@@ -730,6 +730,78 @@ function stop() {
 
 // ── Status ───────────────────────────────────────────────────
 
+// List prices used for the admin cost estimate (storage only; egress noted).
+const CLOUD_PRICING = {
+    b2: { storagePerGbMonth: 0.006, egressPerGb: 0.01, freeGb: 0, egressNote: 'First 3× storage free/day, then $0.01/GB' },
+    r2: { storagePerGbMonth: 0.015, egressPerGb: 0,    freeGb: 10, egressNote: 'Egress is free' },
+};
+
+let _bucketUsageCache = null;
+
+/**
+ * Scan each configured object-store bucket for real usage (object count + bytes,
+ * broken down by top-level prefix). Cached for 10 min — a full ListObjectsV2 walk
+ * is expensive. `force` bypasses the cache.
+ */
+async function getBucketUsage(force = false) {
+    if (!force && _bucketUsageCache && (Date.now() - _bucketUsageCache.at) < 10 * 60 * 1000) {
+        return _bucketUsageCache.data;
+    }
+    loadSdk();
+    const out = {};
+    for (const provider of REMOTE_PROVIDERS) {
+        if (!providerConfigured(provider)) { out[provider] = { configured: false }; continue; }
+        const client = clientFor(provider);
+        let objects = 0, bytes = 0, token;
+        const prefixes = {};
+        try {
+            do {
+                const r = await client.send(new S3.ListObjectsV2Command({
+                    Bucket: PROVIDER_ENV[provider].bucket, ContinuationToken: token, MaxKeys: 1000,
+                }));
+                for (const o of (r.Contents || [])) {
+                    const size = Number(o.Size || 0);
+                    objects++; bytes += size;
+                    const top = (o.Key.includes('/') ? o.Key.split('/')[0] : '(root)');
+                    if (!prefixes[top]) prefixes[top] = { objects: 0, bytes: 0 };
+                    prefixes[top].objects++; prefixes[top].bytes += size;
+                }
+                token = r.IsTruncated ? r.NextContinuationToken : null;
+            } while (token);
+            out[provider] = { configured: true, bucket: PROVIDER_ENV[provider].bucket, objects, bytes, prefixes };
+        } catch (err) {
+            out[provider] = { configured: true, bucket: PROVIDER_ENV[provider].bucket, error: err.message };
+        }
+    }
+    _bucketUsageCache = { at: Date.now(), data: out };
+    return out;
+}
+
+/** Estimate monthly storage cost from bucket usage using list prices. */
+function estimateCloudCosts(usage) {
+    const costs = { pricing: CLOUD_PRICING };
+    let totalStorage = 0;
+    for (const provider of REMOTE_PROVIDERS) {
+        const u = usage?.[provider];
+        const price = CLOUD_PRICING[provider];
+        if (!u || !u.configured || u.error) { costs[provider] = null; continue; }
+        const gb = u.bytes / 1e9;
+        const billableGb = Math.max(0, gb - price.freeGb);
+        const storageMonthly = billableGb * price.storagePerGbMonth;
+        totalStorage += storageMonthly;
+        costs[provider] = {
+            gb,
+            objects: u.objects,
+            storagePerGbMonth: price.storagePerGbMonth,
+            storageMonthly,
+            egressPerGb: price.egressPerGb,
+            egressNote: price.egressNote,
+        };
+    }
+    costs.totalStorageMonthly = totalStorage;
+    return costs;
+}
+
 /**
  * Sanitized bucket configuration + a cheap live HeadBucket reachability probe
  * per provider. NEVER includes credentials (endpoint/bucket/region only).
@@ -836,6 +908,8 @@ module.exports = {
     stop,
     getStatus,
     bucketStatus,
+    getBucketUsage,
+    estimateCloudCosts,
     getSettings,
     setSetting,
     diskUsage,
