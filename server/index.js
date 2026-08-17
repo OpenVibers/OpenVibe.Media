@@ -59,6 +59,7 @@ app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
 app.use('/api/v1/:app/pastes', require('./pastes/routes'));
 app.use('/api/v1/:app/files', require('./files/routes'));
 app.use('/api/v1/:app/thumbnails', require('./thumbnails/routes'));
+app.use('/api/v1/:app/admin/storage', require('./admin/routes'));
 app.use('/', require('./public/routes'));   // /v /c /p /t /f
 
 // eslint-disable-next-line no-unused-vars

@@ -2,7 +2,9 @@
 # OpenVibe.Media — end-to-end smoke test.
 # Boots the service against a throwaway data dir, then exercises:
 #   vod create → chunk upload → complete → meta (duration+thumbnail) →
-#   clip cut → /v range playback → paste (+ /p page + /raw) → file upload →
+#   clip cut → /v range playback → paste (+ /p page + /raw) →
+#   paste admin (screenshot censor + stats) → admin storage (overview, vod
+#   listing, tier-settings round-trip, buckets, bulk delete) → file upload →
 #   /f fetch → bad API key rejected → cross-tenant key rejected.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -114,6 +116,70 @@ echo "$PAGE" | grep -q 'OpenVibe' && ok "/p page carries OpenVibe branding" || b
 RAW=$(curl -s "$BASE/p/$SLUG/raw")
 check "/p/$SLUG/raw returns content" "hello from the smoke test
 line two" "$RAW"
+
+echo "-- pastes admin: screenshot + censor + stats"
+R=$(curl -s -X POST "$BASE/api/v1/live/pastes" -H "$AUTH" \
+    -F "screenshot=@$WORK/thumb.jpg;type=image/jpeg" -F "title=Smoke screenshot")
+SSLUG=$(jsonget "$R" slug)
+[ -n "$SSLUG" ] && ok "screenshot paste created slug=$SSLUG" || bad "screenshot paste ($R)"
+R=$(curl -s -X POST "$BASE/api/v1/live/pastes/$SSLUG/censor" -H "$AUTH" \
+    -F "screenshot=@$WORK/thumb.jpg;type=image/jpeg")
+check "censor replaces screenshot" "$SSLUG" "$(jsonget "$R" paste.slug)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/p/$SSLUG/screenshot")
+check "censored screenshot serves" "200" "$CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/live/pastes/$SLUG/censor" -H "$AUTH" \
+    -F "screenshot=@$WORK/thumb.jpg;type=image/jpeg")
+check "censor on text paste → 400" "400" "$CODE"
+R=$(curl -s "$BASE/api/v1/live/pastes/admin/stats" -H "$AUTH")
+PT=$(jsonget "$R" stats.total); PS=$(jsonget "$R" stats.screenshots)
+[ "${PT:-0}" -ge 2 ] && ok "paste stats total=$PT" || bad "paste stats total (got '$PT')"
+[ "${PS:-0}" -ge 1 ] && ok "paste stats screenshots=$PS" || bad "paste stats screenshots (got '$PS')"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/live/pastes/admin/stats")
+check "paste admin without key → 401" "401" "$CODE"
+
+echo "-- admin storage: overview + vod listing"
+R=$(curl -s "$BASE/api/v1/live/admin/storage" -H "$AUTH")
+check "storage overview scoped to app" "live" "$(jsonget "$R" app_id)"
+DT=$(jsonget "$R" disk.total)
+[ "${DT:-0}" -gt 0 ] && ok "disk total reported ($DT bytes)" || bad "disk total (got '$DT')"
+BD=$(jsonget "$R" breakdown.0.name)
+[ -n "$BD" ] && ok "directory breakdown present (first: $BD)" || bad "directory breakdown ($R)"
+VC=$(jsonget "$R" vodStats.count)
+[ "${VC:-0}" -ge 1 ] && ok "vodStats.count=$VC" || bad "vodStats.count (got '$VC')"
+R=$(curl -s "$BASE/api/v1/live/admin/storage/vods?sort=date&order=desc" -H "$AUTH")
+VT=$(jsonget "$R" total)
+[ "${VT:-0}" -ge 1 ] && ok "admin vod listing total=$VT" || bad "admin vod listing ($R)"
+check "listed vod is on local tier" "local" "$(jsonget "$R" vods.0.actualTier)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/live/admin/storage")
+check "admin storage without key → 401" "401" "$CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/live/admin/storage" -H "Authorization: Bearer $GAMES_KEY")
+check "games key on live admin → 403" "403" "$CODE"
+
+echo "-- admin storage: tier settings round-trip + buckets"
+R=$(curl -s -X PUT "$BASE/api/v1/live/admin/storage/tiers/settings" -H "$AUTH" \
+    -H 'Content-Type: application/json' -d '{"minAgeDays":9,"maxViewsForCold":7}')
+check "PUT tiers/settings applies minAgeDays" "9" "$(jsonget "$R" settings.minAgeDays)"
+check "PUT tiers/settings applies maxViewsForCold" "7" "$(jsonget "$R" settings.maxViewsForCold)"
+R=$(curl -s "$BASE/api/v1/live/admin/storage/tiers" -H "$AUTH")
+check "GET tiers round-trips setting" "9" "$(jsonget "$R" settings.minAgeDays)"
+check "GET tiers reports app scope" "live" "$(jsonget "$R" app.app_id)"
+LC=$(jsonget "$R" app.tiers.local.count)
+[ "${LC:-0}" -ge 1 ] && ok "app-scoped local tier count=$LC" || bad "app tier count (got '$LC')"
+R=$(curl -s "$BASE/api/v1/live/admin/storage/buckets" -H "$AUTH")
+check "buckets: b2 unconfigured in smoke" "false" "$(jsonget "$R" buckets.b2.configured)"
+check "buckets: r2 unconfigured in smoke" "false" "$(jsonget "$R" buckets.r2.configured)"
+
+echo "-- admin storage: bulk delete"
+R=$(curl -s -X POST "$BASE/api/v1/live/vods" -H "$AUTH" -H 'Content-Type: application/json' \
+    -d '{"title":"Bulk delete target"}')
+DELID=$(jsonget "$R" id)
+[ -n "$DELID" ] && ok "scratch vod id=$DELID" || bad "scratch vod create ($R)"
+R=$(curl -s -X DELETE "$BASE/api/v1/live/admin/storage/vods/bulk" -H "$AUTH" \
+    -H 'Content-Type: application/json' -d "{\"ids\":[$DELID]}")
+check "bulk delete deleted=1" "1" "$(jsonget "$R" deleted)"
+check "bulk delete per-id ok" "true" "$(jsonget "$R" results.0.ok)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/live/vods/$DELID" -H "$AUTH")
+check "bulk-deleted vod gone" "404" "$CODE"
 
 echo "-- files: upload + public fetch"
 echo "smoke-file-payload-$(date +%s)" > "$WORK/upload.txt"
