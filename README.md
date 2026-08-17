@@ -71,7 +71,7 @@ Two credential types on `/api/v1/:app/...`:
 On every boot the service upserts apps from env (keys are hashed):
 
 ```bash
-MEDIA_APPS_SEED='[{"app_id":"live","name":"OpenVibe.Live","api_key":"…","webhook_url":"http://127.0.0.1:3000/api/media-webhook","webhook_secret":"…","allowed_origins":["https://openvibe.live"],"quota_bytes":0}]'
+MEDIA_APPS_SEED='[{"app_id":"live","name":"OpenVibe.Live","api_key":"…","webhook_url":"http://127.0.0.1:3000/internal/media-webhook","webhook_secret":"…","allowed_origins":["https://openvibe.live"],"quota_bytes":0}]'
 # fallback short form (no webhooks/origins):
 MEDIA_APP_KEYS="live:key1,games:key2"
 ```
@@ -82,7 +82,7 @@ MEDIA_APP_KEYS="live:key1,games:key2"
 
 | method | path | notes |
 |---|---|---|
-| POST | `/vods` | `{ title?, stream_id?, stream_key?, user_id?, meta?, visibility?, clips_only? }` → `{ id }` |
+| POST | `/vods` | `{ title?, stream_id?, stream_key?, managed_stream_id?, user_id?, meta?, visibility?, clips_only? }` → `{ id }` |
 | POST | `/vods/:id/ingest/rtmp` | `{ rtmp_url }` → **202**; ffmpeg pulls the URL, lossless stream-copy → fragmented `.mp4` |
 | POST | `/vods/:id/ingest/rtp/start` | `{ video: {payloadType, codec, clockRate, ssrc?, parameters?}, audio?: {…} }` → `{ videoPort, audioPort }` from UDP 12000-12199; point PlainRtpTransports at `127.0.0.1` (RTCP = port+1) |
 | POST | `/vods/:id/ingest/rtp/stop` | finalizes the recording |
@@ -90,7 +90,7 @@ MEDIA_APP_KEYS="live:key1,games:key2"
 | POST | `/vods/:id/complete` | finalize chunked upload (user JWT ok) |
 | POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, webhook |
 | GET | `/vods/:id` | `{ id, title, status, duration, playback_url, thumbnail_url, storage_provider, … }` |
-| GET | `/vods?limit&offset&user_id&stream_id` | list |
+| GET | `/vods?limit&offset&user_id&stream_id&managed_stream_id&include_private&order` | list; `include_private` app-key only; `order` = newest\|oldest\|views |
 | PUT | `/vods/:id` | `{ title?, description?, visibility? }` |
 | DELETE | `/vods/:id` | deletes local + B2 + R2 objects + row |
 
@@ -108,9 +108,9 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 
 | method | path | notes |
 |---|---|---|
-| POST | `/clips` | `{ vod_id, start_s, end_s, title?, user_id? }` → **202** `{ id, status: 'processing' }`; cut runs in background (from the local file or a presigned B2/R2 URL); duplicate windows are deduplicated; live recordings are clamped to flushed footage |
+| POST | `/clips` | `{ vod_id, start_s, end_s, title?, user_id?, visibility? }` → **202** `{ id, status: 'processing' }`; cut runs in background (from the local file or a presigned B2/R2 URL); duplicate windows are deduplicated; live recordings are clamped to flushed footage. Multipart `video` = direct upload of an already-cut blob → **201** ready |
 | GET | `/clips/:id` | status: `processing | ready | failed` |
-| GET | `/clips?limit&offset&vod_id&stream_id&user_id` | list |
+| GET | `/clips?limit&offset&vod_id&stream_id&user_id&channel_user_id&hide_self&include_private&order` | list; `channel_user_id` = clipped-channel owner; `include_private` app-key only |
 | PUT | `/clips/:id` | `{ title?, visibility? }` |
 | DELETE | `/clips/:id` | local + offloaded objects + row |
 
@@ -120,6 +120,7 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 |---|---|---|
 | POST | `/pastes` | `{ title?, content?, language?, user_id?, visibility?, burn_after_read?, is_nsfw? }` or multipart with `screenshot` image (EXIF-stripped via sharp) → `{ id, slug, url }` |
 | GET | `/pastes?limit&offset&type&search&user_id` | public list |
+| GET | `/pastes/config` | paste limits (`maxSizeKb`, `cooldownSeconds`, `maxPerUserPerDay`, `todayCount`, …) |
 | GET | `/pastes/:slug` | full paste (private: owner/app only) |
 | PUT | `/pastes/:slug` | update (owner/app) |
 | DELETE | `/pastes/:slug` | delete + screenshot (local & legacy B2 object) |
@@ -160,13 +161,14 @@ the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
 
 | path | behavior |
 |---|---|
-| `GET /v/:id` | VOD playback — local stream with Range support, live-DVR `.seekable` sidecar while recording, or **302** to a presigned B2/R2 URL. `X-Robots-Tag: noindex` |
+| `GET /v/:id` | VOD playback — local stream with Range support, live-DVR `.seekable` sidecar while recording, or **302** to a presigned B2/R2 URL. `X-Robots-Tag: noindex`. Also accepts a legacy **file basename** (old `/api/vods/file/<name>` URLs; clip basenames resolve too) |
 | `GET /c/:id` | clip playback, same logic, `noindex` |
 | `GET /p/:slug` | server-rendered paste HTML page (**indexable** — Media is the canonical home for pastes) |
 | `GET /p/:slug/raw` | `text/plain` |
 | `GET /p/:slug/screenshot` | paste screenshot image |
 | `GET /t/:id` | thumbnail (id = filename), `noindex` |
 | `GET /f/:key` | file with stored Content-Type + Range, `noindex` |
+| `GET /f/screenshots/:name` | paste screenshot by filename — serves straight from `PASTES_PATH/screenshots` (migrated legacy files have no files-table rows), `noindex` |
 
 Private items respond 403/404 unless the request bears the owning app's API
 key or the owning user's JWT.

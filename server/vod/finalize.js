@@ -32,12 +32,17 @@ function vodPublic(vod) {
         id: vod.id,
         app_id: vod.app_id,
         stream_id: vod.stream_id,
+        managed_stream_id: vod.managed_stream_id || null,
         user_id: vod.user_id,
         title: vod.title,
         description: vod.description,
         status: db.vodStatus(vod),
         duration: vod.duration_seconds || 0,
+        duration_seconds: vod.duration_seconds || 0,
         file_size: vod.file_size || 0,
+        // Basename only (server paths stay private) — the inherited SPA derives
+        // its /file/<name> playback URL from this.
+        file_path: vod.file_path ? path.basename(vod.file_path) : null,
         playback_url: `/v/${vod.id}`,
         thumbnail_url: vod.thumbnail_url || null,
         storage_provider: vod.storage_provider || 'local',

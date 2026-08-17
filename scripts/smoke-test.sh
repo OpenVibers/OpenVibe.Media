@@ -70,8 +70,8 @@ check "complete → vod ready" "ready" "$ST"
 
 echo "-- vod: meta shows duration + thumbnail"
 R=$(curl -s "$BASE/api/v1/live/vods/$VOD_ID" -H "$AUTH")
-DUR=$(jsonget "$R" vod.duration)
-THUMB=$(jsonget "$R" vod.thumbnail_url)
+DUR=$(jsonget "$R" duration)
+THUMB=$(jsonget "$R" thumbnail_url)
 [ "$DUR" = "5" ] && ok "duration probed = 5s" || bad "duration (got '$DUR')"
 case "$THUMB" in /t/*) ok "thumbnail_url = $THUMB";; *) bad "thumbnail_url (got '$THUMB')";; esac
 TCODE=$(curl -s -o "$WORK/thumb.jpg" -w '%{http_code}' "$BASE$THUMB")
@@ -85,12 +85,12 @@ CLIP_ID=$(jsonget "$R" id)
 CLIP_ST=""
 for i in $(seq 1 60); do
   sleep 0.5
-  CLIP_ST=$(jsonget "$(curl -s "$BASE/api/v1/live/clips/$CLIP_ID" -H "$AUTH")" clip.status)
+  CLIP_ST=$(jsonget "$(curl -s "$BASE/api/v1/live/clips/$CLIP_ID" -H "$AUTH")" status)
   [ "$CLIP_ST" = "ready" ] && break
   [ "$CLIP_ST" = "failed" ] && break
 done
 check "clip processed" "ready" "$CLIP_ST"
-CDUR=$(jsonget "$(curl -s "$BASE/api/v1/live/clips/$CLIP_ID" -H "$AUTH")" clip.duration)
+CDUR=$(jsonget "$(curl -s "$BASE/api/v1/live/clips/$CLIP_ID" -H "$AUTH")" duration)
 echo "  (clip duration: ${CDUR}s)"
 CCODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/c/$CLIP_ID")
 check "GET /c/$CLIP_ID plays" "200" "$CCODE"

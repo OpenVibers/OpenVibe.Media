@@ -153,12 +153,22 @@ async function serveMediaRecord(kind, record, req, res) {
 }
 
 // ── VOD playback ─────────────────────────────────────────────
+// Accepts a numeric id OR a legacy file basename (old /api/vods/file/<name>
+// URLs in the wild redirect here with the basename; migrated rows keep their
+// original file_path basenames). The old route served CLIP files too, so a
+// basename that matches a clip serves that clip.
 router.get('/v/:id', optionalIdentity, async (req, res) => {
     try {
-        if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
-        const vod = db.getVodById(parseInt(req.params.id, 10));
-        if (!vod || vod.clips_only) return res.status(404).json({ error: 'Not found' });
-        await serveMediaRecord('vod', vod, req, res);
+        if (/^\d+$/.test(req.params.id)) {
+            const vod = db.getVodById(parseInt(req.params.id, 10));
+            if (!vod || vod.clips_only) return res.status(404).json({ error: 'Not found' });
+            return await serveMediaRecord('vod', vod, req, res);
+        }
+        const vod = db.getVodByFileBasename(req.params.id);
+        if (vod && !vod.clips_only) return await serveMediaRecord('vod', vod, req, res);
+        const clip = db.getClipByFileBasename(req.params.id);
+        if (clip) return await serveMediaRecord('clip', clip, req, res);
+        res.status(404).json({ error: 'Not found' });
     } catch (err) {
         console.error('[Public] /v error:', err.message);
         if (!res.headersSent) res.status(500).json({ error: 'Failed to serve media' });
@@ -181,6 +191,26 @@ router.get('/c/:id', optionalIdentity, async (req, res) => {
 // ── Thumbnails ───────────────────────────────────────────────
 router.get('/t/:id', (req, res) => {
     require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
+});
+
+// ── Paste screenshots by filename ────────────────────────────
+// Legacy /data/pastes/screenshots/<name> URLs (old avatars, hero moments,
+// pre-cutover pastes) map here. Migrated screenshot files have arbitrary
+// basenames on disk and NO files-table rows, so this serves straight from
+// PASTES_PATH/screenshots for exactly that namespace.
+router.get('/f/screenshots/:name', (req, res) => {
+    try {
+        const name = path.basename(String(req.params.name || ''));
+        const dir = path.join(require('../config').pastes.path, 'screenshots');
+        const filePath = path.join(dir, name);
+        if (!name || !filePath.startsWith(dir) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+            return res.status(404).json({ error: 'Not found' });
+        }
+        streamFileWithRange(req, res, filePath, { 'Cache-Control': 'public, max-age=86400', 'X-Robots-Tag': 'noindex' });
+    } catch (err) {
+        console.error('[Public] /f/screenshots error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to serve file' });
+    }
 });
 
 // ── Files ────────────────────────────────────────────────────

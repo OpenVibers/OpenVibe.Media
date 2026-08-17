@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS vods (
     app_id TEXT NOT NULL DEFAULT 'live',
     stream_id INTEGER,
     stream_key TEXT,
+    managed_stream_id INTEGER,            -- owning app's stream "slot" (list filter)
     user_id INTEGER,
     title TEXT,
     description TEXT DEFAULT '',
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS clips (
     vod_id INTEGER,
     stream_id INTEGER,
     user_id INTEGER,
+    channel_user_id INTEGER,              -- owner of the clipped channel/stream (list filter)
     title TEXT DEFAULT 'Untitled Clip',
     description TEXT DEFAULT '',
     file_path TEXT,

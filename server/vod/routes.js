@@ -73,14 +73,27 @@ function _getVodScoped(req, res) {
     return vod;
 }
 
+/**
+ * Ownership gate for user-JWT callers on write endpoints (chunks/complete):
+ * the vod's user_id must be THEIR network id. App-key callers are trusted —
+ * they proxy server-side and own their app-local user-id space (Live does).
+ */
+function _userOwnsVod(req, res, vod) {
+    if (req.authType !== 'user') return true;
+    if (vod.user_id != null && String(vod.user_id) === String(req.userId)) return true;
+    res.status(403).json({ error: 'Not your VOD' });
+    return false;
+}
+
 // ── Create VOD ───────────────────────────────────────────────
 router.post('/', tenantAuth(), (req, res) => {
     try {
-        const { title, stream_id, stream_key, user_id, meta, visibility, clips_only } = req.body || {};
+        const { title, stream_id, stream_key, managed_stream_id, user_id, meta, visibility, clips_only } = req.body || {};
         const result = db.createVod({
             app_id: req.appId,
             stream_id: stream_id != null ? parseInt(stream_id, 10) || null : null,
             stream_key: stream_key || null,
+            managed_stream_id: managed_stream_id != null ? parseInt(managed_stream_id, 10) || null : null,
             user_id: user_id != null ? user_id : null,
             title: (title || 'Recording').toString().slice(0, 300),
             meta,
@@ -143,6 +156,7 @@ router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('
     try {
         const vod = _getVodScoped(req, res);
         if (!vod) { if (req.file) tools.cleanupTempFile(req.file.path); return; }
+        if (!_userOwnsVod(req, res, vod)) { if (req.file) tools.cleanupTempFile(req.file.path); return; }
         if (!req.file) return res.status(400).json({ error: 'No chunk data' });
         const segmentId = Math.max(1, parseInt(req.body?.segmentId || req.query.segmentId || '1', 10) || 1);
 
@@ -220,6 +234,7 @@ async function _finalizeHandler(req, res) {
     try {
         const vod = _getVodScoped(req, res);
         if (!vod) return;
+        if (!_userOwnsVod(req, res, vod)) return;
 
         // Live ffmpeg recording → stop gracefully; its exit handler finalizes.
         if (recorder.isRecording(vod.id)) {
@@ -245,15 +260,26 @@ router.post('/:id/complete', tenantAuth({ allowUser: true }), _finalizeHandler);
 router.post('/:id/finalize', tenantAuth(), _finalizeHandler);
 
 // ── List ─────────────────────────────────────────────────────
+// Filters follow the inherited query shapes: user_id, stream_id,
+// managed_stream_id, include_private (private+unlisted too), order
+// (newest|oldest|views|peak_viewers), limit/offset.
 router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
-        const user_id = req.query.user_id != null ? req.query.user_id : null;
-        const stream_id = req.query.stream_id != null ? parseInt(req.query.stream_id, 10) : null;
-        const vods = db.listVods(req.appId, { limit, offset, user_id, stream_id });
-        const total = db.countVods(req.appId, { user_id, stream_id });
-        res.json({ vods: vods.map(vodPublic), total, limit, offset });
+        const filters = {
+            limit, offset,
+            user_id: req.query.user_id != null ? req.query.user_id : null,
+            stream_id: req.query.stream_id != null ? parseInt(req.query.stream_id, 10) : null,
+            managed_stream_id: req.query.managed_stream_id != null ? parseInt(req.query.managed_stream_id, 10) : null,
+            // Only the owning app may list private/unlisted rows — it enforces its
+            // own ownership checks (app-local user ids are opaque to Media).
+            include_private: req.authType === 'app' && ['1', 'true'].includes(String(req.query.include_private || '')),
+            order: req.query.order || req.query.sort,   // `sort` = inherited alias
+        };
+        const vods = db.listVods(req.appId, filters);
+        const total = db.countVods(req.appId, filters);
+        res.json({ vods: vods.map(vodPublic), total, limit, offset, hasMore: offset + vods.length < total });
     } catch (err) {
         console.error('[VOD] List error:', err.message);
         res.status(500).json({ error: 'Failed to list VODs' });
@@ -277,7 +303,8 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
             }
         }
 
-        res.json({ vod: vodPublic(vod) });
+        // Bare object per CONTRACTS.md: { id, title, status, duration, … }
+        res.json(vodPublic(vod));
     } catch (err) {
         console.error('[VOD] Get error:', err.message);
         res.status(500).json({ error: 'Failed to get VOD' });
