@@ -49,7 +49,12 @@ async function fetchNetworkPublicKey() {
 }
 
 function startJwksRefresh() {
-    fetchNetworkPublicKey().catch(() => {});
+    // Until the key loads, retry every 30s — Network may still be booting
+    // (user-JWT auth is down for browsers the whole time the key is missing).
+    const tryLoad = () => fetchNetworkPublicKey().then((pem) => {
+        if (!pem) setTimeout(tryLoad, 30 * 1000).unref?.();
+    }).catch(() => { setTimeout(tryLoad, 30 * 1000).unref?.(); });
+    tryLoad();
     _jwksTimer = setInterval(() => fetchNetworkPublicKey().catch(() => {}), 6 * 60 * 60 * 1000);
     if (_jwksTimer.unref) _jwksTimer.unref();
 }
