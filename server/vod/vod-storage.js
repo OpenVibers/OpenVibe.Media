@@ -730,6 +730,40 @@ function stop() {
 
 // ── Status ───────────────────────────────────────────────────
 
+/**
+ * Sanitized bucket configuration + a cheap live HeadBucket reachability probe
+ * per provider. NEVER includes credentials (endpoint/bucket/region only).
+ */
+async function bucketStatus() {
+    const out = {};
+    for (const name of REMOTE_PROVIDERS) {
+        const p = PROVIDER_ENV[name];
+        const configured = providerConfigured(name);
+        const entry = {
+            configured,
+            endpoint: p.endpoint || null,
+            bucket: p.bucket || null,
+            region: p.region || null,
+            healthy: providerHealthy[name] !== false,   // last known state
+            reachable: false,                            // live probe below
+        };
+        if (configured) {
+            try {
+                loadSdk();
+                await clientFor(name).send(new S3.HeadBucketCommand({ Bucket: p.bucket }));
+                entry.reachable = true;
+                providerHealthy[name] = true;
+            } catch (err) {
+                entry.error = err.name || err.message;
+                providerHealthy[name] = false;
+                entry.healthy = false;
+            }
+        }
+        out[name] = entry;
+    }
+    return out;
+}
+
 function getStatus() {
     const settings = getSettings();
     const localDisk = diskUsage(config.vod.path);
@@ -801,6 +835,7 @@ module.exports = {
     start,
     stop,
     getStatus,
+    bucketStatus,
     getSettings,
     setSetting,
     diskUsage,

@@ -19,6 +19,13 @@
  * POST   /:slug/comments      add comment
  * DELETE /:slug/comments/:id  delete comment
  *
+ * Admin endpoints (app-key auth only — the app's server fronts its admins):
+ * GET    /admin/stats         app-scoped paste stats
+ * GET    /admin/forks         list forked pastes
+ * DELETE /admin/forks         delete ALL forks (+ screenshots)
+ * POST   /bulk                { slugs, action: delete|public|unlisted|private }
+ * POST   /:slug/censor        replace a screenshot with a censored image (multipart)
+ *
  * Rate limits (cooldown/daily) apply to user-JWT callers; app-key callers are
  * trusted server-to-server. AI summary/tags hooks are dropped (Live owns AI)
  * but the columns remain for imported rows.
@@ -274,6 +281,117 @@ router.get('/config', tenantAuth({ allowUser: true }), (req, res) => {
         console.error('[Pastes] Config error:', err.message);
         res.status(500).json({ error: 'Failed to load paste config' });
     }
+});
+
+// ═════════════════════════════════════════════════════════════
+// ── Admin (app-key only) — registered before /:slug ─────────
+// ═════════════════════════════════════════════════════════════
+
+// ── Paste stats ─────────────────────────────────────────────
+router.get('/admin/stats', tenantAuth(), (req, res) => {
+    try {
+        res.json({ stats: db.getPasteStats(req.appId) });
+    } catch (err) {
+        console.error('[Pastes] Stats error:', err.message);
+        res.status(500).json({ error: 'Failed to get paste stats' });
+    }
+});
+
+// ── List forked pastes ──────────────────────────────────────
+router.get('/admin/forks', tenantAuth(), (req, res) => {
+    try {
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 100, 1), 500);
+        const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+        const forks = db.all(`
+            SELECT id, slug, user_id, type, title, forked_from, visibility,
+                   views, copies, likes, created_at
+            FROM pastes
+            WHERE app_id = ? AND forked_from IS NOT NULL
+            ORDER BY created_at DESC LIMIT ? OFFSET ?
+        `, [req.appId, limit, offset]);
+        const total = db.get('SELECT COUNT(*) AS c FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]).c;
+        res.json({ forks, total, limit, offset });
+    } catch (err) {
+        console.error('[Pastes] List forks error:', err.message);
+        res.status(500).json({ error: 'Failed to list forks' });
+    }
+});
+
+// ── Delete ALL forks (ported predecessor semantics) ─────────
+router.delete('/admin/forks', tenantAuth(), (req, res) => {
+    try {
+        const forks = db.all('SELECT id, screenshot_path FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);
+        for (const f of forks) removePasteScreenshot(f);   // unlink screenshots so they don't leak on disk
+        db.run('DELETE FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);
+        res.json({ success: true, deleted: forks.length });
+    } catch (err) {
+        console.error('[Pastes] Delete forks error:', err.message);
+        res.status(500).json({ error: 'Failed to delete forks' });
+    }
+});
+
+// ── Bulk action: delete | public | unlisted | private ───────
+router.post('/bulk', tenantAuth(), (req, res) => {
+    try {
+        const { slugs, action } = req.body || {};
+        if (!Array.isArray(slugs) || !slugs.length) return res.status(400).json({ error: 'No slugs provided' });
+        if (!['delete', 'public', 'unlisted', 'private'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
+        let done = 0, skipped = 0;
+        for (const slug of slugs.slice(0, 500)) {
+            const paste = db.getPasteBySlug(String(slug), req.appId);
+            if (!paste) { skipped++; continue; }
+            if (action === 'delete') {
+                removePasteScreenshot(paste);
+                db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
+            } else {
+                db.run('UPDATE pastes SET visibility = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [action, paste.id]);
+            }
+            done++;
+        }
+        res.json({ done, skipped });
+    } catch (err) {
+        console.error('[Pastes] Bulk error:', err.message);
+        res.status(500).json({ error: 'Bulk action failed' });
+    }
+});
+
+// ── Censor a screenshot (replace with an uploaded image) ────
+router.post('/:slug/censor', tenantAuth(), (req, res) => {
+    // Accept slug or numeric paste id (the predecessor keyed this by slug).
+    let paste = db.getPasteBySlug(String(req.params.slug), req.appId);
+    if (!paste && /^\d+$/.test(String(req.params.slug))) {
+        paste = db.get('SELECT * FROM pastes WHERE id = ? AND app_id = ?', [parseInt(req.params.slug, 10), req.appId]);
+    }
+    if (!paste) return res.status(404).json({ error: 'Paste not found' });
+    if (paste.type !== 'screenshot' || !paste.screenshot_path) {
+        return res.status(400).json({ error: 'Not a screenshot paste' });
+    }
+
+    const censorUpload = multer({
+        storage: screenshotStorage,
+        limits: { fileSize: 16 * 1024 * 1024 }, // 16 MB for censored exports
+        fileFilter: (_req, file, cb) => {
+            if (/^image\/(png|jpeg|webp)$/.test(file.mimetype)) cb(null, true);
+            else cb(new Error('Only PNG, JPEG, or WebP images allowed'));
+        },
+    }).single('screenshot');
+
+    censorUpload(req, res, (err) => {
+        if (err) return res.status(400).json({ error: err.message || 'Upload failed' });
+        if (!req.file) return res.status(400).json({ error: 'Censored image is required' });
+
+        try {
+            // Delete the old screenshot file, then swap in the censored one.
+            try { fs.unlinkSync(paste.screenshot_path); } catch { /* */ }
+            db.run('UPDATE pastes SET screenshot_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                [req.file.path, paste.id]);
+            res.json({ paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
+        } catch (err2) {
+            console.error('[Pastes] Censor error:', err2.message);
+            if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
+            res.status(500).json({ error: 'Failed to save censored image' });
+        }
+    });
 });
 
 // ── Get single paste by slug ────────────────────────────────

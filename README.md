@@ -34,8 +34,9 @@ server/
   vod/vod-storage.js     local/B2/R2 tiering, presigned playback, sweep, CLI
   vod/health-scanner.js  probe/decode/master-recovery primitives
   vod/health-job.js      background health scan + quarantine cleanup + master sweep
-  pastes/routes.js       /api/v1/:app/pastes
+  pastes/routes.js       /api/v1/:app/pastes (+ admin: stats/forks/bulk/censor)
   files/routes.js        /api/v1/:app/files
+  admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
   public/routes.js       public /v /c /p /t /f
 vendor/openvibe-shared/  vendored shared helpers (do not edit; re-sync from canonical)
@@ -130,6 +131,16 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 | GET/POST | `/pastes/:slug/comments` | threaded comments (anon supported) |
 | DELETE | `/pastes/:slug/comments/:id` | author/paste-owner/app |
 
+**Paste admin** (app-key auth only — the app's server fronts its admins):
+
+| method | path | notes |
+|---|---|---|
+| GET | `/pastes/admin/stats` | app-scoped `{ total, textPastes, screenshots, forks, totalViews, totalCopies, totalLikes }` |
+| GET | `/pastes/admin/forks?limit&offset` | list forked pastes |
+| DELETE | `/pastes/admin/forks` | delete ALL forks (screenshots unlinked too) → `{ deleted }` |
+| POST | `/pastes/bulk` | `{ slugs: [...], action: delete\|public\|unlisted\|private }` (max 500) → `{ done, skipped }` |
+| POST | `/pastes/:slug/censor` | multipart `screenshot` (PNG/JPEG/WebP ≤ 16 MB) replaces a screenshot paste's image (old file deleted); `:slug` also accepts a numeric paste id |
+
 Cooldowns and daily limits (`media_settings`: `paste_cooldown_seconds`,
 `paste_max_per_user_per_day`, sizes) apply to user-JWT callers; app-key callers
 are trusted server-to-server. AI summary/tags generation was **dropped** (Live
@@ -149,6 +160,26 @@ owns AI) but the columns remain for imported rows.
 | method | path | notes |
 |---|---|---|
 | POST | `/thumbnails/:kind/:id` | kind `vod`/`clip`: multipart `thumbnail` (or `{image: base64}`) uploads a custom image, or with no body (re)generates from the media (VOD @10%, clip near first frame); kind `live`: upload a broadcaster frame, stored under the stable name `stream-<app>-<id>.jpg` → `{ url }` |
+
+### Admin storage (`/admin/storage`, app-key auth only)
+
+Storage-management endpoints ported from the predecessor's admin panel. Auth
+is the app API key only (no user JWTs) — admins reach these through their
+app's own server, which holds the key. DB-derived stats are scoped to the
+calling app; **disk totals and directory sizes are host-wide** (the data
+directories are shared across apps) and responses carry a `note` saying so.
+
+| method | path | notes |
+|---|---|---|
+| GET | `/admin/storage` | `{ disk (df of VOD volume), database.bytes, breakdown [vods/clips/pastes/thumbnails/files dirs], vodStats/clipStats/pasteStats/fileStats (app-scoped), byProvider.{vods,clips} (count+bytes per local/b2/r2) }` |
+| GET | `/admin/storage/vods?limit&offset&sort&order&provider&tier` | detailed app VOD listing: id, title, size, provider, health, views, `last_accessed_at`, created + `fileExists`/`diskSize`/`actualTier` (disk-reconciled: local/b2/r2/missing), per-user summary. `sort` = size\|date\|duration\|tier\|views\|accessed, `order` = asc\|desc, `provider` = local\|b2\|r2 (`tier` accepts legacy hot/cold aliases) |
+| DELETE | `/admin/storage/vods/bulk` | `{ ids: [...] }` (max 200) — deletes each VOD everywhere (local + B2 + R2 + sidecars/master + thumbnail + row), app-scoped → `{ deleted, freed, results: [{id, ok, error?}] }` |
+| GET | `/admin/storage/tiers` | tiering status: settings, provider health, local disk, service-wide tier counts (`tiers`/`clipTiers`), `sweepRunning`, plus `app.{tiers, pendingOffload}` scoped to the caller |
+| PUT | `/admin/storage/tiers/settings` | update any `storage_tier.*` knob (see `vod-storage.js` `DEFAULTS`: `enabled`, `minAgeDays`, `maxViewsForCold`, `minLastAccessDays`, `sweepIntervalMs`, `hotDiskPressurePct`, `localLowWaterPct`, `maxPerSweep`, `r2Enabled`, `r2MinViews`, …); persisted in `media_settings`, sweep timer restarted → `{ ok, settings }` |
+| POST | `/admin/storage/tiers/sweep` | run the tiering sweep now → sweep summary |
+| POST | `/admin/storage/tiers/move` | `{ vod_id, target: local\|hot\|b2\|cold\|r2 }` — reuses the storage engine's verified move logic; VOD must belong to the app |
+| POST | `/admin/storage/tiers/bulk-move` | `{ ids: [...], target }` (max 50) → `{ moved, bytes, errors? }` |
+| GET | `/admin/storage/buckets` | sanitized bucket status per provider: `{ configured, endpoint, bucket, region, healthy, reachable }` via a live HeadBucket probe — **credentials are never returned** |
 
 ### Webhooks (outbound)
 

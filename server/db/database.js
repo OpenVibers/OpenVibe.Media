@@ -381,6 +381,29 @@ function getLastPasteTime(appId, userId, ip) {
     return row ? new Date(row.created_at + (row.created_at.includes('Z') ? '' : 'Z')).getTime() : 0;
 }
 
+/** App-scoped paste stats (predecessor's admin stats shape). */
+function getPasteStats(appId) {
+    const row = get(`
+        SELECT COUNT(*) AS total,
+               SUM(CASE WHEN type = 'paste' THEN 1 ELSE 0 END) AS textPastes,
+               SUM(CASE WHEN type = 'screenshot' THEN 1 ELSE 0 END) AS screenshots,
+               SUM(CASE WHEN forked_from IS NOT NULL THEN 1 ELSE 0 END) AS forks,
+               COALESCE(SUM(views), 0) AS totalViews,
+               COALESCE(SUM(copies), 0) AS totalCopies,
+               COALESCE(SUM(likes), 0) AS totalLikes
+        FROM pastes WHERE app_id = ?
+    `, [appId]) || {};
+    return {
+        total: row.total || 0,
+        textPastes: row.textPastes || 0,
+        screenshots: row.screenshots || 0,
+        forks: row.forks || 0,
+        totalViews: row.totalViews || 0,
+        totalCopies: row.totalCopies || 0,
+        totalLikes: row.totalLikes || 0,
+    };
+}
+
 // ── Paste comment helpers ────────────────────────────────────
 
 function createPasteComment({ paste_id, user_id, parent_id, anon_name, message, ip_address }) {
@@ -501,7 +524,7 @@ module.exports = {
     createClip, getClipById, getClipByFileBasename, listClips, countClips, setClipVisibility, findDuplicateClip,
     // pastes
     getPasteBySlug, likePaste, unlikePaste, hasUserLikedPaste, incrementPasteCopies,
-    countUserPastesToday, getLastPasteTime,
+    countUserPastesToday, getLastPasteTime, getPasteStats,
     createPasteComment, getPasteComments, getPasteCommentReplies, getPasteCommentById,
     getPasteCommentCount, deletePasteComment, getRecentPasteCommentsByIp,
     // files
