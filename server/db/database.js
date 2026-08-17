@@ -27,8 +27,26 @@ function getDb() {
     database.pragma('journal_mode = WAL');
     const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
     database.exec(schema);
+    migrateColumns();
     seedSettings();
     return database;
+}
+
+// Additive column migrations for DBs created before the column existed
+// (CREATE TABLE IF NOT EXISTS won't add columns to an existing table).
+function migrateColumns() {
+    const wanted = {
+        vods: [['managed_stream_id', 'INTEGER']],
+        clips: [['channel_user_id', 'INTEGER']],
+    };
+    for (const [table, cols] of Object.entries(wanted)) {
+        const existing = database.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+        for (const [name, type] of cols) {
+            if (existing.includes(name)) continue;
+            database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${type}`);
+            console.log(`[DB] Added ${table}.${name}`);
+        }
+    }
 }
 
 function seedSettings() {
@@ -118,15 +136,29 @@ function appAllowedOrigins(app) {
 
 // ── VOD helpers ──────────────────────────────────────────────
 
-function createVod({ app_id, stream_id, stream_key, user_id, title, description, file_path, file_size, duration_seconds, thumbnail_url, master_file_path, meta }) {
+function createVod({ app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, file_size, duration_seconds, thumbnail_url, master_file_path, meta }) {
     return run(
-        `INSERT INTO vods (app_id, stream_id, stream_key, user_id, title, description, file_path, master_file_path, file_size, duration_seconds, thumbnail_url, meta_json, is_public)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-        [app_id, stream_id || null, stream_key || null, user_id || null, title || 'Recording', description || '',
+        `INSERT INTO vods (app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, master_file_path, file_size, duration_seconds, thumbnail_url, meta_json, is_public)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+        [app_id, stream_id || null, stream_key || null, managed_stream_id || null, user_id || null, title || 'Recording', description || '',
          file_path || null, master_file_path || null, file_size || 0, duration_seconds || 0, thumbnail_url || null,
          JSON.stringify(meta || {})]
     );
 }
+
+/** Legacy lookup: resolve a row by its file's basename (old /api/vods/file/<name> URLs). */
+function _byFileBasename(table, basename, appId) {
+    const name = path.basename(String(basename || ''));
+    if (!name) return null;
+    const clause = appId ? ' AND app_id = ?' : '';
+    const params = appId ? [`%${name}`, appId] : [`%${name}`];
+    // LIKE narrows the scan; exact basename match is confirmed in JS (LIKE
+    // wildcards inside the filename can't produce false positives that way).
+    const rows = all(`SELECT * FROM ${table} WHERE file_path LIKE ?${clause}`, params);
+    return rows.find(r => r.file_path && path.basename(r.file_path) === name) || null;
+}
+function getVodByFileBasename(basename, appId = null) { return _byFileBasename('vods', basename, appId); }
+function getClipByFileBasename(basename, appId = null) { return _byFileBasename('clips', basename, appId); }
 
 function getVodById(id, appId = null) {
     const clause = appId ? ' AND app_id = ?' : '';
@@ -135,21 +167,37 @@ function getVodById(id, appId = null) {
                 FROM vods WHERE id = ?${clause}`, params);
 }
 
-function listVods(appId, { limit = 50, offset = 0, user_id = null, stream_id = null, includeRecording = true } = {}) {
+// Sort orders shared by the vod/clip lists (inherited query shapes). The
+// predecessor's 'peak_viewers' needed a streams join that lives in the owning
+// app now — view_count is the closest popularity proxy here.
+const LIST_ORDERS = {
+    newest: 'created_at DESC',
+    oldest: 'created_at ASC',
+    views: 'view_count DESC, created_at DESC',
+    peak_viewers: 'view_count DESC, created_at DESC',
+};
+function _listOrder(order) { return LIST_ORDERS[order] || LIST_ORDERS.newest; }
+
+function _vodConds(appId, { user_id = null, stream_id = null, managed_stream_id = null, include_private = false, includeRecording = true } = {}) {
     const conds = ['app_id = ?', 'COALESCE(clips_only, 0) = 0'];
     const params = [appId];
     if (!includeRecording) conds.push('COALESCE(is_recording, 0) = 0');
+    if (!include_private) conds.push('is_public = 1');
     if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
     if (stream_id != null) { conds.push('stream_id = ?'); params.push(stream_id); }
-    params.push(limit, offset);
-    return all(`SELECT * FROM vods WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT ? OFFSET ?`, params);
+    if (managed_stream_id != null) { conds.push('managed_stream_id = ?'); params.push(managed_stream_id); }
+    return { conds, params };
 }
 
-function countVods(appId, { user_id = null, stream_id = null } = {}) {
-    const conds = ['app_id = ?', 'COALESCE(clips_only, 0) = 0'];
-    const params = [appId];
-    if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
-    if (stream_id != null) { conds.push('stream_id = ?'); params.push(stream_id); }
+function listVods(appId, filters = {}) {
+    const { limit = 50, offset = 0, order = 'newest' } = filters;
+    const { conds, params } = _vodConds(appId, filters);
+    params.push(limit, offset);
+    return all(`SELECT * FROM vods WHERE ${conds.join(' AND ')} ORDER BY ${_listOrder(order)} LIMIT ? OFFSET ?`, params);
+}
+
+function countVods(appId, filters = {}) {
+    const { conds, params } = _vodConds(appId, filters);
     return get(`SELECT COUNT(*) AS count FROM vods WHERE ${conds.join(' AND ')}`, params)?.count || 0;
 }
 
@@ -220,12 +268,12 @@ function vodStatus(vod) {
 
 // ── Clip helpers ─────────────────────────────────────────────
 
-function createClip({ app_id, vod_id, stream_id, user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, auto_generated, status }) {
+function createClip({ app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, auto_generated, status }) {
     const pub = (is_public === 0 || is_public === false) ? 0 : 1;
     return run(
-        `INSERT INTO clips (app_id, vod_id, stream_id, user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [app_id, vod_id || null, stream_id || null, user_id || null, title || 'Untitled Clip', description || '',
+        `INSERT INTO clips (app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [app_id, vod_id || null, stream_id || null, user_id || null, channel_user_id || null, title || 'Untitled Clip', description || '',
          file_path || '', thumbnail_url || null, start_time || 0, end_time || 0, duration_seconds || 0,
          pub, pub ? 'public' : 'unlisted', auto_generated ? 1 : 0, status || 'ready']
     );
@@ -237,22 +285,29 @@ function getClipById(id, appId = null) {
     return get(`SELECT * FROM clips WHERE id = ?${clause}`, params);
 }
 
-function listClips(appId, { limit = 50, offset = 0, vod_id = null, stream_id = null, user_id = null } = {}) {
+function _clipConds(appId, { vod_id = null, stream_id = null, user_id = null, channel_user_id = null, include_private = false, hide_self = false } = {}) {
     const conds = ['app_id = ?'];
     const params = [appId];
+    if (!include_private) conds.push('is_public = 1');
     if (vod_id != null) { conds.push('vod_id = ?'); params.push(vod_id); }
     if (stream_id != null) { conds.push('stream_id = ?'); params.push(stream_id); }
     if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
-    params.push(limit, offset);
-    return all(`SELECT * FROM clips WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT ? OFFSET ?`, params);
+    // channel_user_id = owner of the clipped channel ("clips taken OF this streamer")
+    if (channel_user_id != null) { conds.push('channel_user_id = ?'); params.push(channel_user_id); }
+    // hide_self hides self-clips (creator == channel owner) — clips-taken tab default
+    if (hide_self) conds.push('(channel_user_id IS NULL OR channel_user_id != user_id)');
+    return { conds, params };
 }
 
-function countClips(appId, { vod_id = null, stream_id = null, user_id = null } = {}) {
-    const conds = ['app_id = ?'];
-    const params = [appId];
-    if (vod_id != null) { conds.push('vod_id = ?'); params.push(vod_id); }
-    if (stream_id != null) { conds.push('stream_id = ?'); params.push(stream_id); }
-    if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
+function listClips(appId, filters = {}) {
+    const { limit = 50, offset = 0, order = 'newest' } = filters;
+    const { conds, params } = _clipConds(appId, filters);
+    params.push(limit, offset);
+    return all(`SELECT * FROM clips WHERE ${conds.join(' AND ')} ORDER BY ${_listOrder(order)} LIMIT ? OFFSET ?`, params);
+}
+
+function countClips(appId, filters = {}) {
+    const { conds, params } = _clipConds(appId, filters);
     return get(`SELECT COUNT(*) AS count FROM clips WHERE ${conds.join(' AND ')}`, params)?.count || 0;
 }
 
@@ -440,10 +495,10 @@ module.exports = {
     // apps
     hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins,
     // vods
-    createVod, getVodById, listVods, countVods, setVodVisibility, vodStatus,
+    createVod, getVodById, getVodByFileBasename, listVods, countVods, setVodVisibility, vodStatus,
     updateVodHealth, repairVodDuration, getVodsNeedingHealthScan, getQuarantinedVodsForCleanup,
     // clips
-    createClip, getClipById, listClips, countClips, setClipVisibility, findDuplicateClip,
+    createClip, getClipById, getClipByFileBasename, listClips, countClips, setClipVisibility, findDuplicateClip,
     // pastes
     getPasteBySlug, likePaste, unlikePaste, hasUserLikedPaste, incrementPasteCopies,
     countUserPastesToday, getLastPasteTime,

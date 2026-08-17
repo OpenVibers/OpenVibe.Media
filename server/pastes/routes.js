@@ -257,6 +257,25 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
     }
 });
 
+// ── Paste config / limits (inherited SPA reads this before posting) ──
+// Registered before /:slug so the literal path wins.
+router.get('/config', tenantAuth({ allowUser: true }), (req, res) => {
+    try {
+        const cfg = getPasteConfig();
+        const actor = _actor(req);
+        res.json({
+            maxSizeKb: cfg.maxSizeKb,
+            screenshotMaxSizeMb: cfg.screenshotMaxSizeMb,
+            cooldownSeconds: cfg.cooldownSeconds,
+            maxPerUserPerDay: cfg.maxPerUserPerDay,
+            todayCount: db.countUserPastesToday(req.appId, actor.userId, actor.ip),
+        });
+    } catch (err) {
+        console.error('[Pastes] Config error:', err.message);
+        res.status(500).json({ error: 'Failed to load paste config' });
+    }
+});
+
 // ── Get single paste by slug ────────────────────────────────
 router.get('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
     try {

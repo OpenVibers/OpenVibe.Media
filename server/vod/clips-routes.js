@@ -14,7 +14,10 @@
 'use strict';
 
 const express = require('express');
+const path = require('path');
 const fs = require('fs');
+const multer = require('multer');
+const config = require('../config');
 const db = require('../db/database');
 const tools = require('./media-tools');
 const cutter = require('./clip-cutter');
@@ -24,6 +27,32 @@ const { sendWebhook } = require('../webhooks');
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
+// ── Direct clip upload (browser MediaRecorder blob → multipart `video`) ──
+// Blobs can arrive with codec-qualified types, empty types, or
+// application/octet-stream depending on the browser/platform.
+const CLIP_MIME_TO_EXT = { 'video/webm': '.webm', 'video/mp4': '.mp4', 'video/x-matroska': '.mkv', 'video/ogg': '.ogg' };
+function baseMediaType(mime) { return (mime || '').split(';')[0].trim().toLowerCase(); }
+const clipUploadStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => {
+        const dir = path.resolve(config.vod.clipsPath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        const ext = CLIP_MIME_TO_EXT[baseMediaType(file.mimetype)] || '.webm';
+        cb(null, `clip-${req.params.app}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`);
+    },
+});
+const clipUpload = multer({
+    storage: clipUploadStorage,
+    limits: { fileSize: config.vod.maxSizeMb * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+        const base = baseMediaType(file.mimetype);
+        if (CLIP_MIME_TO_EXT[base] || base === 'application/octet-stream' || base === '' || base.startsWith('video/')) cb(null, true);
+        else cb(new Error('Only video files are allowed for clips'));
+    },
+});
+
 function clipPublic(clip) {
     if (!clip) return null;
     return {
@@ -31,6 +60,7 @@ function clipPublic(clip) {
         app_id: clip.app_id,
         vod_id: clip.vod_id,
         stream_id: clip.stream_id,
+        channel_user_id: clip.channel_user_id || null,
         user_id: clip.user_id,
         title: clip.title,
         description: clip.description,
@@ -38,6 +68,9 @@ function clipPublic(clip) {
         start_time: clip.start_time,
         end_time: clip.end_time,
         duration: clip.duration_seconds || 0,
+        duration_seconds: clip.duration_seconds || 0,
+        // Basename only — the inherited SPA derives its playback URL from this.
+        file_path: clip.file_path ? path.basename(clip.file_path) : null,
         playback_url: `/c/${clip.id}`,
         thumbnail_url: clip.thumbnail_url || null,
         visibility: clip.visibility || 'public',
@@ -62,10 +95,16 @@ function _getClipScoped(req, res) {
     return clip;
 }
 
+const VALID_VIS = new Set(['public', 'unlisted', 'private']);
+
 // ── Create clip ──────────────────────────────────────────────
-router.post('/', tenantAuth({ allowUser: true }), async (req, res) => {
+// JSON body: cut a window out of a VOD (202, background cut + webhook).
+// Multipart `video`: direct upload of an already-cut blob (201, ready) —
+// inherited browser-MediaRecorder clip path.
+router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), async (req, res) => {
     try {
         const body = req.body || {};
+        if (req.file) return _createUploadedClip(req, res);
         const vodId = parseInt(body.vod_id, 10);
         if (!Number.isFinite(vodId)) return res.status(400).json({ error: 'vod_id is required' });
         const vod = db.getVodById(vodId, req.appId);
@@ -123,20 +162,23 @@ router.post('/', tenantAuth({ allowUser: true }), async (req, res) => {
         }
 
         const userId = body.user_id != null ? body.user_id : (req.userId ?? null);
+        const visibility = VALID_VIS.has(body.visibility) ? body.visibility : 'public';
         const result = db.createClip({
             app_id: req.appId,
             vod_id: vodId,
-            stream_id: vod.stream_id || null,
+            stream_id: vod.stream_id || (body.stream_id != null ? parseInt(body.stream_id, 10) || null : null),
             user_id: userId,
+            channel_user_id: body.channel_user_id != null ? body.channel_user_id : (vod.user_id ?? null),
             title: sanitizeClipTitle(body.title, vod.title ? `Clip: ${vod.title}`.slice(0, 200) : 'Untitled Clip'),
             file_path: '',
             start_time: startTime,
             end_time: endTime,
             duration_seconds: duration,
-            is_public: 1,
+            is_public: visibility === 'public' ? 1 : 0,
             status: 'processing',
         });
         const clipId = result.lastInsertRowid;
+        if (visibility !== 'public') db.setClipVisibility(clipId, visibility);
         const appId = req.appId;
 
         // Cut in the background; webhook on completion.
@@ -160,24 +202,90 @@ router.post('/', tenantAuth({ allowUser: true }), async (req, res) => {
         res.status(202).json({ id: clipId, status: 'processing' });
     } catch (err) {
         console.error('[Clips] Create error:', err.message);
+        if (req.file) tools.cleanupTempFile(req.file.path);
         res.status(500).json({ error: 'Failed to create clip' });
     }
 });
 
+/**
+ * Direct clip upload: the blob is already cut client-side — remux it for
+ * seeking (rebases cluster timestamps hours from zero on long streams),
+ * probe the real duration, store as ready. No webhook (nothing async).
+ */
+async function _createUploadedClip(req, res) {
+    const body = req.body || {};
+    const clipPath = req.file.path;
+    try {
+        await tools.remuxForSeeking(clipPath);
+
+        let duration = 0;
+        try { duration = (await tools.probeVodInfo(clipPath)).duration || 0; } catch { /* */ }
+        if (!duration || tools.getFileSizeSafe(clipPath) === 0) {
+            tools.cleanupTempFile(clipPath);
+            return res.status(422).json({ error: 'Clip upload was corrupt or empty. Please try again.' });
+        }
+        const maxClipDuration = db.getSetting('max_clip_duration') || 60;
+        if (duration > maxClipDuration + 5) {
+            tools.cleanupTempFile(clipPath);
+            return res.status(400).json({ error: `Clips are limited to ${maxClipDuration} seconds` });
+        }
+
+        const startTime = Number.parseFloat(body.start_s ?? body.start_time);
+        const endTime = Number.parseFloat(body.end_s ?? body.end_time);
+        const visibility = VALID_VIS.has(body.visibility) ? body.visibility : 'public';
+        const vodId = body.vod_id != null ? parseInt(body.vod_id, 10) || null : null;
+        const result = db.createClip({
+            app_id: req.appId,
+            vod_id: vodId,
+            stream_id: body.stream_id != null ? parseInt(body.stream_id, 10) || null : null,
+            user_id: body.user_id != null ? body.user_id : (req.userId ?? null),
+            channel_user_id: body.channel_user_id != null ? body.channel_user_id : null,
+            title: sanitizeClipTitle(body.title, 'Untitled Clip'),
+            file_path: clipPath,
+            start_time: Number.isFinite(startTime) ? startTime : 0,
+            end_time: Number.isFinite(endTime) ? endTime : duration,
+            duration_seconds: duration,
+            is_public: visibility === 'public' ? 1 : 0,
+            status: 'ready',
+        });
+        const clipId = result.lastInsertRowid;
+        if (visibility !== 'public') db.setClipVisibility(clipId, visibility);
+
+        require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, clipPath)
+            .catch(err => console.warn(`[Clips] Thumbnail failed for clip ${clipId}:`, err.message));
+
+        console.log(`[Clips] Direct upload: clip ${clipId} (${req.appId}, ${duration.toFixed ? duration.toFixed(1) : duration}s)`);
+        res.status(201).json({ ...clipPublic(db.getClipById(clipId, req.appId)) });
+    } catch (err) {
+        console.error('[Clips] Upload error:', err.message);
+        tools.cleanupTempFile(clipPath);
+        res.status(500).json({ error: 'Failed to save uploaded clip' });
+    }
+}
+
 // ── List ─────────────────────────────────────────────────────
+// Filters follow the inherited query shapes: vod_id, stream_id, user_id
+// (creator), channel_user_id / source_streamer_id (owner of the clipped
+// channel), hide_self, include_private, order, limit/offset.
 router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
+        const channelUserId = req.query.channel_user_id ?? req.query.source_streamer_id;
         const filters = {
             limit, offset,
             vod_id: req.query.vod_id != null ? parseInt(req.query.vod_id, 10) : null,
             stream_id: req.query.stream_id != null ? parseInt(req.query.stream_id, 10) : null,
             user_id: req.query.user_id != null ? req.query.user_id : null,
+            channel_user_id: channelUserId != null ? channelUserId : null,
+            hide_self: ['1', 'true'].includes(String(req.query.hide_self || '')),
+            // Only the owning app may list private/unlisted rows (see vods list).
+            include_private: req.authType === 'app' && ['1', 'true'].includes(String(req.query.include_private || '')),
+            order: req.query.order || req.query.sort,   // `sort` = inherited alias
         };
         const clips = db.listClips(req.appId, filters);
         const total = db.countClips(req.appId, filters);
-        res.json({ clips: clips.map(clipPublic), total, limit, offset });
+        res.json({ clips: clips.map(clipPublic), total, limit, offset, hasMore: offset + clips.length < total });
     } catch (err) {
         console.error('[Clips] List error:', err.message);
         res.status(500).json({ error: 'Failed to list clips' });
@@ -189,7 +297,8 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const clip = _getClipScoped(req, res);
         if (!clip) return;
-        res.json({ clip: clipPublic(clip) });
+        // Bare object, mirroring GET /vods/:id per CONTRACTS.md.
+        res.json(clipPublic(clip));
     } catch (err) {
         res.status(500).json({ error: 'Failed to get clip' });
     }
