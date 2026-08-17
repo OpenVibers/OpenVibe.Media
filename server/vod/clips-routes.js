@@ -74,6 +74,7 @@ function clipPublic(clip) {
         playback_url: `/c/${clip.id}`,
         thumbnail_url: clip.thumbnail_url || null,
         visibility: clip.visibility || 'public',
+        is_public: (clip.visibility || (clip.is_public ? 'public' : 'private')) === 'public',
         storage_provider: clip.storage_provider || 'local',
         auto_generated: !!clip.auto_generated,
         view_count: clip.view_count || 0,

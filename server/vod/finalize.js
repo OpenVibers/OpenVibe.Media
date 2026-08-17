@@ -47,6 +47,10 @@ function vodPublic(vod) {
         thumbnail_url: vod.thumbnail_url || null,
         storage_provider: vod.storage_provider || 'local',
         visibility: vod.visibility || 'public',
+        // Kept alongside visibility — inherited SPA surfaces (manager badges,
+        // visibility toggles) read the boolean, and omitting it rendered every
+        // VOD as "Private" in the owner's manager.
+        is_public: (vod.visibility || (vod.is_public ? 'public' : 'private')) === 'public',
         health_status: vod.health_status,
         clips_only: !!vod.clips_only,
         is_recording: !!vod.is_recording,
