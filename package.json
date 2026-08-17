@@ -1,0 +1,23 @@
+{
+  "name": "openvibe-media",
+  "version": "1.0.0",
+  "description": "OpenVibe.Media — multi-tenant media service (VOD ingest/recording, storage tiering, clips, pastes, files, thumbnails)",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "init-db": "node server/db/init.js",
+    "smoke": "bash scripts/smoke-test.sh"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/lib-storage": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "openvibe-shared": "file:./vendor/openvibe-shared",
+    "sharp": "^0.33.4"
+  }
+}

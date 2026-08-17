@@ -1,0 +1,25 @@
+# OpenVibe.Media — multi-tenant media service (VOD recording/serving, clips, pastes, files).
+# Secrets live in /etc/openvibe/media.env (0600).
+[Unit]
+Description=OpenVibe.Media service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/openvibe.media
+EnvironmentFile=/etc/openvibe/media.env
+ExecStart=/usr/bin/env node /opt/openvibe.media/server/index.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/openvibe.media/data
+
+[Install]
+WantedBy=multi-user.target
