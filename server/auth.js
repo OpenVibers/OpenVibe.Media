@@ -31,9 +31,15 @@ async function fetchNetworkPublicKey() {
         if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
         const body = await res.json();
         const jwk = (body.keys || []).find(k => k.kty === 'RSA') || (body.keys || [])[0];
-        if (!jwk) throw new Error('JWKS contained no keys');
-        const keyObj = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-        _networkPublicKeyPem = keyObj.export({ type: 'spki', format: 'pem' });
+        if (jwk) {
+            const keyObj = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+            _networkPublicKeyPem = keyObj.export({ type: 'spki', format: 'pem' });
+        } else if (typeof body.public_key === 'string' && body.public_key.includes('BEGIN')) {
+            // Network's inherited endpoint shape: { public_key: <PEM>, algorithm }
+            _networkPublicKeyPem = crypto.createPublicKey(body.public_key).export({ type: 'spki', format: 'pem' });
+        } else {
+            throw new Error('JWKS contained no keys');
+        }
         console.log('[Auth] Network JWKS public key loaded');
         return _networkPublicKeyPem;
     } catch (err) {
