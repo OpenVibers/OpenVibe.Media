@@ -54,6 +54,16 @@ app.get('/healthz', (req, res) => {
     });
 });
 
+// Per-app media stats (app-key only) — hero/dashboard counters in the owning app.
+app.get('/api/v1/:app/stats', auth.tenantAuth(), (req, res) => {
+    try {
+        res.json(db.getAppStats(req.appId));
+    } catch (err) {
+        console.error('[Stats] error:', err.message);
+        res.status(500).json({ error: 'Failed to compute stats' });
+    }
+});
+
 app.use('/api/v1/:app/vods', require('./vod/routes'));
 app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
 app.use('/api/v1/:app/pastes', require('./pastes/routes'));

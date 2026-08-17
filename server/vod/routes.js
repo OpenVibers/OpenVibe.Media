@@ -275,6 +275,9 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
             // Only the owning app may list private/unlisted rows — it enforces its
             // own ownership checks (app-local user ids are opaque to Media).
             include_private: req.authType === 'app' && ['1', 'true'].includes(String(req.query.include_private || '')),
+            // In-progress recordings are excluded from listings unless asked for —
+            // apps surface the live recording via their own dedicated card.
+            includeRecording: ['1', 'true'].includes(String(req.query.include_recording || '')),
             order: req.query.order || req.query.sort,   // `sort` = inherited alias
         };
         const vods = db.listVods(req.appId, filters);
@@ -283,6 +286,18 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
     } catch (err) {
         console.error('[VOD] List error:', err.message);
         res.status(500).json({ error: 'Failed to list VODs' });
+    }
+});
+
+// ── Latest VOD thumbnail per managed stream (batch) ──────────
+// GET /latest-thumbs?managed_stream_ids=1,2,3 → { "<msid>": { vod_id, thumbnail_url } }
+router.get('/latest-thumbs', tenantAuth({ allowUser: true }), (req, res) => {
+    try {
+        const ids = String(req.query.managed_stream_ids || '').split(',').filter(Boolean);
+        res.json({ thumbs: db.latestVodThumbsByManagedStreams(req.appId, ids) });
+    } catch (err) {
+        console.error('[VOD] latest-thumbs error:', err.message);
+        res.status(500).json({ error: 'Failed to resolve thumbnails' });
     }
 });
 

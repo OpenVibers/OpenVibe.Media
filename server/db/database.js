@@ -196,6 +196,54 @@ function listVods(appId, filters = {}) {
     return all(`SELECT * FROM vods WHERE ${conds.join(' AND ')} ORDER BY ${_listOrder(order)} LIMIT ? OFFSET ?`, params);
 }
 
+/** Latest finished public VOD (id + thumbnail) per managed stream — one batch query. */
+function latestVodThumbsByManagedStreams(appId, managedStreamIds) {
+    const ids = (managedStreamIds || []).map(n => parseInt(n, 10)).filter(Number.isFinite);
+    if (!ids.length) return {};
+    const ph = ids.map(() => '?').join(',');
+    const rows = all(`
+        SELECT v.managed_stream_id, v.id, v.thumbnail_url
+        FROM vods v
+        JOIN (SELECT managed_stream_id ms, MAX(created_at) mc FROM vods
+              WHERE app_id = ? AND managed_stream_id IN (${ph})
+                AND is_public = 1 AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
+              GROUP BY managed_stream_id) latest
+          ON v.managed_stream_id = latest.ms AND v.created_at = latest.mc
+        WHERE v.app_id = ? AND v.is_public = 1 AND COALESCE(v.is_recording, 0) = 0`,
+        [appId, ...ids, appId]);
+    const out = {};
+    for (const r of rows) { if (out[r.managed_stream_id] == null) out[r.managed_stream_id] = { vod_id: r.id, thumbnail_url: r.thumbnail_url }; }
+    return out;
+}
+
+/** Aggregate per-app media stats for the owning app's dashboards/heroes. */
+function getAppStats(appId) {
+    const c = (sql, p = []) => { try { return get(sql, p)?.n || 0; } catch { return 0; } };
+    const win = (sql, extraParams = []) => ({
+        d: c(sql, [...extraParams, '-1 day']),
+        w: c(sql, [...extraParams, '-7 days']),
+        m: c(sql, [...extraParams, '-30 days']),
+    });
+    const vodBase = "FROM vods WHERE app_id = ? AND is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0";
+    const clipBase = "FROM clips WHERE app_id = ? AND COALESCE(is_public,1) = 1";
+    return {
+        vods: c(`SELECT COUNT(*) n ${vodBase}`, [appId]),
+        clips: c(`SELECT COUNT(*) n ${clipBase}`, [appId]),
+        pastes: c('SELECT COUNT(*) n FROM pastes WHERE app_id = ?', [appId]),
+        pasteImages: c("SELECT COUNT(*) n FROM pastes WHERE app_id = ? AND type = 'screenshot'", [appId]),
+        pasteText: c("SELECT COUNT(*) n FROM pastes WHERE app_id = ? AND COALESCE(type,'paste') <> 'screenshot'", [appId]),
+        durationSeconds: c(`SELECT COALESCE(SUM(duration_seconds),0) n ${vodBase}`, [appId]),
+        recent: {
+            vods: win(`SELECT COUNT(*) n ${vodBase} AND created_at >= datetime('now', ?)`, [appId]),
+            clips: win(`SELECT COUNT(*) n ${clipBase} AND created_at >= datetime('now', ?)`, [appId]),
+            hours: (() => {
+                const w = win(`SELECT COALESCE(SUM(duration_seconds),0) n ${vodBase} AND created_at >= datetime('now', ?)`, [appId]);
+                return { d: Math.round(w.d / 3600), w: Math.round(w.w / 3600), m: Math.round(w.m / 3600) };
+            })(),
+        },
+    };
+}
+
 function countVods(appId, filters = {}) {
     const { conds, params } = _vodConds(appId, filters);
     return get(`SELECT COUNT(*) AS count FROM vods WHERE ${conds.join(' AND ')}`, params)?.count || 0;
@@ -519,6 +567,7 @@ module.exports = {
     hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins,
     // vods
     createVod, getVodById, getVodByFileBasename, listVods, countVods, setVodVisibility, vodStatus,
+    latestVodThumbsByManagedStreams, getAppStats,
     updateVodHealth, repairVodDuration, getVodsNeedingHealthScan, getQuarantinedVodsForCleanup,
     // clips
     createClip, getClipById, getClipByFileBasename, listClips, countClips, setClipVisibility, findDuplicateClip,
