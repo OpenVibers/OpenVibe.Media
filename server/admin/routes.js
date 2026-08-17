@@ -397,11 +397,15 @@ router.post('/tiers/bulk-move', async (req, res) => {
     }
 });
 
-// ── GET /buckets — bucket config + reachability (no creds) ───
+// ── GET /buckets — bucket usage scan + cost estimate + reachability ──
+// Full ListObjectsV2 walk per provider (10-min server cache; ?force=1 rescans).
+// Response shape matches the legacy admin UI: { usage, costs, cachedAt } + buckets probe.
 router.get('/buckets', async (req, res) => {
     try {
-        const buckets = await vodStorage.bucketStatus();
-        res.json({ buckets, checkedAt: new Date().toISOString() });
+        const force = req.query.force === '1' || req.query.force === 'true';
+        const [buckets, usage] = await Promise.all([vodStorage.bucketStatus(), vodStorage.getBucketUsage(force)]);
+        const costs = vodStorage.estimateCloudCosts(usage);
+        res.json({ usage, costs, buckets, cachedAt: Date.now(), checkedAt: new Date().toISOString() });
     } catch (err) {
         console.error('[Admin] Bucket status error:', err.message);
         res.status(500).json({ error: 'Failed to check buckets' });
