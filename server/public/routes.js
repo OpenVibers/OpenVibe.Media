@@ -193,6 +193,26 @@ router.get('/t/:id', (req, res) => {
     require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
 });
 
+// ── Legacy thumbnail URLs ────────────────────────────────────
+// Old-stack thumbnails lived at /api/thumbnails/<basename>, and migrated Live
+// rows still carry those absolute URLs. Basenames change when a thumbnail is
+// regenerated, so resolve the vod/clip id from the name and redirect to the
+// current canonical URL; serve the exact file when it still exists.
+router.get('/api/thumbnails/:name', (req, res) => {
+    const name = path.basename(String(req.params.name || ''));
+    const m = /^(vod|clip)-(\d+)-\d+\.(?:jpg|jpeg|png)$/i.exec(name);
+    if (m) {
+        const row = m[1].toLowerCase() === 'vod'
+            ? db.getVodById(parseInt(m[2], 10), 'live')
+            : db.getClipById(parseInt(m[2], 10), 'live');
+        if (row && row.thumbnail_url && !row.thumbnail_url.endsWith(`/${name}`)) {
+            return res.redirect(302, row.thumbnail_url);
+        }
+    }
+    req.params.id = name;
+    require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
+});
+
 // ── Paste screenshots by filename ────────────────────────────
 // Legacy /data/pastes/screenshots/<name> URLs (old avatars, hero moments,
 // pre-cutover pastes) map here. Migrated screenshot files have arbitrary
