@@ -30,7 +30,25 @@ function getDb() {
     migrateColumns();
     normalizeThumbnailUrls();
     seedSettings();
+    recoverInterruptedClips();
     return database;
+}
+
+/**
+ * A clip is marked 'processing' while ffmpeg cuts it. If the service restarts mid-cut
+ * that ffmpeg dies, and nothing ever moves the row on — it stays 'processing' forever,
+ * which the player renders as a permanent "the server is cutting your clip".
+ *
+ * Mark them failed on boot instead: failed is honest, visible, and re-cuttable, whereas
+ * 'processing' is a lie that no longer has a process behind it.
+ */
+function recoverInterruptedClips() {
+    try {
+        const r = database.prepare(
+            "UPDATE clips SET status = 'failed' WHERE status = 'processing'"
+        ).run();
+        if (r.changes) console.log(`[DB] Recovered ${r.changes} clip(s) left mid-cut by a restart → failed (re-cuttable)`);
+    } catch { /* non-fatal */ }
 }
 
 // One-time normalization: migrated rows stored old-stack thumbnail URLs
