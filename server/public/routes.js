@@ -194,23 +194,39 @@ router.get('/t/:id', (req, res) => {
 });
 
 // ── Live frame API (public, dev-facing) ──────────────────────
-// GET /live/:msid/frame.jpg[?w=640][&app=live] — a near-realtime JPEG frame of
-// an actively-live stream slot, extracted from its in-progress recording.
-// Cached 5s per slot (that cache IS the rate limit); CORS-open so external
-// APIs, bots, and dashboards can poll it directly.
-router.get('/live/:msid/frame.jpg', async (req, res) => {
+// GET /live/:sel/frame.jpg[?w=640][&app=live][&format=json]
+// :sel = slot id ("1"), slot slug ("whip"), or "@username" (that streamer's
+// top-viewed live slot). Returns a near-realtime JPEG frame extracted from the
+// slot's in-progress recording; when the target isn't live, a styled OFFLINE
+// card (SVG) is served with a 404 so <img> embeds still look good while API
+// consumers can key off the status code (or pass ?format=json).
+// Cached 5s per slot (that cache IS the rate limit); CORS-open.
+router.get('/live/:sel/frame.jpg', async (req, res) => {
+    const frames = require('../thumbnails/live-frame-service');
+    const wantJson = String(req.query.format || '') === 'json';
+    const sendCard = (status, label, subtitle) => {
+        if (wantJson) return res.status(status).json({ error: subtitle ? `${label} ${subtitle}` : `${label} is offline` });
+        const svg = frames.offlineCardSvg(label, subtitle);
+        res.status(status).set({
+            'Content-Type': 'image/svg+xml; charset=utf-8',
+            'Cache-Control': 'public, max-age=5',
+            'X-Robots-Tag': 'noindex',
+        });
+        res.end(svg);
+    };
     try {
-        const msid = parseInt(req.params.msid, 10);
-        if (!Number.isFinite(msid) || msid <= 0) return res.status(400).json({ error: 'Bad slot id' });
+        res.set('Access-Control-Allow-Origin', '*');
         const appId = String(req.query.app || 'live');
         let w = parseInt(req.query.w, 10);
         w = Number.isFinite(w) ? Math.min(1920, Math.max(64, w)) : null;
 
-        const out = await require('../thumbnails/live-frame-service').getLiveFrame(appId, msid, w);
-        res.set('Access-Control-Allow-Origin', '*');
+        const resolved = await frames.resolveSelector(appId, req.params.sel);
+        if (!resolved.msid) return sendCard(404, resolved.label, 'is offline right now');
+
+        const out = await frames.getLiveFrame(appId, resolved.msid, w);
         if (!out.ok) {
-            return res.status(out.reason === 'not_live' ? 404 : 503)
-                .json({ error: out.reason === 'not_live' ? 'Slot is not live' : 'Frame unavailable' });
+            if (out.reason === 'not_live') return sendCard(404, resolved.label, 'is offline right now');
+            return sendCard(503, resolved.label, 'is live — frame unavailable, retry shortly');
         }
         res.set({
             'Content-Type': 'image/jpeg',
