@@ -19,6 +19,8 @@ const CLIPS_DIR = path.resolve(config.vod.clipsPath);
 // alone but several times that when encodes overlap. Three at once on a 4-core box that
 // also runs live x264 and whisper is how clips ended up timing out in batches.
 const MAX_CONCURRENT = parseInt(process.env.CLIP_MAX_CONCURRENT_FFMPEG || '2', 10);
+// How long a cut will queue for a free encoder slot before giving up.
+const QUEUE_WAIT_MS = parseInt(process.env.CLIP_QUEUE_WAIT_MS || '300000', 10);
 let _active = 0;
 
 function _ffprobe(file) {
@@ -47,7 +49,22 @@ async function cutClipFile({ source, startTime, duration }) {
     if (!source || !(duration >= 1)) return { ok: false, error: 'Invalid cut parameters' };
     const isUrl = /^https?:\/\//i.test(String(source));
     if (!isUrl && !fs.existsSync(source)) return { ok: false, error: 'Source missing' };
-    if (isBusy()) return { ok: false, error: 'busy' };
+    // Wait for a free encoder slot rather than failing. Returning 'busy' here marked the
+    // clip FAILED permanently for a purely transient reason — fire a handful of re-cuts at
+    // once and everything past MAX_CONCURRENT was written off instantly. This is a
+    // background job with no deadline, so queueing is always the right answer.
+    if (isBusy()) {
+        const waitedOk = await new Promise((resolve) => {
+            const deadline = Date.now() + QUEUE_WAIT_MS;
+            const tick = () => {
+                if (!isBusy()) return resolve(true);
+                if (Date.now() > deadline) return resolve(false);
+                setTimeout(tick, 500);
+            };
+            tick();
+        });
+        if (!waitedOk) return { ok: false, error: `encoder busy for over ${Math.round(QUEUE_WAIT_MS / 1000)}s` };
+    }
     try { if (!fs.existsSync(CLIPS_DIR)) fs.mkdirSync(CLIPS_DIR, { recursive: true }); } catch { /* */ }
 
     const ss = Math.max(0, Number(startTime) || 0);
