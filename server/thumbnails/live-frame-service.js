@@ -76,6 +76,81 @@ async function _grab(appId, managedStreamId, width) {
     return buf ? { ok: true, buf } : { ok: false, reason: 'unavailable' };
 }
 
+// ── Selector resolution (slot id / slot slug / @username) ────
+// Slugs, usernames, and viewer counts are app-side data; the app's public
+// /api/streams listing has all three, fetched over loopback and cached 5s.
+const APP_INTERNAL_URLS = (() => {
+    try { const m = JSON.parse(process.env.APP_INTERNAL_URLS || ''); if (m && typeof m === 'object') return m; } catch { /* */ }
+    return { live: process.env.LIVE_APP_INTERNAL_URL || 'http://127.0.0.1:3000' };
+})();
+
+const _liveListCache = new Map();   // appId → { at, streams }
+async function _appLiveStreams(appId) {
+    const hit = _liveListCache.get(appId);
+    if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.streams;
+    const base = APP_INTERNAL_URLS[appId];
+    if (!base) return hit?.streams || [];
+    try {
+        const res = await fetch(`${String(base).replace(/\/+$/, '')}/api/streams`, { signal: AbortSignal.timeout(4000) });
+        if (!res.ok) throw new Error(`streams list ${res.status}`);
+        const streams = (await res.json())?.streams || [];
+        _liveListCache.set(appId, { at: Date.now(), streams });
+        return streams;
+    } catch (err) {
+        console.warn('[LiveFrame] app streams lookup failed:', err.message);
+        return hit?.streams || [];
+    }
+}
+
+/**
+ * Resolve a URL selector to a managed stream slot:
+ *   "12"       → slot id 12
+ *   "whip"     → the live slot whose slug is "whip"
+ *   "@Goosely" → that streamer's top-viewed currently-live slot
+ * @returns {Promise<{msid:number, label:string} | {msid:null, label:string}>}
+ */
+async function resolveSelector(appId, selector) {
+    const sel = String(selector || '').trim();
+    if (/^\d+$/.test(sel)) return { msid: parseInt(sel, 10), label: `Slot ${sel}` };
+    const streams = await _appLiveStreams(appId);
+    if (sel.startsWith('@')) {
+        const name = sel.slice(1).toLowerCase();
+        const mine = streams.filter(s => String(s.username || '').toLowerCase() === name && s.managed_stream_id);
+        mine.sort((a, b) => (b.total_viewer_count ?? b.viewer_count ?? 0) - (a.total_viewer_count ?? a.viewer_count ?? 0));
+        if (mine.length) return { msid: mine[0].managed_stream_id, label: `@${mine[0].username}` };
+        return { msid: null, label: sel };
+    }
+    const slug = sel.toLowerCase();
+    const match = streams.find(s => String(s.managed_stream_slug || '').toLowerCase() === slug && s.managed_stream_id);
+    if (match) return { msid: match.managed_stream_id, label: match.managed_stream_slug };
+    return { msid: null, label: sel };
+}
+
+// ── Offline / unavailable placeholder card (SVG, 640×360) ────
+function _esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+function offlineCardSvg(label, subtitle = 'is offline right now') {
+    const name = _esc(String(label || 'stream').slice(0, 40));
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0f1420"/><stop offset="1" stop-color="#1a2035"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.55">
+      <stop offset="0" stop-color="#8b5cf6" stop-opacity="0.22"/><stop offset="1" stop-color="#8b5cf6" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="640" height="360" fill="url(#bg)"/>
+  <rect width="640" height="360" fill="url(#glow)"/>
+  <g transform="translate(320,128)" stroke="#8b5cf6" stroke-width="5" fill="none" opacity="0.9">
+    <circle cx="-34" cy="22" r="13"/><circle cx="34" cy="22" r="13"/><circle cx="0" cy="-30" r="13"/>
+    <line x1="-24" y1="14" x2="-8" y2="-20"/><line x1="24" y1="14" x2="8" y2="-20"/><line x1="-21" y1="22" x2="21" y2="22"/>
+  </g>
+  <text x="320" y="216" text-anchor="middle" font-family="system-ui,Segoe UI,Arial,sans-serif" font-size="34" font-weight="700" fill="#e6e9f2" letter-spacing="6">OFFLINE</text>
+  <text x="320" y="252" text-anchor="middle" font-family="system-ui,Segoe UI,Arial,sans-serif" font-size="17" fill="#9aa3b8">${name} ${_esc(subtitle)}</text>
+  <text x="320" y="330" text-anchor="middle" font-family="system-ui,Segoe UI,Arial,sans-serif" font-size="13" fill="#5b6478" letter-spacing="2">OPENVIBE.LIVE</text>
+</svg>`;
+}
+
 /**
  * Get a current frame for an actively-live slot.
  * @returns {Promise<{ok:true, buf:Buffer} | {ok:false, reason:'not_live'|'unavailable'}>}
@@ -105,4 +180,4 @@ function getLiveFrame(appId, managedStreamId, width = null) {
     return p;
 }
 
-module.exports = { getLiveFrame, CACHE_TTL_MS };
+module.exports = { getLiveFrame, resolveSelector, offlineCardSvg, CACHE_TTL_MS };
