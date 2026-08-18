@@ -204,15 +204,23 @@ router.get('/t/:id', (req, res) => {
 router.get('/live/:sel/frame.jpg', async (req, res) => {
     const frames = require('../thumbnails/live-frame-service');
     const wantJson = String(req.query.format || '') === 'json';
-    const sendCard = (status, label, subtitle) => {
+    const sendCard = async (status, label, subtitle) => {
         if (wantJson) return res.status(status).json({ error: subtitle ? `${label} ${subtitle}` : `${label} is offline` });
-        const svg = frames.offlineCardSvg(label, subtitle);
+        // Always JPEG bytes — the URL says .jpg and dev pipelines decode accordingly.
+        let buf = null, type = 'image/jpeg';
+        try { buf = await frames.offlineCardJpeg(label, subtitle); }
+        catch (err) {
+            console.warn('[Public] offline card render failed:', err.message);
+            buf = Buffer.from(frames.offlineCardSvg(label, subtitle));
+            type = 'image/svg+xml; charset=utf-8';
+        }
         res.status(status).set({
-            'Content-Type': 'image/svg+xml; charset=utf-8',
+            'Content-Type': type,
+            'Content-Length': buf.length,
             'Cache-Control': 'public, max-age=5',
             'X-Robots-Tag': 'noindex',
         });
-        res.end(svg);
+        res.end(buf);
     };
     try {
         res.set('Access-Control-Allow-Origin', '*');

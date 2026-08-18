@@ -180,4 +180,20 @@ function getLiveFrame(appId, managedStreamId, width = null) {
     return p;
 }
 
-module.exports = { getLiveFrame, resolveSelector, offlineCardSvg, CACHE_TTL_MS };
+// The endpoint is frame.jpg — dev pipelines feed the bytes straight into image
+// decoders, so the placeholder must be a real JPEG too. Rasterize the SVG card
+// via sharp, cached per label (the card for a given name rarely changes).
+const _cardCache = new Map();   // `${label}|${subtitle}` → { at, buf }
+const CARD_CACHE_TTL_MS = 60_000;
+async function offlineCardJpeg(label, subtitle) {
+    const key = `${label}|${subtitle}`;
+    const hit = _cardCache.get(key);
+    if (hit && Date.now() - hit.at < CARD_CACHE_TTL_MS) return hit.buf;
+    const buf = await require('sharp')(Buffer.from(offlineCardSvg(label, subtitle)))
+        .jpeg({ quality: 88 }).toBuffer();
+    if (_cardCache.size > 200) _cardCache.clear();
+    _cardCache.set(key, { at: Date.now(), buf });
+    return buf;
+}
+
+module.exports = { getLiveFrame, resolveSelector, offlineCardSvg, offlineCardJpeg, CACHE_TTL_MS };
