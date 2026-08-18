@@ -19,8 +19,11 @@ const CLIPS_DIR = path.resolve(config.vod.clipsPath);
 // alone but several times that when encodes overlap. Three at once on a 4-core box that
 // also runs live x264 and whisper is how clips ended up timing out in batches.
 const MAX_CONCURRENT = parseInt(process.env.CLIP_MAX_CONCURRENT_FFMPEG || '2', 10);
-// How long a cut will queue for a free encoder slot before giving up.
-const QUEUE_WAIT_MS = parseInt(process.env.CLIP_QUEUE_WAIT_MS || '300000', 10);
+// How long a cut will queue for a free encoder slot before giving up. Sized for a BULK
+// backlog, not a single request: re-cutting 12 clips at 2 concurrent, each taking 1-3
+// minutes on a loaded box, left the tail waiting well past the old 5 minutes and they
+// were written off as failed. This is a background job, so waiting costs nothing.
+const QUEUE_WAIT_MS = parseInt(process.env.CLIP_QUEUE_WAIT_MS || '1800000', 10);
 let _active = 0;
 
 function _ffprobe(file) {
