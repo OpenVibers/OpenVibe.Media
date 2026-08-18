@@ -71,8 +71,9 @@ function clipPublic(clip) {
         duration_seconds: clip.duration_seconds || 0,
         // Basename only — the inherited SPA derives its playback URL from this.
         file_path: clip.file_path ? path.basename(clip.file_path) : null,
-        playback_url: `/c/${clip.id}`,
-        thumbnail_url: clip.thumbnail_url || null,
+        // Absolute URLs — cross-origin consumers render these directly.
+        playback_url: `${config.publicUrl}/c/${clip.id}`,
+        thumbnail_url: require('./finalize')._absUrl(clip.thumbnail_url),
         visibility: clip.visibility || 'public',
         is_public: (clip.visibility || (clip.is_public ? 'public' : 'private')) === 'public',
         storage_provider: clip.storage_provider || 'local',

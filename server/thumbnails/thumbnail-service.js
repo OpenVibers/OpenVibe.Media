@@ -211,14 +211,16 @@ function serveThumbnail(req, res) {
         const ext = path.extname(filename).toLowerCase();
         const contentType = ext === '.png' ? 'image/png' : 'image/jpeg';
 
-        // Cache briefly for live thumbnails, longer for VOD/clip
+        // Cache briefly for live thumbnails; VOD/clip filenames are timestamped
+        // (a regenerated thumb gets a NEW name), so those bytes never change —
+        // mark them immutable so browsers stop revalidating on every render.
         const isLive = filename.startsWith('stream-');
-        const maxAge = isLive ? 30 : 86400;
+        const cacheControl = isLive ? 'public, max-age=30' : 'public, max-age=604800, immutable';
 
         res.writeHead(200, {
             'Content-Type': contentType,
             'Content-Length': stat.size,
-            'Cache-Control': `public, max-age=${maxAge}`,
+            'Cache-Control': cacheControl,
             'X-Robots-Tag': 'noindex',
         });
         fs.createReadStream(filePath).pipe(res);

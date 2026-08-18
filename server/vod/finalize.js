@@ -16,8 +16,16 @@ const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
 const db = require('../db/database');
+const config = require('../config');
 const tools = require('./media-tools');
 const { sendWebhook } = require('../webhooks');
+
+/** Absolute-ize a stored Media-relative URL (/t/…, /api/thumbnails/…). */
+function _absUrl(u) {
+    if (!u) return null;
+    if (/^https?:\/\//i.test(u)) return u;
+    return `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`;
+}
 
 const _finalizing = new Set();
 
@@ -43,8 +51,10 @@ function vodPublic(vod) {
         // Basename only (server paths stay private) — the inherited SPA derives
         // its /file/<name> playback URL from this.
         file_path: vod.file_path ? path.basename(vod.file_path) : null,
-        playback_url: `/v/${vod.id}`,
-        thumbnail_url: vod.thumbnail_url || null,
+        // Absolute URLs — consumers on other origins (app SPAs) render these
+        // directly; relative paths resolved against the app's origin and broke.
+        playback_url: `${config.publicUrl}/v/${vod.id}`,
+        thumbnail_url: _absUrl(vod.thumbnail_url),
         storage_provider: vod.storage_provider || 'local',
         visibility: vod.visibility || 'public',
         // Kept alongside visibility — inherited SPA surfaces (manager badges,
@@ -288,4 +298,4 @@ async function _doFinalize(vodId, opts) {
     return finalVod;
 }
 
-module.exports = { finalizeVod, isFinalizing, vodPublic, rebuildWebmFromMaster };
+module.exports = { finalizeVod, isFinalizing, vodPublic, rebuildWebmFromMaster, _absUrl };
