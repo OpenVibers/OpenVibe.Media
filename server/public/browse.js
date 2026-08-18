@@ -233,6 +233,11 @@ function renderPage(tab, page, data, counts) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenVibe.Media — Media Index</title>
 <meta name="description" content="Index of all public media on the OpenVibe network — videos, clips, images, pastes, and thumbnails.">
+<!-- Critical theme bootstrap (ov-theme-boot) — inline and above the styles, so the cached
+     theme paints on the first frame instead of flashing the default palette. -->
+<script>
+(function(){try{var raw=localStorage.getItem('ov_theme');if(!raw)return;var t=JSON.parse(raw),v=t&&t.variables;if(!v)return;var el=document.documentElement;for(var k in v)if(k.charAt(0)==='-')el.style.setProperty(k,v[k]);if(t.id)el.setAttribute('data-theme',t.id);}catch(_){}})();
+</script>
 <style>
 :root{--bg:#0f1420;--panel:#161c2c;--border:#232b40;--text:#e6e9f2;--muted:#9aa3b8;--accent:#8b5cf6}
 *{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,'Segoe UI',Arial,sans-serif;padding-bottom:3rem}
