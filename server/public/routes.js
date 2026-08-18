@@ -483,6 +483,12 @@ router.get('/p/:slug', optionalIdentity, (req, res) => {
 router.get('/p/:slug/raw', (req, res) => {
     try {
         const paste = db.getPasteBySlug(String(req.params.slug));
+        // Image pastes have no raw text — bounce to the screenshot (stale
+        // consumers stored /raw URLs for hero-moment images).
+        if (paste && paste.type === 'screenshot') {
+            res.set('Cache-Control', 'public, max-age=3600');
+            return res.redirect(302, `/p/${encodeURIComponent(paste.slug)}/screenshot`);
+        }
         if (!paste || paste.type !== 'paste') return res.status(404).send('Not found');
         if (paste.visibility === 'private') return res.status(404).send('Not found');
 
