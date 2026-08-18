@@ -310,6 +310,54 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Update (title / visibility) ──────────────────────────────
+/**
+ * Re-cut a clip whose cut failed. The row already carries everything needed
+ * (vod_id, start_time, end_time), so a failure is recoverable rather than
+ * permanent — previously a failed clip stayed broken forever with no retry path,
+ * and the viewer was shown "the server is cutting your clip" indefinitely.
+ */
+router.post('/:id/recut', tenantAuth(), async (req, res) => {
+    try {
+        const clipId = parseInt(req.params.id, 10);
+        const clip = db.getClipById(clipId);
+        if (!clip || clip.app_id !== req.appId) return res.status(404).json({ error: 'Clip not found' });
+        if (clip.status === 'processing') return res.status(409).json({ error: 'Clip is already being cut' });
+        if (!clip.vod_id) return res.status(422).json({ error: 'Clip has no source VOD to re-cut from' });
+
+        const vod = db.get('SELECT * FROM vods WHERE id = ?', [clip.vod_id]);
+        if (!vod) return res.status(404).json({ error: 'Source VOD no longer exists' });
+
+        const vodStorage = require('./vod-storage');
+        const source = await vodStorage.resolveMediaSource(vod);
+        if (!source) return res.status(404).json({ error: 'VOD media unavailable (not on disk and no cloud copy)' });
+
+        const startTime = Number(clip.start_time) || 0;
+        const duration = Math.max(1, (Number(clip.end_time) || 0) - startTime);
+        db.run('UPDATE clips SET status = ? WHERE id = ?', ['processing', clipId]);
+        const appId = req.appId;
+
+        (async () => {
+            const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
+            if (cut.ok) {
+                db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
+                    [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId]);
+                try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
+                console.log(`[Clips] Clip ${clipId} RE-CUT from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s)`);
+                sendWebhook(appId, 'clip.ready', clipPublic(db.getClipById(clipId))).catch(() => {});
+            } else {
+                console.warn(`[Clips] Clip ${clipId} re-cut failed: ${cut.error}`);
+                db.run('UPDATE clips SET status = ? WHERE id = ?', ['failed', clipId]);
+                sendWebhook(appId, 'clip.failed', clipPublic(db.getClipById(clipId))).catch(() => {});
+            }
+        })().catch(err => console.error('[Clips] Background re-cut error:', err.message));
+
+        res.status(202).json({ id: clipId, status: 'processing' });
+    } catch (err) {
+        console.error('[Clips] Re-cut error:', err.message);
+        res.status(500).json({ error: 'Failed to re-cut clip' });
+    }
+});
+
 router.put('/:id', tenantAuth(), (req, res) => {
     try {
         const clip = _getClipScoped(req, res);

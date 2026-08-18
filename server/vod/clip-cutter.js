@@ -15,7 +15,10 @@ const db = require('../db/database');
 const config = require('../config');
 
 const CLIPS_DIR = path.resolve(config.vod.clipsPath);
-const MAX_CONCURRENT = parseInt(process.env.CLIP_MAX_CONCURRENT_FFMPEG || '3', 10);
+// libvpx is SLOW — measured at ~3.3x realtime on an idle box, so a 25s clip takes ~8s
+// alone but several times that when encodes overlap. Three at once on a 4-core box that
+// also runs live x264 and whisper is how clips ended up timing out in batches.
+const MAX_CONCURRENT = parseInt(process.env.CLIP_MAX_CONCURRENT_FFMPEG || '2', 10);
 let _active = 0;
 
 function _ffprobe(file) {
@@ -53,6 +56,9 @@ async function cutClipFile({ source, startTime, duration }) {
     const outPath = path.join(CLIPS_DIR, filename);
 
     _active++;
+    let timedOut = false;
+    let exitCode = null;
+    const _stderrRef = { get: () => '' };
     // Re-encode the (short) clip instead of stream-copying. `-ss` before `-i`
     // is a fast seek to the nearest keyframe, and because we re-encode, ffmpeg
     // then decodes to the EXACT requested start — the clip begins precisely
@@ -66,13 +72,31 @@ async function cutClipFile({ source, startTime, duration }) {
             '-force_key_frames', 'expr:gte(t,n_forced*2)', '-c:a', 'libopus', '-b:a', '128k',
             '-avoid_negative_ts', 'make_zero', '-f', 'webm', outPath,
         ];
-        const ff = spawn('ffmpeg', args, { stdio: 'ignore' });
-        const to = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* */ } resolve(false); }, Math.round(dur) * 2000 + (isUrl ? 40000 : 20000));
-        ff.on('close', (code) => { clearTimeout(to); resolve(code === 0); });
-        ff.on('error', () => { clearTimeout(to); resolve(false); });
+        // Keep stderr. It used to be discarded, so every failure surfaced as the useless
+        // string "ffmpeg cut failed" and the only way to learn anything was to reproduce
+        // the command by hand.
+        const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] });
+        let errTail = '';
+        ff.stderr.on('data', (d) => { errTail = (errTail + d).slice(-4000); });
+        // Budget generously: this is a background job with no deadline, and the old
+        // dur*2 + 40s budget was tight enough that a burst of concurrent encodes on a
+        // busy box blew through it — which is exactly how a batch of clips failed at once.
+        const budgetMs = Math.round(dur) * 8000 + (isUrl ? 90000 : 45000);
+        const to = setTimeout(() => { timedOut = true; try { ff.kill('SIGKILL'); } catch { /* */ } resolve(false); }, budgetMs);
+        ff.on('close', (code) => { clearTimeout(to); exitCode = code; resolve(code === 0); });
+        ff.on('error', (e) => { clearTimeout(to); errTail += `\nspawn error: ${e.message}`; resolve(false); });
+        _stderrRef.get = () => errTail;
     }).finally(() => { _active = Math.max(0, _active - 1); });
 
-    if (!ok) { try { fs.existsSync(outPath) && fs.unlinkSync(outPath); } catch { /* */ } return { ok: false, error: 'ffmpeg cut failed' }; }
+    if (!ok) {
+        try { fs.existsSync(outPath) && fs.unlinkSync(outPath); } catch { /* */ }
+        // Surface ffmpeg's own last words — the real reason, not a generic label.
+        const tail = String(_stderrRef.get() || '').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 400);
+        const why = timedOut
+            ? `ffmpeg timed out after ${Math.round((Math.round(dur) * 8000 + (isUrl ? 90000 : 45000)) / 1000)}s`
+            : `ffmpeg exited ${exitCode}`;
+        return { ok: false, error: tail ? `${why}: ${tail}` : why };
+    }
 
     // Validate real decodable footage (a seek near EOF can yield a header-only file).
     const pi = await _ffprobe(outPath);
