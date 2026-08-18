@@ -61,7 +61,7 @@ async function _resolveUser(appId, name) {
     return null;
 }
 
-function _vodEntry(v, { withTranscript = true } = {}) {
+function _vodEntry(v, { withTranscript = true, tx = null } = {}) {
     const out = {
         vod_id: v.id,
         title: v.title || null,
@@ -73,11 +73,33 @@ function _vodEntry(v, { withTranscript = true } = {}) {
         ai_overview: v.ai_overview || null,
         ai_analyzed_at: v.ai_analyzed_at || null,
     };
-    if (withTranscript) out.transcript = v.ai_transcript || null;
+    if (withTranscript) {
+        // Prefer what Live returned; fall back to Media's legacy column for pre-cutover rows.
+        out.transcript = (tx && tx.transcript) || v.ai_transcript || null;
+        out.segments = (tx && tx.segments) || [];
+        out.sound_events = (tx && tx.events) || [];
+        if (tx && tx.ai_overview_short && !out.ai_overview) out.ai_overview = tx.ai_overview_short;
+    }
     return out;
 }
 
 const VOD_COLS = 'id, title, created_at, duration_seconds, visibility, is_recording, managed_stream_id, user_id, ai_overview, ai_transcript, ai_analyzed_at';
+
+/**
+ * Transcripts for a batch of VOD ids, fetched from the owning app.
+ *
+ * Media's own vods.ai_transcript column is dead: transcript ownership moved to Live at the
+ * cutover (vod_ai_state.ai_transcript_json, and now stream_timeline_events). Nothing writes
+ * Media's column any more, which is why this endpoint reported transcript: null for every
+ * post-cutover recording. Ask Live instead — it returns the flat text, timestamped speech
+ * segments and non-speech sound events.
+ */
+async function _appTranscripts(appId, vodIds) {
+    const ids = (vodIds || []).filter(Boolean);
+    if (!ids.length) return {};
+    const data = await _appJson(appId, `/api/chat-ai/vod-transcripts?ids=${ids.join(',')}`);
+    return (data && data.transcripts) || {};
+}
 
 /** Streamer-level extras from the app: chat insight + streamer overview + memories. */
 async function _streamerExtras(appId, uid) {
@@ -114,13 +136,14 @@ function getTranscriptTimeline(appId, sel, limit) {
         const current = rows.find(v => v.is_recording) || null;
         const sessions = rows.filter(v => !v.is_recording);
         const extras = await _streamerExtras(appId, uid);
+        const txs = await _appTranscripts(appId, rows.map(v => v.id));
         return {
             status: 200,
             body: {
                 scope, selector: String(sel), label,
                 live: !!current,
-                current: current ? _vodEntry(current) : null,
-                sessions: sessions.map(v => _vodEntry(v)),
+                current: current ? _vodEntry(current, { tx: txs[current.id] }) : null,
+                sessions: sessions.map(v => _vodEntry(v, { tx: txs[v.id] })),
                 streamer: extras?.streamer || null,          // overview + stream memories timeline
                 user: extras?.user || null,
                 generated_at: new Date().toISOString(),
@@ -134,7 +157,8 @@ function getVodTranscript(vodId) {
     return cached(`vt:${vodId}`, async () => {
         const v = db.get(`SELECT ${VOD_COLS}, app_id, is_public FROM vods WHERE id = ?`, [vodId]);
         if (!v || v.visibility === 'private') return { status: 404, body: { error: 'VOD not found' } };
-        return { status: 200, body: { ..._vodEntry(v), app_id: v.app_id, generated_at: new Date().toISOString() } };
+        const txs = await _appTranscripts(v.app_id, [v.id]);
+        return { status: 200, body: { ..._vodEntry(v, { tx: txs[v.id] }), app_id: v.app_id, generated_at: new Date().toISOString() } };
     });
 }
 
