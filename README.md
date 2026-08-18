@@ -200,6 +200,7 @@ the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
 | `GET /t/:id` | thumbnail (id = filename), `noindex` |
 | `GET /f/:key` | file with stored Content-Type + Range, `noindex` |
 | `GET /f/screenshots/:name` | paste screenshot by filename — serves straight from `PASTES_PATH/screenshots` (migrated legacy files have no files-table rows), `noindex` |
+| `GET /live/:msid/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot (`msid` = managed stream id), extracted from its in-progress recording. Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`). Cached **5s per slot** (that cache is the rate limit), CORS-open (`Access-Control-Allow-Origin: *`) for external APIs/bots/dashboards. `404` when the slot isn't live, `503` when a frame can't be cut. |
 
 Private items respond 403/404 unless the request bears the owning app's API
 key or the owning user's JWT.

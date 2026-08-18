@@ -193,6 +193,38 @@ router.get('/t/:id', (req, res) => {
     require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
 });
 
+// ── Live frame API (public, dev-facing) ──────────────────────
+// GET /live/:msid/frame.jpg[?w=640][&app=live] — a near-realtime JPEG frame of
+// an actively-live stream slot, extracted from its in-progress recording.
+// Cached 5s per slot (that cache IS the rate limit); CORS-open so external
+// APIs, bots, and dashboards can poll it directly.
+router.get('/live/:msid/frame.jpg', async (req, res) => {
+    try {
+        const msid = parseInt(req.params.msid, 10);
+        if (!Number.isFinite(msid) || msid <= 0) return res.status(400).json({ error: 'Bad slot id' });
+        const appId = String(req.query.app || 'live');
+        let w = parseInt(req.query.w, 10);
+        w = Number.isFinite(w) ? Math.min(1920, Math.max(64, w)) : null;
+
+        const out = await require('../thumbnails/live-frame-service').getLiveFrame(appId, msid, w);
+        res.set('Access-Control-Allow-Origin', '*');
+        if (!out.ok) {
+            return res.status(out.reason === 'not_live' ? 404 : 503)
+                .json({ error: out.reason === 'not_live' ? 'Slot is not live' : 'Frame unavailable' });
+        }
+        res.set({
+            'Content-Type': 'image/jpeg',
+            'Content-Length': out.buf.length,
+            'Cache-Control': 'public, max-age=5',
+            'X-Robots-Tag': 'noindex',
+        });
+        res.end(out.buf);
+    } catch (err) {
+        console.error('[Public] /live frame error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to grab frame' });
+    }
+});
+
 // ── Legacy thumbnail URLs ────────────────────────────────────
 // Old-stack thumbnails lived at /api/thumbnails/<basename>, and migrated Live
 // rows still carry those absolute URLs. Basenames change when a thumbnail is
