@@ -182,3 +182,23 @@ CREATE TABLE IF NOT EXISTS media_settings (
     type TEXT DEFAULT 'string',
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- ── App assets (emotes / channel sounds) ─────────────────────
+-- Canonical public home for per-channel chat assets the apps upload; browse
+-- index shows uploader + channel. Unique per (app, kind, name, channel).
+CREATE TABLE IF NOT EXISTS assets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    app_id TEXT NOT NULL DEFAULT 'live',
+    kind TEXT NOT NULL,                     -- 'emote' | 'sound'
+    name TEXT NOT NULL,                     -- emote code or !command
+    file_path TEXT NOT NULL,
+    mime TEXT DEFAULT 'application/octet-stream',
+    user_id INTEGER,                        -- uploader (app-local id)
+    username TEXT DEFAULT '',               -- uploader name snapshot
+    channel_username TEXT DEFAULT '',       -- channel it belongs to
+    duration_seconds REAL DEFAULT 0,
+    meta_json TEXT DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_assets_app_kind ON assets(app_id, kind, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_identity ON assets(app_id, kind, name, channel_username);

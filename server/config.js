@@ -32,6 +32,9 @@ const config = {
     pastes: {
         path: process.env.PASTES_PATH || './data/pastes',
     },
+    assets: {
+        path: process.env.ASSETS_PATH || './data/assets',
+    },
     thumbnails: {
         path: process.env.THUMBNAILS_PATH || './data/thumbnails',
     },
@@ -65,6 +68,7 @@ for (const p of ['path']) {
 }
 config.vod.clipsPath = path.resolve(config.vod.clipsPath);
 config.pastes.path = path.resolve(config.pastes.path);
+config.assets.path = path.resolve(config.assets.path);
 config.thumbnails.path = path.resolve(config.thumbnails.path);
 config.files.path = path.resolve(config.files.path);
 config.db.path = path.resolve(config.db.path);

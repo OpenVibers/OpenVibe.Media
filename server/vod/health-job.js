@@ -223,9 +223,39 @@ async function _tick() {
     }
 }
 
+// One boot-time sweep for 0:00 ghost VODs that older failure paths marked
+// ready+public (finalize crash fallbacks, killed processes). Rows with no
+// media at all are deleted; short-but-nonempty ones are quarantined.
+function sweepJunkVods() {
+    try {
+        const fs = require('fs');
+        const rows = db.all(`SELECT id, file_path, file_size, duration_seconds FROM vods
+            WHERE is_recording = 0 AND is_public = 1
+              AND COALESCE(duration_seconds, 0) < 3
+              AND COALESCE(file_size, 0) < 10000000
+              AND (storage_provider IS NULL OR storage_provider = 'local')
+              AND COALESCE(health_status, 'unknown') IN ('unknown', '')`);
+        let deleted = 0, quarantined = 0;
+        for (const v of rows) {
+            const hasFile = v.file_path && fs.existsSync(v.file_path) && (() => { try { return fs.statSync(v.file_path).size > 0; } catch { return false; } })();
+            if (!hasFile) {
+                try { if (v.file_path && fs.existsSync(v.file_path)) fs.unlinkSync(v.file_path); } catch { /* */ }
+                db.run('DELETE FROM vods WHERE id = ?', [v.id]);
+                deleted++;
+            } else {
+                db.run(`UPDATE vods SET health_status = 'needs_review', health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+                    [JSON.stringify(['short_duration']), v.id]);
+                quarantined++;
+            }
+        }
+        if (deleted || quarantined) console.log(`[VOD-Health] Junk sweep: deleted ${deleted} empty VODs, quarantined ${quarantined} short ones`);
+    } catch (e) { console.warn('[VOD-Health] junk sweep error:', e.message); }
+}
+
 function start() {
     if (_running) return;
     _running = true;
+    sweepJunkVods();
     // First pass shortly after boot (idle window), then on the interval.
     const first = setTimeout(() => { _tick().catch(() => {}); }, 90 * 1000);
     if (first.unref) first.unref();

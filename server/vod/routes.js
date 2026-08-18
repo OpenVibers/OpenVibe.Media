@@ -319,7 +319,8 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
         }
 
         // Bare object per CONTRACTS.md: { id, title, status, duration, … }
-        res.json(vodPublic(vod));
+        // Detail responses carry the transcript too (lists stay light).
+        res.json({ ...vodPublic(vod), ai_transcript: vod.ai_transcript || null });
     } catch (err) {
         console.error('[VOD] Get error:', err.message);
         res.status(500).json({ error: 'Failed to get VOD' });

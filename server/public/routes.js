@@ -249,6 +249,24 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
     }
 });
 
+// ── App assets (emotes / sounds) by id ───────────────────────
+router.get('/a/:id', (req, res) => {
+    try {
+        const a = db.getAssetById(parseInt(req.params.id, 10));
+        if (!a || !a.file_path || !fs.existsSync(a.file_path)) return res.status(404).json({ error: 'Not found' });
+        // Content is replaced under the same URL on re-upload — cache a day, not immutable.
+        streamFileWithRange(req, res, a.file_path, {
+            'Content-Type': a.mime || 'application/octet-stream',
+            'Cache-Control': 'public, max-age=86400',
+            'Access-Control-Allow-Origin': '*',
+            'X-Robots-Tag': 'noindex',
+        });
+    } catch (err) {
+        console.error('[Public] /a error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to serve asset' });
+    }
+});
+
 // ── Media index home page ────────────────────────────────────
 // GET / — server-rendered mass index of all public media (tabs: All / Videos /
 // Clips / Images / Text / Thumbnails / Files), each card linking back to its
