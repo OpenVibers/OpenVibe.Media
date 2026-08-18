@@ -28,8 +28,25 @@ function getDb() {
     const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
     database.exec(schema);
     migrateColumns();
+    normalizeThumbnailUrls();
     seedSettings();
     return database;
+}
+
+// One-time normalization: migrated rows stored old-stack thumbnail URLs
+// (/api/thumbnails/<name> or absolute variants). Canonical form is /t/<name>
+// — the legacy redirect route covers stragglers, but direct URLs cache better.
+function normalizeThumbnailUrls() {
+    try {
+        for (const table of ['vods', 'clips']) {
+            const info = database.prepare(
+                `UPDATE ${table}
+                 SET thumbnail_url = '/t/' || replace(thumbnail_url, rtrim(thumbnail_url, replace(thumbnail_url, '/', '')), '')
+                 WHERE thumbnail_url LIKE '%/api/thumbnails/%'`
+            ).run();
+            if (info.changes) console.log(`[DB] Normalized ${info.changes} legacy thumbnail URLs in ${table}`);
+        }
+    } catch (e) { console.warn('[DB] thumbnail URL normalization:', e.message); }
 }
 
 // Additive column migrations for DBs created before the column existed

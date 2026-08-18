@@ -249,6 +249,13 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
     }
 });
 
+// ── Media index home page ────────────────────────────────────
+// GET / — server-rendered mass index of all public media (tabs: All / Videos /
+// Clips / Images / Text / Thumbnails / Files), each card linking back to its
+// source page in the owning app. See public/browse.js.
+router.get('/', (req, res) => require('./browse').handle(req, res));
+router.get('/browse', (req, res) => require('./browse').handle(req, res));
+
 // ── Dev data APIs: transcripts / AI timelines / chat insight ─
 // JSON companions to the frame API — same selector grammar, 30s cache as the
 // rate limit, CORS-open. See README "Public serving".
@@ -293,6 +300,7 @@ router.get('/api/thumbnails/:name', (req, res) => {
             ? db.getVodById(parseInt(m[2], 10), 'live')
             : db.getClipById(parseInt(m[2], 10), 'live');
         if (row && row.thumbnail_url && !row.thumbnail_url.endsWith(`/${name}`)) {
+            res.set('Cache-Control', 'public, max-age=3600');
             return res.redirect(302, row.thumbnail_url);
         }
     }
@@ -313,7 +321,7 @@ router.get('/f/screenshots/:name', (req, res) => {
         if (!name || !filePath.startsWith(dir) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
             return res.status(404).json({ error: 'Not found' });
         }
-        streamFileWithRange(req, res, filePath, { 'Cache-Control': 'public, max-age=86400', 'X-Robots-Tag': 'noindex' });
+        streamFileWithRange(req, res, filePath, { 'Cache-Control': 'public, max-age=604800, immutable', 'X-Robots-Tag': 'noindex' });
     } catch (err) {
         console.error('[Public] /f/screenshots error:', err.message);
         if (!res.headersSent) res.status(500).json({ error: 'Failed to serve file' });
