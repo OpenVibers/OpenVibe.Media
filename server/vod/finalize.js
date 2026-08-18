@@ -64,6 +64,8 @@ function vodPublic(vod) {
         health_status: vod.health_status,
         clips_only: !!vod.clips_only,
         is_recording: !!vod.is_recording,
+        ai_overview: vod.ai_overview || null,
+        ai_analyzed_at: vod.ai_analyzed_at || null,
         view_count: vod.view_count || 0,
         created_at: vod.created_at,
         meta: (() => { try { return JSON.parse(vod.meta_json || '{}'); } catch { return {}; } })(),
@@ -154,10 +156,13 @@ async function _doFinalize(vodId, opts) {
     }
 
     if (!filePath || !fs.existsSync(filePath)) {
-        db.run('UPDATE vods SET is_recording = 0 WHERE id = ?', [vodId]);
-        const failed = db.getVodById(vodId);
-        _webhookForVod(failed, 'vod.failed');
-        return failed;
+        // No media was ever written (ingest started but produced nothing, or the
+        // process died before ffmpeg opened the file). Nothing to review — delete
+        // the row so a 0:00 ghost never reaches listings.
+        console.warn(`[VOD] vod ${vodId}: no recording file — deleting empty row`);
+        _webhookForVod(vod, 'vod.failed');
+        try { db.run('DELETE FROM vods WHERE id = ?', [vodId]); } catch { /* */ }
+        return null;
     }
 
     // Merge any pending browser-chunk segments before remuxing.

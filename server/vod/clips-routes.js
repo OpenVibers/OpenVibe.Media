@@ -78,6 +78,8 @@ function clipPublic(clip) {
         is_public: (clip.visibility || (clip.is_public ? 'public' : 'private')) === 'public',
         storage_provider: clip.storage_provider || 'local',
         auto_generated: !!clip.auto_generated,
+        ai_overview: clip.ai_overview || null,
+        ai_analyzed_at: clip.ai_analyzed_at || null,
         view_count: clip.view_count || 0,
         created_at: clip.created_at,
     };
@@ -300,7 +302,8 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
         const clip = _getClipScoped(req, res);
         if (!clip) return;
         // Bare object, mirroring GET /vods/:id per CONTRACTS.md.
-        res.json(clipPublic(clip));
+        // Detail responses carry the transcript too (lists stay light).
+        res.json({ ...clipPublic(clip), ai_transcript: clip.ai_transcript || null });
     } catch (err) {
         res.status(500).json({ error: 'Failed to get clip' });
     }

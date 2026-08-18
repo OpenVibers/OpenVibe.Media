@@ -257,7 +257,11 @@ class StreamRecorder {
             const filePath = rec?.filePath;
             this._teardown(vodId);
             require('./finalize').finalizeVod(vodId, { startTimeMs: rec?.startTime }).catch(() => {
-                db.run('UPDATE vods SET is_recording = 0 WHERE id = ?', [vodId]);
+                // Never bare-mark a failed recording as ready — that published
+                // 0:00 ghosts. Quarantine it out of listings instead.
+                db.run(`UPDATE vods SET is_recording = 0, health_status = 'needs_review',
+                        health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+                    [JSON.stringify(['finalize_failed']), vodId]);
             });
             if (filePath && !fs.existsSync(filePath)) this._cleanupFailedVod(vodId, filePath);
         });

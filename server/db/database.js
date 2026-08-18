@@ -532,6 +532,34 @@ function getFileByKey(key, appId = null) {
     return get(`SELECT * FROM files WHERE key = ?${clause}`, params);
 }
 
+// ── App assets (emotes / channel sounds) ─────────────────────
+function upsertAsset({ app_id, kind, name, file_path, mime, user_id, username, channel_username, duration_seconds, meta }) {
+    const info = run(`
+        INSERT INTO assets (app_id, kind, name, file_path, mime, user_id, username, channel_username, duration_seconds, meta_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(app_id, kind, name, channel_username) DO UPDATE SET
+            file_path = excluded.file_path, mime = excluded.mime,
+            user_id = excluded.user_id, username = excluded.username,
+            duration_seconds = excluded.duration_seconds, meta_json = excluded.meta_json`,
+        [app_id, kind, name, file_path, mime || 'application/octet-stream', user_id ?? null,
+         username || '', channel_username || '', duration_seconds || 0, JSON.stringify(meta || {})]);
+    return get('SELECT * FROM assets WHERE app_id = ? AND kind = ? AND name = ? AND channel_username = ?',
+        [app_id, kind, name, channel_username || '']);
+}
+function getAssetById(id) { return get('SELECT * FROM assets WHERE id = ?', [id]); }
+function listAssets(appId, { kind = null, limit = 100, offset = 0 } = {}) {
+    const conds = ['app_id = ?']; const params = [appId];
+    if (kind) { conds.push('kind = ?'); params.push(kind); }
+    params.push(limit, offset);
+    return all(`SELECT * FROM assets WHERE ${conds.join(' AND ')} ORDER BY created_at DESC LIMIT ? OFFSET ?`, params);
+}
+function countAssets(appId, { kind = null } = {}) {
+    const conds = ['app_id = ?']; const params = [appId];
+    if (kind) { conds.push('kind = ?'); params.push(kind); }
+    return get(`SELECT COUNT(*) c FROM assets WHERE ${conds.join(' AND ')}`, params).c;
+}
+function deleteAsset(id) { return run('DELETE FROM assets WHERE id = ?', [id]); }
+
 function listFiles(appId, { limit = 100, offset = 0 } = {}) {
     return all('SELECT * FROM files WHERE app_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?', [appId, limit, offset]);
 }
@@ -585,6 +613,7 @@ module.exports = {
     // vods
     createVod, getVodById, getVodByFileBasename, listVods, countVods, setVodVisibility, vodStatus,
     latestVodThumbsByManagedStreams, getAppStats,
+    upsertAsset, getAssetById, listAssets, countAssets, deleteAsset,
     updateVodHealth, repairVodDuration, getVodsNeedingHealthScan, getQuarantinedVodsForCleanup,
     // clips
     createClip, getClipById, getClipByFileBasename, listClips, countClips, setClipVisibility, findDuplicateClip,

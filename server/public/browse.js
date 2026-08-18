@@ -73,6 +73,20 @@ function fileCard(f) {
         source: null,
     };
 }
+function assetCard(a) {
+    const isEmote = a.kind === 'emote';
+    const channel = a.channel_username || a.username || '';
+    return {
+        kind: a.kind, title: isEmote ? a.name : `!${a.name}`, date: a.created_at, app: a.app_id,
+        thumb: isEmote ? `${config.publicUrl}/a/${a.id}` : null,
+        duration: !isEmote ? a.duration_seconds : null,
+        text: `uploaded by ${a.username || 'unknown'}${channel ? ` · channel @${channel}` : ''}`,
+        view: `${config.publicUrl}/a/${a.id}`,
+        source: channel ? `${appUrl(a.app_id)}/@${encodeURIComponent(channel)}` : null,
+        sourceLabel: channel ? `@${channel}'s channel` : null,
+    };
+}
+
 function thumbCard(name, mtimeMs) {
     const m = /^(vod|clip|stream)-(\d+)/.exec(name);
     let source = null, sourceLabel = null;
@@ -133,6 +147,14 @@ function fetchTab(tab, page) {
             total: db.get('SELECT COUNT(*) c FROM files').c,
             cards: db.all(`SELECT * FROM files ${L}`).map(fileCard),
         };
+        case 'emotes': return {
+            total: db.get("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'").c,
+            cards: db.all(`SELECT * FROM assets WHERE kind = 'emote' ${L}`).map(assetCard),
+        };
+        case 'sounds': return {
+            total: db.get("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'").c,
+            cards: db.all(`SELECT * FROM assets WHERE kind = 'sound' ${L}`).map(assetCard),
+        };
         case 'thumbnails': {
             const list = thumbList();
             return { total: list.length, cards: list.slice(off, off + PAGE_SIZE).map(([f, t]) => thumbCard(f, t)) };
@@ -144,13 +166,17 @@ function fetchTab(tab, page) {
                 SELECT 'clip', id, title, description, ai_overview, thumbnail_url, duration_seconds, created_at, app_id, NULL, NULL, NULL, NULL FROM clips WHERE ${C_WHERE}
                 UNION ALL
                 SELECT 'paste', id, title, NULL, NULL, NULL, NULL, created_at, app_id, slug, type, substr(COALESCE(content,''),1,300), language FROM pastes WHERE ${P_WHERE}
+                UNION ALL
+                SELECT 'asset', id, name, username, channel_username, kind, duration_seconds, created_at, app_id, NULL, NULL, NULL, NULL FROM assets
                 ORDER BY created_at DESC LIMIT ${PAGE_SIZE} OFFSET ${off}`);
             const total = db.get(`SELECT
                 (SELECT COUNT(*) FROM vods WHERE ${V_WHERE}) +
                 (SELECT COUNT(*) FROM clips WHERE ${C_WHERE}) +
-                (SELECT COUNT(*) FROM pastes WHERE ${P_WHERE}) c`).c;
+                (SELECT COUNT(*) FROM pastes WHERE ${P_WHERE}) +
+                (SELECT COUNT(*) FROM assets) c`).c;
             const cards = rows.map(r => r.k === 'vod' ? vodCard({ ...r, id: r.ref })
                 : r.k === 'clip' ? clipCard({ ...r, id: r.ref })
+                : r.k === 'asset' ? assetCard({ id: r.ref, name: r.title, username: r.description, channel_username: r.ai_overview, kind: r.thumbnail_url, duration_seconds: r.duration_seconds, created_at: r.created_at, app_id: r.app_id })
                 : pasteCard({ ...r, id: r.ref }));
             return { total, cards };
         }
@@ -167,9 +193,11 @@ function tabCounts() {
         images: c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`),
         text: c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`),
         files: c('SELECT COUNT(*) c FROM files'),
+        emotes: c("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'"),
+        sounds: c("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'"),
         thumbnails: thumbList().length,
     };
-    counts.all = counts.videos + counts.clips + counts.images + counts.text;
+    counts.all = counts.videos + counts.clips + counts.images + counts.text + counts.emotes + counts.sounds;
     _countCache = { at: Date.now(), counts };
     return counts;
 }
@@ -196,7 +224,7 @@ function renderCard(c) {
 </div>`;
 }
 
-const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['images', 'Images'], ['text', 'Text'], ['thumbnails', 'Thumbnails'], ['files', 'Files']];
+const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['images', 'Images'], ['text', 'Text'], ['emotes', 'Emotes'], ['sounds', 'Sounds'], ['thumbnails', 'Thumbnails'], ['files', 'Files']];
 
 function renderPage(tab, page, data, counts) {
     const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
@@ -208,7 +236,7 @@ function renderPage(tab, page, data, counts) {
 <style>
 :root{--bg:#0f1420;--panel:#161c2c;--border:#232b40;--text:#e6e9f2;--muted:#9aa3b8;--accent:#8b5cf6}
 *{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,'Segoe UI',Arial,sans-serif;padding-bottom:3rem}
-header{display:flex;align-items:center;gap:.9rem;padding:1rem 1.4rem;border-bottom:1px solid var(--border);position:sticky;top:0;background:rgba(15,20,32,.92);backdrop-filter:blur(8px);z-index:2}
+header{display:flex;align-items:center;gap:.9rem;padding:1rem 1.4rem;border-bottom:1px solid var(--border);background:rgba(15,20,32,.92)}
 header .logo{width:30px;height:30px}
 header h1{font-size:1.15rem}header h1 b{color:var(--accent)}
 header .sub{color:var(--muted);font-size:.82rem;margin-left:auto}
@@ -232,7 +260,11 @@ nav a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 .pg{color:var(--accent);text-decoration:none;padding:.35rem .8rem;border:1px solid var(--border);border-radius:8px}
 .pg.dis{color:var(--muted);opacity:.4}
 .empty{padding:3rem;text-align:center;color:var(--muted)}
-</style></head><body>
+</style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head><body>
+<script src="https://openvibe.network/shared/navbar.js"></script>
+<script>try { OpenVibeNavbar.init({ service: 'media' }); } catch (e) { /* navbar optional */ }</script>
 <header>
   <svg class="logo" viewBox="0 0 100 100" fill="none" stroke="#8b5cf6" stroke-width="7"><circle cx="28" cy="66" r="11"/><circle cx="72" cy="66" r="11"/><circle cx="50" cy="30" r="11"/><line x1="34" y1="58" x2="45" y2="40"/><line x1="66" y1="58" x2="55" y2="40"/><line x1="39" y1="66" x2="61" y2="66"/></svg>
   <h1>OpenVibe<b>.Media</b></h1>
