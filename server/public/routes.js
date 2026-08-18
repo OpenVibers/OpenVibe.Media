@@ -249,6 +249,37 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
     }
 });
 
+// ── Dev data APIs: transcripts / AI timelines / chat insight ─
+// JSON companions to the frame API — same selector grammar, 30s cache as the
+// rate limit, CORS-open. See README "Public serving".
+function _devDataRoute(handler) {
+    return async (req, res) => {
+        try {
+            res.set('Access-Control-Allow-Origin', '*');
+            const { status, body } = await handler(req);
+            res.status(status).set('Cache-Control', 'public, max-age=15').json(body);
+        } catch (err) {
+            console.error('[Public] dev-data error:', err.message);
+            if (!res.headersSent) res.status(500).json({ error: 'Failed to load data' });
+        }
+    };
+}
+
+// Full transcript log + AI overview timeline for a slot (id/slug) or streamer (@username).
+router.get('/live/:sel/transcript.json', _devDataRoute((req) =>
+    require('./dev-data').getTranscriptTimeline(String(req.query.app || 'live'), req.params.sel, req.query.limit)));
+
+// A user's chat-related AI insight + timeline (@username or numeric user id).
+router.get('/live/:sel/chat-insight.json', _devDataRoute((req) =>
+    require('./dev-data').getChatInsight(String(req.query.app || 'live'), req.params.sel)));
+
+// Transcript + AI overview for one existing VOD id.
+router.get('/v/:id/transcript.json', _devDataRoute((req) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return { status: 400, body: { error: 'Bad VOD id' } };
+    return require('./dev-data').getVodTranscript(id);
+}));
+
 // ── Legacy thumbnail URLs ────────────────────────────────────
 // Old-stack thumbnails lived at /api/thumbnails/<basename>, and migrated Live
 // rows still carry those absolute URLs. Basenames change when a thumbnail is

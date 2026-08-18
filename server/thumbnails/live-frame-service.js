@@ -196,4 +196,8 @@ async function offlineCardJpeg(label, subtitle) {
     return buf;
 }
 
-module.exports = { getLiveFrame, resolveSelector, offlineCardSvg, offlineCardJpeg, CACHE_TTL_MS };
+module.exports = {
+    getLiveFrame, resolveSelector, offlineCardSvg, offlineCardJpeg, CACHE_TTL_MS,
+    // shared with the dev-data API (transcripts / chat insight)
+    APP_INTERNAL_URLS, appLiveStreams: _appLiveStreams,
+};
