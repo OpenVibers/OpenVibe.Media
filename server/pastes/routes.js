@@ -251,7 +251,20 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
         const search = req.query.search ? `%${req.query.search}%` : null;
         const userId = req.query.user_id != null ? req.query.user_id : null;
 
-        let sql = `SELECT * FROM pastes WHERE app_id = ? AND visibility = 'public'`;
+        // Unlisted/private pastes are hidden from PUBLIC listings, but their owner must
+        // still see them in their own list — otherwise creating an unlisted paste looks
+        // exactly like it was never created at all. Only honoured for a caller that can be
+        // trusted to be the owner: either an app key (the app gates who may ask) or a user
+        // token whose subject matches the user_id being listed.
+        const wantMine = req.query.include_unlisted === '1' || req.query.include_unlisted === 'true';
+        const ownerView = wantMine && userId != null && (
+            req.authType === 'app' || (req.authType === 'user' && String(req.userId) === String(userId))
+        );
+        const visClause = ownerView
+            ? `AND visibility IN ('public', 'unlisted', 'private')`
+            : `AND visibility = 'public'`;
+
+        let sql = `SELECT * FROM pastes WHERE app_id = ? ${visClause}`;
         const params = [req.appId];
 
         if (type === 'paste' || type === 'screenshot') { sql += ` AND type = ?`; params.push(type); }
@@ -267,7 +280,7 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
             content: p.type === 'paste' ? (p.content || '').slice(0, 300) : null, // Preview only in list
         }));
 
-        let countSql = `SELECT COUNT(*) as total FROM pastes WHERE app_id = ? AND visibility = 'public'`;
+        let countSql = `SELECT COUNT(*) as total FROM pastes WHERE app_id = ? ${visClause}`;
         const countParams = [req.appId];
         if (type === 'paste' || type === 'screenshot') { countSql += ` AND type = ?`; countParams.push(type); }
         if (userId != null) { countSql += ` AND user_id = ?`; countParams.push(userId); }
