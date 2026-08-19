@@ -36,12 +36,61 @@ if (!fs.existsSync(THUMB_DIR)) {
 // ── Generate Thumbnail from Video File (VODs & Clips) ────────
 const _activeThumbJobs = new Set(); // Dedup concurrent VOD/clip thumbnail generation
 
+// How far behind the live edge to grab a frame for an in-progress recording.
+// The recorder is still writing the tail fragment, so back off a few seconds to
+// stay inside data that has actually been flushed to disk.
+const LIVE_EDGE_BACKOFF_SEC = 3;
+
+/**
+ * Duration of a file whose container header has no usable duration.
+ *
+ * A recording that is still being written (fragmented mp4, and especially WebM/
+ * Matroska) carries NO duration in its header — it is only written when the
+ * muxer finalizes the file. `ffprobe -show_format` therefore reports "N/A", and
+ * `parseFloat('N/A')` is NaN, which silently fails every `duration > 2` check.
+ *
+ * Reading the timestamp of the LAST video packet gives the real position instead.
+ * `-read_intervals 999999%+#1` makes ffprobe seek to (effectively) the end and
+ * read a single packet, so this costs ~0.1s even on a multi-GB growing file
+ * rather than decoding it.
+ *
+ * @returns {Promise<number>} seconds, or 0 when it cannot be determined
+ */
+function _probeLastPts(videoPath) {
+    return new Promise((resolve) => {
+        let out = '';
+        let p;
+        try {
+            p = spawn('ffprobe', [
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'packet=pts_time',
+                '-of', 'csv=p=0',
+                '-read_intervals', '999999%+#1',
+                videoPath,
+            ]);
+        } catch { return resolve(0); }
+        const to = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* */ } resolve(0); }, 10000);
+        p.stdout.on('data', (d) => { out += d; });
+        p.on('close', () => {
+            clearTimeout(to);
+            // The interval can yield a few packets; the last non-empty one wins.
+            const last = String(out).trim().split(/\s+/).filter(Boolean).pop();
+            const v = parseFloat(last);
+            resolve(Number.isFinite(v) && v > 0 ? v : 0);
+        });
+        p.on('error', () => { clearTimeout(to); resolve(0); });
+    });
+}
+
 /**
  * Extract a thumbnail frame from a video file using ffmpeg.
  * @param {string} videoPath  – Absolute path (or presigned URL) of the video
  * @param {string} prefix     – Filename prefix ('vod' or 'clip')
  * @param {number} entityId   – DB id (vod or clip id)
- * @param {object} opts       – { seekPercent?, seekSeconds? }
+ * @param {object} opts       – { seekPercent?, seekSeconds?, liveEdge? }
+ *   liveEdge: the file is an in-progress recording — grab the newest frame
+ *   available instead of a percentage of a duration the header does not have.
  * @returns {Promise<string|null>} public thumbnail URL (/t/<file>), or null
  */
 function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
@@ -68,20 +117,39 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
         let probeData = '';
         probe.stdout.on('data', (d) => (probeData += d));
 
-        probe.on('close', (probeCode) => {
+        probe.on('close', async (probeCode) => {
             let seekTime = opts.seekSeconds || 1;
 
-            if (probeCode === 0 && !opts.seekSeconds) {
-                try {
-                    const info = JSON.parse(probeData);
-                    const duration = parseFloat(info.format?.duration || '0');
-                    if (duration > 2) {
-                        seekTime = Math.min(
-                            duration * ((opts.seekPercent || 10) / 100),
-                            duration - 0.5
-                        );
-                    }
-                } catch {}
+            if (!opts.seekSeconds) {
+                let duration = 0;
+                if (probeCode === 0) {
+                    try {
+                        const info = JSON.parse(probeData);
+                        // parseFloat('N/A') is NaN — normalize so the checks below
+                        // treat "no usable duration" as 0 rather than silently
+                        // falling through to the default 1-second seek.
+                        const d = parseFloat(info.format?.duration);
+                        if (Number.isFinite(d)) duration = d;
+                    } catch { /* */ }
+                }
+
+                // A still-recording file has no header duration; find the real
+                // tail position from the last video packet instead.
+                if (opts.liveEdge || duration <= 0) {
+                    const lastPts = await _probeLastPts(videoPath);
+                    if (lastPts > 0) duration = lastPts;
+                }
+
+                if (opts.liveEdge) {
+                    // Newest frame that is safely on disk. Falls back to the
+                    // start only when the tail could not be located at all.
+                    seekTime = duration > 0 ? Math.max(0, duration - LIVE_EDGE_BACKOFF_SEC) : 0;
+                } else if (duration > 2) {
+                    seekTime = Math.min(
+                        duration * ((opts.seekPercent || 10) / 100),
+                        duration - 0.5
+                    );
+                }
             }
 
             // Extract frame
@@ -112,9 +180,18 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
     }).finally(() => _activeThumbJobs.delete(jobKey));
 }
 
-// ── Generate VOD Thumbnail (~10% in) ─────────────────────────
-async function generateVodThumbnail(vodId, filePath) {
-    const thumbUrl = await generateFromVideo(filePath, 'vod', vodId, { seekPercent: 10 });
+// ── Generate VOD Thumbnail (~10% in, or the live edge while recording) ───────
+// While a stream is live, OpenVibe.Live regenerates this VOD's thumbnail every
+// ~2 min and uses it as the stream's card image. "10% in" is the wrong frame for
+// that: on a growing file the header carries no duration, so every regeneration
+// produced the identical 1-second frame and the card looked frozen for the whole
+// broadcast. An in-progress recording therefore grabs the live edge instead.
+async function generateVodThumbnail(vodId, filePath, opts = {}) {
+    const isRecording = opts.liveEdge != null
+        ? !!opts.liveEdge
+        : !!db.get('SELECT is_recording FROM vods WHERE id = ?', [vodId])?.is_recording;
+    const thumbUrl = await generateFromVideo(filePath, 'vod', vodId,
+        isRecording ? { liveEdge: true } : { seekPercent: 10 });
     if (thumbUrl) {
         // Clean up the previous thumbnail for this VOD
         _removeOldThumb(db.get('SELECT thumbnail_url FROM vods WHERE id = ?', [vodId])?.thumbnail_url, thumbUrl);

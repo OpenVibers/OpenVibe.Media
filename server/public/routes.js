@@ -224,9 +224,17 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
     };
     try {
         res.set('Access-Control-Allow-Origin', '*');
+        // Each cache miss spawns ffprobe+ffmpeg, so the endpoint is guarded by a
+        // per-IP token bucket before any work is done.
+        if (!frames.rateLimitOk(req.ip)) {
+            res.set('Retry-After', '2');
+            if (wantJson) return res.status(429).json({ error: 'Too many requests' });
+            return res.status(429).end();
+        }
         const appId = String(req.query.app || 'live');
-        let w = parseInt(req.query.w, 10);
-        w = Number.isFinite(w) ? Math.min(1920, Math.max(64, w)) : null;
+        // Snap to a fixed width ladder — an unbounded `w` would give every request
+        // its own cache key and defeat the cache that IS the rate limit.
+        const w = frames.quantizeWidth(req.query.w);
 
         const resolved = await frames.resolveSelector(appId, req.params.sel);
         if (!resolved.msid) return sendCard(404, resolved.label, 'is offline right now');
@@ -234,6 +242,10 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
         const out = await frames.getLiveFrame(appId, resolved.msid, w);
         if (!out.ok) {
             if (out.reason === 'not_live') return sendCard(404, resolved.label, 'is offline right now');
+            if (out.reason === 'busy') {
+                res.set('Retry-After', '2');
+                return sendCard(503, resolved.label, 'is live — server busy, retry shortly');
+            }
             return sendCard(503, resolved.label, 'is live — frame unavailable, retry shortly');
         }
         res.set({
