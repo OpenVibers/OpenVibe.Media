@@ -214,8 +214,22 @@ function _rateLimitCheck(req, res) {
 }
 
 function _getPasteScoped(req, res) {
-    const paste = db.getPasteBySlug(String(req.params.slug), req.appId);
-    if (!paste) { res.status(404).json({ error: 'Paste not found' }); return null; }
+    const slug = String(req.params.slug);
+    const paste = db.getPasteBySlug(slug, req.appId);
+    if (!paste) {
+        // "Paste not found" was being reported for pastes that demonstrably exist, and the
+        // 404 was silent — so there was no way to tell whether the slug was wrong, the
+        // tenant scope was wrong, or the row was genuinely missing. Log all three.
+        let existsElsewhere = null;
+        try {
+            const any = db.get('SELECT app_id FROM pastes WHERE slug = ?', [slug]);
+            existsElsewhere = any ? any.app_id : null;
+        } catch { /* */ }
+        console.warn(`[Pastes] 404 slug="${slug}" appId="${req.appId}" auth=${req.authType || 'none'}` +
+            (existsElsewhere ? ` — EXISTS under app_id="${existsElsewhere}" (tenant mismatch)` : ' — no row with that slug'));
+        res.status(404).json({ error: 'Paste not found' });
+        return null;
+    }
     return paste;
 }
 
