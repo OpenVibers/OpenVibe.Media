@@ -269,6 +269,12 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
 
         if (type === 'paste' || type === 'screenshot') { sql += ` AND type = ?`; params.push(type); }
         if (userId != null) { sql += ` AND user_id = ?`; params.push(userId); }
+        // Work queue for the owning app's AI pass. Media holds the pastes but has no LLM;
+        // the app polls this, analyses, and posts results back to /:slug/ai. App-key only —
+        // this deliberately spans visibility, so it must never be reachable by a user token.
+        if (req.authType === 'app' && (req.query.needs_ai === '1' || req.query.needs_ai === 'true')) {
+            sql = sql.replace(visClause, `AND COALESCE(ai_summary, '') = ''`);
+        }
         if (search) { sql += ` AND (title LIKE ? OR content LIKE ?)`; params.push(search, search); }
 
         const dir = req.query.sort === 'oldest' ? 'ASC' : 'DESC';
@@ -530,6 +536,33 @@ router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('scree
         console.error('[Pastes] Create error:', err.message);
         if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
         res.status(500).json({ error: 'Failed to create paste' });
+    }
+});
+
+/**
+ * Store AI results for a paste. App-key only: Media owns the pastes but has no LLM, so
+ * the owning app analyses and writes back here.
+ *
+ * Paste AI silently stopped at the migration — the analysis job still queried the app's
+ * OWN pastes table, which no longer receives rows, so every paste created since had no
+ * summary. There was no route to write one either; this is it.
+ */
+router.post('/:slug/ai', tenantAuth(), (req, res) => {
+    try {
+        const paste = _getPasteScoped(req, res);
+        if (!paste) return;
+        const { ai_summary, ai_tags } = req.body || {};
+        const summary = ai_summary == null ? null : String(ai_summary).slice(0, 2000);
+        const tags = ai_tags == null ? null
+            : (typeof ai_tags === 'string' ? ai_tags : JSON.stringify(ai_tags)).slice(0, 2000);
+        db.run(
+            'UPDATE pastes SET ai_summary = ?, ai_tags = ?, ai_analyzed_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [summary, tags, paste.id]
+        );
+        res.json({ ok: true, paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
+    } catch (err) {
+        console.error('[Pastes] AI update error:', err.message);
+        res.status(500).json({ error: 'Failed to store paste AI' });
     }
 });
 
