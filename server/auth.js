@@ -166,26 +166,22 @@ function tenantAuth({ allowUser = false } = {}) {
             return res.status(403).json({ error: 'API key not valid for this app' });
         }
 
-        // 2) Network user JWT (browser endpoints only).
+        // 2) A Network user JWT is a real credential, but it cannot say WHICH of an app's
+        //    users is calling. It names the account by the Network's id; every user_id
+        //    stored here is in the app's own space. They are different numbers over the
+        //    same people, so reading identity out of the JWT filed writes under an
+        //    unrelated account and made the ownership checks below compare one space
+        //    against the other. Both callers that used this path — openvibe.live and the
+        //    openvibe.tools paste gateway — now go through their own server, which knows
+        //    its users, and name the caller in X-OV-User-Id.
         //
-        // HAZARD: payload.sub is a NETWORK id, but req.userId is compared against
-        // user_id columns holding APP-LOCAL ids. The two spaces overlap by accident, so
-        // this path can both hide a caller's own content and expose someone else's. A
-        // server-side caller should send its app key with X-OV-User-Id instead (see
-        // actingUserId above) — openvibe.live now does. Kept for the browser-direct
-        // callers of the other apps, which have not been migrated.
-        if (allowUser && token) {
-            const payload = verifyUserJwt(token);
-            if (payload) {
-                const origin = req.headers.origin;
-                if (origin && !db.appAllowedOrigins(app).includes(origin)) {
-                    return res.status(403).json({ error: 'Origin not allowed for this app' });
-                }
-                req.authType = 'user';
-                req.user = payload;
-                req.userId = payload.sub != null ? Number(payload.sub) || payload.sub : (payload.id ?? null);
-                return next();
-            }
+        //    Answered specifically rather than falling through to a bare 401, so anyone
+        //    who builds against the old shape is told what to do instead.
+        if (allowUser && token && verifyUserJwt(token)) {
+            return res.status(403).json({
+                error: 'A user JWT cannot identify a user here. Call from your server with '
+                    + 'your app key and set X-OV-User-Id to the caller\'s id in YOUR user space.',
+            });
         }
 
         return res.status(401).json({ error: 'Authentication required' });
@@ -200,9 +196,11 @@ function isKeyOfOtherApp(presentedKey, exceptAppId) {
 }
 
 /**
- * Optional identity on PUBLIC serving routes (/v /c /p /t /f): attaches the
- * owning app (via any valid app key) or user payload if a credential is sent.
- * Never rejects.
+ * Optional identity on PUBLIC serving routes (/v /c /p /t /f): attaches the owning app
+ * (via any valid app key), and the user that app says it is acting for. Never rejects.
+ *
+ * A Network JWT is deliberately NOT an identity here — see tenantAuth for why its
+ * subject cannot be used as an app-local user id.
  */
 function optionalIdentity(req, _res, next) {
     const token = bearerToken(req);
@@ -217,13 +215,6 @@ function optionalIdentity(req, _res, next) {
             if (onBehalf != null) {
                 req.authType = 'user';
                 req.userId = onBehalf;
-            }
-        } else {
-            const payload = verifyUserJwt(token);
-            if (payload) {
-                req.authType = 'user';
-                req.user = payload;
-                req.userId = payload.sub != null ? Number(payload.sub) || payload.sub : (payload.id ?? null);
             }
         }
     }
@@ -291,7 +282,8 @@ module.exports = {
     tenantAuth,
     tenantCors,
     optionalIdentity,
-    verifyUserJwt,
+    // verifyUserJwt stays internal: it proves a token is a genuine Network credential,
+    // but its subject is a Network id and must never be used as an app-local user id.
     seedApps,
     startJwksRefresh,
     stopJwksRefresh,
