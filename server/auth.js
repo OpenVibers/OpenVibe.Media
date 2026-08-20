@@ -108,6 +108,27 @@ function bearerToken(req) {
     return null;
 }
 
+/**
+ * The user an app-key caller is acting on behalf of, from X-OV-User-Id.
+ *
+ * Every user_id column in this database holds an id in the CALLING APP's own user-id
+ * space — that is the only space an app can resolve back to a person. A Network JWT
+ * cannot supply one: its `sub` is the Network's id for that account, which collides
+ * with an unrelated local account in each app (Network #57 and Live's user #57 are
+ * different people). So a server that wants to act as one of its users says which one
+ * explicitly, over its app key.
+ *
+ * Only the app key unlocks this, and an app key never reaches a browser — it lives in
+ * the app's server process. A caller holding one can already write any user_id it likes
+ * through the request body, so this grants no reach it did not have.
+ */
+function actingUserId(req) {
+    const raw = req.headers['x-ov-user-id'];
+    if (raw == null || raw === '') return null;
+    const n = Number(String(raw).trim());
+    return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 // ── Middleware ───────────────────────────────────────────────
 
 /**
@@ -131,6 +152,14 @@ function tenantAuth({ allowUser = false } = {}) {
         //    DIFFERENT app must NOT fall through to anything else.
         if (token && checkAppKey(app, token)) {
             req.authType = 'app';
+            // Acting on behalf of one of the app's own users: same authority as a user
+            // call, so every ownership check below applies — now comparing ids that are
+            // actually in the same space as the stored ones.
+            const onBehalf = actingUserId(req);
+            if (onBehalf != null) {
+                req.authType = 'user';
+                req.userId = onBehalf;
+            }
             return next();
         }
         if (token && isKeyOfOtherApp(token, appId)) {
@@ -138,6 +167,13 @@ function tenantAuth({ allowUser = false } = {}) {
         }
 
         // 2) Network user JWT (browser endpoints only).
+        //
+        // HAZARD: payload.sub is a NETWORK id, but req.userId is compared against
+        // user_id columns holding APP-LOCAL ids. The two spaces overlap by accident, so
+        // this path can both hide a caller's own content and expose someone else's. A
+        // server-side caller should send its app key with X-OV-User-Id instead (see
+        // actingUserId above) — openvibe.live now does. Kept for the browser-direct
+        // callers of the other apps, which have not been migrated.
         if (allowUser && token) {
             const payload = verifyUserJwt(token);
             if (payload) {
@@ -177,6 +213,11 @@ function optionalIdentity(req, _res, next) {
             req.authType = 'app';
             req.appRow = appRow;
             req.appId = appRow.app_id;
+            const onBehalf = actingUserId(req);
+            if (onBehalf != null) {
+                req.authType = 'user';
+                req.userId = onBehalf;
+            }
         } else {
             const payload = verifyUserJwt(token);
             if (payload) {
