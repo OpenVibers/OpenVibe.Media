@@ -154,6 +154,8 @@ function screenshotUrl(paste) {
 function pastePublic(paste) {
     if (!paste) return null;
     return {
+        unique_views: paste.unique_views || 0,
+
         id: paste.id,
         app_id: paste.app_id,
         slug: paste.slug,
@@ -435,6 +437,12 @@ router.get('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const paste = _getPasteScoped(req, res);
         if (!paste) return;
+        // The owning app renders the paste page itself — count the view here (real client
+        // IP via X-Forwarded-For, viewer via the user JWT / X-OV-User-Id) unless it says
+        // this fetch is not a page view (?no_view=1 for edit forms, embeds, bots).
+        if (String(req.query.no_view || '') !== '1' && !paste.burn_after_read) {
+            try { const r = require('../views/service').recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } } catch { /* */ }
+        }
 
         // Private pastes: owner (or the app itself) only.
         if (paste.visibility === 'private') {

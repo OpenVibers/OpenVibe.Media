@@ -64,6 +64,9 @@ app.get('/api/v1/:app/stats', auth.tenantAuth(), (req, res) => {
     }
 });
 
+try { require('./views/service').ensureSchema(); } catch (e) { console.warn('[Views] schema:', e.message); }
+setInterval(() => { try { const n = require('./views/service').prune(30); if (n) console.log(`[Views] pruned ${n} stale visit row(s)`); } catch { /* */ } }, 12 * 3600 * 1000);
+app.use('/api/v1/:app/views', require('./views/routes'));
 app.use('/api/v1/:app/vods', require('./vod/routes'));
 app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
 app.use('/api/v1/:app/pastes', require('./pastes/routes'));

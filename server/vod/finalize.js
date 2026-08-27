@@ -37,6 +37,8 @@ function isFinalizing(vodId) {
 function vodPublic(vod) {
     if (!vod) return null;
     return {
+        unique_views: vod.unique_views || 0,
+
         id: vod.id,
         app_id: vod.app_id,
         stream_id: vod.stream_id,

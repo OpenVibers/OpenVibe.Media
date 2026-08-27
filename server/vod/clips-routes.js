@@ -56,6 +56,8 @@ const clipUpload = multer({
 function clipPublic(clip) {
     if (!clip) return null;
     return {
+        unique_views: clip.unique_views || 0,
+
         id: clip.id,
         app_id: clip.app_id,
         vod_id: clip.vod_id,
