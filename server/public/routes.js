@@ -34,19 +34,12 @@ function getRequesterIp(req) {
     return req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
-function trackUniqueView(kind, id, req) {
-    try {
-        const ip = getRequesterIp(req);
-        const inserted = db.run(
-            'INSERT OR IGNORE INTO content_views (content_type, content_id, ip) VALUES (?, ?, ?)',
-            [kind, id, ip]
-        );
-        if (inserted.changes > 0) {
-            const count = db.get('SELECT COUNT(*) as c FROM content_views WHERE content_type = ? AND content_id = ?', [kind, id]);
-            const table = kind === 'vod' ? 'vods' : 'clips';
-            db.run(`UPDATE ${table} SET view_count = ? WHERE id = ?`, [count.c, id]);
-        }
-    } catch { /* non-critical */ }
+const views = require('../views/service');
+// Views + unique views live in ../views/service (visit-based with a cooldown, hashed
+// visitors, owner/bot/rate-limit exclusions). A playback session counts once: only the
+// request for the first bytes, not every seek/range request.
+function trackUniqueView(kind, id, req, ownerUserId = null) {
+    try { if (views.isInitialPlaybackRequest(req)) views.recordView(kind, id, { req, ownerUserId }); } catch { /* non-critical */ }
 }
 
 function canAccessPrivate(record, req) {
@@ -103,7 +96,7 @@ async function serveMediaRecord(kind, record, req, res) {
         return res.status(403).json({ error: 'This media is private' });
     }
 
-    trackUniqueView(kind, record.id, req);
+    trackUniqueView(kind, record.id, req, record.user_id);
 
     // Track last access time for storage tier decisions
     if (kind === 'vod') {
@@ -452,7 +445,7 @@ function renderPastePage(paste) {
 </header>
 <main>
   <h1>${title}</h1>
-  <p class="meta">${escapeHtml(paste.language || 'text')} · ${paste.views || 0} views · ${created}${isScreenshot ? '' : ` · <a href="/p/${escapeHtml(paste.slug)}/raw">raw</a>`}</p>
+  <p class="meta">${escapeHtml(paste.language || 'text')} · ${paste.views || 0} views · ${paste.unique_views || 0} unique · ${created}${isScreenshot ? '' : ` · <a href="/p/${escapeHtml(paste.slug)}/raw">raw</a>`}</p>
   ${body}
 </main>
 <footer>Shared via OpenVibe.Media — <a href="https://openvibe.network">One Account. All of OpenVibe.</a></footer>
@@ -471,11 +464,12 @@ router.get('/p/:slug', optionalIdentity, (req, res) => {
             return res.status(404).send('Paste not found');
         }
 
-        // Increment view count (don't count the owner's views)
+        // Count the view (visit-based, cooldown, owner excluded). Burn-after-read pastes
+        // keep the literal every-read counter — one read is the whole point of them.
         const isOwner = req.userId != null && paste.user_id === req.userId;
         if (!isOwner) {
-            db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]);
-            paste.views += 1;
+            if (paste.burn_after_read) { db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]); paste.views += 1; }
+            else { const r = views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } }
         }
 
         // Burn-after-read: allow one non-owner read, then delete.
@@ -510,7 +504,8 @@ router.get('/p/:slug/raw', (req, res) => {
             return res.status(410).send('This paste has been burned after reading.');
         }
 
-        db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]);
+        if (paste.burn_after_read) db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]);
+        else views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id });
         res.type('text/plain').send(paste.content);
     } catch {
         res.status(500).send('Error');
