@@ -258,3 +258,16 @@ idempotent (`INSERT OR IGNORE`). After the copy, run
   stream registry; apps re-trigger ingest on their side.
 - Comments on VODs/clips, notifications, permissions/moderation ranks: owned
   by the apps.
+
+## VOD storage tiering & disk safety
+
+`server/vod/vod-storage.js` keeps the local VOD volume healthy without anyone watching it:
+
+- **Drain policy** — a drain starts when the disk is above `hotDiskPressurePct` (70%) **or** has less than `minFreeGb` (25 GB) free, and stops only when it is under `localLowWaterPct` (60%) **and** has `targetFreeGb` (40 GB) free. Above `criticalDiskPct` (90%) recordings finished more than `criticalMinAgeHours` (2 h) ago are eligible; otherwise 1 day. Least-recently-watched VODs go first. All values live in `media_settings` as `storage_tier.*` (`PUT /api/v1/:app/admin/storage/tiers/settings`).
+- **Only real files are candidates.** Rows without a file (a recording that was refused or never produced output, legacy paths) are quarantined as `health_status='missing_file'` and excluded — they used to fill the candidate list and starve the drain.
+- **Cadence** — while a drain is still needed the sweep re-runs every `pressureRetryMs` (2 min), otherwise every `sweepIntervalMs` (15 min). A VOD whose upload failed is skipped for 30 min so one bad file cannot pin the drain.
+- **Bounded uploads** — each upload is aborted past `uploadTimeoutFloorMs + size / uploadMinThroughputMBps`; a watchdog logs a sweep that has run for hours.
+- **Stall alerts** — after `alertAfterStalledPasses` (2) consecutive pressure passes that freed nothing, and whenever the disk is critical, Media sends `storage.alert` to every app webhook (Live logs it and forwards to `OPS_ALERT_WEBHOOK_URL` / the `ops_alert_webhook_url` setting); `storage.recovered` follows once the drain works again. Each pass under pressure logs candidates / uploaded / failed / backed-off / quarantined.
+- **Status** — `GET /api/v1/:app/admin/storage` includes `sweep` (last result, next run, stalled flag, needsDrain/critical).
+
+Run `npm test` for the policy regression tests.
