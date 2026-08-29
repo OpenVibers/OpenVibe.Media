@@ -85,6 +85,23 @@ const DEFAULTS = {
     // beats keeping yesterday's VOD hot.
     criticalDiskPct: 90,
     criticalMinAgeHours: 2,
+    // Free-space budget, in GB, evaluated alongside the percentages. Percentages
+    // alone scale badly: 30% of a 96 GB disk is one long stream, and the recorder's
+    // own guard rails are in GB (VOD_DISK_WARN_GB / VOD_DISK_CRIT_GB). Drain whenever
+    // free space is below minFreeGb and keep going until targetFreeGb is free again.
+    minFreeGb: 25,
+    targetFreeGb: 40,
+    // While a drain is still needed after a pass, re-run this soon instead of waiting
+    // for the regular interval — recovery from a full disk should take minutes.
+    pressureRetryMs: 2 * 60 * 1000,
+    // Upload deadline = floor + size / minimum acceptable throughput; a stalled
+    // multipart upload is aborted instead of holding the sweep lock forever.
+    uploadTimeoutFloorMs: 20 * 60 * 1000,
+    uploadMinThroughputMBps: 2,
+    // Raise storage.alert after this many consecutive pressure passes that freed
+    // nothing (per-kind cooldown so a stuck night doesn't page every 2 minutes).
+    alertAfterStalledPasses: 2,
+    alertCooldownMs: 6 * 60 * 60 * 1000,
     maxPerSweep: 40,
     // R2 popularity tier
     r2Enabled: true,
@@ -175,10 +192,23 @@ async function headObject(provider, key) {
     }
 }
 
+/** Deadline for one upload: a floor plus the time the file takes at the minimum acceptable throughput. */
+function uploadTimeoutMs(bytes, settings = getSettings()) {
+    const floor = Number(settings.uploadTimeoutFloorMs) || DEFAULTS.uploadTimeoutFloorMs;
+    const mbps = Number(settings.uploadMinThroughputMBps) || DEFAULTS.uploadMinThroughputMBps;
+    return floor + Math.ceil((Number(bytes) || 0) / (mbps * 1024 * 1024)) * 1000;
+}
+
 async function uploadFile(provider, key, filePath, contentType = 'video/webm') {
     const client = clientFor(provider);
     if (!client) throw new Error(`Provider ${provider} not configured`);
     loadSdk();
+    const size = fs.statSync(filePath).size;
+    // A hung multipart upload used to hold the sweep lock indefinitely (nothing else
+    // could drain). Abort past the deadline so the sweep moves on to the next VOD;
+    // leavePartsOnError cleans the partial multipart up on the bucket.
+    const abort = new AbortController();
+    const deadline = setTimeout(() => abort.abort(new Error(`upload deadline exceeded (${Math.round(uploadTimeoutMs(size) / 60000)} min for ${(size / 1048576).toFixed(0)} MB)`)), uploadTimeoutMs(size));
     const upload = new LibStorage.Upload({
         client,
         params: {
@@ -190,8 +220,16 @@ async function uploadFile(provider, key, filePath, contentType = 'video/webm') {
         partSize: 64 * 1024 * 1024,
         queueSize: 3,
         leavePartsOnError: false,
+        abortController: abort,
     });
-    await upload.done();
+    try {
+        await upload.done();
+    } catch (err) {
+        if (abort.signal.aborted) throw (abort.signal.reason instanceof Error ? abort.signal.reason : new Error('upload aborted'));
+        throw err;
+    } finally {
+        clearTimeout(deadline);
+    }
     // Verify size before anything destructive happens
     const localSize = fs.statSync(filePath).size;
     const head = await headObject(provider, key);
@@ -609,6 +647,71 @@ function reconcileGhosts() {
 const OFFLOAD_RETRY_BACKOFF_MS = 30 * 60 * 1000;
 const offloadFailedAt = new Map(); // vodId → epoch ms of the last failed upload
 
+// ── Drain policy (pure — unit-tested) ────────────────────────
+
+const GB = 1024 * 1024 * 1024;
+
+/** Drain when either the percentage ceiling or the free-space floor is crossed. */
+function needsDrain(disk, settings) {
+    if (!disk || !disk.total) return false;
+    const freeGb = disk.available / GB;
+    return disk.usePct >= settings.hotDiskPressurePct || freeGb < settings.minFreeGb;
+}
+
+/** A drain may stop only when BOTH the percentage and the free-space target are met. */
+function drainSatisfied(disk, settings) {
+    if (!disk || !disk.total) return true;
+    const freeGb = disk.available / GB;
+    return disk.usePct <= settings.localLowWaterPct && freeGb >= settings.targetFreeGb;
+}
+
+function isCritical(disk, settings) {
+    return !!disk && !!disk.total && disk.usePct >= settings.criticalDiskPct;
+}
+
+/**
+ * When to run the next pass: soon while a drain is still needed (progress was made,
+ * or candidates are merely in retry back-off), the regular interval otherwise.
+ */
+function planNextDelayMs(result, settings) {
+    if (result && result.stillNeedsDrain && (result.migrated || result.skippedBackoff || result.errors)) {
+        return settings.pressureRetryMs;
+    }
+    return settings.sweepIntervalMs;
+}
+
+// ── Sweep state + alerts ─────────────────────────────────────
+
+const sweepState = {
+    lastRunAt: null,
+    lastResult: null,
+    nextRunAt: null,
+    startedAt: null,
+    stalledPasses: 0,   // consecutive pressure passes that freed nothing
+    stalled: false,
+};
+const alertLastSentAt = new Map(); // kind → epoch ms
+
+/**
+ * Tell every app with a webhook that storage needs a human (or that it recovered).
+ * Delivered as the regular Media→app webhook (`storage.alert` / `storage.recovered`),
+ * so Live can log it loudly and page whatever ops channel it has configured.
+ */
+async function emitStorageEvent(event, kind, data, settings = getSettings()) {
+    const cooldownKey = `${event}:${kind}`;
+    const last = alertLastSentAt.get(cooldownKey) || 0;
+    if (event === 'storage.alert' && Date.now() - last < settings.alertCooldownMs) return false;
+    alertLastSentAt.set(cooldownKey, Date.now());
+    const payload = { kind, ...data, at: new Date().toISOString() };
+    (event === 'storage.alert' ? console.error : console.warn)(`[VodStorage] ${event} (${kind}): ${JSON.stringify(data)}`);
+    let apps = [];
+    try { apps = db.listApps().filter(a => a.webhook_url); } catch { apps = []; }
+    let webhooks;
+    try { webhooks = require('../webhooks'); } catch { return false; }
+    await Promise.all(apps.map(app => webhooks.sendWebhook(app.app_id, event, payload).catch(() => false)));
+    return true;
+}
+
 async function runSweep() {
     if (sweepRunning) return { skipped: true, reason: 'already running' };
     sweepRunning = true;
@@ -622,16 +725,17 @@ async function runSweep() {
         let migrated = 0, bytesFreed = 0, promoted = 0, demoted = 0;
         const errors = [];
 
+        sweepState.startedAt = Date.now();
         const disk = diskUsage(config.vod.path);
-        const underPressure = disk.usePct >= settings.hotDiskPressurePct;
-        const critical = disk.usePct >= settings.criticalDiskPct;
+        const underPressure = needsDrain(disk, settings);
+        const critical = isCritical(disk, settings);
         const ghosts = reconcileGhosts();
 
         // 1) Cold offload to B2
         let candidates;
         if (underPressure) {
             const minAge = critical ? `-${settings.criticalMinAgeHours} hours` : '-1 day';
-            console.log(`[VodStorage] Disk at ${disk.usePct}% (${critical ? 'CRITICAL ≥ ' + settings.criticalDiskPct : 'pressure ≥ ' + settings.hotDiskPressurePct}%) — draining to ${settings.localLowWaterPct}%`
+            console.log(`[VodStorage] Disk at ${disk.usePct}%, ${(disk.available / GB).toFixed(1)} GB free (${critical ? 'CRITICAL' : 'pressure'}) — draining to ≤${settings.localLowWaterPct}% / ≥${settings.targetFreeGb} GB free`
                 + (ghosts ? `; quarantined ${ghosts} file-less VOD row(s)` : ''));
             candidates = db.all(`
                 SELECT id, file_path, file_size FROM vods
@@ -655,7 +759,7 @@ async function runSweep() {
 
         let skippedBackoff = 0, quarantined = ghosts;
         for (const vod of candidates) {
-            if (underPressure && diskUsage(config.vod.path).usePct <= settings.localLowWaterPct) break;
+            if (underPressure && drainSatisfied(diskUsage(config.vod.path), settings)) break;
             const failedAt = offloadFailedAt.get(vod.id);
             if (failedAt && Date.now() - failedAt < OFFLOAD_RETRY_BACKOFF_MS) { skippedBackoff++; continue; }
             // Verify the file before spending an upload slot on it; a row whose file is
@@ -691,6 +795,46 @@ async function runSweep() {
             if (underPressure && !migrated && !candidates.length) {
                 console.warn('[VodStorage] Disk is under pressure but nothing is eligible to offload — check for stuck recordings or non-VOD files in the VOD directory');
             }
+        }
+
+        // Stall detection: a pressure pass that freed nothing is the failure mode that
+        // went unnoticed for weeks. Count them, and after a couple in a row raise an
+        // alert through the app webhooks; announce recovery once the drain works again.
+        const diskAfter = diskUsage(config.vod.path);
+        const stillNeedsDrain = underPressure && !drainSatisfied(diskAfter, settings);
+        if (underPressure && !migrated) {
+            sweepState.stalledPasses++;
+            if (sweepState.stalledPasses >= settings.alertAfterStalledPasses) {
+                sweepState.stalled = true;
+                await emitStorageEvent('storage.alert', 'drain_stalled', {
+                    disk_pct: diskAfter.usePct,
+                    free_gb: Number((diskAfter.available / GB).toFixed(1)),
+                    stalled_passes: sweepState.stalledPasses,
+                    candidates: candidates.length,
+                    errors: errors.slice(0, 3),
+                    hint: !candidates.length
+                        ? 'nothing eligible to offload (stuck recordings? non-VOD files in the VOD directory?)'
+                        : errors.length ? 'uploads failing — check B2 credentials/bucket and network' : 'all candidates in retry back-off',
+                }, settings);
+            }
+        } else {
+            if (sweepState.stalled) {
+                await emitStorageEvent('storage.recovered', 'drain_recovered', {
+                    disk_pct: diskAfter.usePct,
+                    free_gb: Number((diskAfter.available / GB).toFixed(1)),
+                    uploaded: migrated,
+                }, settings);
+            }
+            sweepState.stalledPasses = 0;
+            sweepState.stalled = false;
+        }
+        if (critical && stillNeedsDrain) {
+            await emitStorageEvent('storage.alert', 'disk_critical', {
+                disk_pct: diskAfter.usePct,
+                free_gb: Number((diskAfter.available / GB).toFixed(1)),
+                uploaded_this_pass: migrated,
+                hint: 'recorder refuses new recordings below VOD_DISK_CRIT_GB; drain in progress',
+            }, settings);
         }
 
         // 2) R2 promotion for popular VODs
@@ -730,9 +874,17 @@ async function runSweep() {
             demoted,
             bytesFreed,
             underPressure,
+            critical,
+            stillNeedsDrain,
+            skippedBackoff,
+            quarantined,
+            diskPct: diskAfter.usePct,
+            freeGb: Number((diskAfter.available / GB).toFixed(1)),
             errors: errors.length ? errors : undefined,
             timestamp: new Date().toISOString(),
         };
+        sweepState.lastRunAt = Date.now();
+        sweepState.lastResult = summary;
         if (migrated || promoted || demoted) {
             console.log(`[VodStorage] Sweep: ${migrated} → B2, ${promoted} → R2, ${demoted} R2→B2, ${(bytesFreed / 1048576).toFixed(1)} MB freed locally`);
         }
@@ -742,6 +894,7 @@ async function runSweep() {
         return { error: err.message };
     } finally {
         sweepRunning = false;
+        sweepState.startedAt = null;
     }
 }
 
@@ -812,6 +965,32 @@ async function migrateLegacy() {
     console.log(`[VodStorage] Legacy migration: ${flipped} cold VOD(s) mapped to B2${restoredLocal ? `, ${restoredLocal} still local` : ''}`);
 }
 
+// The sweep is a self-rescheduling chain, not a fixed interval: after a pass that
+// left the disk still needing a drain it comes back in pressureRetryMs, otherwise in
+// sweepIntervalMs. A sweep that overran its deadline is reported by the watchdog
+// (the upload abort in uploadFile is what actually frees it).
+const SWEEP_WATCHDOG_MS = 3 * 60 * 60 * 1000;
+
+function scheduleNext(delayMs) {
+    if (sweepTimer) { clearTimeout(sweepTimer); sweepTimer = null; }
+    sweepState.nextRunAt = Date.now() + delayMs;
+    sweepTimer = setTimeout(async () => {
+        sweepTimer = null;
+        let result = null;
+        try {
+            result = await runSweep();
+        } catch (err) {
+            console.error('[VodStorage] Sweep failed:', err.message);
+        }
+        if (result && result.skipped && result.reason === 'already running'
+            && sweepState.startedAt && Date.now() - sweepState.startedAt > SWEEP_WATCHDOG_MS) {
+            console.error(`[VodStorage] Watchdog: a sweep has been running for ${Math.round((Date.now() - sweepState.startedAt) / 60000)} min — an upload is probably hung`);
+        }
+        scheduleNext(planNextDelayMs(result, getSettings()));
+    }, delayMs);
+    if (sweepTimer.unref) sweepTimer.unref();
+}
+
 function start() {
     stop();
     const settings = getSettings();
@@ -819,18 +998,13 @@ function start() {
         console.log('[VodStorage] Disabled — not starting sweep timer');
         return;
     }
-    console.log(`[VodStorage] Starting sweep timer (every ${(settings.sweepIntervalMs / 60000).toFixed(0)} min)`);
-    setTimeout(() => {
-        runSweep().catch(err => console.error('[VodStorage] Sweep failed:', err.message));
-        sweepTimer = setInterval(() => {
-            runSweep().catch(err => console.error('[VodStorage] Sweep failed:', err.message));
-        }, settings.sweepIntervalMs);
-        if (sweepTimer.unref) sweepTimer.unref();
-    }, 30_000).unref?.();
+    console.log(`[VodStorage] Starting sweep (every ${(settings.sweepIntervalMs / 60000).toFixed(0)} min, every ${(settings.pressureRetryMs / 60000).toFixed(0)} min while draining)`);
+    scheduleNext(30_000);
 }
 
 function stop() {
-    if (sweepTimer) { clearInterval(sweepTimer); sweepTimer = null; }
+    if (sweepTimer) { clearTimeout(sweepTimer); sweepTimer = null; }
+    sweepState.nextRunAt = null;
 }
 
 // ── Status ───────────────────────────────────────────────────
@@ -987,11 +1161,28 @@ function getStatus() {
             r2: { count: clipCounts.r2Count || 0 },
         },
         sweepRunning,
+        sweep: {
+            running: sweepRunning,
+            startedAt: sweepState.startedAt ? new Date(sweepState.startedAt).toISOString() : null,
+            lastRunAt: sweepState.lastRunAt ? new Date(sweepState.lastRunAt).toISOString() : null,
+            nextRunAt: sweepState.nextRunAt ? new Date(sweepState.nextRunAt).toISOString() : null,
+            lastResult: sweepState.lastResult,
+            stalled: sweepState.stalled,
+            stalledPasses: sweepState.stalledPasses,
+            needsDrain: needsDrain(localDisk, settings),
+            critical: isCritical(localDisk, settings),
+        },
     };
 }
 
 module.exports = {
     DEFAULTS,
+    OFFLOADABLE_WHERE,
+    needsDrain,
+    drainSatisfied,
+    isCritical,
+    planNextDelayMs,
+    uploadTimeoutMs,
     providerOf,
     isRemote,
     keyForVod,

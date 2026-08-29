@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server/index.js",
     "init-db": "node server/db/init.js",
-    "smoke": "bash scripts/smoke-test.sh"
+    "smoke": "bash scripts/smoke-test.sh",
+    "test": "for f in test/*.test.js; do node \"$f\" || exit 1; done"
   },
   "license": "MIT",
   "dependencies": {
