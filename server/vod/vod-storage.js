@@ -80,6 +80,11 @@ const DEFAULTS = {
     hotDiskPressurePct: 70,
     // …until local disk is back under this %
     localLowWaterPct: 60,
+    // At/above this % even recordings finished a couple of hours ago are fair game —
+    // the recorder refuses new recordings when free space runs out, so draining
+    // beats keeping yesterday's VOD hot.
+    criticalDiskPct: 90,
+    criticalMinAgeHours: 2,
     maxPerSweep: 40,
     // R2 popularity tier
     r2Enabled: true,
@@ -343,6 +348,9 @@ async function moveToCold(vodId) {
                 db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]);
                 return { ok: true, already: true };
             }
+            // Neither here nor in B2: nothing to offload, ever. Quarantine the row so the
+            // sweep stops re-selecting it (see runSweep) and listings stop showing it.
+            quarantineMissing(vodId, 'local file missing and no B2 object');
             return { ok: false, error: 'Source file missing' };
         }
 
@@ -540,6 +548,67 @@ function dirStats(dirPath) {
 
 // ── Sweep ────────────────────────────────────────────────────
 
+/**
+ * Rows the offload sweep may pick: a local, finished VOD with a file path that is
+ * not already quarantined as file-less. Ghost rows (a shell created for a recording
+ * that never produced a file, or a legacy path from before the media split) satisfy
+ * the naive "storage_provider = local" test but fail instantly with "Source file
+ * missing" — and under disk pressure they filled the whole candidate LIMIT every
+ * sweep, so the real multi-GB recordings behind them were never reached and the
+ * disk sat at 96%+ while the log said "draining" every 15 minutes.
+ */
+const OFFLOADABLE_WHERE = `
+    COALESCE(storage_provider, 'local') = 'local'
+    AND COALESCE(is_recording, 0) = 0
+    AND file_path IS NOT NULL
+    AND COALESCE(health_status, 'ok') NOT IN ('missing_file', 'zero_byte')`;
+
+function quarantineMissing(vodId, reason) {
+    try {
+        db.run(`UPDATE vods
+                SET health_status = 'missing_file',
+                    health_issues_json = ?,
+                    last_health_scan_at = datetime('now'),
+                    quarantined_at = COALESCE(quarantined_at, datetime('now')),
+                    is_public = 0
+                WHERE id = ?`, [JSON.stringify(['missing_file', reason]), vodId]);
+    } catch (err) {
+        console.warn(`[VodStorage] Could not quarantine VOD ${vodId}:`, err.message);
+    }
+}
+
+/**
+ * Quarantine finished local rows that never got a file (file_path NULL) once they are
+ * an hour old — by then the recorder would have opened the file if it ever was going
+ * to. Returns how many rows were newly quarantined.
+ */
+function reconcileGhosts() {
+    try {
+        const res = db.run(`UPDATE vods
+                SET health_status = 'missing_file',
+                    health_issues_json = ?,
+                    last_health_scan_at = datetime('now'),
+                    quarantined_at = COALESCE(quarantined_at, datetime('now')),
+                    is_public = 0
+                WHERE COALESCE(storage_provider, 'local') = 'local'
+                  AND COALESCE(is_recording, 0) = 0
+                  AND file_path IS NULL
+                  AND created_at <= datetime('now', '-1 hour')
+                  AND COALESCE(health_status, 'ok') NOT IN ('missing_file', 'zero_byte')`,
+            [JSON.stringify(['missing_file', 'recording never produced a file'])]);
+        return (res && typeof res.changes === 'number') ? res.changes : 0;
+    } catch (err) {
+        console.warn('[VodStorage] Ghost reconcile failed:', err.message);
+        return 0;
+    }
+}
+
+// A VOD whose upload just failed (network blip, B2 5xx, a 15 GB multipart that timed
+// out) must not be retried on every sweep ahead of everything else — it would pin the
+// drain on one file. Skip it for a while and let the next candidates proceed.
+const OFFLOAD_RETRY_BACKOFF_MS = 30 * 60 * 1000;
+const offloadFailedAt = new Map(); // vodId → epoch ms of the last failed upload
+
 async function runSweep() {
     if (sweepRunning) return { skipped: true, reason: 'already running' };
     sweepRunning = true;
@@ -555,24 +624,27 @@ async function runSweep() {
 
         const disk = diskUsage(config.vod.path);
         const underPressure = disk.usePct >= settings.hotDiskPressurePct;
+        const critical = disk.usePct >= settings.criticalDiskPct;
+        const ghosts = reconcileGhosts();
 
         // 1) Cold offload to B2
         let candidates;
         if (underPressure) {
-            console.log(`[VodStorage] Disk at ${disk.usePct}% (pressure ≥ ${settings.hotDiskPressurePct}%) — draining to ${settings.localLowWaterPct}%`);
+            const minAge = critical ? `-${settings.criticalMinAgeHours} hours` : '-1 day';
+            console.log(`[VodStorage] Disk at ${disk.usePct}% (${critical ? 'CRITICAL ≥ ' + settings.criticalDiskPct : 'pressure ≥ ' + settings.hotDiskPressurePct}%) — draining to ${settings.localLowWaterPct}%`
+                + (ghosts ? `; quarantined ${ghosts} file-less VOD row(s)` : ''));
             candidates = db.all(`
                 SELECT id, file_path, file_size FROM vods
-                WHERE COALESCE(storage_provider, 'local') = 'local'
-                  AND COALESCE(is_recording, 0) = 0
-                  AND created_at <= datetime('now', '-1 day')
+                WHERE ${OFFLOADABLE_WHERE}
+                  AND created_at <= datetime('now', ?)
                 ORDER BY (last_accessed_at IS NOT NULL), last_accessed_at ASC, view_count ASC, file_size DESC
-                LIMIT 100
-            `);
+                LIMIT 200
+            `, [minAge]);
         } else {
+            if (ghosts) console.log(`[VodStorage] Quarantined ${ghosts} file-less VOD row(s)`);
             candidates = db.all(`
                 SELECT id, file_path, file_size FROM vods
-                WHERE COALESCE(storage_provider, 'local') = 'local'
-                  AND COALESCE(is_recording, 0) = 0
+                WHERE ${OFFLOADABLE_WHERE}
                   AND created_at <= datetime('now', ?)
                   AND COALESCE(view_count, 0) <= ?
                   AND (last_accessed_at IS NULL OR last_accessed_at <= datetime('now', ?))
@@ -581,11 +653,44 @@ async function runSweep() {
             `, [`-${settings.minAgeDays} days`, settings.maxViewsForCold, `-${settings.minLastAccessDays} days`, settings.maxPerSweep]);
         }
 
+        let skippedBackoff = 0, quarantined = ghosts;
         for (const vod of candidates) {
             if (underPressure && diskUsage(config.vod.path).usePct <= settings.localLowWaterPct) break;
+            const failedAt = offloadFailedAt.get(vod.id);
+            if (failedAt && Date.now() - failedAt < OFFLOAD_RETRY_BACKOFF_MS) { skippedBackoff++; continue; }
+            // Verify the file before spending an upload slot on it; a row whose file is
+            // gone (legacy path, manual deletion) is quarantined, not retried forever.
+            if (!fs.existsSync(localPathForVod(vod))) {
+                const key = keyForVod(vod);
+                if (await headObject('b2', key).catch(() => null)) {
+                    db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]);
+                } else {
+                    quarantineMissing(vod.id, `file not found at ${localPathForVod(vod)}`);
+                    quarantined++;
+                }
+                continue;
+            }
             const result = await moveToCold(vod.id);
-            if (result.ok && !result.already) { migrated++; bytesFreed += result.bytes || 0; }
-            else if (!result.ok) errors.push({ id: vod.id, error: result.error });
+            if (result.ok) {
+                offloadFailedAt.delete(vod.id);
+                if (!result.already) { migrated++; bytesFreed += result.bytes || 0; }
+            } else {
+                offloadFailedAt.set(vod.id, Date.now());
+                errors.push({ id: vod.id, error: result.error });
+            }
+        }
+
+        // Say what happened whenever it matters: the old sweep only logged on success, so
+        // weeks of "draining" that freed nothing looked healthy in the journal.
+        if (underPressure || errors.length || quarantined) {
+            const freedMb = (bytesFreed / 1048576).toFixed(1);
+            console.log(`[VodStorage] Offload pass: ${candidates.length} candidate(s), ${migrated} uploaded (${freedMb} MB freed), `
+                + `${errors.length} failed, ${skippedBackoff} in retry back-off, ${quarantined} quarantined`
+                + (underPressure ? `, disk now ${diskUsage(config.vod.path).usePct}%` : ''));
+            for (const e of errors.slice(0, 5)) console.warn(`[VodStorage]   VOD ${e.id}: ${e.error}`);
+            if (underPressure && !migrated && !candidates.length) {
+                console.warn('[VodStorage] Disk is under pressure but nothing is eligible to offload — check for stuck recordings or non-VOD files in the VOD directory');
+            }
         }
 
         // 2) R2 promotion for popular VODs
