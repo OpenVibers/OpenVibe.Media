@@ -101,6 +101,14 @@ vodStorage.checkProviders()
     .catch(err => console.warn('[Boot] Provider check failed:', err.message));
 vodStorage.start();                                        // tiering sweep
 healthJob.start();                                         // health scan + quarantine cleanup
+require('./vod/clip-jobs').start();                        // failed clip re-cuts (auto-retry, hot-fetch)
+// Descriptor watchdog: a leak here once pinned 80 GB of deleted recordings to the disk.
+every(5 * 60 * 1000, () => {
+    try {
+        const n = fs.readdirSync('/proc/self/fd').length;
+        if (n > 1500) console.warn(`[Boot] ${n} open file descriptors — investigate a stream/handle leak (lsof -p ${process.pid} +L1)`);
+    } catch { /* not linux */ }
+});
 every(60 * 1000, () => recorder.checkDisk());              // disk guardian
 every(60 * 60 * 1000, () => thumbService.cleanupOldThumbnails());  // stale live thumbs
 

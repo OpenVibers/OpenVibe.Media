@@ -72,7 +72,7 @@ function normalizeThumbnailUrls() {
 function migrateColumns() {
     const wanted = {
         vods: [['managed_stream_id', 'INTEGER']],
-        clips: [['channel_user_id', 'INTEGER']],
+        clips: [['channel_user_id', 'INTEGER'], ['cut_error', 'TEXT'], ['cut_attempts', 'INTEGER DEFAULT 0'], ['cut_next_at', 'DATETIME']],
     };
     for (const [table, cols] of Object.entries(wanted)) {
         const existing = database.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);

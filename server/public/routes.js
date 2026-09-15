@@ -49,6 +49,21 @@ function canAccessPrivate(record, req) {
     return false;
 }
 
+/**
+ * Pipe a file (or a byte range of it) to the response WITHOUT leaking the descriptor.
+ * `createReadStream(...).pipe(res)` alone never closes the file when the client goes away
+ * mid-transfer — and video players do that thousands of times per session (every seek
+ * aborts a range request). Deleted-but-open VOD files once held 80 GB of disk that way.
+ */
+function sendFileStream(res, filePath, opts) {
+    const stream = fs.createReadStream(filePath, opts);
+    const done = () => { try { stream.destroy(); } catch { /* */ } };
+    res.on('close', done); res.on('error', done); res.on('finish', done);
+    stream.on('error', () => { try { res.destroy(); } catch { /* */ } });
+    stream.pipe(res);
+    return stream;
+}
+
 function streamFileWithRange(req, res, filePath, extraHeaders = {}) {
     const stat = fs.statSync(filePath);
     const range = req.headers.range;
@@ -71,7 +86,7 @@ function streamFileWithRange(req, res, filePath, extraHeaders = {}) {
             'Content-Type': contentType,
             ...extraHeaders,
         });
-        fs.createReadStream(filePath, { start, end: Math.min(end, stat.size - 1) }).pipe(res);
+        sendFileStream(res, filePath, { start, end: Math.min(end, stat.size - 1) });
     } else {
         res.writeHead(200, {
             'Content-Length': stat.size,
@@ -79,7 +94,7 @@ function streamFileWithRange(req, res, filePath, extraHeaders = {}) {
             'Accept-Ranges': 'bytes',
             ...extraHeaders,
         });
-        fs.createReadStream(filePath).pipe(res);
+        sendFileStream(res, filePath);
     }
 }
 
@@ -382,7 +397,7 @@ router.get('/f/:key', (req, res) => {
                 'Content-Type': contentType,
                 ...headers,
             });
-            fs.createReadStream(filePath, { start, end }).pipe(res);
+            sendFileStream(res, filePath, { start, end });
         } else {
             res.writeHead(200, {
                 'Content-Length': stat.size,
@@ -390,7 +405,7 @@ router.get('/f/:key', (req, res) => {
                 'Accept-Ranges': 'bytes',
                 ...headers,
             });
-            fs.createReadStream(filePath).pipe(res);
+            sendFileStream(res, filePath);
         }
     } catch (err) {
         console.error('[Public] /f error:', err.message);

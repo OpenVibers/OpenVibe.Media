@@ -67,6 +67,10 @@ function clipPublic(clip) {
         title: clip.title,
         description: clip.description,
         status: clip.status || (clip.file_path ? 'ready' : 'processing'),
+        cut_error: clip.cut_error || null,
+        cut_attempts: Number(clip.cut_attempts) || 0,
+        cut_next_at: clip.cut_next_at || null,
+        will_retry: clip.status === 'failed' && !!clip.cut_next_at,
         start_time: clip.start_time,
         end_time: clip.end_time,
         duration: clip.duration_seconds || 0,
@@ -199,8 +203,11 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
                 console.log(`[Clips] Clip ${clipId} cut from vod ${vodId} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s)`);
                 sendWebhook(appId, 'clip.ready', clipPublic(db.getClipById(clipId))).catch(() => {});
             } else {
-                console.warn(`[Clips] Clip ${clipId} failed: ${cut.error}`);
-                db.run('UPDATE clips SET status = ? WHERE id = ?', ['failed', clipId]);
+                // First attempt failed: record why and let the retry sweeper take it from here
+                // (attempt 2 pulls a cloud-stored VOD back to local disk first).
+                const nextAt = new Date(Date.now() + 2 * 60000).toISOString().replace('T', ' ').slice(0, 19);
+                db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_attempts = 1, cut_next_at = ? WHERE id = ?", [String(cut.error || 'cut failed').slice(0, 500), nextAt, clipId]);
+                console.warn(`[Clips] Clip ${clipId} failed: ${cut.error} — auto-retry in 2 min`);
                 sendWebhook(appId, 'clip.failed', clipPublic(db.getClipById(clipId))).catch(() => {});
             }
         })().catch(err => console.error('[Clips] Background cut error:', err.message));
@@ -325,34 +332,9 @@ router.post('/:id/recut', tenantAuth(), async (req, res) => {
         if (!clip || clip.app_id !== req.appId) return res.status(404).json({ error: 'Clip not found' });
         if (clip.status === 'processing') return res.status(409).json({ error: 'Clip is already being cut' });
         if (!clip.vod_id) return res.status(422).json({ error: 'Clip has no source VOD to re-cut from' });
-
-        const vod = db.get('SELECT * FROM vods WHERE id = ?', [clip.vod_id]);
-        if (!vod) return res.status(404).json({ error: 'Source VOD no longer exists' });
-
-        const vodStorage = require('./vod-storage');
-        const source = await vodStorage.resolveMediaSource(vod);
-        if (!source) return res.status(404).json({ error: 'VOD media unavailable (not on disk and no cloud copy)' });
-
-        const startTime = Number(clip.start_time) || 0;
-        const duration = Math.max(1, (Number(clip.end_time) || 0) - startTime);
-        db.run('UPDATE clips SET status = ? WHERE id = ?', ['processing', clipId]);
-        const appId = req.appId;
-
-        (async () => {
-            const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
-            if (cut.ok) {
-                db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
-                    [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId]);
-                try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
-                console.log(`[Clips] Clip ${clipId} RE-CUT from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s)`);
-                sendWebhook(appId, 'clip.ready', clipPublic(db.getClipById(clipId))).catch(() => {});
-            } else {
-                console.warn(`[Clips] Clip ${clipId} re-cut failed: ${cut.error}`);
-                db.run('UPDATE clips SET status = ? WHERE id = ?', ['failed', clipId]);
-                sendWebhook(appId, 'clip.failed', clipPublic(db.getClipById(clipId))).catch(() => {});
-            }
-        })().catch(err => console.error('[Clips] Background re-cut error:', err.message));
-
+        // A manual retry resets the attempt counter so it gets the full ladder again.
+        db.run("UPDATE clips SET cut_attempts = 0 WHERE id = ?", [clipId]);
+        require('./clip-jobs').recutClip(clipId, { reason: 're-cut' }).catch(err => console.error('[Clips] Background re-cut error:', err.message));
         res.status(202).json({ id: clipId, status: 'processing' });
     } catch (err) {
         console.error('[Clips] Re-cut error:', err.message);
