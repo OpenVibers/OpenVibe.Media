@@ -32,8 +32,22 @@ function freeBytes() {
 }
 function _clipPublic(clip) { try { return require('./clips-routes').clipPublic(clip); } catch { return clip; } }
 
-/** (Re)cut one clip row. Returns { ok, error }. */
-async function recutClip(clipId, { reason = 'recut' } = {}) {
+const RECUT_CAP_MS = 30 * 60 * 1000;         // one clip can never hold the queue longer than this
+
+/** (Re)cut one clip row. Returns { ok, error }. Hard-capped so a hung download/cut can't wedge the sweeper. */
+async function recutClip(clipId, opts = {}) {
+    let timer = null;
+    const cap = new Promise((resolve) => { timer = setTimeout(() => resolve({ ok: false, error: 'timed out', capped: true }), RECUT_CAP_MS); });
+    const result = await Promise.race([_recutClip(clipId, opts), cap]);
+    clearTimeout(timer);
+    if (result && result.capped) {
+        const clip = db.getClipById(clipId);
+        if (clip && clip.status === 'processing') return fail(clipId, clip, Number(clip.cut_attempts) || 1, `gave up after ${Math.round(RECUT_CAP_MS / 60000)} min (hung download or cut)`);
+    }
+    return result;
+}
+
+async function _recutClip(clipId, { reason = 'recut' } = {}) {
     const clip = db.getClipById(clipId);
     if (!clip) return { ok: false, error: 'Clip not found' };
     if (!clip.vod_id) return { ok: false, error: 'Clip has no source VOD' };
@@ -93,6 +107,7 @@ async function sweep() {
 
 function start() {
     if (_timer) return;
+    try { vodStorage.cleanupStaleDownloads(); } catch { /* */ }
     // Anything left 'processing' by a crash/restart is really failed — queue it for a retry.
     try { db.run("UPDATE clips SET status = 'failed', cut_error = COALESCE(cut_error, 'interrupted by a restart') WHERE status = 'processing'"); } catch { /* */ }
     setTimeout(() => sweep().catch(() => {}), 40 * 1000);
