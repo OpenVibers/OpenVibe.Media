@@ -85,7 +85,10 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
 
 function fail(clipId, clip, attempt, error) {
     const msg = String(error || 'cut failed').slice(0, 500);
-    const more = attempt < MAX_ATTEMPTS;
+    // Nothing to retry when the source itself has no footage there (empty recording, window
+    // past the end of what was captured): give up now instead of burning the whole ladder.
+    const hopeless = /No decodable footage|Error opening input: End of file|Source VOD no longer exists|Invalid data found when processing input/i.test(msg);
+    const more = attempt < MAX_ATTEMPTS && !hopeless;
     const mins = BACKOFF_MIN[Math.min(attempt - 1, BACKOFF_MIN.length - 1)];
     const nextAt = more ? new Date(Date.now() + mins * 60000).toISOString().replace('T', ' ').slice(0, 19) : null;
     db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId]);
