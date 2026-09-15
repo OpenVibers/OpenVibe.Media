@@ -413,6 +413,18 @@ async function moveToCold(vodId) {
 }
 
 /** Restore an offloaded VOD to local disk. */
+/** Remove half-downloaded restores left behind by a crash or a killed process (older than 1h). */
+function cleanupStaleDownloads() {
+    try {
+        const dir = path.resolve(config.vod.path);
+        for (const f of fs.readdirSync(dir)) {
+            if (!f.endsWith('.download')) continue;
+            const fp = path.join(dir, f);
+            try { if (Date.now() - fs.statSync(fp).mtimeMs > 3600000) { fs.unlinkSync(fp); console.log(`[VodStorage] Removed stale partial download ${f}`); } } catch { /* */ }
+        }
+    } catch { /* */ }
+}
+
 async function moveToHot(vodId) {
     const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
@@ -441,13 +453,27 @@ async function moveToHot(vodId) {
         const client = clientFor(provider);
         const obj = await client.send(new S3.GetObjectCommand({ Bucket: PROVIDER_ENV[provider].bucket, Key: key }));
         const tmp = local + '.download';
+        // A cloud stream can simply stop mid-file without ever erroring (seen at 7.1 of 8.9 GB),
+        // which used to hang this promise — and everything queued behind it — forever. Watch the
+        // file grow; no growth for STALL_MS, or blowing the overall budget, aborts the download.
+        const STALL_MS = 90 * 1000;
+        const budgetMs = Math.min(60 * 60000, 5 * 60000 + Math.round(head.size / (2 * 1024 * 1024)) * 1000);   // ≥2 MB/s expected
         await new Promise((resolve, reject) => {
             const out = fs.createWriteStream(tmp);
+            const started = Date.now();
+            let lastSize = -1, lastGrowth = Date.now(), done = false;
+            const finish = (err) => { if (done) return; done = true; clearInterval(watch); if (err) { try { obj.Body.destroy(); } catch { /* */ } try { out.destroy(); } catch { /* */ } reject(err); } else resolve(); };
+            const watch = setInterval(() => {
+                let size = 0; try { size = fs.statSync(tmp).size; } catch { size = 0; }
+                if (size !== lastSize) { lastSize = size; lastGrowth = Date.now(); }
+                if (Date.now() - lastGrowth > STALL_MS) finish(new Error(`download stalled at ${(size / 1048576).toFixed(0)} MB of ${(head.size / 1048576).toFixed(0)} MB`));
+                else if (Date.now() - started > budgetMs) finish(new Error(`download exceeded ${Math.round(budgetMs / 60000)} min`));
+            }, 5000);
             obj.Body.pipe(out);
-            obj.Body.on('error', reject);
-            out.on('error', reject);
-            out.on('finish', resolve);
-        });
+            obj.Body.on('error', finish);
+            out.on('error', finish);
+            out.on('finish', () => finish(null));
+        }).catch((err) => { try { fs.unlinkSync(tmp); } catch { /* ignore */ } throw err; });
         if (fs.statSync(tmp).size !== head.size) {
             try { fs.unlinkSync(tmp); } catch { /* ignore */ }
             return { ok: false, error: 'Download verification failed' };
@@ -1176,6 +1202,7 @@ function getStatus() {
 }
 
 module.exports = {
+    cleanupStaleDownloads,
     DEFAULTS,
     OFFLOADABLE_WHERE,
     needsDrain,
