@@ -56,8 +56,14 @@ function remuxForSeeking(filePath) {
 
         proc.on('error', () => resolve(false));
 
-        // Timeout: 60s should be plenty for copy-mode remux
-        setTimeout(() => { try { proc.kill(); } catch {} }, 60000);
+        // Timeout scales with size: a copy-mode remux still rewrites every byte (twice for
+        // +faststart), and a flat 60 s killed every multi-hour recording — which left them
+        // fragmented with no seek index, so every clip cut from cloud storage had to scan
+        // the whole file and timed out. ~45 s per GB, 3 min floor, 45 min ceiling.
+        let bytes = 0; try { bytes = fs.statSync(filePath).size; } catch { /* */ }
+        const budgetMs = Math.min(45 * 60000, Math.max(180000, Math.round(bytes / 1e9 * 45000) + 60000));
+        const killer = setTimeout(() => { console.warn(`[VOD] Remux of ${path.basename(filePath)} exceeded ${Math.round(budgetMs / 1000)} s — killed`); try { proc.kill('SIGKILL'); } catch {} }, budgetMs);
+        proc.on('close', () => clearTimeout(killer));
     });
 }
 

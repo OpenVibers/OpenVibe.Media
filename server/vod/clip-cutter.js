@@ -101,10 +101,22 @@ async function cutClipFile({ source, startTime, duration }) {
         // Budget generously: this is a background job with no deadline, and the old
         // dur*2 + 40s budget was tight enough that a burst of concurrent encodes on a
         // busy box blew through it — which is exactly how a batch of clips failed at once.
-        const budgetMs = Math.round(dur) * 8000 + (isUrl ? 90000 : 45000);
-        const to = setTimeout(() => { timedOut = true; try { ff.kill('SIGKILL'); } catch { /* */ } resolve(false); }, budgetMs);
-        ff.on('close', (code) => { clearTimeout(to); exitCode = code; resolve(code === 0); });
-        ff.on('error', (e) => { clearTimeout(to); errTail += `\nspawn error: ${e.message}`; resolve(false); });
+        // Remote sources get a much bigger budget (a cloud seek can mean walking a big file),
+        // and a STALL watchdog rather than a flat kill: as long as the output keeps growing
+        // the cut is alive; only a file that stops growing for STALL_MS gets killed.
+        const budgetMs = Math.round(dur) * 8000 + (isUrl ? 20 * 60000 : 45000);
+        const STALL_MS = isUrl ? 4 * 60000 : 90000;
+        let lastSize = -1, lastGrowth = Date.now();
+        const started = Date.now();
+        const watchdog = setInterval(() => {
+            let size = 0; try { size = fs.statSync(outPath).size; } catch { size = 0; }
+            if (size !== lastSize) { lastSize = size; lastGrowth = Date.now(); }
+            const stalled = Date.now() - lastGrowth > STALL_MS;
+            const overBudget = Date.now() - started > budgetMs;
+            if (stalled || overBudget) { timedOut = true; errTail += `\n[watchdog] ${stalled ? 'no output growth for ' + Math.round(STALL_MS / 1000) + 's' : 'over budget'}`; try { ff.kill('SIGKILL'); } catch { /* */ } }
+        }, 5000);
+        ff.on('close', (code) => { clearInterval(watchdog); exitCode = code; resolve(!timedOut && code === 0); });
+        ff.on('error', (e) => { clearInterval(watchdog); errTail += `\nspawn error: ${e.message}`; resolve(false); });
         _stderrRef.get = () => errTail;
     }).finally(() => { _active = Math.max(0, _active - 1); });
 
@@ -112,9 +124,7 @@ async function cutClipFile({ source, startTime, duration }) {
         try { fs.existsSync(outPath) && fs.unlinkSync(outPath); } catch { /* */ }
         // Surface ffmpeg's own last words — the real reason, not a generic label.
         const tail = String(_stderrRef.get() || '').split('\n').filter(Boolean).slice(-3).join(' | ').slice(0, 400);
-        const why = timedOut
-            ? `ffmpeg timed out after ${Math.round((Math.round(dur) * 8000 + (isUrl ? 90000 : 45000)) / 1000)}s`
-            : `ffmpeg exited ${exitCode}`;
+        const why = timedOut ? `ffmpeg gave up (${isUrl ? 'cloud source' : 'local source'})` : `ffmpeg exited ${exitCode}`;
         return { ok: false, error: tail ? `${why}: ${tail}` : why };
     }
 

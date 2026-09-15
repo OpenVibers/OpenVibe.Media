@@ -300,7 +300,11 @@ function serveThumbnail(req, res) {
             'Cache-Control': cacheControl,
             'X-Robots-Tag': 'noindex',
         });
-        fs.createReadStream(filePath).pipe(res);
+        const stream = fs.createReadStream(filePath);
+        const done = () => { try { stream.destroy(); } catch { /* */ } };
+        res.on('close', done); res.on('finish', done); res.on('error', done);
+        stream.on('error', () => { try { res.destroy(); } catch { /* */ } });
+        stream.pipe(res);
     } catch (err) {
         res.status(500).json({ error: 'Failed to serve thumbnail' });
     }
