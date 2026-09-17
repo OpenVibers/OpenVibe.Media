@@ -279,6 +279,33 @@ function getAppStats(appId) {
     };
 }
 
+// Daily values behind one of the stats above, for an app's "over time" charts. Missing days are
+// filled with 0; `before` is the total before the window so a running total can start from it.
+const STAT_SERIES = {
+    vods:   { base: "FROM vods WHERE app_id = ? AND is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0", agg: 'COUNT(*)' },
+    clips:  { base: 'FROM clips WHERE app_id = ? AND COALESCE(is_public,1) = 1', agg: 'COUNT(*)' },
+    pastes: { base: 'FROM pastes WHERE app_id = ?', agg: 'COUNT(*)' },
+    hours:  { base: "FROM vods WHERE app_id = ? AND is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0", agg: 'COALESCE(SUM(duration_seconds),0) / 3600.0' },
+};
+function getAppStatSeries(appId, metric, days = 30) {
+    const def = STAT_SERIES[metric];
+    if (!def) return null;
+    days = Math.max(1, Math.min(365, parseInt(days, 10) || 30));
+    const since = `-${days - 1} days`;
+    const rows = all(`SELECT date(created_at) AS day, ${def.agg} AS value ${def.base} AND created_at >= date('now', ?) GROUP BY day`, [appId, since]);
+    const byDay = new Map(rows.map((r) => [r.day, Number(r.value) || 0]));
+    const points = [];
+    for (let i = days - 1; i >= 0; i--) {
+        const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+        points.push({ day, value: Number((byDay.get(day) || 0).toFixed(2)) });
+    }
+    const one = (sql, p) => Number(get(sql, p)?.value) || 0;
+    const before = one(`SELECT ${def.agg} AS value ${def.base} AND created_at < date('now', ?)`, [appId, since]);
+    const prevTotal = one(`SELECT ${def.agg} AS value ${def.base} AND created_at >= date('now', ?) AND created_at < date('now', ?)`, [appId, `-${2 * days - 1} days`, since]);
+    const total = Number(points.reduce((n, p) => n + p.value, 0).toFixed(2));
+    return { metric, days, points, total, before: Number(before.toFixed(2)), prev_total: Number(prevTotal.toFixed(2)) };
+}
+
 function countVods(appId, filters = {}) {
     const { conds, params } = _vodConds(appId, filters);
     return get(`SELECT COUNT(*) AS count FROM vods WHERE ${conds.join(' AND ')}`, params)?.count || 0;
@@ -630,7 +657,7 @@ module.exports = {
     hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins,
     // vods
     createVod, getVodById, getVodByFileBasename, listVods, countVods, setVodVisibility, vodStatus,
-    latestVodThumbsByManagedStreams, getAppStats,
+    latestVodThumbsByManagedStreams, getAppStats, getAppStatSeries,
     upsertAsset, getAssetById, listAssets, countAssets, deleteAsset,
     updateVodHealth, repairVodDuration, getVodsNeedingHealthScan, getQuarantinedVodsForCleanup,
     // clips

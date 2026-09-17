@@ -64,6 +64,18 @@ app.get('/api/v1/:app/stats', auth.tenantAuth(), (req, res) => {
     }
 });
 
+// Daily series behind a stat (vods, clips, pastes, hours) — "over time" charts in the owning app.
+app.get('/api/v1/:app/stats/series/:metric', auth.tenantAuth(), (req, res) => {
+    try {
+        const series = db.getAppStatSeries(req.appId, String(req.params.metric), req.query.days);
+        if (!series) return res.status(404).json({ error: 'Unknown metric' });
+        res.json(series);
+    } catch (err) {
+        console.error('[Stats] series error:', err.message);
+        res.status(500).json({ error: 'Failed to compute series' });
+    }
+});
+
 try { require('./views/service').ensureSchema(); } catch (e) { console.warn('[Views] schema:', e.message); }
 setInterval(() => { try { const n = require('./views/service').prune(30); if (n) console.log(`[Views] pruned ${n} stale visit row(s)`); } catch { /* */ } }, 12 * 3600 * 1000);
 app.use('/api/v1/:app/views', require('./views/routes'));
