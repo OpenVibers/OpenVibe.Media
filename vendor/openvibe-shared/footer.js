@@ -27,6 +27,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
+    const root = typeof globalThis !== 'undefined' ? globalThis : (typeof window !== 'undefined' ? window : {});
     // ── Shared chrome data (https://openvibe.network/api/chrome) ─────────────────────────────
     // Sites ordered by real use, footer copy and per-site legal links. Cached per host for 30
     // minutes in localStorage and refreshed in the background, so pages paint from cache and the
@@ -281,7 +282,7 @@
 .ovf-col{display:flex;flex-direction:column;gap:8px;min-width:0}
 .ovf-col h3{margin:0 0 2px;font-size:.72rem;font-weight:800;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted,#8b93ad)}
 .ovf-col a{color:var(--text-secondary,#b6bdd2);font-size:.86rem;text-decoration:none;line-height:1.4;width:fit-content;transition:color .15s,transform .15s}
-.ovf-col a:hover{color:var(--accent,#a78bfa);transform:translateX(2px)}
+.ovf-col a:hover{color:var(--accent,#60a5fa);transform:translateX(2px)}
 .ovf-more{font-weight:600;opacity:.85}.ovf-more i{font-size:.7rem;transition:transform .15s}.ovf-more:hover i{transform:translateX(3px)}
 .ovf-brand{display:inline-flex;align-items:center;gap:9px;color:var(--text-primary,#f1f4fb);font-size:1.05rem;font-weight:700;text-decoration:none}
 .ovf-brand--sm{font-size:.9rem}
@@ -289,23 +290,23 @@
 .ovf-social{display:flex;gap:8px;margin-top:4px}
 .ovf-social a{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:var(--text-secondary,#b6bdd2);
   background:var(--bg-tertiary,#1a1b28);border:1px solid var(--border,rgba(255,255,255,.08));font-size:.95rem;transition:color .15s,border-color .15s,transform .15s}
-.ovf-social a:hover{color:var(--accent,#a78bfa);border-color:var(--accent,#a78bfa);transform:translateY(-2px)}
+.ovf-social a:hover{color:var(--accent,#60a5fa);border-color:var(--accent,#60a5fa);transform:translateY(-2px)}
 .ovf-account{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px 18px;
   margin-top:clamp(18px,2.5vw,26px);padding:10px 14px;border-radius:14px;
-  background:color-mix(in srgb, var(--accent,#a78bfa) 8%, var(--bg-tertiary,#1a1b28));
-  border:1px solid color-mix(in srgb, var(--accent,#a78bfa) 26%, var(--border,rgba(255,255,255,.08)));
+  background:color-mix(in srgb, var(--accent,#60a5fa) 8%, var(--bg-tertiary,#1a1b28));
+  border:1px solid color-mix(in srgb, var(--accent,#60a5fa) 26%, var(--border,rgba(255,255,255,.08)));
   animation:ovfIn .4s ease-out both}
 @keyframes ovfIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 .ovf-account-who{display:inline-flex;align-items:center;gap:8px;font-size:.84rem;color:var(--text-secondary,#b6bdd2)}
 .ovf-account-who strong{color:var(--text-primary,#f1f4fb)}
 .ovf-avatar{width:24px;height:24px;border-radius:50%;overflow:hidden;display:grid;place-items:center;
-  background:var(--accent,#a78bfa);color:#fff;font-size:.7rem;font-weight:800;flex:none}
+  background:var(--accent,#60a5fa);color:#fff;font-size:.7rem;font-weight:800;flex:none}
 .ovf-avatar img{width:100%;height:100%;object-fit:cover}
 .ovf-account-links{display:flex;flex-wrap:wrap;gap:6px}
 .ovf-account-links a{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;border-radius:999px;font-size:.78rem;font-weight:600;
   color:var(--text-secondary,#b6bdd2);background:var(--bg-secondary,#12131c);border:1px solid var(--border,rgba(255,255,255,.08));
   text-decoration:none;transition:color .15s,border-color .15s,transform .15s}
-.ovf-account-links a:hover{color:var(--accent,#a78bfa);border-color:var(--accent,#a78bfa);transform:translateY(-1px)}
+.ovf-account-links a:hover{color:var(--accent,#60a5fa);border-color:var(--accent,#60a5fa);transform:translateY(-1px)}
 .ovf-account-links i{font-size:.72rem;opacity:.8}
 .ovf-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;
   margin-top:clamp(20px,3vw,30px);padding-top:16px;border-top:1px solid var(--border,rgba(255,255,255,.08));
@@ -313,7 +314,7 @@
 .ovf-copy{color:var(--text-muted,#8b93ad);font-size:.78rem}
 .ovf-legal-inline,.ovf-compact-links{display:flex;flex-wrap:wrap;gap:14px}
 .ovf-legal-inline a,.ovf-compact-links a{color:var(--text-muted,#8b93ad);font-size:.78rem;text-decoration:none;transition:color .15s}
-.ovf-legal-inline a:hover,.ovf-compact-links a:hover{color:var(--accent,#a78bfa)}
+.ovf-legal-inline a:hover,.ovf-compact-links a:hover{color:var(--accent,#60a5fa)}
 .ovf-compact-meta{color:var(--text-muted,#8b93ad);font-size:.74rem}
 @media (max-width:900px){.ovf-cols{grid-template-columns:repeat(2,minmax(0,1fr))}.ovf-col--brand{grid-column:1/-1}}
 @media (max-width:560px){

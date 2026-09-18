@@ -266,6 +266,7 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 .empty{padding:3rem;text-align:center;color:var(--muted)}
 </style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+${require('openvibe-shared/app-icon').headTags({ site: 'media' })}
 </head><body>
 <div id="navbar-mount"></div>
 <header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, images, pastes &amp; thumbnails from all OpenVibe sites</span></header>

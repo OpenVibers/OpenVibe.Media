@@ -14,7 +14,8 @@
     "./url-resolver": "./url-resolver.js",
     "./seo": "./seo.js",
     "./icons": "./ov-icons.js",
-    "./legal": "./legal.js"
+    "./legal": "./legal.js",
+    "./app-icon": "./app-icon.js"
   },
   "license": "MIT",
   "dependencies": {

@@ -102,19 +102,19 @@
             .ovnav-launcher .ovl-empty { padding: 18px 8px; color: var(--text-secondary, #a8b3c4); font-size: 13px; }
             @media (max-width: 480px) { .ovnav-launcher { left: 8px; } .ovnav-launcher .ovl-fams { grid-template-columns: 1fr; } }
             @media (prefers-reduced-motion: reduce) { .ovnav-launcher { transition: none; } }
-            .openvibe-navbar-brand .flame { font-size: 18px; text-decoration: none; color: var(--accent, #8b5cf6); display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; }
+            .openvibe-navbar-brand .flame { font-size: 18px; text-decoration: none; color: var(--accent, #3b82f6); display: inline-grid; place-items: center; width: 28px; height: 28px; flex: none; }
             .openvibe-navbar-brand .name { display: inline-flex; align-items: baseline; font-size: 15px; font-weight: 700; letter-spacing: -.3px; white-space: nowrap; line-height: 1; }
             /* Segments: subdomain · OpenVibe · TLD. The part that names *this* site is the loud one. */
             .openvibe-navbar-brand .b-sub { color: var(--text-primary, #e0e0e0); }
             .openvibe-navbar-brand .b-core { color: var(--text-primary, #e0e0e0); }
-            .openvibe-navbar-brand .b-tld { color: var(--accent-light, var(--accent, #a78bfa)); }
+            .openvibe-navbar-brand .b-tld { color: var(--accent-light, var(--accent, #60a5fa)); }
             .openvibe-navbar-brand.has-sub .b-core { color: var(--text-secondary, #b0b0b8); font-weight: 600; }
             .openvibe-navbar-brand.has-sub .b-tld { color: var(--text-secondary, #b0b0b8); font-weight: 600; }
-            .openvibe-navbar-brand .b-dot { color: var(--accent, #8b5cf6); opacity: .75; margin: 0 1px; font-weight: 800; }
+            .openvibe-navbar-brand .b-dot { color: var(--accent, #3b82f6); opacity: .75; margin: 0 1px; font-weight: 800; }
             .openvibe-navbar-brand .b-sub, .openvibe-navbar-brand .b-core, .openvibe-navbar-brand .b-tld { transition: color .2s, opacity .2s; }
-            .openvibe-navbar-brand:hover .b-tld, .openvibe-navbar-brand:hover .b-sub { color: var(--accent-light, #a78bfa); }
+            .openvibe-navbar-brand:hover .b-tld, .openvibe-navbar-brand:hover .b-sub { color: var(--accent-light, #60a5fa); }
             .openvibe-navbar-brand:hover .b-dot { opacity: 1; }
-            .openvibe-navbar-brand .b-tag { font-size: 9px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--accent-light, #a78bfa); background: var(--accent-glow, rgba(139,92,246,.14)); border-radius: 4px; padding: 2px 5px; margin-left: 6px; align-self: center; }
+            .openvibe-navbar-brand .b-tag { font-size: 9px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--accent-light, #60a5fa); background: var(--accent-glow, rgba(59,130,246,.14)); border-radius: 4px; padding: 2px 5px; margin-left: 6px; align-self: center; }
             /* Compact: drop the trailing segments on narrow viewports, keep what identifies the page. */
             .openvibe-navbar[data-compact="always"] .openvibe-navbar-brand.has-sub .b-core,
             .openvibe-navbar[data-compact="always"] .openvibe-navbar-brand.has-sub .b-tld,
@@ -132,10 +132,10 @@
             .openvibe-navbar-links a .icon { margin-right: 5px; opacity: .8; }
             .openvibe-navbar-dropdown-recent { padding: 6px 8px 2px; border-bottom: 1px solid var(--border, #333340); }
             .openvibe-navbar-dropdown-recent .label { font-size: 10px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--text-muted, #707080); padding: 2px 8px 4px; display: flex; justify-content: space-between; align-items: center; }
-            .openvibe-navbar-dropdown-recent .label a { color: var(--accent-light, #a78bfa); text-decoration: none; font-weight: 600; letter-spacing: 0; text-transform: none; }
+            .openvibe-navbar-dropdown-recent .label a { color: var(--accent-light, #60a5fa); text-decoration: none; font-weight: 600; letter-spacing: 0; text-transform: none; }
             .openvibe-navbar-dropdown-recent .item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; font-size: 12px; color: var(--text-secondary, #b0b0b8); text-decoration: none; transition: background .12s; min-width: 0; }
             .openvibe-navbar-dropdown-recent .item:hover { background: var(--bg-hover, #2f2f3d); color: var(--text-primary, #e0e0e0); }
-            .openvibe-navbar-dropdown-recent .item .icon { width: 18px; text-align: center; color: var(--accent-light, #a78bfa); flex: none; }
+            .openvibe-navbar-dropdown-recent .item .icon { width: 18px; text-align: center; color: var(--accent-light, #60a5fa); flex: none; }
             .openvibe-navbar-dropdown-recent .item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
             .openvibe-navbar-dropdown-recent .item .s { margin-left: auto; font-size: 10px; color: var(--text-muted, #707080); flex: none; }
             .openvibe-navbar-dropdown-menu .sep { height: 1px; background: var(--border, #333340); margin: 4px -8px; }
@@ -147,7 +147,7 @@
                 transition: all .15s;
             }
             .openvibe-navbar-links a:hover { background: var(--bg-hover, #2f2f3d); color: var(--text-primary, #e0e0e0); }
-            .openvibe-navbar-links a.active { background: var(--bg-tertiary, #2a2a38); color: var(--accent-light, #a78bfa); }
+            .openvibe-navbar-links a.active { background: var(--bg-tertiary, #2a2a38); color: var(--accent-light, #60a5fa); }
 
             .openvibe-navbar-spacer { flex: 1; }
 
@@ -158,14 +158,14 @@
                 border: 2px solid var(--border, #333340); transition: border-color .2s;
                 object-fit: cover;
             }
-            .openvibe-navbar-avatar:hover { border-color: var(--accent, #8b5cf6); }
+            .openvibe-navbar-avatar:hover { border-color: var(--accent, #3b82f6); }
 
             .openvibe-navbar-login {
                 padding: 6px 16px; border-radius: 6px; font-size: 13px; font-weight: 600;
-                background: var(--accent, #8b5cf6); color: #fff; border: none; cursor: pointer;
+                background: var(--accent, #3b82f6); color: #fff; border: none; cursor: pointer;
                 transition: background .15s; text-decoration: none; display: inline-flex; align-items: center;
             }
-            .openvibe-navbar-login:hover { background: var(--accent-dark, #6d28d9); }
+            .openvibe-navbar-login:hover { background: var(--accent-dark, #2563eb); }
 
             .openvibe-navbar-dropdown {
                 position: absolute; top: 48px; right: 8px;
@@ -186,7 +186,7 @@
             .openvibe-navbar-dropdown-header .info { line-height: 1.3; }
             .openvibe-navbar-dropdown-header .info .name { font-size: 14px; font-weight: 600; }
             .openvibe-navbar-dropdown-header .info .email { font-size: 11px; color: var(--text-muted, #707080); }
-            .openvibe-navbar-dropdown-header .info .anon-tag { font-size: 10px; color: var(--accent-light, #a78bfa); }
+            .openvibe-navbar-dropdown-header .info .anon-tag { font-size: 10px; color: var(--accent-light, #60a5fa); }
 
             .openvibe-navbar-dropdown-accounts {
                 padding: 6px 8px; border-bottom: 1px solid var(--border, #333340);
@@ -199,7 +199,7 @@
             }
             .openvibe-navbar-dropdown-accounts .account-item:hover { background: var(--bg-hover, #2f2f3d); }
             .openvibe-navbar-dropdown-accounts .account-item img { width: 24px; height: 24px; border-radius: 50%; }
-            .openvibe-navbar-dropdown-accounts .account-item.active { color: var(--accent-light, #a78bfa); font-weight: 600; }
+            .openvibe-navbar-dropdown-accounts .account-item.active { color: var(--accent-light, #60a5fa); font-weight: 600; }
             .openvibe-navbar-dropdown-accounts .add-account {
                 display: flex; align-items: center; gap: 8px; padding: 6px 8px;
                 border-radius: 6px; cursor: pointer; font-size: 12px;
@@ -222,11 +222,11 @@
 
             .openvibe-navbar .openvibe-network-badge {
                 font-size: 10px; padding: 2px 8px; border-radius: 4px;
-                background: rgba(139,92,246,0.1); color: var(--accent-light, #a78bfa);
+                background: rgba(59,130,246,0.1); color: var(--accent-light, #60a5fa);
                 font-weight: 500; cursor: pointer; border: 1px solid transparent;
                 transition: all .15s;
             }
-            .openvibe-navbar .openvibe-network-badge:hover { border-color: var(--accent-dark, #6d28d9); }
+            .openvibe-navbar .openvibe-network-badge:hover { border-color: var(--accent-dark, #2563eb); }
 
             @media (max-width: 600px) {
                 .openvibe-navbar-links { display: none; }
@@ -663,6 +663,19 @@
             panel.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
             try { panel.querySelector('.ovl-q').focus({ preventScroll: true }); } catch { /* */ }
         });
+    }
+
+    /** One anonymous page-view count per page load (host only), which is what orders the network's
+     *  navigation. Skipped when the browser asks not to be tracked. */
+    let _counted = false;
+    function countView() {
+        if (_counted || _config.countViews === false) return; _counted = true;
+        try {
+            if (navigator.globalPrivacyControl || navigator.doNotTrack === '1') return;
+            if (!/^https:$/.test(location.protocol)) return;
+            const url = 'https://openvibe.network/api/chrome/hit';
+            if (navigator.sendBeacon) navigator.sendBeacon(url);
+        } catch { /* */ }
     }
 
     /** The network's most used sites, after the page's own links (networkLinks: false turns it off). */
@@ -1118,7 +1131,7 @@
 
     function makeAvatarPlaceholder(user, size = 64) {
         const initial = getAvatarInitial(user);
-        const bg = user?.profile_color || '#8b5cf6';
+        const bg = user?.profile_color || '#3b82f6';
         const svg = `
             <svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
                 <rect width="100%" height="100%" rx="${Math.round(size / 2)}" fill="${bg}"/>
@@ -1200,13 +1213,13 @@
             </div>
             <div class="openvibe-navbar-spacer"></div>
             <div class="openvibe-navbar-right">
-                <a class="openvibe-network-badge" href="https://openvibe.network" title="Connected to OpenVibe"><span class="ov-mark" data-size="16" data-static="1"></span> OpenVibe</a>
                 <div id="openvibe-bell-mount"></div>
                 ${u ? avatarImg(u, 64, 'openvibe-navbar-avatar', 'openvibe-avatar-btn') :
                     `<a class="openvibe-navbar-login" id="openvibe-login-btn" href="${escapeAttr(loginHref)}">Sign In</a>`}
             </div>
         `;
         bindLauncher(nav);
+        countView();
         // Pages that wire the bell themselves run right after init(); give them the first go.
         setTimeout(() => mountBell(nav, u), 0);
 
