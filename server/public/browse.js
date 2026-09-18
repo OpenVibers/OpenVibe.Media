@@ -17,17 +17,8 @@ const db = require('../db/database');
 const PAGE_SIZE = 48;
 const THUMB_DIR = path.resolve(config.thumbnails.path);
 
-// Public base URL per app for "source" links (env-overridable JSON map).
-const APP_PUBLIC_URLS = (() => {
-    try { const m = JSON.parse(process.env.APP_PUBLIC_URLS || ''); if (m && typeof m === 'object') return m; } catch { /* */ }
-    return {
-        live: 'https://openvibe.live',
-        games: 'https://openvibe.games',
-        tools: 'https://openvibe.tools',
-        network: 'https://openvibe.network',
-    };
-})();
-const appUrl = (appId) => APP_PUBLIC_URLS[appId] || APP_PUBLIC_URLS.live;
+// Public base URL per app for "source" links — shared with the watch/paste pages.
+const { appUrl } = require('./page-chrome');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`));
@@ -233,21 +224,30 @@ function renderPage(tab, page, data, counts) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenVibe.Media — Media Index</title>
 <meta name="description" content="Index of all public media on the OpenVibe network — videos, clips, images, pastes, and thumbnails.">
-<!-- Critical theme bootstrap (ov-theme-boot) — inline and above the styles, so the cached
-     theme paints on the first frame instead of flashing the default palette. -->
-<script>
-(function(){try{var raw=localStorage.getItem('ov_theme');if(!raw)return;var t=JSON.parse(raw),v=t&&t.variables;if(!v)return;var el=document.documentElement;for(var k in v)if(k.charAt(0)==='-')el.style.setProperty(k,v[k]);if(t.id)el.setAttribute('data-theme',t.id);}catch(_){}})();
-</script>
+<link rel="canonical" href="${config.publicUrl}/${tab === 'all' && page === 1 ? '' : `?tab=${tab}${page > 1 ? `&page=${page}` : ''}`}">
+<meta name="robots" content="${page > 1 ? 'noindex, follow' : 'index, follow'}">
+<meta property="og:site_name" content="OpenVibe.Media">
+<meta property="og:type" content="website">
+<meta property="og:title" content="OpenVibe.Media — Media Index">
+<meta property="og:description" content="Every public file on the OpenVibe network — videos, clips, images, pastes and thumbnails.">
+<meta property="og:url" content="${config.publicUrl}/">
+<meta property="og:image" content="${config.publicUrl}/og-image.png">
+<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="OpenVibe.Media — Media Index">
+<meta name="twitter:image" content="${config.publicUrl}/og-image.png">
+<!-- The shared theme-loader applies the user's theme to <html> before anything paints. -->
+<script src="https://openvibe.network/shared/theme-loader.js"></script>
 <style>
-:root{--bg:#0f1420;--panel:#161c2c;--border:#232b40;--text:#e6e9f2;--muted:#9aa3b8;--accent:#8b5cf6}
+:root{--bg:var(--bg-primary,#0a0f1c);--panel:var(--bg-card,#131c2e);--border:#1f2d47;--text:var(--text-primary,#e6edf7);--muted:var(--text-secondary,#96a7c2);--accent-page:var(--accent,#3b82f6)}
 *{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,'Segoe UI',Arial,sans-serif;padding-bottom:3rem}
-header{display:flex;align-items:center;gap:.9rem;padding:1rem 1.4rem;border-bottom:1px solid var(--border);background:rgba(15,20,32,.92)}
+header{display:flex;align-items:center;gap:.9rem;padding:1rem 1.4rem;border-bottom:1px solid var(--border);background:var(--bg-secondary,rgba(15,20,32,.92))}
 header .logo{width:30px;height:30px}
-header h1{font-size:1.15rem}header h1 b{color:var(--accent)}
+header h1{font-size:1.15rem}header h1 b{color:var(--accent-page)}
 header .sub{color:var(--muted);font-size:.82rem;margin-left:auto}
 nav{display:flex;gap:.25rem;padding:.7rem 1.4rem;flex-wrap:wrap}
 nav a{color:var(--muted);text-decoration:none;padding:.45rem .9rem;border-radius:999px;font-size:.88rem;border:1px solid transparent}
-nav a:hover{color:var(--text)}nav a.on{color:#fff;background:var(--accent)}
+nav a:hover{color:var(--text)}nav a.on{color:var(--on-accent,#fff);background:var(--accent-page)}
 nav a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem;padding:0 1.4rem}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
@@ -255,29 +255,30 @@ nav a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 .thumb img{width:100%;height:100%;object-fit:cover;display:block}
 .thumb .ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.2rem;opacity:.5}
 .thumb .dur{position:absolute;right:.5rem;bottom:.5rem;background:rgba(0,0,0,.75);padding:.1rem .45rem;border-radius:6px;font-size:.75rem}
-.thumb .kind{position:absolute;left:.5rem;top:.5rem;background:rgba(139,92,246,.85);color:#fff;padding:.1rem .5rem;border-radius:6px;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}
+.thumb .kind{position:absolute;left:.5rem;top:.5rem;background:rgba(var(--accent-rgb,59,130,246),.85);color:var(--on-accent,#fff);padding:.1rem .5rem;border-radius:6px;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}
 .meta{padding:.7rem .8rem;display:flex;flex-direction:column;gap:.35rem;flex:1}
 .title{font-weight:600;font-size:.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .desc{color:var(--muted);font-size:.8rem;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .foot{margin-top:auto;display:flex;justify-content:space-between;gap:.6rem;color:var(--muted);font-size:.74rem;flex-wrap:wrap}
-.foot a{color:var(--accent);text-decoration:none}.foot a:hover{text-decoration:underline}
+.foot a{color:var(--accent-page);text-decoration:none}.foot a:hover{text-decoration:underline}
 .pager{display:flex;gap:.5rem;justify-content:center;align-items:center;padding:1.4rem;color:var(--muted);font-size:.88rem}
-.pg{color:var(--accent);text-decoration:none;padding:.35rem .8rem;border:1px solid var(--border);border-radius:8px}
+.pg{color:var(--accent-page);text-decoration:none;padding:.35rem .8rem;border:1px solid var(--border);border-radius:8px}
 .pg.dis{color:var(--muted);opacity:.4}
 .empty{padding:3rem;text-align:center;color:var(--muted)}
 </style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 </head><body>
-<script src="https://openvibe.network/shared/navbar.js"></script>
-<script>try { OpenVibeNavbar.init({ service: 'media' }); } catch (e) { /* navbar optional */ }</script>
+<div id="navbar-mount"></div>
 <header>
-  <svg class="logo" viewBox="0 0 100 100" fill="none" stroke="#8b5cf6" stroke-width="7"><circle cx="28" cy="66" r="11"/><circle cx="72" cy="66" r="11"/><circle cx="50" cy="30" r="11"/><line x1="34" y1="58" x2="45" y2="40"/><line x1="66" y1="58" x2="55" y2="40"/><line x1="39" y1="66" x2="61" y2="66"/></svg>
+  <svg class="logo" viewBox="0 0 100 100" fill="none" stroke="var(--accent-page)" stroke-width="7"><circle cx="28" cy="66" r="11"/><circle cx="72" cy="66" r="11"/><circle cx="50" cy="30" r="11"/><line x1="34" y1="58" x2="45" y2="40"/><line x1="66" y1="58" x2="55" y2="40"/><line x1="39" y1="66" x2="61" y2="66"/></svg>
   <h1>OpenVibe<b>.Media</b></h1>
   <span class="sub">every public file on the network — videos, clips, images, pastes &amp; thumbnails</span>
 </header>
 <nav>${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>
+<footer id="ov-footer" class="ovf"></footer>
+${require('./page-chrome').chromeScripts({ footer: { variant: 'full' } })}
 </body></html>`;
 }
 
