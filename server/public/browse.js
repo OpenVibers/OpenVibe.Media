@@ -268,12 +268,12 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 ${require('openvibe-shared/app-icon').headTags({ site: 'media', iconBase: '/assets' })}
 </head><body>
-<div id="navbar-mount"></div>
+<div id="navbar-mount"></div>${require('openvibe-shared/chrome-ssr').noscriptNav({ name: 'OpenVibe.Media' })}
 <header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, images, pastes &amp; thumbnails from all OpenVibe sites</span></header>
 <nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>
-<footer id="ov-footer" class="ovf"></footer>
+${require('openvibe-shared/footer').ssr({ service: 'media', variant: 'full' })}
 ${require('./page-chrome').chromeScripts({ footer: { variant: 'full' } })}
 </body></html>`;
 }
