@@ -184,11 +184,11 @@ ${headTags(seo)}
 <style>${baseCss()}${css}</style>
 </head>
 <body>
-<div id="navbar-mount"></div>
+<div id="navbar-mount"></div>${require('openvibe-shared/chrome-ssr').noscriptNav({ name: 'OpenVibe.Media', links: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }] })}
 <main>
 ${body}
 </main>
-<footer id="ov-footer" class="ovf"></footer>
+${require('openvibe-shared/footer').ssr({ service: 'media', variant: 'compact' })}
 ${chromeScripts({ history, footer })}
 </body>
 </html>`;
