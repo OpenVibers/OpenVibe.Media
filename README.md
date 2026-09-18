@@ -43,6 +43,14 @@ vendor/openvibe-shared/  vendored shared helpers (do not edit; re-sync from cano
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 ```
 
+## Visitor sign-in
+
+The public pages use the shared navbar and footer. Visitors sign in through the Network as OAuth
+client `media` (`server/user-auth.js`, routes under `/auth`, host-only cookies); set
+`OV_OAUTH_CLIENT_SECRET` in the unit's environment. `/terms`, `/privacy` and `/dmca` come from
+`openvibe-shared/legal` (profile `hosting`). This is separate from tenant auth below, which is how
+other OpenVibe services call the API.
+
 ## Tenancy & auth
 
 Tenant = the `:app` path segment. Rows in the `apps` table define tenants:
