@@ -62,7 +62,9 @@ function fetchOnce(u, pinned, deadline) {
         const req = https.get({
             host: u.hostname, servername: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET',
             headers: { 'User-Agent': 'OpenVibeMedia/1.0 (+https://openvibe.media; avatar fetch)', Accept: 'image/*' },
-            lookup: (_h, _o, cb) => cb(null, pinned.address, pinned.family),      // connect to the address we checked, nothing else
+            // Connect to the address we checked, nothing else. Newer Node asks for a list (options.all) when it races
+            // address families; older Node wants the single-address form.
+            lookup: (_h, o, cb) => ((o && o.all) ? cb(null, [{ address: pinned.address, family: pinned.family }]) : cb(null, pinned.address, pinned.family)),
             timeout: Math.max(1000, deadline - Date.now()),
         }, (res) => {
             const status = res.statusCode || 0;
