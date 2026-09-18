@@ -134,7 +134,7 @@ function baseCss() {
  *   footer   { variant: 'full' | 'compact', links: [{ heading, items: [{ label, href }] }] }
  */
 function chromeScripts({ history, footer } = {}) {
-    const navOpts = { service: 'media', apiBase: NETWORK_URL };
+    const navOpts = { service: 'media', apiBase: NETWORK_URL, silentLogin: `${config.publicUrl}/auth/login?silent=1&next={url}`, fedcmLogin: `${config.publicUrl}/auth/fedcm`, loginUrl: `${config.publicUrl}/auth/login?next={url}`, sessionUrl: '/auth/me' };
     if (history) navOpts.history = history;
     const footOpts = {
         service: 'media',
