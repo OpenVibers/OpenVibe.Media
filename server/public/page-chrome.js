@@ -78,7 +78,8 @@ function headTags(seo) {
         `<title>${title}</title>`,
         `<meta name="description" content="${description}">`,
         // Applies the user's theme to <html> synchronously; must run before any CSS paints.
-        `<script src="${NETWORK_URL}/shared/theme-loader.js"></script>`,
+        require('openvibe-shared/app-icon').headTags({ site: 'media', iconBase: '/assets' }),
+        `<script src="${NETWORK_URL}/shared/theme-loader.js" defer></script>`,
         seo.canonical ? `<link rel="canonical" href="${esc(seo.canonical)}">` : '',
         `<meta name="robots" content="${esc(seo.robots || 'index, follow')}">`,
         `<meta property="og:site_name" content="${SITE_NAME}">`,
