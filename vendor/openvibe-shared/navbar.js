@@ -61,11 +61,28 @@
                 color: var(--text-primary, #e0e0e0);
             }
             .openvibe-navbar-brand { display: flex; align-items: center; gap: 9px; text-decoration: none; color: inherit; margin-right: 8px; min-width: 0; }
-            .openvibe-navbar-brand a { color: inherit; text-decoration: none; }
-            .openvibe-navbar-brand a.b-core:hover, .openvibe-navbar-brand a.b-tld:hover, .openvibe-navbar-brand a.b-sub:hover { color: var(--accent-light, var(--accent, #60a5fa)); text-decoration: underline; text-underline-offset: 3px; text-decoration-thickness: 1.5px; }
-            .openvibe-navbar-brand a:focus-visible, .ovnav-launch:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 2px; border-radius: 6px; }
-            .ovnav-launch { appearance: none; border: 0; background: transparent; color: var(--text-secondary, #a8b3c4); width: 32px; height: 32px; border-radius: 9px; display: inline-grid; place-items: center; cursor: pointer; flex: none; margin-right: 6px; transition: background .15s, color .15s; }
-            .ovnav-launch:hover, .ovnav-launch[aria-expanded="true"] { background: var(--accent-glow, rgba(59,130,246,.14)); color: var(--accent-light, var(--accent, #60a5fa)); }
+            /* Brand group: mark + linked wordmark + launcher read as one control. Every property a host
+               page might set on bare "nav a" / "a" is reset here, so the brand looks the same everywhere. */
+            .openvibe-navbar .openvibe-navbar-brand a, .openvibe-navbar .openvibe-navbar-brand a:hover { all: unset; cursor: pointer; color: inherit; font: inherit; }
+            .openvibe-navbar .openvibe-navbar-brand { gap: 8px; padding: 3px 4px 3px 3px; border-radius: 12px; margin-right: 2px; }
+            .openvibe-navbar .openvibe-navbar-brand a.flame { display: inline-grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; transition: background .15s; }
+            .openvibe-navbar .openvibe-navbar-brand a.flame:hover { background: var(--accent-glow, rgba(59,130,246,.14)); }
+            .openvibe-navbar .openvibe-navbar-brand .name { align-items: center; gap: 0; font-size: 15.5px; letter-spacing: -.25px; }
+            .openvibe-navbar .openvibe-navbar-brand .name a { padding: 3px 2px; border-radius: 6px; transition: color .15s, background .15s; }
+            .openvibe-navbar .openvibe-navbar-brand .name a.b-sub { color: var(--text-primary, #e6edf7); font-weight: 750; }
+            .openvibe-navbar .openvibe-navbar-brand .name a.b-core { color: var(--text-primary, #e6edf7); font-weight: 700; }
+            .openvibe-navbar .openvibe-navbar-brand .name a.b-tld { color: var(--accent-light, var(--accent, #60a5fa)); font-weight: 700; }
+            .openvibe-navbar .openvibe-navbar-brand.has-sub .name a.b-core, .openvibe-navbar .openvibe-navbar-brand.has-sub .name a.b-tld { color: var(--text-secondary, #a8b3c4); font-weight: 600; }
+            .openvibe-navbar .openvibe-navbar-brand .name a:hover { color: var(--accent-light, var(--accent, #60a5fa)); background: var(--accent-glow, rgba(59,130,246,.12)); }
+            .openvibe-navbar .openvibe-navbar-brand .b-dot { margin: 0; padding: 0 .5px; opacity: .55; }
+            .openvibe-navbar .openvibe-navbar-brand a:focus-visible, .ovnav-launch:focus-visible { outline: 2px solid var(--accent, #3b82f6); outline-offset: 1px; }
+            .ovnav-launch { all: unset; box-sizing: border-box; cursor: pointer; color: var(--text-secondary, #a8b3c4); width: 32px; height: 32px; border-radius: 10px; display: inline-grid; place-items: center; flex: none; margin-right: 10px; border: 1px solid transparent; transition: background .15s, color .15s, border-color .15s; }
+            .ovnav-launch:hover, .ovnav-launch[aria-expanded="true"] { background: var(--accent-glow, rgba(59,130,246,.14)); color: var(--accent-light, var(--accent, #60a5fa)); border-color: color-mix(in srgb, var(--accent, #3b82f6) 35%, transparent); }
+            .ovnav-launch svg { display: block; transition: transform .25s cubic-bezier(.2,1.4,.3,1); }
+            .ovnav-launch[aria-expanded="true"] svg { transform: rotate(45deg) scale(.92); }
+            .ovnav-launcher a { all: unset; cursor: pointer; box-sizing: border-box; }
+            .openvibe-navbar .ovnav-sep { width: 1px; height: 18px; background: var(--border, rgba(255,255,255,.12)); margin: 0 6px; flex: none; align-self: center; }
+            @media (max-width: 1180px) { .openvibe-navbar .ovnav-net, .openvibe-navbar .ovnav-sep { display: none; } }
             .ovnav-launcher { position: absolute; top: calc(100% + 6px); left: 12px; width: min(440px, calc(100vw - 24px)); max-height: min(560px, calc(100vh - 80px)); overflow: auto; background: var(--bg-elevated, var(--bg-secondary, #111826)); border: 1px solid var(--border, rgba(255,255,255,.12)); border-radius: 16px; box-shadow: 0 24px 60px rgba(0,0,0,.5); padding: 12px; z-index: 1000; opacity: 0; transform: translateY(-6px) scale(.98); transform-origin: top left; pointer-events: none; transition: opacity .16s, transform .2s cubic-bezier(.2,1.2,.3,1); }
             .ovnav-launcher.open { opacity: 1; transform: none; pointer-events: auto; }
             .ovnav-launcher .ovl-q { width: 100%; box-sizing: border-box; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--border, rgba(255,255,255,.12)); background: var(--bg-primary, #0a0f18); color: var(--text-primary, #e6edf7); font: 500 14px/1.2 inherit; outline: none; }
@@ -79,6 +96,9 @@
             .ovnav-launcher .ovl-site:hover, .ovnav-launcher .ovl-fam:hover, .ovnav-launcher a:focus-visible { background: var(--accent-glow, rgba(59,130,246,.14)); outline: none; }
             .ovnav-launcher b { display: block; font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
             .ovnav-launcher small { display: block; font-size: 11px; color: var(--text-muted, #7d8aa0); margin-top: 1px; }
+            .ovnav-launcher .ovl-soon { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 4px; }
+            .ovnav-launcher .ovl-soon a { font-size: 12px; font-weight: 600; padding: 4px 9px; border-radius: 999px; border: 1px solid var(--border, rgba(255,255,255,.1)); color: var(--text-secondary, #a8b3c4); }
+            .ovnav-launcher .ovl-soon a:hover { border-color: var(--accent, #3b82f6); color: var(--text-primary, #e6edf7); background: none; }
             .ovnav-launcher .ovl-empty { padding: 18px 8px; color: var(--text-secondary, #a8b3c4); font-size: 13px; }
             @media (max-width: 480px) { .ovnav-launcher { left: 8px; } .ovnav-launcher .ovl-fams { grid-template-columns: 1fr; } }
             @media (prefers-reduced-motion: reduce) { .ovnav-launcher { transition: none; } }
@@ -529,6 +549,42 @@
             ${_config.launcher === false ? '' : '<button type="button" class="ovnav-launch" id="openvibe-launcher-btn" aria-label="All OpenVibe sites and tools" aria-haspopup="true" aria-expanded="false" title="All OpenVibe sites and tools"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><g fill="currentColor"><circle cx="5" cy="5" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="12" cy="19" r="2"/><circle cx="19" cy="19" r="2"/></g></svg></button>'}`;
     }
 
+
+    // ── Shared chrome data (https://openvibe.network/api/chrome) ─────────────────────────────
+    // Sites ordered by real use, footer copy and per-site legal links. Cached per host for 30
+    // minutes in localStorage and refreshed in the background, so pages paint from cache and the
+    // order never jumps while someone is looking at it. Defined once, shared by navbar + footer.
+    const OVChrome = root.OpenVibeChrome || (root.OpenVibeChrome = (function () {
+        const KEY = 'ov_chrome_v1', TTL = 30 * 60000;
+        let inflight = null;
+        const host = () => (typeof location !== 'undefined' ? location.hostname : '');
+        const https = (u) => { try { return new URL(u).protocol === 'https:'; } catch { return false; } };
+        function clean(d) {
+            if (!d || !Array.isArray(d.nav)) return null;
+            const link = (l) => (l && typeof l.name === 'string' && https(l.url) ? { id: String(l.id || ''), name: l.name.slice(0, 60), url: l.url, icon: String(l.icon || ''), tagline: String(l.tagline || '').slice(0, 80) } : null);
+            const f = d.footer || {}, lg = f.legal || {};
+            return { nav: d.nav.map(link).filter(Boolean).slice(0, 12), soon: (d.soon || []).map(link).filter(Boolean).slice(0, 24),
+                footer: { blurb: String(f.blurb || '').slice(0, 200), discover: (f.discover || []).map(link).filter(Boolean).slice(0, 6), popular: (f.popular || []).map(link).filter(Boolean).slice(0, 10),
+                    legal: https(lg.terms) && https(lg.privacy) && https(lg.dmca) ? { terms: lg.terms, privacy: lg.privacy, dmca: lg.dmca } : null } };
+        }
+        function cached() { try { const c = JSON.parse(localStorage.getItem(KEY) || 'null'); return c && c.host === host() && c.data ? c : null; } catch { return null; } }
+        function refresh() {
+            if (inflight || typeof fetch === 'undefined') return inflight || Promise.resolve(null);
+            inflight = fetch('https://openvibe.network/api/chrome?host=' + encodeURIComponent(host()), { credentials: 'omit' })
+                .then(r => (r.ok ? r.json() : null)).then(clean)
+                .then(d => { if (d) { try { localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), host: host(), data: d })); } catch { /* */ } } return d; })
+                .catch(() => null);
+            return inflight;
+        }
+        /** Cached data now (or null); `onFirst` fires once when a first-ever fetch lands. */
+        function get(onFirst) {
+            const c = cached();
+            if (!c || Date.now() - c.at > TTL) { const p = refresh(); if (!c && onFirst) p.then(d => { if (d) onFirst(d); }); }
+            return c ? c.data : null;
+        }
+        return { get, refresh };
+    })());
+
     // ── Network launcher ─────────────────────────────────────
     const LAUNCHER_SITES = [
         { name: 'Live', desc: 'Streams, clips and chat', icon: 'live', url: 'https://openvibe.live/' },
@@ -575,8 +631,12 @@
                 body.innerHTML = hits.length ? `<div class="ovl-h">Tools</div><div class="ovl-fams">${hits.map(t => tile(t, 'ovl-fam')).join('')}</div>` : '<div class="ovl-empty">No tool matches. <a href="https://openvibe.tools/">Browse them all</a></div>';
                 return;
             }
-            body.innerHTML = `<div class="ovl-h">Sites</div><div class="ovl-sites">${LAUNCHER_SITES.map(x => tile(x, 'ovl-site')).join('')}</div>
-                <div class="ovl-h">Tools <a href="https://openvibe.tools/">See all</a></div><div class="ovl-fams">${fams.map(x => tile(x, 'ovl-fam')).join('')}</div>`;
+            const chrome = OVChrome.get();
+            const sites = chrome && chrome.nav.length ? chrome.nav.map(n => ({ name: n.name, desc: n.tagline, icon: n.icon || n.id, url: n.url })) : LAUNCHER_SITES;
+            const soon = chrome ? chrome.soon : [];
+            body.innerHTML = `<div class="ovl-h">Sites</div><div class="ovl-sites">${sites.map(x => tile(x, 'ovl-site')).join('')}</div>
+                <div class="ovl-h">Tools <a href="https://openvibe.tools/">See all</a></div><div class="ovl-fams">${fams.map(x => tile(x, 'ovl-fam')).join('')}</div>
+                ${soon.length ? `<div class="ovl-h">Opening soon</div><div class="ovl-soon">${soon.map(x => `<a href="${escapeAttr(x.url)}">${escapeAttr(x.name)}</a>`).join('')}</div>` : ''}`;
         }
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -603,6 +663,19 @@
             panel.classList.add('open'); btn.setAttribute('aria-expanded', 'true');
             try { panel.querySelector('.ovl-q').focus({ preventScroll: true }); } catch { /* */ }
         });
+    }
+
+    /** The network's most used sites, after the page's own links (networkLinks: false turns it off). */
+    function networkLinksHTML(pageLinks) {
+        if (_config.networkLinks === false) return '';
+        const chrome = OVChrome.get((d) => { if (d && _navEl && !_navEl.querySelector('.ovnav-net')) { try { render(); } catch { /* */ } } });
+        if (!chrome) return '';
+        const here = currentHost().toLowerCase();
+        const taken = new Set((pageLinks || []).map(l => { try { return new URL(l.href, location.href).hostname; } catch { return ''; } }));
+        const max = typeof _config.networkLinks === 'number' ? _config.networkLinks : 4;
+        const pick = chrome.nav.filter(n => { try { const h = new URL(n.url).hostname; return h !== here && !here.endsWith('.' + h) && !taken.has(h); } catch { return false; } }).slice(0, max);
+        if (!pick.length) return '';
+        return `<span class="ovnav-sep" aria-hidden="true"></span>` + pick.map(n => `<a class="ovnav-net" href="${escapeAttr(n.url)}" title="${escapeAttr(n.tagline)}">${escapeAttr(n.name)}</a>`).join('');
     }
 
     // ── Notification bell (mounted by the navbar itself) ─────
@@ -775,7 +848,7 @@
 
     /** Where "Sign In" goes on this host. */
     function resolveLoginHref(host, returnUrl) {
-        if (_config.loginUrl) return _config.loginUrl;
+        if (_config.loginUrl) return String(_config.loginUrl).replace('{url}', encodeURIComponent(returnUrl || '/'));
         if (onToolsDomain(host)) {
             // Every *.openvibe.tools host signs in through the gateway apex: it
             // holds the OAuth state cookie + redirect_uri (both apex-host-only)
@@ -1122,6 +1195,7 @@
             ${brandHTML(brand)}
             <div class="openvibe-navbar-links">
                 ${links.map(l => `<a href="${escapeAttr(l.href)}"${l.active ? ' class="active"' : ''}${l.external ? ' target="_blank" rel="noopener"' : ''}>${l.icon ? `<i class="fa-solid ${escapeAttr(l.icon)} icon"></i>` : ''}${escapeAttr(l.label)}</a>`).join('')}
+                ${networkLinksHTML(links)}
                 ${u && u.role === 'admin' ? `<a href="https://openvibe.network/admin"><i class="fa-solid fa-shield-halved"></i> Admin</a>` : ''}
             </div>
             <div class="openvibe-navbar-spacer"></div>

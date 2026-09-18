@@ -27,6 +27,25 @@ auth.startJwksRefresh();
 const app = express();
 app.set('trust proxy', true);
 app.use(express.json({ limit: '2mb' }));
+
+// ── Visitor sign-in (OAuth client `media` on the Network; same module as Community/Tools) ──
+// Host-only cookies on openvibe.media. No new dependency: cookies are parsed here.
+app.use((req, _res, next) => {
+    req.cookies = {};
+    for (const part of String(req.headers.cookie || '').split(';')) {
+        const i = part.indexOf('='); if (i < 1) continue;
+        try { req.cookies[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim()); } catch { /* malformed value */ }
+    }
+    next();
+});
+{ const legal = require('openvibe-shared/legal'); app.get(legal.PATHS, legal.handler({ id: 'media', service: 'media', host: 'openvibe.media', name: 'OpenVibe.Media', profile: 'hosting' })); app.get('/tos', (_req, res) => res.redirect(301, '/terms')); }
+const userAuth = require('./user-auth');
+const userAuthConfig = {
+    baseUrl: config.publicUrl, networkUrl: config.network.url, networkInternalUrl: config.network.internalUrl,
+    cookies: { secure: /^https:/.test(config.publicUrl) },
+    oauth: { clientId: process.env.OV_OAUTH_CLIENT_ID || 'media', clientSecret: process.env.OV_OAUTH_CLIENT_SECRET || '', redirectUri: process.env.OV_OAUTH_REDIRECT_URI || `${config.publicUrl}/auth/callback` },
+};
+app.use('/auth', userAuth.createAuthRoutes(userAuthConfig, userAuth.createAuthClient(userAuthConfig)));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // CORS preflight for tenant API routes (per-app allow-list; auth-less OPTIONS).

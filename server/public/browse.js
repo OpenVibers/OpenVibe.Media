@@ -241,14 +241,13 @@ function renderPage(tab, page, data, counts) {
 <style>
 :root{--bg:var(--bg-primary,#0a0f1c);--panel:var(--bg-card,#131c2e);--border:#1f2d47;--text:var(--text-primary,#e6edf7);--muted:var(--text-secondary,#96a7c2);--accent-page:var(--accent,#3b82f6)}
 *{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,'Segoe UI',Arial,sans-serif;padding-bottom:3rem}
-header{display:flex;align-items:center;gap:.9rem;padding:1rem 1.4rem;border-bottom:1px solid var(--border);background:var(--bg-secondary,rgba(15,20,32,.92))}
-header .logo{width:30px;height:30px}
-header h1{font-size:1.15rem}header h1 b{color:var(--accent-page)}
-header .sub{color:var(--muted);font-size:.82rem;margin-left:auto}
-nav{display:flex;gap:.25rem;padding:.7rem 1.4rem;flex-wrap:wrap}
-nav a{color:var(--muted);text-decoration:none;padding:.45rem .9rem;border-radius:999px;font-size:.88rem;border:1px solid transparent}
-nav a:hover{color:var(--text)}nav a.on{color:var(--on-accent,#fff);background:var(--accent-page)}
-nav a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
+header.intro{display:flex;align-items:baseline;gap:.2rem .8rem;flex-wrap:wrap;padding:1rem 1.4rem .4rem}
+header.intro h1{font-size:1.15rem;margin:0}
+header.intro .sub{color:var(--muted);font-size:.85rem}
+nav.tabs{display:flex;gap:.25rem;padding:.2rem 1.4rem .7rem;flex-wrap:wrap}
+nav.tabs a{color:var(--muted);text-decoration:none;padding:.45rem .9rem;border-radius:999px;font-size:.88rem;border:1px solid transparent}
+nav.tabs a:hover{color:var(--text)}nav.tabs a.on{color:var(--on-accent,#fff);background:var(--accent-page)}
+nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem;padding:0 1.4rem}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
 .thumb{position:relative;display:block;aspect-ratio:16/9;background:#0b0f18}
@@ -269,12 +268,8 @@ nav a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 </head><body>
 <div id="navbar-mount"></div>
-<header>
-  <svg class="logo" viewBox="0 0 100 100" fill="none" stroke="var(--accent-page)" stroke-width="7"><circle cx="28" cy="66" r="11"/><circle cx="72" cy="66" r="11"/><circle cx="50" cy="30" r="11"/><line x1="34" y1="58" x2="45" y2="40"/><line x1="66" y1="58" x2="55" y2="40"/><line x1="39" y1="66" x2="61" y2="66"/></svg>
-  <h1>OpenVibe<b>.Media</b></h1>
-  <span class="sub">every public file on the network — videos, clips, images, pastes &amp; thumbnails</span>
-</header>
-<nav>${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
+<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, images, pastes &amp; thumbnails from all OpenVibe sites</span></header>
+<nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>
 <footer id="ov-footer" class="ovf"></footer>
