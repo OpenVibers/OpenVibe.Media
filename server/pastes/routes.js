@@ -830,6 +830,8 @@ router.delete('/:slug/comments/:commentId', tenantAuth({ allowUser: true }), (re
 
 module.exports = router;
 module.exports.pastePublic = pastePublic;
+module.exports.generateSlug = generateSlug;
+module.exports.SCREENSHOTS_DIR = SCREENSHOTS_DIR;
 module.exports.screenshotUrl = screenshotUrl;
 module.exports.removePasteScreenshot = removePasteScreenshot;
 module.exports.SCREENSHOTS_DIR = SCREENSHOTS_DIR;
