@@ -3,16 +3,20 @@
  *
  * GET /v/:id             VOD playback: local stream w/ Range, or 302 presigned
  *                        B2/R2 (inherited logic). Live recordings serve the
- *                        fully-indexed .seekable sidecar for DVR.
- * GET /c/:id             clip playback (same tiering/range logic)
- * GET /p/:slug           paste HTML page (indexable)
+ *                        fully-indexed .seekable sidecar for DVR. A browser
+ *                        NAVIGATING here gets a watch page instead (see
+ *                        pages.js — ?raw=1 always yields the bytes).
+ * GET /c/:id             clip playback (same tiering/range logic + watch page)
+ * GET /p/:slug           paste viewer — canonical on OpenVibe.Community
  * GET /p/:slug/raw       paste raw text
  * GET /p/:slug/screenshot paste screenshot image
  * GET /t/:id             thumbnails (id = filename)
  * GET /f/:key            files with correct Content-Type + Range
+ * GET /og-image.png      the site's share card
  *
- * /v /c /t /f carry X-Robots-Tag: noindex — the owning app has the canonical
- * page. Pastes are Media-canonical and stay indexable.
+ * /v /c /t /f bytes carry X-Robots-Tag: noindex — the owning app has the
+ * canonical page (the watch page says so with rel=canonical). The paste
+ * viewer is noindex too: Community owns that URL now.
  */
 'use strict';
 
@@ -22,6 +26,7 @@ const fs = require('fs');
 const db = require('../db/database');
 const tools = require('../vod/media-tools');
 const { optionalIdentity } = require('../auth');
+const pages = require('./pages');
 
 const router = express.Router();
 
@@ -111,6 +116,13 @@ async function serveMediaRecord(kind, record, req, res) {
         return res.status(403).json({ error: 'This media is private' });
     }
 
+    // A person (or a link-preview crawler) landing on the URL gets the watch
+    // page; its <video> comes back here with ?raw=1 for the bytes.
+    if (pages.wantsHtmlPage(req)) {
+        res.set('Cache-Control', visibility === 'public' ? 'public, max-age=60' : 'private, no-store');
+        return res.type('html').send(pages.renderWatchPage(kind, record));
+    }
+
     trackUniqueView(kind, record.id, req, record.user_id);
 
     // Track last access time for storage tier decisions
@@ -194,6 +206,12 @@ router.get('/c/:id', optionalIdentity, async (req, res) => {
         console.error('[Public] /c error:', err.message);
         if (!res.headersSent) res.status(500).json({ error: 'Failed to serve media' });
     }
+});
+
+// ── Share card (og:image default) ────────────────────────────
+router.get('/og-image.png', (req, res) => {
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.sendFile(path.join(__dirname, '..', 'static', 'og-image.png'));
 });
 
 // ── Thumbnails ───────────────────────────────────────────────
@@ -415,59 +433,7 @@ router.get('/f/:key', (req, res) => {
 
 // ── Pastes ───────────────────────────────────────────────────
 
-function escapeHtml(s) {
-    return String(s ?? '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-}
-
-function renderPastePage(paste) {
-    const title = escapeHtml(paste.title || 'Untitled');
-    const isScreenshot = paste.type === 'screenshot' && paste.screenshot_path;
-    const body = isScreenshot
-        ? `<figure class="shot"><img src="/p/${escapeHtml(paste.slug)}/screenshot" alt="${title}"></figure>
-           ${paste.content ? `<p class="desc">${escapeHtml(paste.content)}</p>` : ''}`
-        : `<pre class="code" data-language="${escapeHtml(paste.language || 'text')}"><code>${escapeHtml(paste.content || '')}</code></pre>`;
-    const created = escapeHtml(String(paste.created_at || ''));
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} — OpenVibe.Media</title>
-<meta name="description" content="${title} — shared via OpenVibe.Media pastes">
-<style>
-  :root { --accent: #8b5cf6; --accent-light: #a78bfa; --bg: #131318; --panel: #1b1b22; --text: #e8e8ee; --muted: #9a9aa8; }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif; }
-  header { display: flex; align-items: center; gap: .6rem; padding: .8rem 1.2rem; border-bottom: 1px solid #26262f; }
-  header .brand { font-weight: 700; color: var(--accent-light); text-decoration: none; font-size: 1.05rem; }
-  header .brand span { color: var(--text); }
-  main { max-width: 960px; margin: 0 auto; padding: 1.2rem; }
-  h1 { font-size: 1.3rem; margin: .2rem 0 .3rem; }
-  .meta { color: var(--muted); font-size: .85rem; margin-bottom: 1rem; }
-  .meta a { color: var(--accent-light); text-decoration: none; }
-  .code { background: var(--panel); border: 1px solid #26262f; border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto; white-space: pre; font: 13px/1.5 ui-monospace, 'Cascadia Code', Menlo, monospace; }
-  .shot img { max-width: 100%; border-radius: 10px; border: 1px solid #26262f; }
-  .desc { color: var(--muted); }
-  footer { max-width: 960px; margin: 0 auto; padding: 1rem 1.2rem 2rem; color: var(--muted); font-size: .82rem; }
-  footer a { color: var(--accent-light); text-decoration: none; }
-</style>
-</head>
-<body>
-<header>
-  <a class="brand" href="https://openvibe.network">OpenVibe<span>.Media</span></a>
-</header>
-<main>
-  <h1>${title}</h1>
-  <p class="meta">${escapeHtml(paste.language || 'text')} · ${paste.views || 0} views · ${paste.unique_views || 0} unique · ${created}${isScreenshot ? '' : ` · <a href="/p/${escapeHtml(paste.slug)}/raw">raw</a>`}</p>
-  ${body}
-</main>
-<footer>Shared via OpenVibe.Media — <a href="https://openvibe.network">One Account. All of OpenVibe.</a></footer>
-</body>
-</html>`;
-}
-
+// The page itself is rendered in pages.js (thin viewer; canonical on Community).
 router.get('/p/:slug', optionalIdentity, (req, res) => {
     try {
         const paste = db.getPasteBySlug(String(req.params.slug));
@@ -494,7 +460,8 @@ router.get('/p/:slug', optionalIdentity, (req, res) => {
             return res.status(410).send('This paste has been burned after reading.');
         }
 
-        res.type('html').send(renderPastePage(paste));
+        res.set('Cache-Control', 'private, no-store');
+        res.type('html').send(pages.renderPastePage(paste));
     } catch (err) {
         console.error('[Public] /p error:', err.message);
         res.status(500).send('Error');
