@@ -174,15 +174,18 @@ async function _doFinalize(vodId, opts) {
     await tools.mergePendingSegments(filePath);
 
     // A recording that never received media (e.g. an RTP ingest that was
-    // started and stopped without packets) leaves a zero-byte file. Quarantine
-    // it as failed — the wall-clock fallback below must never mark it ready.
+    // started and stopped without packets) leaves a zero-byte file. There is
+    // nothing to review, so treat it like a missing file: report the failure and
+    // delete the row and file — the wall-clock fallback below must never mark it
+    // ready, and a 0:00 ghost must never reach listings.
     if (tools.getFileSizeSafe(filePath) === 0) {
-        console.warn(`[VOD] vod ${vodId}: zero-byte recording — quarantining`);
-        db.run(`UPDATE vods SET is_recording = 0, health_status = 'zero_byte', health_issues_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
-            [JSON.stringify(['zero_byte']), vodId]);
-        const failed = db.getVodById(vodId);
-        _webhookForVod(failed, 'vod.failed');
-        return failed;
+        console.warn(`[VOD] vod ${vodId}: zero-byte recording — deleting empty recording`);
+        _webhookForVod({ ...vod, health_status: 'zero_byte', is_public: 0 }, 'vod.failed');
+        try { fs.unlinkSync(filePath); } catch { /* */ }
+        try { tools.cleanupSeekableFile(filePath); } catch { /* */ }
+        try { if (vod.master_file_path && fs.existsSync(vod.master_file_path)) fs.unlinkSync(vod.master_file_path); } catch { /* */ }
+        try { db.run('DELETE FROM vods WHERE id = ?', [vodId]); } catch { /* */ }
+        return null;
     }
 
     // Remux for proper seeking support (fast copy-mode, no re-encode)
@@ -247,7 +250,7 @@ async function _doFinalize(vodId, opts) {
     }
 
     // Very short recordings are quarantined for review instead of deleted.
-    const MIN_VOD_SECONDS = parseInt(process.env.MIN_VOD_SECONDS || '3', 10);
+    const MIN_VOD_SECONDS = parseInt(process.env.MIN_VOD_SECONDS || '2', 10);
     if (durationSeconds < MIN_VOD_SECONDS) {
         console.log(`[VOD] Quarantining short vod ${vodId}: duration ${durationSeconds}s`);
         db.run(`UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
