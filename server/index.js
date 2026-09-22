@@ -22,6 +22,7 @@ for (const dir of [config.vod.path, config.vod.clipsPath, config.pastes.path, co
 
 db.getDb();          // init schema (WAL)
 auth.seedApps();     // upsert MEDIA_APPS_SEED / MEDIA_APP_KEYS
+auth.ensureTokenOnlyApps();  // tenants reached only with Network service tokens (community)
 auth.startJwksRefresh();
 
 const app = express();

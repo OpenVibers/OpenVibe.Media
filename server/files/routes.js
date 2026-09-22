@@ -72,7 +72,7 @@ function sha256File(filePath) {
 }
 
 // ── Upload ───────────────────────────────────────────────────
-router.post('/', tenantAuth({ allowUser: true }), upload.single('file'), async (req, res) => {
+router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload' }), upload.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded (multipart field: file)' });
 

@@ -16,6 +16,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const { serviceAuth, capabilities, http } = require('openvibe-contracts');
 const db = require('./db/database');
 const config = require('./config');
 
@@ -92,6 +93,27 @@ function verifyUserJwt(token) {
     }
 }
 
+/** A Network-issued service token for this service (sub svc:/app:/mod:), or null. */
+function verifyServiceToken(token) {
+    if (!_networkPublicKeyPem) return null;
+    const r = serviceAuth.verifyServiceToken(token, { publicKey: _networkPublicKeyPem, issuer: config.network.url, audience: 'openvibe.media' });
+    return r.ok ? r.claims : null;
+}
+
+function problem(res, status, code, detail) {
+    return http.sendProblem(res, status, code, { detail });
+}
+
+/**
+ * Tenants that exist only to be reached with service tokens (no API key is ever issued):
+ * OpenVibe.Community stores screenshot bytes here under its own namespace.
+ */
+function ensureTokenOnlyApps() {
+    for (const [appId, name] of [['community', 'OpenVibe.Community']]) {
+        if (!db.getApp(appId)) db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, 10 * 1024 ** 3]);
+    }
+}
+
 // ── App key check (constant-time) ────────────────────────────
 
 function checkAppKey(app, presentedKey) {
@@ -138,7 +160,7 @@ function actingUserId(req) {
  * @param {boolean} [opts.allowUser=false]  also accept a Network user JWT
  *        (browser endpoints); Origin, when present, must be allow-listed.
  */
-function tenantAuth({ allowUser = false } = {}) {
+function tenantAuth({ allowUser = false, capability = null } = {}) {
     return (req, res, next) => {
         const appId = String(req.params.app || '').trim();
         const app = appId ? db.getApp(appId) : null;
@@ -164,6 +186,21 @@ function tenantAuth({ allowUser = false } = {}) {
         }
         if (token && isKeyOfOtherApp(token, appId)) {
             return res.status(403).json({ error: 'API key not valid for this app' });
+        }
+
+        // 1b) A service-principal token from OpenVibe.Network (roadmap Wave 1, ADR-003). Accepted only on
+        //     routes that name the capability they perform, and only for the :app namespaces the token was
+        //     granted. It carries the app's authority for that one action — no acting user.
+        if (token && token.split('.').length === 3) {
+            const svc = verifyServiceToken(token);
+            if (svc) {
+                if (!capability) return problem(res, 403, 'capability.denied', 'service tokens are not accepted on this route');
+                const c = capabilities.check(svc, capability, { namespace: appId });
+                if (!c.allowed) return problem(res, 403, c.code, c.reason);
+                req.authType = 'app';
+                req.principal = { sub: svc.sub, cap: svc.cap, jti: svc.jti };
+                return next();
+            }
         }
 
         // 2) A Network user JWT is a real credential, but it cannot say WHICH of an app's
@@ -280,6 +317,9 @@ function seedApps() {
 
 module.exports = {
     tenantAuth,
+    ensureTokenOnlyApps,
+    verifyServiceToken,
+    _setNetworkPublicKeyForTests(pem) { _networkPublicKeyPem = pem; },
     tenantCors,
     optionalIdentity,
     // verifyUserJwt stays internal: it proves a token is a genuine Network credential,
