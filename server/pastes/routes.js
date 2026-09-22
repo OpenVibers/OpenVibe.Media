@@ -44,6 +44,15 @@ const { tenantAuth, tenantCors } = require('../auth');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
+// Apps whose pastes moved to OpenVibe.Community (PASTES_FROZEN_APPS, roadmap Wave 5) get no more writes
+// here; reads keep working for anything still pointed at Media during the switch.
+router.use((req, res, next) => {
+    const frozen = String(process.env.PASTES_FROZEN_APPS || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS' && frozen.includes(String(req.params.app))) {
+        return res.status(410).json({ error: 'Pastes for this app moved to OpenVibe.Community', code: 'pastes.moved' });
+    }
+    next();
+});
 
 // ── Screenshot upload storage ───────────────────────────────
 const SCREENSHOTS_DIR = path.join(config.pastes.path, 'screenshots');

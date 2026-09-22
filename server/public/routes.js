@@ -434,7 +434,12 @@ router.get('/f/:key', (req, res) => {
 // ── Pastes ───────────────────────────────────────────────────
 
 // The page itself is rendered in pages.js (thin viewer; canonical on Community).
+// Pastes moved to OpenVibe.Community (roadmap Wave 5, PASTES_MOVED_TO): the page and its text are
+// Community's now, so send people there. Screenshot bytes keep being served from here.
+const movedTo = () => String(process.env.PASTES_MOVED_TO || '').replace(/\/$/, '');
+
 router.get('/p/:slug', optionalIdentity, (req, res) => {
+    if (movedTo()) return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(req.params.slug)}`);
     try {
         const paste = db.getPasteBySlug(String(req.params.slug));
         if (!paste) return res.status(404).send('Paste not found');
@@ -478,6 +483,7 @@ router.get('/p/:slug/raw', (req, res) => {
             return res.redirect(302, `/p/${encodeURIComponent(paste.slug)}/screenshot`);
         }
         if (!paste || paste.type !== 'paste') return res.status(404).send('Not found');
+        if (movedTo()) return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(paste.slug)}/raw`);
         if (paste.visibility === 'private') return res.status(404).send('Not found');
 
         // Burn after read
