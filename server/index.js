@@ -8,6 +8,23 @@
  */
 'use strict';
 
+// Restore-drill mode (MEDIA_DRILL=1, `ovhost drill media`): refuse an unsafe environment before the
+// database is opened, then cut every way out of the process but its own HTTP port. The instance
+// serves reads from a restored copy of media.db, never opens a stored file and starts nothing else
+// (server/drill.js).
+require('dotenv').config();
+const drill = require('./drill');
+if (drill.enabled) {
+    try {
+        drill.assertSafe();
+    } catch (err) {
+        console.error(`[Drill] ${err.message}`);
+        process.exit(1);
+    }
+    drill.installGuards();
+    console.log(`[Drill] MEDIA_DRILL: restore-drill instance on ${process.env.HOST}:${process.env.PORT}, database ${require('path').resolve(process.env.DB_PATH)}. Reads only; no stored bytes, background work or outbound connections.`);
+}
+
 const fs = require('fs');
 const express = require('express');
 const config = require('./config');
@@ -16,14 +33,19 @@ const auth = require('./auth');
 
 // ── Bootstrap ────────────────────────────────────────────────
 
-for (const dir of [config.vod.path, config.vod.clipsPath, config.pastes.path, config.thumbnails.path, config.files.path, config.objects.path]) {
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+// A drill creates no storage directory (it writes no file) and seeds nothing: the copy is production's.
+if (!drill.enabled) {
+    for (const dir of [config.vod.path, config.vod.clipsPath, config.pastes.path, config.thumbnails.path, config.files.path, config.objects.path]) {
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    }
 }
 
 db.getDb();          // init schema (WAL)
-auth.seedApps();     // upsert MEDIA_APPS_SEED / MEDIA_APP_KEYS
-auth.ensureTokenOnlyApps();  // tenants reached only with Network service tokens (community)
-auth.startJwksRefresh();
+if (!drill.enabled) {
+    auth.seedApps();     // upsert MEDIA_APPS_SEED / MEDIA_APP_KEYS
+    auth.ensureTokenOnlyApps();  // tenants reached only with Network service tokens (community)
+    auth.startJwksRefresh();     // a drill asks Network for nothing (app keys still verify against the copy)
+}
 
 const app = express();
 app.set('trust proxy', true);
@@ -31,6 +53,9 @@ app.set('trust proxy', true);
 const release = require('openvibe-shared/release').createRelease({ service: 'media', root: require('path').join(__dirname, '..') });
 const observability = require('./observability');
 const instrumented = observability.instrument(app, { release: release.release });
+// A restore-drill instance answers reads only: 403 for every other method, on every path (before the
+// raw-body upload routes below).
+if (drill.enabled) app.use(drill.readOnly);
 // Object API v2 content uploads read the raw request body, so they sit ahead of the body parsers.
 app.put('/api/v2/:app/objects/:id/content', ...require('./objects/routes').contentHandlers);
 app.put('/api/v2/:app/objects/:id/multipart/:uploadId/parts/:n', ...require('./objects/routes').partHandlers);
@@ -69,6 +94,8 @@ const userAuthConfig = {
     cookies: { secure: /^https:/.test(config.publicUrl) },
     oauth: { clientId: process.env.OV_OAUTH_CLIENT_ID || 'media', clientSecret: process.env.OV_OAUTH_CLIENT_SECRET || '', redirectUri: process.env.OV_OAUTH_REDIRECT_URI || `${config.publicUrl}/auth/callback` },
 };
+// A restore drill signs nobody in: that would redeem codes at Network.
+if (drill.enabled) app.use('/auth', (req, res) => res.status(503).json({ error: 'This is a restore-drill instance (MEDIA_DRILL): no sign-in', code: 'media.drill_no_sign_in' }));
 app.use('/auth', userAuth.createAuthRoutes(userAuthConfig, userAuth.createAuthClient(userAuthConfig)));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
@@ -108,6 +135,7 @@ app.get('/healthz', (req, res) => {
         recorder: require('./vod/recorder'),
         events: require('./events'),
         remote: { configured: (n) => vodStorageForReady.providerConfigured(n), probe: (n) => vodStorageForReady.probeProvider(n) },
+        drill: drill.enabled,
     });
 }
 
@@ -134,7 +162,7 @@ app.get('/api/v1/:app/stats/series/:metric', auth.tenantAuth(), (req, res) => {
 });
 
 try { require('./views/service').ensureSchema(); } catch (e) { console.warn('[Views] schema:', e.message); }
-setInterval(() => { try { const n = require('./views/service').prune(30); if (n) console.log(`[Views] pruned ${n} stale visit row(s)`); } catch { /* */ } }, 12 * 3600 * 1000);
+if (!drill.enabled) setInterval(() => { try { const n = require('./views/service').prune(30); if (n) console.log(`[Views] pruned ${n} stale visit row(s)`); } catch { /* */ } }, 12 * 3600 * 1000);
 app.use('/api/v1/:app/views', require('./views/routes'));
 app.use('/api/v1/:app/vods', require('./vod/routes'));
 app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
@@ -168,62 +196,70 @@ function every(ms, fn) {
     timers.push(t);
 }
 
-vodStorage.checkProviders()
-    .then(() => vodStorage.migrateLegacy().catch(() => {}))
-    .catch(err => console.warn('[Boot] Provider check failed:', err.message));
-vodStorage.start();                                        // tiering sweep
-healthJob.start();                                         // health scan + quarantine cleanup
-require('./vod/clip-jobs').start();                        // failed clip re-cuts (auto-retry, hot-fetch)
-require('./objects/verify-job').start();                   // scheduled copy verification (bounded batches; never deletes)
-require('./jobs/worker').start();                          // media_jobs worker (light + heavy lanes; proposals wait for their owner)
-// Descriptor watchdog: a leak here once pinned 80 GB of deleted recordings to the disk.
-every(5 * 60 * 1000, () => {
-    try {
-        const n = fs.readdirSync('/proc/self/fd').length;
-        if (n > 1500) console.warn(`[Boot] ${n} open file descriptors — investigate a stream/handle leak (lsof -p ${process.pid} +L1)`);
-    } catch { /* not linux */ }
-});
-every(60 * 1000, () => recorder.checkDisk());              // disk guardian
-every(60 * 60 * 1000, () => thumbService.cleanupOldThumbnails());  // stale live thumbs
-// Object model: purge native objects whose soft-delete retention has passed (held ones are kept).
-every(60 * 60 * 1000, () => {
-    try { const n = require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
-    // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
-    try { const r = require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
-});
-// Project rows that have no media_object yet (first boot after the upgrade: all of them).
-setTimeout(() => {
-    try {
-        const bf = require('./objects/backfill');
-        const r = bf.backfill({ onlyMissing: true });
-        if (r.totals.created || r.totals.updated || r.errors.length) console.log(`[Objects] Backfill: ${bf.summarize(r)}`);
-    } catch (err) { console.warn('[Objects] Backfill failed:', err.message); }
-}, 15 * 1000).unref?.();
+// A restore drill starts none of this: every job below reads or writes stored files, runs ffmpeg,
+// talks to B2/R2 or announces outcomes to Live.
+if (!drill.enabled) {
+    vodStorage.checkProviders()
+        .then(() => vodStorage.migrateLegacy().catch(() => {}))
+        .catch(err => console.warn('[Boot] Provider check failed:', err.message));
+    vodStorage.start();                                        // tiering sweep
+    healthJob.start();                                         // health scan + quarantine cleanup
+    require('./vod/clip-jobs').start();                        // failed clip re-cuts (auto-retry, hot-fetch)
+    require('./objects/verify-job').start();                   // scheduled copy verification (bounded batches; never deletes)
+    require('./jobs/worker').start();                          // media_jobs worker (light + heavy lanes; proposals wait for their owner)
+    // Descriptor watchdog: a leak here once pinned 80 GB of deleted recordings to the disk.
+    every(5 * 60 * 1000, () => {
+        try {
+            const n = fs.readdirSync('/proc/self/fd').length;
+            if (n > 1500) console.warn(`[Boot] ${n} open file descriptors — investigate a stream/handle leak (lsof -p ${process.pid} +L1)`);
+        } catch { /* not linux */ }
+    });
+    every(60 * 1000, () => recorder.checkDisk());              // disk guardian
+    every(60 * 60 * 1000, () => thumbService.cleanupOldThumbnails());  // stale live thumbs
+    // Object model: purge native objects whose soft-delete retention has passed (held ones are kept).
+    every(60 * 60 * 1000, () => {
+        try { const n = require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
+        // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
+        try { const r = require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
+    });
+    // Project rows that have no media_object yet (first boot after the upgrade: all of them).
+    setTimeout(() => {
+        try {
+            const bf = require('./objects/backfill');
+            const r = bf.backfill({ onlyMissing: true });
+            if (r.totals.created || r.totals.updated || r.errors.length) console.log(`[Objects] Backfill: ${bf.summarize(r)}`);
+        } catch (err) { console.warn('[Objects] Backfill failed:', err.message); }
+    }, 15 * 1000).unref?.();
 
-// Recover from an unclean shutdown: rows stuck in is_recording with no live
-// ffmpeg are finalized from whatever hit the disk.
-setTimeout(() => {
-    try {
-        const stuck = db.all('SELECT id FROM vods WHERE is_recording = 1');
-        for (const row of stuck) {
-            if (recorder.isRecording(row.id)) continue;
-            console.log(`[Boot] Finalizing orphaned recording vod ${row.id}`);
-            require('./vod/finalize').finalizeVod(row.id).catch(() => {});
+    // Recover from an unclean shutdown: rows stuck in is_recording with no live
+    // ffmpeg are finalized from whatever hit the disk.
+    setTimeout(() => {
+        try {
+            const stuck = db.all('SELECT id FROM vods WHERE is_recording = 1');
+            for (const row of stuck) {
+                if (recorder.isRecording(row.id)) continue;
+                console.log(`[Boot] Finalizing orphaned recording vod ${row.id}`);
+                require('./vod/finalize').finalizeVod(row.id).catch(() => {});
+            }
+        } catch (err) {
+            console.warn('[Boot] Orphan finalize sweep failed:', err.message);
         }
-    } catch (err) {
-        console.warn('[Boot] Orphan finalize sweep failed:', err.message);
-    }
-}, 5000).unref?.();
+    }, 5000).unref?.();
+}
 
 // ── Listen + graceful shutdown ───────────────────────────────
 
 const server = app.listen(config.port, config.host, () => {
+    if (drill.enabled) { console.log(`[Drill] Ready: http://${config.host}:${config.port} (reads only)`); return; }
     console.log(`[Media] OpenVibe.Media listening on ${config.host}:${config.port} (${config.nodeEnv})`);
     console.log(`[Media] Data: db=${config.db.path} vods=${config.vod.path} clips=${config.vod.clipsPath}`);
     console.log(`[Media] RTP ingest pool: udp ${config.rtp.portMin}-${config.rtp.portMax} (127.0.0.1)`);
     // Durable events (roadmap Wave 3): webhook outcomes also go to OpenVibe.Events. Off without EVENTS_URL.
     try { require('./events').init(); } catch (err) { console.warn('[Events] not started:', err.message); }
 });
+
+// A drill whose port is taken stops instead of running unready.
+if (drill.enabled) server.once('error', (err) => { console.error(`[Drill] HTTP server: ${err.message}`); process.exit(1); });
 
 let shuttingDown = false;
 function shutdown(signal) {

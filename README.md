@@ -23,6 +23,7 @@ server/
   config.js              env config (PORT, DB_PATH, *_PATH, MEDIA_B2_*/R2_*, RTP pool, OV_NETWORK_URL)
   auth.js                tenancy + auth middleware, JWKS fetch, app seeding
   webhooks.js            HMAC-signed outbound webhooks
+  drill.js               MEDIA_DRILL: restore-drill mode (reads only, no bytes, no jobs, nothing leaves)
   db/schema.sql          apps, vods, clips, pastes(+likes/comments), files, content_views, media_settings,
                          media_objects/locations/relationships/variants/jobs/holds/invariant_violations
   db/database.js         better-sqlite3 helpers, all app_id-scoped; legacy row importer
@@ -264,6 +265,29 @@ change it describes (`webhooks.announce()`), so an outcome is never lost or anno
 rolled-back change; the webhook follows the commit and carries `event_id` = that event's id
 (absent when the outbox is off), so an app that reads both paths (Live during its webhook →
 Events transition) handles each outcome once. Webhooks stay until every consumer reads Events.
+
+## Restore drills (`MEDIA_DRILL=1`)
+
+`ovhost drill media` (OpenVibe.Host `docs/restore-drills.md`) restores `media.db` from the latest
+backup and starts a second Media from this checkout on 127.0.0.1:14100 with `MEDIA_DRILL=1` and
+`DB_PATH` on the copy. In that mode (`server/drill.js`) Media:
+
+- refuses to start unless `DB_PATH` is set and outside the checkout and `/opt/openvibe.media`, `HOST`
+  is loopback and `PORT` is not 4100 (before the database is opened);
+- starts only its HTTP server: no app seeding, JWKS refresh, tiering sweep, health job, junk sweep,
+  clip re-cuts, copy verification, jobs worker, disk guardian, thumbnail cleanup, object purge,
+  backfill, orphan-recording finalize or Events relay; webhooks are never sent;
+- writes no file and creates no directory (the storage checks leave `/api/ready`, as do the remote
+  tiers; it reports `"mode": "drill"`);
+- never opens a file path from the database: every byte route (`/v` and `/c` bytes, `/t`, `/a`, `/f`,
+  `/o`, `/p/:slug/screenshot`, `/live/:sel/frame.jpg`, `/api/thumbnails/:name`) answers 503;
+  watch pages and the `/browse` index still render from the copy;
+- connects to nothing and runs no program but `git` (no ffmpeg or ffprobe), opens no UDP socket and
+  listens on nothing but its port;
+- answers 403 to every method but GET, HEAD and OPTIONS, and 503 to `/auth/*`.
+
+`test/drill-mode.test.js` boots the real server that way against a copy whose app has a webhook URL
+and checks each point.
 
 ## Health, readiness and metrics
 

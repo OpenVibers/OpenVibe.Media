@@ -29,7 +29,8 @@ const THUMB_WIDTH = 640;
 const THUMB_QUALITY = 6; // ffmpeg qscale:v  (2=best, 31=worst, 6 is good balance)
 const CLIENT_THUMB_WRITE_MIN_INTERVAL_MS = 15000;
 
-if (!fs.existsSync(THUMB_DIR)) {
+// (A restore drill writes nothing, directories included.)
+if (!require('../drill').enabled && !fs.existsSync(THUMB_DIR)) {
     fs.mkdirSync(THUMB_DIR, { recursive: true });
 }
 
@@ -267,6 +268,7 @@ function saveLiveThumbnail(appId, streamId, imageData) {
 
 // ── Serve Thumbnail File (public /t/:id) ─────────────────────
 function serveThumbnail(req, res) {
+    if (require('../drill').refuseBytes(res)) return;   // a restore drill serves no stored file
     try {
         const filename = path.basename(req.params.id || req.params.filename || ''); // prevent traversal
         const filePath = path.join(THUMB_DIR, filename);

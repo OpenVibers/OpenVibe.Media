@@ -49,6 +49,8 @@ async function _post(url, rawBody, signature) {
  * @param {string} [opts.eventId]  the OpenVibe.Events event_id of the same outcome
  */
 async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
+    // A restore drill (MEDIA_DRILL) never calls an app: the URLs in its apps table are production's.
+    if (require('./drill').enabled) return false;
     let app = appOrId;
     if (typeof appOrId === 'string') {
         try { app = db.getApp(appOrId); } catch { app = null; }

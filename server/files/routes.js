@@ -32,8 +32,9 @@ const { tenantAuth, tenantCors } = require('../auth');
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
+// (multer creates `dest` when it is built; a restore drill takes no upload and creates no directory.)
 const upload = multer({
-    dest: path.join(config.files.path, '.tmp'),
+    ...(require('../drill').enabled ? { storage: multer.memoryStorage() } : { dest: path.join(config.files.path, '.tmp') }),
     limits: { fileSize: config.files.maxSizeMb * 1024 * 1024 },
 });
 

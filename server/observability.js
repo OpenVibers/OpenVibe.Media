@@ -94,16 +94,19 @@ function domainMetrics(registry, { db, recorder, events }) {
     });
 }
 
-function createMediaReadiness({ release, db, config, auth, recorder, events, remote }) {
+function createMediaReadiness({ release, db, config, auth, recorder, events, remote, drill = false }) {
     const checks = [
         { name: 'db', required: true, check: () => { const r = db.get('SELECT COUNT(*) AS n FROM apps'); return { ok: Number.isInteger(r.n), detail: { apps: r.n } }; } },
     ];
-    for (const [name, dir] of Object.entries(storageDirs(config))) {
-        checks.push({ name: `storage_${name}`, required: true, check: () => writable(dir) });
+    // A restore drill (MEDIA_DRILL) writes no file and asks no remote tier anything: neither is checked.
+    if (!drill) {
+        for (const [name, dir] of Object.entries(storageDirs(config))) {
+            checks.push({ name: `storage_${name}`, required: true, check: () => writable(dir) });
+        }
     }
     checks.push({ name: 'network_jwks', required: false, description: 'user sign-in and service tokens (app keys work without it)', check: () => auth.jwksLoaded() || 'Network public key not loaded yet' });
     for (const name of ['b2', 'r2']) {
-        if (!remote.configured(name)) continue;   // not configured: no check, rather than a pretend pass
+        if (drill || !remote.configured(name)) continue;   // not configured: no check, rather than a pretend pass
         checks.push({ name: `remote_${name}`, required: false, cacheMs: 60 * 1000, timeoutMs: 5000, check: () => remote.probe(name) });
     }
     checks.push({
@@ -129,7 +132,7 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
         service: 'media',
         release,
         checks,
-        details: () => ({ recordings_in_progress: recorder.activeCount() }),
+        details: () => ({ ...(drill ? { mode: 'drill' } : {}), recordings_in_progress: recorder.activeCount() }),
     });
 }
 

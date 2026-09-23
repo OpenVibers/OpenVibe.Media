@@ -89,8 +89,9 @@ function createAuthClient(config) {
         return client.verifyToken(token);
     }
 
-    // Warm the key cache at boot (non-fatal if the Network is down)
-    ensureKey().catch(() => {});
+    // Warm the key cache at boot (non-fatal if the Network is down). A restore drill asks Network
+    // for nothing (MEDIA_DRILL; its /auth routes answer 503).
+    if (!require('./drill').enabled) ensureKey().catch(() => {});
 
     return { client, ensureKey, verify };
 }

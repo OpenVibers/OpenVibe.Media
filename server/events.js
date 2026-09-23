@@ -56,6 +56,8 @@ function init({
     fetchImpl, intervalMs = 2000,
 } = {}) {
     if (outbox) return outbox;
+    // A restore drill (MEDIA_DRILL) relays nothing: its outbox rows describe a restored copy.
+    if (require('./drill').enabled) return null;
     if (process.env.EVENTS_PUBLISH === 'off' || !eventsUrl || !clientSecret) return null;
     const tokens = createServiceTokenClient({ tokenUrl: `${networkUrl}/oauth/token`, clientId, clientSecret, fetch: fetchImpl });
     const client = createClient({ baseUrls: { events: eventsUrl }, tokenProvider: tokens, fetch: fetchImpl, retries: 0 });

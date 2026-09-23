@@ -322,7 +322,8 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
         }
 
         // Self-heal a missing duration on a finished local VOD.
-        if (!vod.is_recording && (!vod.duration_seconds || vod.duration_seconds <= 0) && vod.file_path && fs.existsSync(vod.file_path)) {
+        // (Never in a restore drill: it opens no stored file and runs no ffprobe.)
+        if (!require('../drill').enabled && !vod.is_recording && (!vod.duration_seconds || vod.duration_seconds <= 0) && vod.file_path && fs.existsSync(vod.file_path)) {
             const duration = await tools.probeVodDuration(vod.file_path);
             if (duration > 0) {
                 const fileSize = tools.getFileSizeSafe(vod.file_path);

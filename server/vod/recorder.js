@@ -150,7 +150,8 @@ class StreamRecorder {
         this._diskState = 'ok';   // 'ok' | 'warning' | 'critical'
 
         const vodDir = path.resolve(config.vod.path);
-        if (!fs.existsSync(vodDir)) fs.mkdirSync(vodDir, { recursive: true });
+        // A restore drill (MEDIA_DRILL) records nothing and writes nothing, directories included.
+        if (!require('../drill').enabled && !fs.existsSync(vodDir)) fs.mkdirSync(vodDir, { recursive: true });
     }
 
     isRecording(vodId) {

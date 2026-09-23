@@ -599,6 +599,8 @@ const INLINE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$|text\/plain$)
 
 const publicRouter = express.Router();
 publicRouter.get('/:id', async (req, res) => {
+    // A restore drill (MEDIA_DRILL) serves no stored bytes, local or by a B2/R2 redirect.
+    if (require('../drill').refuseBytes(res)) return;
     try {
         const obj = model.getObject(String(req.params.id || ''));
         if (!obj) return res.status(404).json({ error: 'Not found' });

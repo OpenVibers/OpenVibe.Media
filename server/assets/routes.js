@@ -21,7 +21,7 @@ const db = require('../db/database');
 const { tenantAuth } = require('../auth');
 
 const ASSET_DIR = config.assets.path;
-if (!fs.existsSync(ASSET_DIR)) fs.mkdirSync(ASSET_DIR, { recursive: true });
+if (!require('../drill').enabled && !fs.existsSync(ASSET_DIR)) fs.mkdirSync(ASSET_DIR, { recursive: true });   // a restore drill writes nothing
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const router = express.Router({ mergeParams: true });

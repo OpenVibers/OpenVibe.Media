@@ -56,7 +56,7 @@ router.use((req, res, next) => {
 
 // ── Screenshot upload storage ───────────────────────────────
 const SCREENSHOTS_DIR = path.join(config.pastes.path, 'screenshots');
-if (!fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });
+if (!require('../drill').enabled && !fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });   // a restore drill writes nothing
 
 const MIME_TO_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
 const screenshotStorage = multer.diskStorage({
@@ -706,13 +706,14 @@ router.post('/:slug/copy', tenantAuth({ allowUser: true }), (req, res) => {
 
 // Rate-limit state: IP → timestamp of last comment
 const commentCooldowns = new Map();
-const _cooldownSweep = setInterval(() => {
+// (A restore drill takes no comments and runs no timers.)
+const _cooldownSweep = require('../drill').enabled ? null : setInterval(() => {
     const now = Date.now();
     for (const [ip, ts] of commentCooldowns) {
         if (now - ts > 120_000) commentCooldowns.delete(ip);
     }
 }, 600_000);
-if (_cooldownSweep.unref) _cooldownSweep.unref();
+if (_cooldownSweep && _cooldownSweep.unref) _cooldownSweep.unref();
 
 router.get('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
     try {

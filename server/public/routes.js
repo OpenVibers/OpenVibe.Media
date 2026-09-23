@@ -27,6 +27,9 @@ const db = require('../db/database');
 const tools = require('../vod/media-tools');
 const { optionalIdentity } = require('../auth');
 const pages = require('./pages');
+// A restore drill (MEDIA_DRILL) serves no stored bytes: every byte route answers 503 before it looks
+// at a file path (the database's paths are production's files). Watch pages still render.
+const drill = require('../drill');
 
 const router = express.Router();
 
@@ -71,6 +74,7 @@ function canAccessPrivate(record, req) {
  * aborts a range request). Deleted-but-open VOD files once held 80 GB of disk that way.
  */
 function sendFileStream(res, filePath, opts) {
+    if (drill.enabled) { try { res.destroy(); } catch { /* */ } return null; }   // unreachable: every caller refuses first
     const stream = fs.createReadStream(filePath, opts);
     const done = () => { try { stream.destroy(); } catch { /* */ } };
     res.on('close', done); res.on('error', done); res.on('finish', done);
@@ -80,6 +84,7 @@ function sendFileStream(res, filePath, opts) {
 }
 
 function streamFileWithRange(req, res, filePath, extraHeaders = {}) {
+    if (drill.refuseBytes(res)) return;
     const stat = fs.statSync(filePath);
     const range = req.headers.range;
     const ext = path.extname(filePath).toLowerCase();
@@ -132,6 +137,7 @@ async function serveMediaRecord(kind, record, req, res) {
         res.set('Cache-Control', visibility === 'public' ? 'public, max-age=60' : 'private, no-store');
         return res.type('html').send(pages.renderWatchPage(kind, record));
     }
+    if (drill.refuseBytes(res)) return;
 
     trackUniqueView(kind, record.id, req, record.user_id);
 
@@ -226,6 +232,7 @@ router.get('/og-image.png', (req, res) => {
 
 // ── Thumbnails ───────────────────────────────────────────────
 router.get('/t/:id', (req, res) => {
+    if (drill.refuseBytes(res)) return;
     require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
 });
 
@@ -238,6 +245,7 @@ router.get('/t/:id', (req, res) => {
 // consumers can key off the status code (or pass ?format=json).
 // Cached 5s per slot (that cache IS the rate limit); CORS-open.
 router.get('/live/:sel/frame.jpg', async (req, res) => {
+    if (drill.refuseBytes(res)) return;   // ffprobe + ffmpeg on the live recording
     const frames = require('../thumbnails/live-frame-service');
     const wantJson = String(req.query.format || '') === 'json';
     const sendCard = async (status, label, subtitle) => {
@@ -299,6 +307,7 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
 
 // ── App assets (emotes / sounds) by id ───────────────────────
 router.get('/a/:id', (req, res) => {
+    if (drill.refuseBytes(res)) return;
     try {
         const a = db.getAssetById(parseInt(req.params.id, 10));
         if (!a || !a.file_path || !fs.existsSync(a.file_path)) return res.status(404).json({ error: 'Not found' });
@@ -359,6 +368,7 @@ router.get('/v/:id/transcript.json', _devDataRoute((req) => {
 // regenerated, so resolve the vod/clip id from the name and redirect to the
 // current canonical URL; serve the exact file when it still exists.
 router.get('/api/thumbnails/:name', (req, res) => {
+    if (drill.refuseBytes(res)) return;
     const name = path.basename(String(req.params.name || ''));
     const m = /^(vod|clip)-(\d+)-\d+\.(?:jpg|jpeg|png)$/i.exec(name);
     if (m) {
@@ -382,6 +392,7 @@ router.get('/api/thumbnails/:name', (req, res) => {
 // basenames on disk and NO files-table rows, so this serves straight from
 // PASTES_PATH/screenshots for exactly that namespace.
 router.get('/f/screenshots/:name', (req, res) => {
+    if (drill.refuseBytes(res)) return;
     try {
         const name = path.basename(String(req.params.name || ''));
         const dir = path.join(require('../config').pastes.path, 'screenshots');
@@ -398,6 +409,7 @@ router.get('/f/screenshots/:name', (req, res) => {
 
 // ── Files ────────────────────────────────────────────────────
 router.get('/f/:key', (req, res) => {
+    if (drill.refuseBytes(res)) return;
     try {
         const row = db.getFileByKey(String(req.params.key));
         if (!row) return res.status(404).json({ error: 'Not found' });
@@ -524,6 +536,7 @@ router.get('/p/:slug/raw', (req, res) => {
 });
 
 router.get('/p/:slug/screenshot', (req, res) => {
+    if (drill.refuseBytes(res)) return;
     try {
         const paste = db.getPasteBySlug(String(req.params.slug));
         // Pastes made since the move live in Community only: send an unknown slug there, like
