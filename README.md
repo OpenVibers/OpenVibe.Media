@@ -170,6 +170,13 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 
 ### Pastes
 
+**Production (since 2026-09-22):** OpenVibe.Community is the paste authority.
+With `PASTES_FROZEN_APPS=live`, paste writes for app `live` answer 410, and
+`PASTES_MOVED_TO=https://openvibe.community` turns `/p/:slug` and its text
+`/raw` into 301s to Community. Screenshot bytes are still served from here, and
+new screenshots are uploaded to the token-only `community` tenant. The routes
+below stay as the rollback path.
+
 | method | path | notes |
 |---|---|---|
 | POST | `/pastes` | `{ title?, content?, language?, user_id?, visibility?, burn_after_read?, is_nsfw? }` or multipart with `screenshot` image (EXIF-stripped via sharp) → `{ id, slug, url }` |
