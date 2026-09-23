@@ -50,7 +50,7 @@ server/
                          has_result, never params/result/error text/creator), worker (light/heavy lanes, leases, retries,
                          cancellation), routes (/api/v2/:app/jobs), types: thumbnail.regenerate,
                          invariant.scan (proposes split/remux), object.split, object.remux
-(openvibe-shared: pinned OpenVibe.Shared v1.0.0 release, installed by npm)
+(openvibe-shared v1.5.1, openvibe-contracts v0.33.0, openvibe-sdk v0.5.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -295,7 +295,9 @@ and checks each point.
 |---|---|
 | `GET /healthz` | liveness: the process answers (unchanged; it checks nothing else) |
 | `GET /api/ready` | readiness from real checks, each with `status`, `required`, `latency_ms`, `checked_at`. **Required** (503 when one fails): `db` (a query against the SQLite database), `storage_vods`, `storage_clips`, `storage_pastes`, `storage_thumbnails`, `storage_files`, `storage_objects` (a probe file is written and removed). **Optional** (listed in `degraded`, still 200): `network_jwks` (user JWTs and service tokens; app keys work without it), `remote_b2` / `remote_r2` (HeadBucket, at most once a minute; present only when the provider is configured), `events_outbox` (backlog over 1000 events). Also `recordings_in_progress`. |
-| `GET /metrics` | Prometheus text (openvibe-shared/metrics) for **direct loopback callers only**; 404 through nginx. HTTP golden signals by route template, process metrics, `release_info`, plus `media_recordings_in_progress`, `media_object_locations{provider,state}`, `media_objects{lifecycle_status}`, `media_events_outbox{status}` (only while the outbox runs). |
+| `GET /metrics` | Prometheus text (openvibe-shared/metrics) for **direct loopback callers only**; 404 through nginx. HTTP golden signals by route template, process metrics, `release_info`, `release_client_updates_total{outcome,reason}`, plus `media_recordings_in_progress`, `media_object_locations{provider,state}`, `media_objects{lifecycle_status}`, `media_events_outbox{status}` (only while the outbox runs). |
+| `GET /release.json` | release manifest (`registry.release-manifest@1` 1.1.0, openvibe-shared/release, ADR-016): deployed commit, package versions, components, contract ranges, `metrics_url`. The shared navbar's release-watch polls it. No components are declared, so every release still prompts open tabs to reload. |
+| `POST /release-metrics` | open tabs' update reports (release-watch beacons, at most 4 KB; 30 a minute per connecting address, which behind nginx is the proxy, so one budget for all tabs; Sec-GPC/DNT dropped) into `release_client_updates_total` on `/metrics`. 403 in a restore drill, like every write. |
 
 ## Public serving (no auth unless the item is private)
 

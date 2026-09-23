@@ -14,7 +14,7 @@
  *   - The endpoints the Host inventory compares (/release.json, the /browse index) and the watch pages
  *     render from the copy; every route that would stream a stored file answers 503 without opening
  *     the path the database gives it.
- *   - Writes answer 403, sign-in 503, and the copy's rows stay as they were.
+ *   - Writes answer 403 (POST /release-metrics too), sign-in 503, and the copy's rows stay as they were.
  *
  * Run: node test/drill-mode.test.js
  */
@@ -271,6 +271,7 @@ const safe = { DB_PATH, HOST: '127.0.0.1', PORT: '14100' };
             ['POST', '/api/v1/live/vods', { title: 'x' }], ['PUT', '/api/v1/live/vods/1', { title: 'y' }], ['DELETE', '/api/v1/live/vods/1', null],
             ['POST', '/api/v1/live/clips', { vod_id: 1 }], ['PUT', `/api/v2/live/objects/${objectId}/content`, 'raw bytes'], ['POST', '/api/v2/live/jobs', { type: 'thumbnail' }],
             ['POST', '/api/v1/live/admin/storage/tiers/sweep', {}], ['POST', '/internal/avatar-ingest', {}], ['PATCH', '/api/v1/live/vods/1', {}],
+            ['POST', '/release-metrics', { counts: { reloaded: { user: 1 } } }],
         ];
         for (const [m, p, body] of writes) {
             const r = await request(m, p, { headers: auth, body });

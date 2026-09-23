@@ -146,6 +146,24 @@ const listen = (app) => new Promise((resolve) => { const s = app.listen(0, '127.
         assert.ok(m.body.includes('http_requests_total{method="GET",route="/api/ready",status_class="2xx"} 1\n'), m.body.slice(0, 400));
         const h = await request(b2, '/healthz');
         assert.strictEqual(h.status, 200, '/healthz still answers');
+        // The release manifest (registry.release-manifest@1) names where open tabs report updates,
+        // and those reports land in /metrics.
+        const rel = await request(b2, '/release.json');
+        assert.strictEqual(rel.status, 200);
+        const manifest = JSON.parse(rel.body);
+        assert.strictEqual(manifest.service, 'media');
+        assert.strictEqual(manifest.release, 'abcdef123456');
+        assert.deepStrictEqual(require('openvibe-contracts').validate('registry.release-manifest@1', manifest).errors, []);
+        assert.strictEqual(manifest.metrics_url, '/release-metrics');
+        const report = await new Promise((resolve, reject) => {
+            const req = http.request(`${b2}/release-metrics`, { method: 'POST', headers: { 'Content-Type': 'text/plain' } }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+            req.on('error', reject);
+            req.end(JSON.stringify({ counts: { reloaded: { user: 2 }, deferred: { typing: 1 } } }));
+        });
+        assert.strictEqual(report, 204);
+        const m2 = await request(b2, '/metrics');
+        assert.ok(m2.body.includes('release_client_updates_total{outcome="reloaded",reason="user"} 2\n'), m2.body.slice(0, 400));
+        assert.ok(m2.body.includes('release_client_updates_total{outcome="deferred",reason="typing"} 1\n'));
     } finally {
         child.kill('SIGKILL');
     }

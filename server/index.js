@@ -114,8 +114,10 @@ app.options(['/api/v1/:app/*', '/api/v2/:app/*'], (req, res) => {
 
 // ── Routes ───────────────────────────────────────────────────
 
-// What this server runs (ADR-016); the shared navbar's release-watch polls it.
-app.get('/release.json', release.handler);
+// What this server runs (ADR-016); the shared navbar's release-watch polls it. POST /release-metrics
+// takes open tabs' update reports into /metrics (release_client_updates_total). A restore drill
+// answers that POST with the readOnly 403 above, like every other write.
+release.mount(app, { registry: instrumented.registry });
 
 app.get('/healthz', (req, res) => {
     res.json({
