@@ -84,20 +84,6 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded (multipart field: file)' });
 
-        // Per-app quota check against quota_bytes (0 = unlimited): files + native objects.
-        const quota = Number(req.appRow.quota_bytes) || 0;
-        if (quota > 0) {
-            const used = require('../objects/model').usedBytes(req.appId);
-            if (used + req.file.size > quota) {
-                try { fs.unlinkSync(req.file.path); } catch { /* */ }
-                return res.status(413).json({
-                    error: 'App file quota exceeded',
-                    quota_bytes: quota,
-                    used_bytes: used,
-                });
-            }
-        }
-
         const digest = await sha256File(req.file.path);
         const name = sanitizeName(req.file.originalname);
         // Keys are global. A developer-project tenant's keys carry a tag of the tenant id, so two
@@ -115,6 +101,22 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
                 return res.status(409).json({ error: 'Key conflict — rename the file and retry' });
             }
             return res.status(200).json({ ...filePublic(existing), deduplicated: true });
+        }
+
+        // Per-app quota check against quota_bytes (0 = unlimited): files + native objects. Checked
+        // after the last await, so nothing else is stored between this check and the row below
+        // (concurrent uploads each saw the same usage when it ran before hashing).
+        const quota = Number(req.appRow.quota_bytes) || 0;
+        if (quota > 0) {
+            const used = require('../objects/model').usedBytes(req.appId);
+            if (used + req.file.size > quota) {
+                try { fs.unlinkSync(req.file.path); } catch { /* */ }
+                return res.status(413).json({
+                    error: 'App file quota exceeded',
+                    quota_bytes: quota,
+                    used_bytes: used,
+                });
+            }
         }
 
         const dest = path.join(appDir(req.appId), key);

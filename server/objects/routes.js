@@ -417,3 +417,4 @@ publicRouter.get('/:id', async (req, res) => {
 module.exports = router;
 module.exports.contentHandlers = [contentAuth, tenantCors, putContent];
 module.exports.publicRouter = publicRouter;
+module.exports.INLINE = INLINE;

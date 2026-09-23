@@ -156,7 +156,7 @@ stop working at the next restart. **Set `MEDIA_SIGNING_SECRET` in production.**
 
 **Quota.** `apps.quota_bytes` is compared against v1 file bytes plus native objects that are
 `uploading` (their declared size counts as a reservation) or `ready`. Soft-deleted objects do not
-count. The v1 files route still counts only v1 files, so its response is unchanged.
+count, except in developer-project tenants, where they count until their bytes are purged. The v1 files route still counts only v1 files, so its response is unchanged.
 
 **Purge.** Every hour, the service removes the bytes of native objects whose retention period has
 passed and that have no active hold. The object row stays `deleted` with `metadata.purged_at`.

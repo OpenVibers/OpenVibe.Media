@@ -114,6 +114,9 @@ gets a tenant keyed by its project id, **created on first use**. The URL always 
 - The quota counts v1 files and native v2 objects together (files uploads now use the same count
   as objects for every tenant). v1 file keys in project tenants carry a tenant tag, so two tenants
   never collide on identical uploads. Project tenants' files are not listed in the public gallery.
+  Soft-deleted objects keep counting against a project tenant's quota until their bytes are purged.
+- `/f/:key` (like `/o/:id`) sends `nosniff` and serves only images (not SVG), video, audio, PDF and
+  plain text inline; anything else an uploader labels (HTML, SVG, XML…) is an `attachment`.
 - Not yet: reading quotas set in Network (`network.project.read`), and removing a project's
   tenants when the project is archived.
 

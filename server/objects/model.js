@@ -488,8 +488,13 @@ function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
 
 /** Bytes counted against apps.quota_bytes: v1 files + live native objects (reservations included). */
 function usedBytes(appId, excludeId = null) {
+    // Developer-project tenants (third-party uploaders) also pay for soft-deleted bytes until they are
+    // purged: those stay on disk for the retention period, and upload -> delete -> upload would
+    // otherwise grow the disk without bound.
+    const app = db.getApp(appId);
+    const retained = app && app.project_id ? " OR (lifecycle_status = 'deleted' AND json_extract(metadata, '$.purged_at') IS NULL)" : '';
     const native = db.get(`SELECT COALESCE(SUM(size_bytes), 0) AS b FROM media_objects
-                           WHERE app_id = ? AND legacy_ref IS NULL AND lifecycle_status IN ('uploading', 'ready') AND id != ?`,
+                           WHERE app_id = ? AND legacy_ref IS NULL AND (lifecycle_status IN ('uploading', 'ready')${retained}) AND id != ?`,
     [appId, excludeId || '']).b;
     return db.appFilesBytes(appId) + native;
 }

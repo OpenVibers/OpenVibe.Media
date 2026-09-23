@@ -400,8 +400,13 @@ router.get('/f/:key', (req, res) => {
         const stat = fs.statSync(filePath);
         const range = req.headers.range;
         const contentType = row.mime || 'application/octet-stream';
+        const inline = /^[\w.+-]+\/[\w.+-]+$/.test(contentType) && require('../objects/routes').INLINE.test(contentType.toLowerCase());
+        // Uploaders (developer apps included) choose the Content-Type: only inert types render here,
+        // everything else (HTML, SVG, XML…) downloads, so it never runs on this origin.
         const headers = {
             'X-Robots-Tag': 'noindex',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${row.key}"`,
             'Cache-Control': sandbox ? 'private, no-store' : 'public, max-age=86400',
         };
         if (range) {
