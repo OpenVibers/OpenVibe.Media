@@ -88,6 +88,13 @@ const config = {
         repairCorrupt: ['1', 'true', 'on'].includes(String(process.env.MEDIA_VERIFY_REPAIR_CORRUPT || '').toLowerCase()),
     },
 
+    // Owner subjects (server/objects/owner-subject-job.js): objects that name only an app-local owner get
+    // the owner's Network subject (usr_…) on the next run.
+    ownerSubject: {
+        enabled: !['0', 'false', 'off'].includes(String(process.env.MEDIA_OWNER_SUBJECT_SYNC || '').toLowerCase()),
+        intervalMin: intEnv('MEDIA_OWNER_SUBJECT_INTERVAL_MIN', 10),
+    },
+
     rtp: {
         portMin: intEnv('RTP_PORT_MIN', 12000),
         portMax: intEnv('RTP_PORT_MAX', 12199),

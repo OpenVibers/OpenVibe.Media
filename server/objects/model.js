@@ -211,6 +211,11 @@ function project(p) {
         if (!fields.content_hash) fields.content_hash = found.content_hash;
         fields.metadata = { ...parseJson(found.metadata, {}), ...fields.metadata };
         if (found.lifecycle_status === 'deleted') fields.deleted_at = null;   // the row exists, so the object does
+        // owner_subject (filled by the owner-subject job) is the subject of owner_user_id; a different owner
+        // drops it until the job resolves the new one.
+        if (String(found.owner_app || found.app_id) !== String(fields.owner_app) || String(found.owner_user_id ?? '') !== String(fields.owner_user_id ?? '')) {
+            fields.owner_subject = null;
+        }
         updateObject(id, fields);
     } else {
         id = createObject({ ...fields, createdMs: toMs(p.created_at), created_at: p.created_at || null });

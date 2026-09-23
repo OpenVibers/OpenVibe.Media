@@ -114,6 +114,57 @@ object `deleted` whenever its row is deleted, which covers all of the inherited 
 never throw: the legacy write has already happened, so a failed sync only logs a warning. The next
 sync or backfill repairs it.
 
+## Owner subjects
+
+`owner_subject` names an object's owner as a Network subject (`usr_<ULID>`), so consumers such as
+Live's lineage resolver (which reads `owner.subject` on the v2 object) never translate an app's own
+user ids. An object gets it in one of three ways:
+
+- **At creation,** when the caller names it: `X-OV-Subject` on `POST /api/v2/:app/objects`. Tools and
+  developer-project uploads do this. A derived object (split, remux) copies its source's.
+- **From the reconcile job** (`server/objects/owner-subject-job.js`), for every object that names only
+  `owner_app` + `owner_user_id`: the projected vods, clips, files, screenshots, avatars and thumbnails,
+  and v2 uploads that send only `user_id`. Every `MEDIA_OWNER_SUBJECT_INTERVAL_MIN` minutes (first run
+  one minute after boot) it collects the distinct owners that still lack a subject and asks Network's
+  `POST /internal/identity/resolve-batch` (`{ system, type: 'user', ids }`, 500 ids per call). It then
+  fills their objects. Upload and projection paths never wait on Network. When nothing is missing, a
+  run asks Network nothing. An owner Network does not know (a Live account not linked to Network) stays
+  `NULL` until a later run finds it.
+- **From the one-off backfill** `scripts/backfill-owner-subject.js`, for everything that existed before
+  the job.
+
+Rules for both job and backfill:
+
+- A non-null `owner_subject` is never overwritten. Every write is guarded by `owner_subject IS NULL`
+  and by the owner it was resolved for.
+- Only the tenants whose user-id space is known are resolved (`SOURCE_SYSTEMS` in
+  `server/objects/owner-subject.js`: `live` -> `live`). Others are reported and left alone.
+- A re-projection keeps the subject, unless it changes the owner (`owner_app`/`owner_user_id`). Then
+  the subject is dropped until the job resolves the new owner.
+- Network is asked with a service token (`OV_OAUTH_CLIENT_ID`/`OV_OAUTH_CLIENT_SECRET`, capability
+  `identity.subject.resolve`, audience `openvibe.network`). When Network has not granted it, the
+  request uses `INTERNAL_API_KEY`.
+
+```
+node scripts/backfill-owner-subject.js [--db media.db] [--batch 500] [--json]        # dry run: counts per tenant
+node scripts/backfill-owner-subject.js --apply --backup <file.json> [--batch 500]     # fill
+node scripts/backfill-owner-subject.js --rollback <file.json> [--apply]               # undo (dry without --apply)
+```
+
+- **The dry run** (the default) opens the database read-only and prints per tenant: objects, already
+  set, to fill, unresolvable, unsupported tenant and no owner.
+- **`--apply --backup <file.json>`** first takes an online backup to `<file>.media.db` and requires
+  `PRAGMA integrity_check` = `ok` on it. It then writes `<file.json>` (0600), the rows it is about to
+  change, and fills them in `--batch` transactions. Finally it rewrites the file to list exactly the
+  rows it changed. It refuses an existing backup name, and a re-run fills only what is still missing.
+- **`--rollback <file.json> --apply`** sets `owner_subject` back to `NULL` on each listed row that
+  still carries the subject the backfill wrote for the same owner. Rows changed since are counted and
+  left alone. Without `--apply` it only reports, which also verifies an applied backfill. Stop the job
+  first (`MEDIA_OWNER_SUBJECT_SYNC=0`, restart), or its next run fills the rows again.
+
+The script opens the database directly, not through `server/db/database.js`, so none of the service's
+boot work runs (for example, marking in-progress clip cuts failed).
+
 ## Object API v2
 
 All routes live under `/api/v2/:app/objects`.
@@ -499,6 +550,8 @@ Not run against production yet: it needs the owner's go-ahead.
 | `MEDIA_VERIFY_HASH_MAX_MB` | 64 | sha256 local copies up to this size (objects with a `content_hash`) |
 | `MEDIA_VERIFY_MAX_REUPLOADS` | 2 | missing remote copies restored per run |
 | `MEDIA_VERIFY_REPAIR_CORRUPT` | off | `1` also overwrites a corrupt remote copy from a good local copy |
+| `MEDIA_OWNER_SUBJECT_SYNC` | on | `0` turns the owner-subject reconcile job off |
+| `MEDIA_OWNER_SUBJECT_INTERVAL_MIN` | 10 | minutes between owner-subject reconcile runs |
 
 ## Not in this pass
 
