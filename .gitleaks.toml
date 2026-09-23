@@ -1,0 +1,17 @@
+# gitleaks configuration, used by the shared security workflow
+# (OpenVibers/OpenVibe.Shared/.github/workflows/security.yml). The default rules stay on; every
+# allowlist below is one proven false positive, matched on path AND value so nothing else is hidden.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "A file object key (def456-b.png) in the objects-model test"
+condition = "AND"
+paths = ['''^test/objects-model\.test\.js$''']
+regexes = ['''^def456-b\.png$''']
+
+[[allowlists]]
+description = "Throwaway app keys the local smoke test provisions for its own temporary server, and its deliberately wrong key"
+condition = "AND"
+paths = ['''^scripts/smoke-test\.sh$''']
+regexes = ['''^(smoke-[a-z]+-key-[0-9]+|wrong-key)$''']
