@@ -389,6 +389,10 @@ router.get('/f/:key', (req, res) => {
     try {
         const row = db.getFileByKey(String(req.params.key));
         if (!row) return res.status(404).json({ error: 'Not found' });
+        // Developer-project sandbox files are never public: only a valid signed URL (from the
+        // Files API) serves them, and a missing signature looks exactly like a missing file.
+        const sandbox = db.isSandboxTenant(row.app_id);
+        if (sandbox && !require('../objects/signing').verifyFile(row.key, req.query.exp, req.query.sig)) return res.status(404).json({ error: 'Not found' });
         const filesRoutes = require('../files/routes');
         const filePath = filesRoutes.filePathForKey(row);
         if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
@@ -398,7 +402,7 @@ router.get('/f/:key', (req, res) => {
         const contentType = row.mime || 'application/octet-stream';
         const headers = {
             'X-Robots-Tag': 'noindex',
-            'Cache-Control': 'public, max-age=86400',
+            'Cache-Control': sandbox ? 'private, no-store' : 'public, max-age=86400',
         };
         if (range) {
             const parts = range.replace(/bytes=/, '').split('-');

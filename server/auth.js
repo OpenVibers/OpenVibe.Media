@@ -96,15 +96,63 @@ function verifyUserJwt(token) {
     }
 }
 
-/** A Network-issued service token for this service (sub svc:/app:/mod:), or null. */
+/**
+ * Verify a Network-issued principal token for this service (sub svc:/app:/mod:).
+ * Returns { ok, claims } or { ok: false, code, reason }. `acceptSandbox` is true only on the
+ * developer-project tenant routes; everywhere else an env=sandbox token is token.sandbox_refused.
+ */
+function verifyServiceTokenResult(token, { acceptSandbox = false } = {}) {
+    if (!_networkPublicKeyPem) return { ok: false, code: 'token.unavailable', reason: 'Network signing key not loaded yet' };
+    return serviceAuth.verifyServiceToken(token, { publicKey: _networkPublicKeyPem, issuer: config.network.url, audience: 'openvibe.media', acceptSandbox });
+}
+
+/** A Network-issued service token for this service (sandbox tokens refused), or null. */
 function verifyServiceToken(token) {
-    if (!_networkPublicKeyPem) return null;
-    const r = serviceAuth.verifyServiceToken(token, { publicKey: _networkPublicKeyPem, issuer: config.network.url, audience: 'openvibe.media' });
+    const r = verifyServiceTokenResult(token);
     return r.ok ? r.claims : null;
 }
 
 function problem(res, status, code, detail) {
     return http.sendProblem(res, status, code, { detail });
+}
+
+// ── Developer-project tenants (roadmap Wave 20, ADR-014) ─────
+
+const PROJECT_ID_RE = /^prj_[0-9A-HJKMNP-TV-Z]{26}$/;
+const isAppPrincipal = (claims) => !!claims && (claims.actor_type === 'app' || /^app:/.test(String(claims.sub || '')));
+
+/**
+ * An app token on /api/v1/<project_id>/files or /api/v2/<project_id>/objects. The path names the
+ * project; the token's env picks the tenant row (production prj_<ULID>, sandbox prj_<ULID>-sandbox),
+ * which is created on first use with the default quota. Nothing is created unless the token's
+ * project_id is the path's project and the token holds this route's capability for it.
+ */
+function projectTenant(req, res, next, projectId, claims, capability) {
+    if (claims.project_id !== projectId) {
+        return problem(res, 403, 'capability.namespace_denied', `this app token belongs to ${claims.project_id || 'no project'}, not ${projectId}`);
+    }
+    const env = claims.env === 'sandbox' ? 'sandbox' : 'production';
+    const c = capabilities.check(claims, capability, { namespace: projectId });
+    if (!c.allowed) return problem(res, 403, c.code, c.reason);
+    let tenant;
+    try {
+        tenant = db.ensureProjectTenant(projectId, env, (env === 'sandbox' ? config.apps.sandboxQuotaMb : config.apps.projectQuotaMb) * 1024 * 1024);
+    } catch (err) {
+        if (err.code === 'media.tenant.conflict') return problem(res, 409, err.code, err.message);
+        throw err;
+    }
+    req.appId = tenant.app_id;       // the tenant (storage, quota, namespace of objects)
+    req.appRow = tenant;
+    req.appPath = projectId;         // what the URL says; used to build URLs back to this tenant
+    req.authType = 'app';
+    req.tenantEnv = env;
+    req.principal = { sub: claims.sub, cap: claims.cap, jti: claims.jti, project_id: projectId, env };
+    return next();
+}
+
+/** The path segment a tenant is addressed by: its project id for developer-project tenants. */
+function tenantPath(app) {
+    return app && app.project_id ? app.project_id : app && app.app_id;
 }
 
 /**
@@ -173,12 +221,35 @@ function actingUserId(req) {
 function tenantAuth({ allowUser = false, capability = null } = {}) {
     return (req, res, next) => {
         const appId = String(req.params.app || '').trim();
+        const token = bearerToken(req);
+
+        // 0) Principal tokens first, so a sandbox token is refused as such (never a 404 that hints
+        //    at which tenants exist). Only developer-project tenant routes (a route that names its
+        //    capability, under /<project_id>/) opt in to sandbox tokens.
+        const appRoute = !!capability && PROJECT_ID_RE.test(appId);
+        let svc = null;
+        if (token && token.split('.').length === 3) {
+            const r = verifyServiceTokenResult(token, { acceptSandbox: appRoute });
+            if (r.ok) svc = r.claims;
+            else if (r.code === 'token.sandbox_refused') {
+                return problem(res, 401, 'token.sandbox_refused', 'sandbox tokens are accepted only on developer-project tenant routes (/api/v1/<project_id>/files, /api/v2/<project_id>/objects)');
+            }
+        }
+        if (svc && isAppPrincipal(svc)) {
+            // Developer apps reach only their own project's tenant, and only on routes that name a capability.
+            if (!appRoute) {
+                return problem(res, 403, capability ? 'capability.namespace_denied' : 'capability.denied',
+                    capability ? 'app tokens reach only /<project_id>/ tenants' : 'app tokens are not accepted on this route');
+            }
+            return projectTenant(req, res, next, appId, svc, capability);
+        }
+        if (svc && svc.env === 'sandbox') return problem(res, 401, 'token.sandbox_refused', 'only developer-app sandbox tokens are accepted, on their own project tenant');
+
         const app = appId ? db.getApp(appId) : null;
-        if (!app) return res.status(404).json({ error: 'Unknown app' });
+        // Developer-project tenants are reachable only through their project's app tokens (above).
+        if (!app || app.project_id) return res.status(404).json({ error: 'Unknown app' });
         req.appId = appId;
         req.appRow = app;
-
-        const token = bearerToken(req);
 
         // 1) App API key — only valid for its own :app segment. A valid key of a
         //    DIFFERENT app must NOT fall through to anything else.
@@ -201,16 +272,13 @@ function tenantAuth({ allowUser = false, capability = null } = {}) {
         // 1b) A service-principal token from OpenVibe.Network (roadmap Wave 1, ADR-003). Accepted only on
         //     routes that name the capability they perform, and only for the :app namespaces the token was
         //     granted. It carries the app's authority for that one action — no acting user.
-        if (token && token.split('.').length === 3) {
-            const svc = verifyServiceToken(token);
-            if (svc) {
-                if (!capability) return problem(res, 403, 'capability.denied', 'service tokens are not accepted on this route');
-                const c = capabilities.check(svc, capability, { namespace: appId });
-                if (!c.allowed) return problem(res, 403, c.code, c.reason);
-                req.authType = 'app';
-                req.principal = { sub: svc.sub, cap: svc.cap, jti: svc.jti };
-                return next();
-            }
+        if (svc) {
+            if (!capability) return problem(res, 403, 'capability.denied', 'service tokens are not accepted on this route');
+            const c = capabilities.check(svc, capability, { namespace: appId });
+            if (!c.allowed) return problem(res, 403, c.code, c.reason);
+            req.authType = 'app';
+            req.principal = { sub: svc.sub, cap: svc.cap, jti: svc.jti };
+            return next();
         }
 
         // 2) A Network user JWT is a real credential, but it cannot say WHICH of an app's
@@ -290,6 +358,7 @@ function seedApps() {
             const list = JSON.parse(config.apps.seedJson);
             for (const entry of Array.isArray(list) ? list : []) {
                 if (!entry || !entry.app_id || !entry.api_key) continue;
+                if (/^prj_/.test(String(entry.app_id))) { console.warn(`[Auth] MEDIA_APPS_SEED: ${entry.app_id} skipped (developer-project tenants never get an API key)`); continue; }
                 db.upsertApp(entry);
                 seeded++;
             }
@@ -305,6 +374,7 @@ function seedApps() {
             const app_id = pair.slice(0, idx).trim();
             const api_key = pair.slice(idx + 1).trim();
             if (!app_id || !api_key) continue;
+            if (/^prj_/.test(app_id)) { console.warn(`[Auth] MEDIA_APP_KEYS: ${app_id} skipped (developer-project tenants never get an API key)`); continue; }
             // Don't clobber a richer MEDIA_APPS_SEED entry for the same app.
             const existing = db.getApp(app_id);
             if (existing && config.apps.seedJson && config.apps.seedJson.includes(`"${app_id}"`)) continue;
@@ -327,8 +397,11 @@ function seedApps() {
 
 module.exports = {
     tenantAuth,
+    tenantPath,
     ensureTokenOnlyApps,
     verifyServiceToken,
+    verifyServiceTokenResult,
+    PROJECT_ID_RE,
     _setNetworkPublicKeyForTests(pem) { _networkPublicKeyPem = pem; },
     tenantCors,
     optionalIdentity,

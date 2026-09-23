@@ -76,6 +76,8 @@ function migrateColumns() {
         clips: [['channel_user_id', 'INTEGER'], ['cut_error', 'TEXT'], ['cut_attempts', 'INTEGER DEFAULT 0'], ['cut_next_at', 'DATETIME'], ['object_id', 'TEXT']],
         files: [['object_id', 'TEXT']],
         pastes: [['object_id', 'TEXT']],
+        // Developer-project tenants (ADR-014): project_id prj_<ULID>, env sandbox|production. NULL on first-party tenants.
+        apps: [['project_id', 'TEXT'], ['env', 'TEXT']],
     };
     for (const [table, cols] of Object.entries(wanted)) {
         const existing = database.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
@@ -191,6 +193,10 @@ function listApps() {
 
 function upsertApp({ app_id, name, api_key, webhook_url, webhook_secret, allowed_origins, quota_bytes }) {
     if (!app_id || !api_key) throw new Error('app_id and api_key required');
+    // Developer-project tenants never get an API key: they are reached only with their project's app tokens.
+    if (/^prj_/.test(String(app_id))) throw new Error(`${app_id} is a developer-project tenant id; API keys are never issued for those`);
+    const existing = getApp(app_id);
+    if (existing && existing.project_id) throw new Error(`${app_id} is a developer-project tenant; API keys are never issued for those`);
     const origins = JSON.stringify(Array.isArray(allowed_origins) ? allowed_origins : []);
     run(`INSERT INTO apps (app_id, name, api_key_hash, webhook_url, webhook_secret, allowed_origins, quota_bytes)
          VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -203,6 +209,37 @@ function upsertApp({ app_id, name, api_key, webhook_url, webhook_secret, allowed
              quota_bytes = excluded.quota_bytes`,
         [app_id, name || app_id, hashApiKey(api_key), webhook_url || null, webhook_secret || null, origins, quota_bytes || 0]);
     return getApp(app_id);
+}
+
+/**
+ * Developer-project tenant (ADR-014), created on first use. One project has up to two tenants:
+ *   production  app_id = prj_<ULID>
+ *   sandbox     app_id = prj_<ULID>-sandbox
+ * Both are reached through the project id in the URL; the token's env picks the row. No API key.
+ * Returns the row, or throws { code: 'media.tenant.conflict' } when the id is taken by something else.
+ */
+function projectTenantId(projectId, env) {
+    return env === 'sandbox' ? `${projectId}-sandbox` : projectId;
+}
+
+function ensureProjectTenant(projectId, env, quotaBytes) {
+    const id = projectTenantId(projectId, env);
+    run(`INSERT OR IGNORE INTO apps (app_id, name, api_key_hash, quota_bytes, project_id, env)
+         VALUES (?, ?, '', ?, ?, ?)`, [id, `project ${projectId} (${env})`, quotaBytes, projectId, env]);
+    const row = getApp(id);
+    if (!row || row.project_id !== projectId || row.env !== env || row.api_key_hash) {
+        const err = new Error(`tenant id ${id} is taken by a tenant that is not this project's ${env} tenant`);
+        err.code = 'media.tenant.conflict';
+        throw err;
+    }
+    return row;
+}
+
+/** Is this tenant a developer project's sandbox? Its content is never served from public URLs. */
+function isSandboxTenant(appId) {
+    if (!appId) return false;
+    const r = get('SELECT env FROM apps WHERE app_id = ?', [appId]);
+    return !!(r && r.env === 'sandbox');
 }
 
 function appAllowedOrigins(app) {
@@ -704,7 +741,7 @@ module.exports = {
     getDb, run, get, all, close, syncObject: _syncObject,
     getSetting, setSetting,
     // apps
-    hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins,
+    hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins, projectTenantId, ensureProjectTenant, isSandboxTenant,
     // vods
     createVod, getVodById, getVodByFileBasename, listVods, countVods, setVodVisibility, vodStatus,
     latestVodThumbsByManagedStreams, getAppStats, getAppStatSeries,

@@ -522,12 +522,14 @@ function objectPublic(obj, { locations = true } = {}) {
         content_hash: obj.content_hash || null,
         metadata: parseJson(obj.metadata, {}),
         held: isHeld(obj.id),
-        public_url: obj.visibility !== 'private' && obj.lifecycle_status === 'ready'
+        // Developer-project sandbox objects have no public URL: /download hands out signed ones.
+        public_url: obj.visibility !== 'private' && obj.lifecycle_status === 'ready' && !db.isSandboxTenant(obj.app_id)
             ? (legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`) : null,
         created_at: obj.created_at,
         updated_at: obj.updated_at,
         deleted_at: obj.deleted_at || null,
     };
+    if (db.isSandboxTenant(obj.app_id)) out.sandbox = true;
     // Where the bytes are, never the keys or paths themselves.
     if (locations) {
         out.locations = listLocations(obj.id).map(l => ({

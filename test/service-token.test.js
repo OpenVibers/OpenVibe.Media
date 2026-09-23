@@ -61,8 +61,11 @@ const server = http.createServer(app);
     assert.strictEqual(r.status, 401);
     r = await upload('community', 'live-key');
     assert.strictEqual(r.status, 403, "live's key is not valid for the community tenant");
-    const list = await fetch(`${base}/api/v1/community/files`, { headers: { authorization: `Bearer ${tok({ cap: ['media.object.upload', 'media.object.read'] })}` } });
-    assert.strictEqual(list.status, 403, 'routes that name no capability refuse service tokens');
+    let list = await fetch(`${base}/api/v1/community/files`, { headers: { authorization: `Bearer ${tok()}` } });
+    assert.strictEqual(list.status, 403, 'listing needs media.object.read');
+    list = await fetch(`${base}/api/v1/community/files`, { headers: { authorization: `Bearer ${tok({ cap: ['media.object.upload', 'media.object.read'] })}` } });
+    assert.strictEqual(list.status, 200, 'listing with media.object.read');
+    assert.strictEqual((await list.json()).files.length, 1);
     server.close();
 
     // ── Paste export bundle ──

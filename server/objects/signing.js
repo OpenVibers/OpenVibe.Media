@@ -48,6 +48,25 @@ function verifyDownload(objectId, exp, sig) {
     return safeEqual(sig, mac('get', objectId, e));
 }
 
+/**
+ * Short-lived GET URL for a v1 file (/f/:key). Its own purpose ('getf') and id space (file:<key>), so
+ * a file signature is never valid for an object or the other way round. Used for developer-project
+ * sandbox files, which are never served without one.
+ */
+function signedFileUrl(key, ttlS = config.objects.signedUrlTtlS) {
+    const exp = nowS() + Math.min(3600, Math.max(30, Number(ttlS) || config.objects.signedUrlTtlS));
+    return {
+        url: `${config.publicUrl}/f/${encodeURIComponent(key)}?exp=${exp}&sig=${mac('getf', `file:${key}`, exp)}`,
+        expires_at: new Date(exp * 1000).toISOString(),
+    };
+}
+
+function verifyFile(key, exp, sig) {
+    const e = Number(exp);
+    if (!Number.isInteger(e) || e < nowS()) return false;
+    return safeEqual(sig, mac('getf', `file:${key}`, e));
+}
+
 /** Token for PUT /api/v2/:app/objects/:id/content: "<exp>.<mac>". */
 function uploadToken(objectId, ttlS = config.objects.uploadTokenTtlS) {
     const exp = nowS() + Math.max(60, Number(ttlS) || 3600);
@@ -62,4 +81,4 @@ function verifyUploadToken(objectId, token) {
     return safeEqual(m[2], mac('put', objectId, exp));
 }
 
-module.exports = { signedDownloadUrl, verifyDownload, uploadToken, verifyUploadToken };
+module.exports = { signedDownloadUrl, verifyDownload, signedFileUrl, verifyFile, uploadToken, verifyUploadToken };

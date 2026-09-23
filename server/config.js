@@ -73,6 +73,10 @@ const config = {
         seedJson: process.env.MEDIA_APPS_SEED || '',
         // Fallback short form: "live:key1,games:key2"
         seedKeys: process.env.MEDIA_APP_KEYS || '',
+        // Developer-project tenants (ADR-014), created on first use by an app token: default quotas.
+        // Applied when the tenant is created; an operator can change apps.quota_bytes afterwards.
+        projectQuotaMb: Math.max(1, intEnv('MEDIA_APP_TENANT_QUOTA_MB', 1024)),
+        sandboxQuotaMb: Math.max(1, intEnv('MEDIA_APP_SANDBOX_QUOTA_MB', 100)),
     },
 };
 

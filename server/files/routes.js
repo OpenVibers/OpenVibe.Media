@@ -10,8 +10,13 @@
  *
  * Files live at FILES_PATH/<app>/<key> with key = <sha256-prefix>-<name>.
  * Public serving (Content-Type + Range) is at GET /f/:key.
- * Per-app quota: apps.quota_bytes (0 = unlimited) checked against the sum of
- * the app's stored file sizes.
+ * Per-app quota: apps.quota_bytes (0 = unlimited) checked against the tenant's
+ * stored bytes (v1 files + native v2 objects, objects/model.usedBytes).
+ *
+ * Network principal tokens: upload + delete need media.object.upload, list + meta
+ * need media.object.read, for namespace = :app. Developer-project tenants
+ * (:app = prj_<ULID>, app tokens only, ADR-014): sandbox files are never served
+ * publicly — their `url` is a short-lived signed /f/:key URL.
  */
 'use strict';
 
@@ -48,6 +53,8 @@ function filePathForKey(row) {
 }
 
 function filePublic(row) {
+    const sandbox = db.isSandboxTenant(row.app_id);
+    const signed = sandbox ? require('../objects/signing').signedFileUrl(row.key) : null;
     return {
         key: row.key,
         app_id: row.app_id,
@@ -56,7 +63,8 @@ function filePublic(row) {
         size: row.size,
         mime: row.mime,
         sha256: row.sha256,
-        url: `/f/${row.key}`,
+        url: signed ? signed.url : `/f/${row.key}`,
+        ...(sandbox ? { sandbox: true, url_expires_at: signed.expires_at } : {}),
         created_at: row.created_at,
     };
 }
@@ -76,10 +84,10 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded (multipart field: file)' });
 
-        // Per-app quota check against quota_bytes (0 = unlimited).
+        // Per-app quota check against quota_bytes (0 = unlimited): files + native objects.
         const quota = Number(req.appRow.quota_bytes) || 0;
         if (quota > 0) {
-            const used = db.appFilesBytes(req.appId);
+            const used = require('../objects/model').usedBytes(req.appId);
             if (used + req.file.size > quota) {
                 try { fs.unlinkSync(req.file.path); } catch { /* */ }
                 return res.status(413).json({
@@ -92,7 +100,10 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
 
         const digest = await sha256File(req.file.path);
         const name = sanitizeName(req.file.originalname);
-        const key = `${digest.slice(0, 12)}-${name}`;
+        // Keys are global. A developer-project tenant's keys carry a tag of the tenant id, so two
+        // tenants never collide on (and so never learn about) each other's identical uploads.
+        const tag = req.appRow.project_id ? `${crypto.createHash('sha256').update(`tenant:${req.appId}`).digest('hex').slice(0, 8)}-` : '';
+        const key = `${digest.slice(0, 12)}-${tag}${name}`;
 
         const existing = db.getFileByKey(key);
         if (existing) {
@@ -136,14 +147,14 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
 });
 
 // ── List ─────────────────────────────────────────────────────
-router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true, capability: 'media.object.read' }), (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
         const files = db.listFiles(req.appId, { limit, offset });
         res.json({
             files: files.map(filePublic),
-            used_bytes: db.appFilesBytes(req.appId),
+            used_bytes: require('../objects/model').usedBytes(req.appId),
             quota_bytes: Number(req.appRow.quota_bytes) || 0,
             limit, offset,
         });
@@ -153,7 +164,7 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Meta ─────────────────────────────────────────────────────
-router.get('/:key', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/:key', tenantAuth({ allowUser: true, capability: 'media.object.read' }), (req, res) => {
     try {
         const row = db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });
@@ -164,7 +175,7 @@ router.get('/:key', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Delete ───────────────────────────────────────────────────
-router.delete('/:key', tenantAuth({ allowUser: true }), (req, res) => {
+router.delete('/:key', tenantAuth({ allowUser: true, capability: 'media.object.upload' }), (req, res) => {
     try {
         const row = db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });

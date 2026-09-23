@@ -14,7 +14,9 @@
  * DELETE /:id/holds/:holdId   release it                                      (app key only)
  *
  * Auth: the app's API key, or a Network service token granting media.object.upload
- * (writes) / media.object.read (reads) for namespace = :app. X-OV-Subject names the
+ * (writes) / media.object.read (reads) for namespace = :app. Developer-project tenants
+ * (:app = prj_<ULID>) take their project's app tokens only (server/auth.js); their sandbox
+ * objects are served only through signed URLs, whatever their visibility. X-OV-Subject names the
  * owner (usr_…); X-OV-User-Id (app key only) acts as one of the app's users. The
  * content PUT and complete also accept the upload token handed out at init, so a
  * browser can send the bytes directly.
@@ -34,7 +36,7 @@ const config = require('../config');
 const model = require('./model');
 const invariant = require('./invariant');
 const signing = require('./signing');
-const { tenantAuth, tenantCors } = require('../auth');
+const { tenantAuth, tenantCors, tenantPath } = require('../auth');
 const { sendWebhook } = require('../webhooks');
 
 const MB = 1024 * 1024;
@@ -75,10 +77,15 @@ function load(req, res) {
 function contentAuth(req, res, next) {
     const token = req.query.token || req.headers['x-upload-token'];
     if (!token) return upload(req, res, next);
-    const app = db.getApp(String(req.params.app || ''));
-    if (!app) return res.status(404).json({ error: 'Unknown app' });
-    if (!signing.verifyUploadToken(String(req.params.id || ''), token)) return problem(res, 401, 'media.upload_token.invalid', 'Upload token is invalid or expired');
+    const id = String(req.params.id || '');
+    if (!signing.verifyUploadToken(id, token)) return problem(res, 401, 'media.upload_token.invalid', 'Upload token is invalid or expired');
+    // The token names the object; its tenant must be the one the URL addresses (a developer-project
+    // tenant is addressed by its project id, whichever of its production/sandbox rows holds the object).
+    const obj = model.getObject(id);
+    const app = obj ? db.getApp(obj.app_id) : null;
+    if (!app || tenantPath(app) !== String(req.params.app || '')) return res.status(404).json({ error: 'Unknown app' });
     req.appId = app.app_id;
+    req.appPath = tenantPath(app);
     req.appRow = app;
     req.authType = 'upload_token';
     next();
@@ -221,11 +228,11 @@ router.post('/', upload, (req, res) => {
             object: model.objectPublic(model.getObject(id)),
             upload: {
                 method: 'PUT',
-                url: `${config.publicUrl}/api/v2/${encodeURIComponent(req.appId)}/objects/${id}/content?token=${encodeURIComponent(tok.token)}`,
+                url: `${config.publicUrl}/api/v2/${encodeURIComponent(req.appPath || req.appId)}/objects/${id}/content?token=${encodeURIComponent(tok.token)}`,
                 token: tok.token,
                 expires_at: tok.expires_at,
                 max_bytes: size || max,
-                complete_url: `${config.publicUrl}/api/v2/${encodeURIComponent(req.appId)}/objects/${id}/complete`,
+                complete_url: `${config.publicUrl}/api/v2/${encodeURIComponent(req.appPath || req.appId)}/objects/${id}/complete`,
             },
         });
     } catch (err) {
@@ -327,7 +334,8 @@ router.get('/:id/download', read, (req, res) => {
     if (obj.lifecycle_status !== 'ready') return problem(res, 409, 'media.object.not_ready', `Object is ${obj.lifecycle_status}`);
     const json = req.query.format === 'json';
     res.set('Cache-Control', 'private, no-store');
-    if (obj.visibility !== 'private') {
+    // Developer-project sandbox objects are never public, whatever their visibility: always signed.
+    if (obj.visibility !== 'private' && !db.isSandboxTenant(obj.app_id)) {
         const url = model.legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`;
         return json ? res.json({ url, expires_at: null, public: true }) : res.redirect(302, url);
     }
@@ -374,8 +382,10 @@ publicRouter.get('/:id', async (req, res) => {
         if (obj.lifecycle_status === 'deleted') return res.status(410).json({ error: 'Gone' });
         if (obj.lifecycle_status !== 'ready') return res.status(404).json({ error: 'Not found' });
         const signed = !!req.query.sig && signing.verifyDownload(obj.id, req.query.exp, req.query.sig);
-        // Private objects are indistinguishable from missing ones without a valid signature.
-        if (obj.visibility === 'private' && !signed) return res.status(404).json({ error: 'Not found' });
+        // Private objects (and every developer-project sandbox object) are indistinguishable from
+        // missing ones without a valid signature.
+        const sandbox = db.isSandboxTenant(obj.app_id);
+        if ((obj.visibility === 'private' || sandbox) && !signed) return res.status(404).json({ error: 'Not found' });
 
         const mime = obj.mime_type || 'application/octet-stream';
         const md = model.parseJson(obj.metadata, {});
@@ -384,7 +394,7 @@ publicRouter.get('/:id', async (req, res) => {
             'Content-Type': mime,
             'X-Content-Type-Options': 'nosniff',
             'X-Robots-Tag': 'noindex',
-            'Cache-Control': obj.visibility === 'private' ? 'private, no-store' : 'public, max-age=3600',
+            'Cache-Control': obj.visibility === 'private' || sandbox ? 'private, no-store' : 'public, max-age=3600',
             'Content-Disposition': `${INLINE.test(mime) ? 'inline' : 'attachment'}; filename="${name}"`,
         };
         const locs = model.listLocations(obj.id);

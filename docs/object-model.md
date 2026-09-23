@@ -118,6 +118,7 @@ All routes live under `/api/v2/:app/objects`.
 
 - the app's API key;
 - a Network service token that grants `media.object.upload` (writes) or `media.object.read` (reads) for the namespace `:app`. `tenantAuth({ capability })` enforces this, as it does on v1.
+- for `:app = prj_<ULID>` (a developer-project tenant, ADR-014): only that project's app tokens, production or sandbox. The token's `env` selects the tenant (`prj_<ULID>` or `prj_<ULID>-sandbox`), and upload URLs always name the project. Sandbox objects never get a `public_url`; `/download` signs them and `/o/:id` needs the signature, whatever their visibility. Retention holds are not available to app tokens. See the README's "Developer-project tenants".
 
 **Owner.**
 

@@ -97,6 +97,8 @@ function thumbCard(name, mtimeMs) {
 // ── Data per tab ─────────────────────────────────────────────
 const V_WHERE = "is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0";
 const C_WHERE = "COALESCE(is_public,1) = 1";
+// Developer-project tenants' files (ADR-014) are theirs to share; the gallery lists first-party files only.
+const F_WHERE = "app_id NOT IN (SELECT app_id FROM apps WHERE project_id IS NOT NULL)";
 const P_WHERE = "visibility = 'public'";
 
 let _thumbListCache = { at: 0, list: [] };
@@ -135,8 +137,8 @@ function fetchTab(tab, page) {
             cards: db.all(`SELECT * FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot' ${L}`).map(pasteCard),
         };
         case 'files': return {
-            total: db.get('SELECT COUNT(*) c FROM files').c,
-            cards: db.all(`SELECT * FROM files ${L}`).map(fileCard),
+            total: db.get(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`).c,
+            cards: db.all(`SELECT * FROM files WHERE ${F_WHERE} ${L}`).map(fileCard),
         };
         case 'emotes': return {
             total: db.get("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'").c,
@@ -183,7 +185,7 @@ function tabCounts() {
         clips: c(`SELECT COUNT(*) c FROM clips WHERE ${C_WHERE}`),
         images: c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`),
         text: c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`),
-        files: c('SELECT COUNT(*) c FROM files'),
+        files: c(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`),
         emotes: c("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'"),
         sounds: c("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'"),
         thumbnails: thumbList().length,

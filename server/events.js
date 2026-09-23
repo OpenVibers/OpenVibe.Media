@@ -72,6 +72,9 @@ function slim(appId, data) {
 /** Queue the durable twin of a webhook event. Never throws; returns the envelope or null. */
 function emit(webhookEvent, appId, data) {
     if (!outbox) return null;
+    // Developer-project sandbox tenants (ADR-014) produce no platform events: sandbox activity must
+    // never reach production consumers.
+    if (appId && db.isSandboxTenant(appId)) return null;
     const map = TYPES[webhookEvent];
     if (!map) return null;
     const [eventType, subjectType] = map;

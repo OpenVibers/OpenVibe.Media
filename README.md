@@ -65,9 +65,10 @@ Tenant = the `:app` path segment. Rows in the `apps` table define tenants:
 | `api_key_hash` | sha256 of the app API key (never stored in plaintext) |
 | `webhook_url` / `webhook_secret` | outbound event delivery (HMAC) |
 | `allowed_origins` | JSON array; guards browser (user-JWT) calls |
-| `quota_bytes` | files-subsystem quota (0 = unlimited) |
+| `quota_bytes` | storage quota: v1 files + native v2 objects (0 = unlimited) |
+| `project_id` / `env` | set only on developer-project tenants (below) |
 
-Two credential types on `/api/v1/:app/...`:
+Credential types on `/api/v1/:app/...`:
 
 1. **App API key** — `Authorization: Bearer <app_api_key>`. Compared in
    constant time against the app's stored hash. A key is only valid for its
@@ -78,6 +79,43 @@ Two credential types on `/api/v1/:app/...`:
    (cached, refreshed every 6 h). `aud` must include `openvibe.media` when
    present. If the request carries an `Origin` header it must be in the app's
    `allowed_origins` (CORS is reflected for allow-listed origins only).
+
+3. **Network principal token** (`sub svc:…`, `app:…`, `mod:…`; RS256, audience `openvibe.media`) —
+   accepted only on routes that name a capability: files upload/delete and every objects v2 write
+   (`media.object.upload`), files list/meta and objects v2 reads (`media.object.read`), and only for
+   the `:app` namespaces in the token's `ns`.
+
+### Developer-project tenants (ADR-014)
+
+A developer app from OpenVibe.Network (token `sub app:app_<ULID>`, `project_id prj_<ULID>`,
+`env sandbox|production`, `ns [project_id]`) holding `media.object.upload` / `media.object.read`
+gets a tenant keyed by its project id, **created on first use**. The URL always names the project
+(`/api/v1/prj_<ULID>/files`, `/api/v2/prj_<ULID>/objects`, so openvibe-sdk's
+`createMediaClient({ app: projectId })` works); the token's `env` picks one of two separate tenants:
+
+| env | tenant (`apps.app_id`) | default quota |
+|---|---|---|
+| production | `prj_<ULID>` | `MEDIA_APP_TENANT_QUOTA_MB` (1024) |
+| sandbox | `prj_<ULID>-sandbox` | `MEDIA_APP_SANDBOX_QUOTA_MB` (100) |
+
+- Both rows carry `project_id` and `env`, and have no API key (`api_key_hash` empty; the seeding
+  env refuses `prj_…` ids). Only the project's own app tokens reach them: other projects' tokens,
+  first-party service tokens, app keys and user JWTs get 403/404, and the `-sandbox` id cannot be
+  named in a URL. Nothing is created unless the token's `project_id` is the path's project and the
+  token holds the route's capability.
+- App tokens reach only these tenants and only the capability routes (files, objects v2 without
+  retention holds). VODs, clips, pastes, thumbnails, assets, stats and admin refuse them.
+- **Sandbox tokens** (`env: sandbox`) are accepted on these routes only; everywhere else they get
+  `401 token.sandbox_refused`.
+- **Sandbox content is never public.** `/f/:key` and `/o/:id` answer 404 for it unless the URL
+  carries a valid signature; the Files API returns a signed, short-lived `url` (+ `url_expires_at`,
+  `sandbox: true`), objects have `public_url: null` and `/download` always signs, whatever the
+  visibility. Sandbox tenants emit no platform events.
+- The quota counts v1 files and native v2 objects together (files uploads now use the same count
+  as objects for every tenant). v1 file keys in project tenants carry a tenant tag, so two tenants
+  never collide on identical uploads. Project tenants' files are not listed in the public gallery.
+- Not yet: reading quotas set in Network (`network.project.read`), and removing a project's
+  tenants when the project is archived.
 
 ### App seeding
 
