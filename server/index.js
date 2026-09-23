@@ -172,6 +172,7 @@ vodStorage.checkProviders()
 vodStorage.start();                                        // tiering sweep
 healthJob.start();                                         // health scan + quarantine cleanup
 require('./vod/clip-jobs').start();                        // failed clip re-cuts (auto-retry, hot-fetch)
+require('./objects/verify-job').start();                   // scheduled copy verification (bounded batches; never deletes)
 // Descriptor watchdog: a leak here once pinned 80 GB of deleted recordings to the disk.
 every(5 * 60 * 1000, () => {
     try {
@@ -227,6 +228,7 @@ function shutdown(signal) {
     try { recorder.stopAll(); } catch { /* */ }
     try { vodStorage.stop(); } catch { /* */ }
     try { healthJob.stop(); } catch { /* */ }
+    try { require('./objects/verify-job').stop(); } catch { /* */ }
     try { auth.stopJwksRefresh(); } catch { /* */ }
     try { require('./events')._reset(); } catch { /* */ }
     for (const t of timers) clearInterval(t);

@@ -57,6 +57,16 @@ const config = {
         publicWarnMb: intEnv('MEDIA_PUBLIC_OBJECT_WARN_MB', 384),
     },
 
+    // Scheduled copy verification (server/objects/verify-job.js; docs/object-model.md#scheduled-verification).
+    verify: {
+        enabled: !['0', 'false', 'off'].includes(String(process.env.MEDIA_VERIFY_ENABLED || '').toLowerCase()),
+        intervalMin: intEnv('MEDIA_VERIFY_INTERVAL_MIN', 10),     // one batch this often
+        batch: intEnv('MEDIA_VERIFY_BATCH', 50),                  // objects per run (least recently verified first)
+        hashMaxMb: intEnv('MEDIA_VERIFY_HASH_MAX_MB', 64),        // sha256 local copies up to this size (objects with a content_hash)
+        maxReuploads: intEnv('MEDIA_VERIFY_MAX_REUPLOADS', 2),    // missing remote copies restored from a good local copy, per run
+        repairCorrupt: ['1', 'true', 'on'].includes(String(process.env.MEDIA_VERIFY_REPAIR_CORRUPT || '').toLowerCase()),
+    },
+
     rtp: {
         portMin: intEnv('RTP_PORT_MIN', 12000),
         portMax: intEnv('RTP_PORT_MAX', 12199),

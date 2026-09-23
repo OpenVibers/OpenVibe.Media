@@ -9,7 +9,10 @@
  * local storage directory accepts a write. Optional (one capability degrades, the rest keeps
  * working): the Network public key (user-JWT and service-token routes; app-key tenants are
  * unaffected), each CONFIGURED remote tier (B2 cold storage, R2 cache; a HeadBucket at most once a
- * minute), and the Events outbox (webhooks still deliver when it backs up).
+ * minute), the Events outbox (webhooks still deliver when it backs up), and object_copies: every
+ * ready object has a good copy somewhere (server/objects/verify-job.js records it; objects with no
+ * good copy are listed by scripts/no-good-copy-report.js). object_copies never fails readiness —
+ * Media keeps serving everything else.
  *
  * `instrument()` must run before any route is mounted; `mountReady()` any time after.
  */
@@ -18,6 +21,8 @@ const path = require('path');
 const crypto = require('crypto');
 const metrics = require('openvibe-shared/metrics');
 const { createReadiness } = require('openvibe-shared/ready');
+
+const copyReport = require('./objects/copy-report');
 
 const OUTBOX_BACKLOG_LIMIT = 1000;
 
@@ -60,6 +65,18 @@ function domainMetrics(registry, { db, recorder, events }) {
         collect: () => db.all('SELECT lifecycle_status, COUNT(*) AS n FROM media_objects GROUP BY lifecycle_status').map((r) => ({ labels: { lifecycle_status: r.lifecycle_status }, value: r.n })),
     });
     registry.gauge({
+        name: 'media_objects_no_good_copy', help: 'Ready media objects with no present or unverified copy anywhere (see scripts/no-good-copy-report.js)',
+        collect: () => copyReport.countNoGoodCopy(db),
+    });
+    registry.gauge({
+        name: 'media_verify_last_run_timestamp_seconds', help: 'When the scheduled copy verification last finished a run',
+        collect: () => {
+            const r = db.get('SELECT finished_at FROM media_verify_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1');
+            const t = r ? Date.parse(r.finished_at) : NaN;
+            return Number.isFinite(t) ? Math.floor(t / 1000) : null;   // no run yet: no series
+        },
+    });
+    registry.gauge({
         name: 'media_events_outbox', help: 'Events outbox rows waiting to reach OpenVibe.Events, and rows Events rejected', labelNames: ['status'],
         collect: () => {
             const s = events.status();
@@ -88,6 +105,16 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
             if (!s.enabled) return { ok: true, detail: { enabled: false } };
             if (s.pending > OUTBOX_BACKLOG_LIMIT) return { ok: false, error: `${s.pending} events waiting (limit ${OUTBOX_BACKLOG_LIMIT})`, detail: { pending: s.pending } };
             return { ok: true, detail: { pending: s.pending, rejected: s.rejected } };
+        },
+    });
+    checks.push({
+        name: 'object_copies', required: false, cacheMs: 60 * 1000, description: 'every ready object has a good copy (scheduled verification)',
+        check: () => {
+            const n = copyReport.countNoGoodCopy(db);
+            const last = db.get('SELECT id, finished_at, objects_checked, reuploaded FROM media_verify_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1');
+            const detail = { no_good_copy: n, last_verify_run: last ? last.finished_at : null };
+            if (n) return { ok: false, error: `${n} ready object(s) with no good copy (scripts/no-good-copy-report.js)`, detail };
+            return { ok: true, detail };
         },
     });
     return createReadiness({

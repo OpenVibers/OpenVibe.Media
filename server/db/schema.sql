@@ -313,3 +313,33 @@ CREATE TABLE IF NOT EXISTS media_invariant_violations (
     last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     resolved_at DATETIME
 );
+
+-- Scheduled copy verification (server/objects/verify-job.js). One row per ready object: when it was
+-- last checked and what that check found; the least recently verified objects go first in each run.
+-- Verification only records and restores copies — it never deletes bytes or rows.
+CREATE TABLE IF NOT EXISTS media_verifications (
+    object_id TEXT PRIMARY KEY,
+    verified_at TEXT NOT NULL,            -- ISO-8601 with ms (orders the rotation)
+    status TEXT NOT NULL CHECK(status IN ('good', 'no_good_copy', 'unverifiable')),
+    good_providers TEXT,                  -- comma list of providers holding a good copy
+    detail TEXT NOT NULL DEFAULT '{}',    -- per-location verdicts and any re-upload
+    run_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_media_verifications_at ON media_verifications(verified_at);
+CREATE INDEX IF NOT EXISTS idx_media_verifications_status ON media_verifications(status);
+
+-- One row per verification run (summary).
+CREATE TABLE IF NOT EXISTS media_verify_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    objects_checked INTEGER NOT NULL DEFAULT 0,
+    locations_checked INTEGER NOT NULL DEFAULT 0,
+    good INTEGER NOT NULL DEFAULT 0,
+    no_good_copy INTEGER NOT NULL DEFAULT 0,
+    unverifiable INTEGER NOT NULL DEFAULT 0,
+    reuploaded INTEGER NOT NULL DEFAULT 0,
+    reupload_failed INTEGER NOT NULL DEFAULT 0,
+    no_good_copy_total INTEGER,           -- ready objects with no good copy anywhere, after this run
+    error TEXT
+);

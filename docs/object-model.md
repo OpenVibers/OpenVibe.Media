@@ -7,7 +7,7 @@ projection over an object through its `object_id` column. Every existing URL and
 unchanged. New code talks to objects through the [v2 API](#object-api-v2).
 
 Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`, `invariant.js`,
-`signing.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`.
+`signing.js`, `verify-job.js`, `copy-report.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`.
 
 ## Tables
 
@@ -25,7 +25,7 @@ Location `state`:
 
 - `present`: verified. The local file exists, or a HEAD answered with the right size.
 - `missing`: verified absent.
-- `pending`: believed there but not verified yet. Every remote copy starts here until reconciliation runs with `--verify`.
+- `pending`: believed there but not verified yet. Every remote copy starts here until reconciliation runs with `--verify` or the [scheduled verification](#scheduled-verification) reaches it.
 - `corrupt`: the size or hash does not match.
 
 A copy that reconciliation has verified keeps that state when the row is projected again. The
@@ -209,6 +209,34 @@ The exit code is 1 when issues were found.
 listing) and incomplete multipart uploads. `server/objects/reconcile.js` takes a `head` function,
 so tests run it against a fake provider.
 
+## Scheduled verification
+
+`server/objects/verify-job.js` runs inside the service (started from `server/index.js`, two minutes
+after boot, then every `MEDIA_VERIFY_INTERVAL_MIN`). Each run takes the `MEDIA_VERIFY_BATCH` ready
+objects verified least recently (never-verified first), so every object is covered over time: with
+the defaults, 7,200 objects a day.
+
+For each object it:
+
+1. **Checks every copy**, with the same rules as `reconcile-objects.js --verify`. A local copy is `present` when the file exists, and `corrupt` when the object carries a `content_hash` and the file (≤ `MEDIA_VERIFY_HASH_MAX_MB`) hashes differently. A B2/R2 copy is `missing` on a 404 and `corrupt` when its size differs. An unconfigured or unreachable provider is *unverifiable* and keeps its state. The verdict goes to `media_locations` (`state`, `size_bytes`, `verified_at`), but only if the location still has the key that was checked.
+2. **Restores a missing B2/R2 copy** by uploading a verified-good local copy (right size, hash not contradicted) to the same key through the storage engine's `uploadFile`. That call HEADs the upload afterwards and fails on a size mismatch. At most `MEDIA_VERIFY_MAX_REUPLOADS` uploads run per run, and the rest wait for the next one. A `corrupt` remote copy is overwritten only when `MEDIA_VERIFY_REPAIR_CORRUPT=1`.
+3. **Records the outcome.** `media_verifications` gets one row per object (`verified_at`, `status` `good` / `no_good_copy` / `unverifiable`, `good_providers`, per-location `detail`). `media_verify_runs` gets one summary row per run.
+
+**It never deletes anything.** No file, remote object or row is removed, and no lifecycle is changed.
+
+**No good copy.** A ready object has *no good copy* when none of its locations is `present` or
+`pending`. This includes ready objects with no location row at all. They show up in three places:
+
+- `media_objects_no_good_copy` on `/metrics`, next to `media_verify_last_run_timestamp_seconds`.
+- The optional `object_copies` check in `/api/ready`. It is degraded while the count is above zero and never makes Media not-ready.
+- The report, which lists each one for an operator to decide on:
+
+  ```
+  node scripts/no-good-copy-report.js [--app live] [--json] [--out report.json] [--db ./data/media.db]
+  ```
+
+  For each object it prints the owner (app, `owner_user_id`, `owner_subject`), `legacy_ref`, the `vods`/`clips`/`files`/`pastes` rows that point at it, its relationships, variants and holds, every location with its state and `verified_at`, and the last verification. The report opens the database read-only. It exits 1 when there are any.
+
 ## Public object-size invariant
 
 This is roadmap W4 deliverable 5, stated as **policy** rather than a copied constant:
@@ -247,6 +275,12 @@ which splits playback into objects that fit.
 | `MEDIA_SIGNED_URL_TTL_S` | 300 | default signed download lifetime |
 | `MEDIA_UPLOAD_TOKEN_TTL_S` | 3600 | upload token lifetime |
 | `MEDIA_PUBLIC_OBJECT_{MAX,TARGET,WARN}_MB` | 500 / 256 / 384 | invariant thresholds |
+| `MEDIA_VERIFY_ENABLED` | on | `0` turns the scheduled verification off |
+| `MEDIA_VERIFY_INTERVAL_MIN` | 10 | minutes between verification runs |
+| `MEDIA_VERIFY_BATCH` | 50 | objects per run |
+| `MEDIA_VERIFY_HASH_MAX_MB` | 64 | sha256 local copies up to this size (objects with a `content_hash`) |
+| `MEDIA_VERIFY_MAX_REUPLOADS` | 2 | missing remote copies restored per run |
+| `MEDIA_VERIFY_REPAIR_CORRUPT` | off | `1` also overwrites a corrupt remote copy from a good local copy |
 
 ## Not in this pass
 

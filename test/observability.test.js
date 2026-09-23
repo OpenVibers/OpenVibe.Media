@@ -62,7 +62,7 @@ const listen = (app) => new Promise((resolve) => { const s = app.listen(0, '127.
     assert.strictEqual(body.service, 'media');
     assert.strictEqual(body.recordings_in_progress, 1);
     const names = Object.keys(body.checks).sort();
-    assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'remote_b2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods'], 'r2 is not configured, so it has no check');
+    assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'object_copies', 'remote_b2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods'], 'r2 is not configured, so it has no check');
     for (const [n, c] of Object.entries(body.checks)) {
         assert.strictEqual(c.status, 'ok', n);
         assert.strictEqual(typeof c.latency_ms, 'number');

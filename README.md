@@ -41,10 +41,11 @@ server/
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
   public/routes.js       public /v /c /p /t /f
   objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
-                         backfill, reconcile, invariant, signing — see docs/object-model.md
+                         backfill, reconcile, invariant, signing, verify-job (scheduled copy
+                         verification), copy-report — see docs/object-model.md
 (openvibe-shared: pinned OpenVibe.Shared v1.0.0 release, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
-scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js   object-model operator tools
+scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 ```
 
 ## Visitor sign-in
