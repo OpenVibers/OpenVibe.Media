@@ -155,8 +155,11 @@ function getTranscriptTimeline(appId, sel, limit) {
 /** Transcript + AI overview for one existing VOD id. */
 function getVodTranscript(vodId) {
     return cached(`vt:${vodId}`, async () => {
-        const v = db.get(`SELECT ${VOD_COLS}, app_id, is_public FROM vods WHERE id = ?`, [vodId]);
-        if (!v || v.visibility === 'private') return { status: 404, body: { error: 'VOD not found' } };
+        const v = db.get(`SELECT ${VOD_COLS}, app_id, is_public, clips_only FROM vods WHERE id = ?`, [vodId]);
+        // Private (including legacy rows with no visibility and is_public = 0) and clips-only
+        // source recordings answer exactly like a missing id — the same rule /v/:id applies.
+        const hidden = v && ((v.visibility || (v.is_public ? 'public' : 'private')) === 'private' || v.clips_only);
+        if (!v || hidden) return { status: 404, body: { error: 'VOD not found' } };
         const txs = await _appTranscripts(v.app_id, [v.id]);
         return { status: 200, body: { ..._vodEntry(v, { tx: txs[v.id] }), app_id: v.app_id, generated_at: new Date().toISOString() } };
     });

@@ -379,13 +379,14 @@ publicRouter.get('/:id', async (req, res) => {
     try {
         const obj = model.getObject(String(req.params.id || ''));
         if (!obj) return res.status(404).json({ error: 'Not found' });
-        if (obj.lifecycle_status === 'deleted') return res.status(410).json({ error: 'Gone' });
-        if (obj.lifecycle_status !== 'ready') return res.status(404).json({ error: 'Not found' });
         const signed = !!req.query.sig && signing.verifyDownload(obj.id, req.query.exp, req.query.sig);
         // Private objects (and every developer-project sandbox object) are indistinguishable from
-        // missing ones without a valid signature.
+        // missing ones without a valid signature — checked before the lifecycle answers, or a 410
+        // for a deleted private object would still say it existed.
         const sandbox = db.isSandboxTenant(obj.app_id);
         if ((obj.visibility === 'private' || sandbox) && !signed) return res.status(404).json({ error: 'Not found' });
+        if (obj.lifecycle_status === 'deleted') return res.status(410).json({ error: 'Gone' });
+        if (obj.lifecycle_status !== 'ready') return res.status(404).json({ error: 'Not found' });
 
         const mime = obj.mime_type || 'application/octet-stream';
         const md = model.parseJson(obj.metadata, {});

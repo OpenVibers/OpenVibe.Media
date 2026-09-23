@@ -47,6 +47,16 @@ function trackUniqueView(kind, id, req, ownerUserId = null) {
     try { if (views.isInitialPlaybackRequest(req)) views.recordView(kind, id, { req, ownerUserId }); } catch { /* non-critical */ }
 }
 
+/** public | unlisted | private. Rows without a visibility fall back to is_public (0 = private). */
+function recordVisibility(record) {
+    return record.visibility || (record.is_public ? 'public' : 'private');
+}
+
+/** The single "no such thing" answer for every id-addressed route, used for private items too. */
+function notFound(res) {
+    return res.status(404).json({ error: 'Not found' });
+}
+
 function canAccessPrivate(record, req) {
     // Private items: the owning app (its API key) or the owning user's JWT.
     if (req.authType === 'app' && req.appId === record.app_id) return true;
@@ -111,10 +121,10 @@ async function serveMediaRecord(kind, record, req, res) {
     const vodStorage = require('../vod/vod-storage');
     const noindex = { 'X-Robots-Tag': 'noindex' };
 
-    const visibility = record.visibility || (record.is_public ? 'public' : 'private');
-    if (visibility === 'private' && !canAccessPrivate(record, req)) {
-        return res.status(403).json({ error: 'This media is private' });
-    }
+    const visibility = recordVisibility(record);
+    // Exactly the answer a missing id gets: a 403 here told anyone probing ids which private
+    // recordings exist (and, through the basename form of /v, which file names are real).
+    if (visibility === 'private' && !canAccessPrivate(record, req)) return notFound(res);
 
     // A person (or a link-preview crawler) landing on the URL gets the watch
     // page; its <video> comes back here with ?raw=1 for the bytes.
@@ -181,14 +191,14 @@ router.get('/v/:id', optionalIdentity, async (req, res) => {
     try {
         if (/^\d+$/.test(req.params.id)) {
             const vod = db.getVodById(parseInt(req.params.id, 10));
-            if (!vod || vod.clips_only) return res.status(404).json({ error: 'Not found' });
+            if (!vod || vod.clips_only) return notFound(res);
             return await serveMediaRecord('vod', vod, req, res);
         }
         const vod = db.getVodByFileBasename(req.params.id);
         if (vod && !vod.clips_only) return await serveMediaRecord('vod', vod, req, res);
         const clip = db.getClipByFileBasename(req.params.id);
         if (clip) return await serveMediaRecord('clip', clip, req, res);
-        res.status(404).json({ error: 'Not found' });
+        notFound(res);
     } catch (err) {
         console.error('[Public] /v error:', err.message);
         if (!res.headersSent) res.status(500).json({ error: 'Failed to serve media' });
@@ -198,9 +208,9 @@ router.get('/v/:id', optionalIdentity, async (req, res) => {
 // ── Clip playback ────────────────────────────────────────────
 router.get('/c/:id', optionalIdentity, async (req, res) => {
     try {
-        if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: 'Not found' });
+        if (!/^\d+$/.test(req.params.id)) return notFound(res);
         const clip = db.getClipById(parseInt(req.params.id, 10));
-        if (!clip || !clip.file_path) return res.status(404).json({ error: 'Not found' });
+        if (!clip || !clip.file_path) return notFound(res);
         await serveMediaRecord('clip', clip, req, res);
     } catch (err) {
         console.error('[Public] /c error:', err.message);
@@ -355,7 +365,9 @@ router.get('/api/thumbnails/:name', (req, res) => {
         const row = m[1].toLowerCase() === 'vod'
             ? db.getVodById(parseInt(m[2], 10), 'live')
             : db.getClipById(parseInt(m[2], 10), 'live');
-        if (row && row.thumbnail_url && !row.thumbnail_url.endsWith(`/${name}`)) {
+        // Never for a private row: the redirect would hand out the current thumbnail URL of any
+        // private recording to whoever guesses vod-<id>-0.jpg. The exact file name still serves.
+        if (row && row.thumbnail_url && recordVisibility(row) !== 'private' && !row.thumbnail_url.endsWith(`/${name}`)) {
             res.set('Cache-Control', 'public, max-age=3600');
             return res.redirect(302, row.thumbnail_url);
         }
@@ -484,16 +496,18 @@ router.get('/p/:slug', optionalIdentity, (req, res) => {
 
 router.get('/p/:slug/raw', (req, res) => {
     try {
-        const paste = db.getPasteBySlug(String(req.params.slug));
+        const found = db.getPasteBySlug(String(req.params.slug));
+        // A private paste answers exactly like a missing slug (no redirect that proves it exists).
+        const paste = found && found.visibility !== 'private' ? found : null;
         // Image pastes have no raw text — bounce to the screenshot (stale
         // consumers stored /raw URLs for hero-moment images).
         if (paste && paste.type === 'screenshot') {
             res.set('Cache-Control', 'public, max-age=3600');
             return res.redirect(302, `/p/${encodeURIComponent(paste.slug)}/screenshot`);
         }
+        // Moved: every slug goes to Community, found or not, like /p/:slug.
+        if (movedTo()) return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(String(req.params.slug))}/raw`);
         if (!paste || paste.type !== 'paste') return res.status(404).send('Not found');
-        if (movedTo()) return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(paste.slug)}/raw`);
-        if (paste.visibility === 'private') return res.status(404).send('Not found');
 
         // Burn after read
         if (paste.burn_after_read && paste.views > 0) {
@@ -523,3 +537,4 @@ router.get('/p/:slug/screenshot', (req, res) => {
 
 module.exports = router;
 module.exports.streamFileWithRange = streamFileWithRange;
+module.exports.recordVisibility = recordVisibility;

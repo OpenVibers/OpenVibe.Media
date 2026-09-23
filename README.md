@@ -266,12 +266,17 @@ the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
 | `GET /v/:id/transcript.json` | **VOD transcript API** — transcript + AI overview for one existing VOD id (`{ vod_id, title, duration_seconds, ai_overview, transcript, ai_analyzed_at }`). Private VODs → 404. Cached 30s, CORS-open. |
 | `GET /live/:sel/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot, extracted from its in-progress recording. `:sel` = slot id (`1`), slot **slug** (`whip`), or **`@username`** (that streamer's top-viewed live slot; slug/username resolve via the app's `/api/streams` listing, cached 5s). Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`; internal base URLs from `APP_INTERNAL_URLS` JSON env or `LIVE_APP_INTERNAL_URL`). Cached **5s per slot** (that cache is the rate limit), CORS-open for external APIs/bots/dashboards. Not live → **404 with a styled OFFLINE card** (real JPEG bytes — dev pipelines decode the body as image/jpeg) so `<img>` embeds degrade nicely (`?format=json` for JSON errors); `503` + card when live but a frame can't be cut. |
 
-Private items respond 403/404 unless the request bears the owning app's API
-key or the owning user's JWT.
+Private items (and legacy rows with no visibility and `is_public = 0`) answer
+exactly like a missing id — the same 404 and body — unless the request bears the
+owning app's API key, optionally acting for the owner via `X-OV-User-Id`. That holds
+for the watch page, the bytes, `transcript.json`, the legacy `/api/thumbnails` redirect
+and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`, `/pastes/:slug`)
+apply it to an app acting for someone other than the owner.
 
 `GET /o/:id` serves object bytes by canonical id (`med_…`): public/unlisted
 objects openly, private ones only with a valid signature from
-`/api/v2/:app/objects/:id/download`, deleted ones 410 (see below).
+`/api/v2/:app/objects/:id/download`, deleted ones 410 (a deleted private object
+without a signature is a 404 like any other private one).
 
 ## Object model and API v2
 

@@ -66,6 +66,11 @@ const chunkUpload = multer({
  */
 const activeChunkUploads = new Map();
 
+/** Private, including legacy rows that have no visibility and is_public = 0. */
+function _isPrivate(row) {
+    return (row.visibility || (row.is_public ? 'public' : 'private')) === 'private';
+}
+
 function _getVodScoped(req, res) {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) { res.status(404).json({ error: 'VOD not found' }); return null; }
@@ -308,6 +313,11 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
         const vod = _getVodScoped(req, res);
         if (!vod) return;
+        // Acting for one of the app's users (X-OV-User-Id): their private VODs only — anyone
+        // else's answers exactly like a missing id. The app key alone sees the namespace.
+        if (req.authType === 'user' && _isPrivate(vod) && !(vod.user_id != null && String(vod.user_id) === String(req.userId))) {
+            return res.status(404).json({ error: 'VOD not found' });
+        }
 
         // Self-heal a missing duration on a finished local VOD.
         if (!vod.is_recording && (!vod.duration_seconds || vod.duration_seconds <= 0) && vod.file_path && fs.existsSync(vod.file_path)) {

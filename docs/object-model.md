@@ -145,7 +145,7 @@ All routes live under `/api/v2/:app/objects`.
 
 - Public and unlisted `ready` objects are served openly.
 - Private objects need a valid `?exp=&sig=` from `/download`. Without one the answer is 404, so a private object cannot be told apart from a missing one.
-- A deleted object answers 410.
+- A deleted object answers 410 — after the check above, so a deleted private object is a 404 without a signature.
 - A local copy streams with Range support. Otherwise the route redirects 302 to a presigned R2 URL, then a presigned B2 URL.
 - Headers: `X-Content-Type-Options: nosniff` and `X-Robots-Tag: noindex`. Content is `inline` only for images (not SVG), video, audio, PDF and plain text, and `attachment` for everything else.
 

@@ -98,6 +98,11 @@ function sanitizeClipTitle(title, fallback = 'Untitled Clip') {
     return title.replace(/<[^>]*>/g, '').replace(/&[a-z]+;/gi, '').trim().slice(0, 200) || fallback;
 }
 
+/** Private, including legacy rows that have no visibility and is_public = 0. */
+function _isPrivate(row) {
+    return (row.visibility || (row.is_public ? 'public' : 'private')) === 'private';
+}
+
 function _getClipScoped(req, res) {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) { res.status(404).json({ error: 'Clip not found' }); return null; }
@@ -120,6 +125,10 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
         if (!Number.isFinite(vodId)) return res.status(400).json({ error: 'vod_id is required' });
         const vod = db.getVodById(vodId, req.appId);
         if (!vod) return res.status(404).json({ error: 'VOD not found' });
+        // An acting user cannot cut someone else's private VOD, and is not told it exists.
+        if (req.authType === 'user' && _isPrivate(vod) && !(vod.user_id != null && String(vod.user_id) === String(req.userId))) {
+            return res.status(404).json({ error: 'VOD not found' });
+        }
 
         let startTime = Number.parseFloat(body.start_s ?? body.start_time);
         let endTime = Number.parseFloat(body.end_s ?? body.end_time);
@@ -313,6 +322,10 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const clip = _getClipScoped(req, res);
         if (!clip) return;
+        // Acting for one of the app's users: another user's private clip looks missing (see GET /vods/:id).
+        if (req.authType === 'user' && _isPrivate(clip) && !(clip.user_id != null && String(clip.user_id) === String(req.userId))) {
+            return res.status(404).json({ error: 'Clip not found' });
+        }
         // Bare object, mirroring GET /vods/:id per CONTRACTS.md.
         // Detail responses carry the transcript too (lists stay light).
         res.json({ ...clipPublic(clip), ai_transcript: clip.ai_transcript || null });

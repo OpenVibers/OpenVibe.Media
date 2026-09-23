@@ -451,6 +451,11 @@ router.get('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const paste = _getPasteScoped(req, res);
         if (!paste) return;
+        // Private pastes: owner (or the app itself) only — decided before anything is counted.
+        if (paste.visibility === 'private') {
+            const allowed = req.authType === 'app' || (req.userId != null && paste.user_id === req.userId);
+            if (!allowed) return res.status(404).json({ error: 'Paste not found' });
+        }
         // The owning app renders the paste page itself — count the view here (real client
         // IP via X-Forwarded-For, viewer via the user JWT / X-OV-User-Id) unless it says
         // this fetch is not a page view (?no_view=1 for edit forms, embeds, bots).
@@ -458,11 +463,6 @@ router.get('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
             try { const r = require('../views/service').recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } } catch { /* */ }
         }
 
-        // Private pastes: owner (or the app itself) only.
-        if (paste.visibility === 'private') {
-            const allowed = req.authType === 'app' || (req.userId != null && paste.user_id === req.userId);
-            if (!allowed) return res.status(404).json({ error: 'Paste not found' });
-        }
 
         paste.liked = req.userId != null ? db.hasUserLikedPaste(paste.id, req.userId) : false;
         res.json({ paste: { ...pastePublic(paste), liked: paste.liked } });
