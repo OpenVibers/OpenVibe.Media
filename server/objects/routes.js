@@ -449,6 +449,12 @@ router.get('/:id/multipart/:uploadId', mpRead, (req, res) => {
 router.post('/:id/multipart/:uploadId/complete', mpWrite, tenantCors, async (req, res) => {
     let session = null;
     try {
+        // A repeat of a complete that already succeeded (its answer was lost on the way): the object as it is.
+        const already = model.resolveObject(String(req.params.id || ''), req.appId);
+        const prior = already && multipart.getSession(String(req.params.uploadId || ''));
+        if (prior && prior.object_id === already.id && prior.status === 'completed' && already.lifecycle_status === 'ready' && canSee(req, already)) {
+            return res.json(model.objectPublic(already));
+        }
         const obj = loadUploading(req, res);
         if (!obj) return;
         session = loadSession(req, res, obj);

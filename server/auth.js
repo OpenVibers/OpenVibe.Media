@@ -342,7 +342,7 @@ function tenantCors(req, res, next) {
     if (origin && req.appRow && db.appAllowedOrigins(req.appRow).includes(origin)) {
         res.set('Access-Control-Allow-Origin', origin);
         res.set('Vary', 'Origin');
-        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Upload-Token, X-Content-SHA256, Idempotency-Key');
+        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Upload-Token, X-Content-SHA256, Idempotency-Key, traceparent, X-OpenVibe-Request-Id');
         res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     }
     next();

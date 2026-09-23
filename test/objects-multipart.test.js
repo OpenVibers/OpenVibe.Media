@@ -190,7 +190,9 @@ const mac = (parts) => crypto.createHmac('sha256', 'test-signing-secret').update
     r = await call('GET', local(r.body.url), { bearer: null });
     assert.deepStrictEqual([r.status, sha(Buffer.from(await (await fetch(local((await call('GET', `${O}/${mp.id}/download`)).body.url))).arrayBuffer()))], [200, sha(big)]);
     r = await call('POST', local(up.complete_url), { bearer: null });
-    assert.strictEqual(r.status, 409, 'completing twice');
+    assert.deepStrictEqual([r.status, r.body.id, r.body.lifecycle_status], [200, mp.id, 'ready'], 'completing again (a lost answer) returns the object');
+    r = await call('POST', `${O}/${mp.id}/complete`);
+    assert.strictEqual(r.status, 200, 'and so does the single-part complete');
     console.log('✅ multipart: exact parts, sha256 per part, resumable after a dropped connection, assembled and verified');
 
     // Declare the size later; abort; a session for another object does not open this one; expiry.

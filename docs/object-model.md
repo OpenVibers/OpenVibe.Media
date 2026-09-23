@@ -203,7 +203,8 @@ client asks with `multipart: true`. Code: `server/objects/multipart.js`.
    `parts` list with sha256 values must match what was received. The parts are concatenated into
    `OBJECTS_PATH/<app>/<id>` while hashing, the parts are deleted, and the checks of `/complete`
    follow (expected hash, invariant, quota, content). If one of those fails, the object stays
-   `uploading` with its content and can be sent again.
+   `uploading` with its content and can be sent again. Completing a completed session again (a
+   retry after a lost answer) returns the object.
 5. **Abort** (`DELETE`) deletes the parts; the object stays `uploading`. A single-part PUT is refused
    while a session is open (409 `media.upload.multipart_active`).
 

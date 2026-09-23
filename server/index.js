@@ -79,7 +79,7 @@ app.options(['/api/v1/:app/*', '/api/v2/:app/*'], (req, res) => {
     if (origin && appRow && db.appAllowedOrigins(appRow).includes(origin)) {
         res.set('Access-Control-Allow-Origin', origin);
         res.set('Vary', 'Origin');
-        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Upload-Token, X-Content-SHA256, Idempotency-Key');
+        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Upload-Token, X-Content-SHA256, Idempotency-Key, traceparent, X-OpenVibe-Request-Id');
         res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     }
     res.sendStatus(204);
