@@ -11,7 +11,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "openvibe-contracts": "https://codeload.github.com/OpenVibers/OpenVibe.Contracts/tar.gz/refs/tags/v0.5.1",
+    "openvibe-contracts": "https://codeload.github.com/OpenVibers/OpenVibe.Contracts/tar.gz/refs/tags/v0.7.0",
     "@aws-sdk/client-s3": "^3.600.0",
     "@aws-sdk/lib-storage": "^3.600.0",
     "@aws-sdk/s3-request-presigner": "^3.600.0",
@@ -19,7 +19,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
-    "openvibe-shared": "file:./vendor/openvibe-shared",
+    "openvibe-shared": "https://codeload.github.com/OpenVibers/OpenVibe.Shared/tar.gz/refs/tags/v1.0.0",
     "sharp": "^0.33.4"
   }
 }

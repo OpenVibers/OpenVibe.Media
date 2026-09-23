@@ -42,7 +42,7 @@ server/
   public/routes.js       public /v /c /p /t /f
   objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
                          backfill, reconcile, invariant, signing — see docs/object-model.md
-vendor/openvibe-shared/  vendored shared helpers (do not edit; re-sync from canonical)
+(openvibe-shared: pinned OpenVibe.Shared v1.0.0 release, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js   object-model operator tools
 ```
