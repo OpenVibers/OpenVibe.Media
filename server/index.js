@@ -82,6 +82,10 @@ app.options(['/api/v1/:app/*', '/api/v2/:app/*'], (req, res) => {
 
 // ── Routes ───────────────────────────────────────────────────
 
+// What this server runs (ADR-016); the shared navbar's release-watch polls it.
+const release = require('openvibe-shared/release').createRelease({ service: 'media', root: require('path').join(__dirname, '..') });
+app.get('/release.json', release.handler);
+
 app.get('/healthz', (req, res) => {
     res.json({
         ok: true,
