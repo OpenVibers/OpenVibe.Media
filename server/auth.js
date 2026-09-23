@@ -112,8 +112,13 @@ function problem(res, status, code, detail) {
  * OpenVibe.Community stores screenshot bytes here under its own namespace.
  */
 function ensureTokenOnlyApps() {
-    for (const [appId, name] of [['community', 'OpenVibe.Community']]) {
-        if (!db.getApp(appId)) db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, 10 * 1024 ** 3]);
+    // Services that reach Media only with Network service tokens (no app key). Quotas are per tenant.
+    for (const [appId, name, quotaGb] of [
+        ['community', 'OpenVibe.Community', 10],
+        ['tools', 'OpenVibe.Tools', 20],       // Wave 11 job results (TOOLS_JOB_RESULTS=media)
+        ['games', 'OpenVibe.Games', 10],       // Wave 12 map-editor assets
+    ]) {
+        if (!db.getApp(appId)) db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, quotaGb * 1024 ** 3]);
     }
 }
 
