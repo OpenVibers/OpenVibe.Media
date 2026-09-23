@@ -751,6 +751,7 @@ async function emitStorageEvent(event, kind, data, settings = getSettings()) {
     alertLastSentAt.set(cooldownKey, Date.now());
     const payload = { kind, ...data, at: new Date().toISOString() };
     (event === 'storage.alert' ? console.error : console.warn)(`[VodStorage] ${event} (${kind}): ${JSON.stringify(data)}`);
+    try { require('../events').emit(event, null, payload); } catch { /* never blocks the alert */ }
     let apps = [];
     try { apps = db.listApps().filter(a => a.webhook_url); } catch { apps = []; }
     let webhooks;

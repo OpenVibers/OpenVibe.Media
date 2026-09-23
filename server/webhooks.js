@@ -41,6 +41,11 @@ async function _post(url, rawBody, signature) {
  * @param {object} data            event payload
  */
 async function sendWebhook(appOrId, event, data) {
+    // The durable twin (OpenVibe.Events) is queued whether or not this app has a webhook URL.
+    // Storage alerts go to every app, so server/vod/vod-storage.js queues those once itself.
+    if (!String(event).startsWith('storage.')) {
+        try { require('./events').emit(event, typeof appOrId === 'string' ? appOrId : appOrId && appOrId.app_id, data); } catch { /* never blocks a webhook */ }
+    }
     let app = appOrId;
     if (typeof appOrId === 'string') {
         try { app = db.getApp(appOrId); } catch { app = null; }

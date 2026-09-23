@@ -197,6 +197,8 @@ const server = app.listen(config.port, config.host, () => {
     console.log(`[Media] OpenVibe.Media listening on ${config.host}:${config.port} (${config.nodeEnv})`);
     console.log(`[Media] Data: db=${config.db.path} vods=${config.vod.path} clips=${config.vod.clipsPath}`);
     console.log(`[Media] RTP ingest pool: udp ${config.rtp.portMin}-${config.rtp.portMax} (127.0.0.1)`);
+    // Durable events (roadmap Wave 3): webhook outcomes also go to OpenVibe.Events. Off without EVENTS_URL.
+    try { require('./events').init(); } catch (err) { console.warn('[Events] not started:', err.message); }
 });
 
 let shuttingDown = false;
@@ -208,6 +210,7 @@ function shutdown(signal) {
     try { vodStorage.stop(); } catch { /* */ }
     try { healthJob.stop(); } catch { /* */ }
     try { auth.stopJwksRefresh(); } catch { /* */ }
+    try { require('./events')._reset(); } catch { /* */ }
     for (const t of timers) clearInterval(t);
     server.close(() => {
         try { db.close(); } catch { /* */ }
