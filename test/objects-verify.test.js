@@ -128,7 +128,10 @@ function request(base, p) {
     assert.ok(uploads.includes('b2:objs/b'), 'missing b2 copy re-uploaded');
     assert.strictEqual(bucket.b2['objs/b'], B.length);
     assert.strictEqual(loc(ids.restore, 'b2').state, 'present');
-    assert.strictEqual(JSON.parse(ver(ids.restore).detail).reuploads[0].ok, true);
+    // The run that first checked it did the re-upload. (media_verifications keeps only the latest verdict,
+    // and a later run may re-verify it once batches rotate, with no re-upload left to do.)
+    const firstRestore = [r1, r2, r3].flatMap(r => r.objects).find(o => o.object_id === ids.restore);
+    assert.strictEqual(firstRestore.reuploads, 1, 'the run that first checked it re-uploaded the missing copy');
     assert.ok(!uploads.includes('b2:objs/g'), 'a corrupt remote copy is not overwritten unless MEDIA_VERIFY_REPAIR_CORRUPT=1');
     assert.strictEqual(loc(ids.corruptNoRepair, 'b2').state, 'corrupt');
     assert.ok(!uploads.includes('b2:objs/e'), 'never re-uploads from a local copy that failed its hash');
