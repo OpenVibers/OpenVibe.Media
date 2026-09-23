@@ -13,7 +13,9 @@ EnvironmentFile=/etc/openvibe/media.env
 ExecStart=/usr/bin/env node /opt/openvibe.media/server/index.js
 Restart=always
 RestartSec=3
-TimeoutStopSec=30
+# Recordings get VOD_STOP_GRACE_MS (60 s) to flush trailers and the process force-exits at 70 s;
+# systemd must not SIGKILL before that, or a stop during a recording cuts the file.
+TimeoutStopSec=80
 KillSignal=SIGTERM
 NoNewPrivileges=true
 PrivateTmp=true
