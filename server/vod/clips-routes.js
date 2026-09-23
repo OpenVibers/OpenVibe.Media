@@ -7,8 +7,8 @@
  *                 completion. Also accepts a live cut against a still-recording
  *                 VOD (clamped to flushed footage, like the predecessor).
  * GET    /:id     clip meta (status: processing | ready | failed)
- * GET    /        list (?limit&offset&vod_id&stream_id&user_id)
- * PUT    /:id     update title/visibility
+ * GET    /        list (?limit&offset&vod_id&stream_id&user_id&auto_generated&status&since)
+ * PUT    /:id     update title/visibility (and auto_generated, app key only)
  * DELETE /:id     delete file + offloaded objects + row
  */
 'use strict';
@@ -112,6 +112,8 @@ function _getClipScoped(req, res) {
 }
 
 const VALID_VIS = new Set(['public', 'unlisted', 'private']);
+/** A boolean query/body field: 1, 0, or null when absent or unreadable. */
+const flag = (v) => (['1', 'true'].includes(String(v)) ? 1 : ['0', 'false'].includes(String(v)) ? 0 : null);
 
 // ── Create clip ──────────────────────────────────────────────
 // JSON body: cut a window out of a VOD (202, background cut + webhook).
@@ -183,6 +185,10 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
 
         const userId = body.user_id != null ? body.user_id : (req.userId ?? null);
         const visibility = VALID_VIS.has(body.visibility) ? body.visibility : 'public';
+        // The app's own automation (an AI auto-clip) says so with auto_generated; a call acting for
+        // one of its users is a person's clip whatever it claims. The flag and the description used
+        // to be dropped here, so every auto-clip was stored as if a person had made it.
+        const byApp = req.authType === 'app';
         const result = db.createClip({
             app_id: req.appId,
             vod_id: vodId,
@@ -190,6 +196,8 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
             user_id: userId,
             channel_user_id: body.channel_user_id != null ? body.channel_user_id : (vod.user_id ?? null),
             title: sanitizeClipTitle(body.title, vod.title ? `Clip: ${vod.title}`.slice(0, 200) : 'Untitled Clip'),
+            description: typeof body.description === 'string' ? body.description.replace(/<[^>]*>/g, '').trim().slice(0, 1000) : '',
+            auto_generated: byApp && flag(body.auto_generated) === 1,
             file_path: '',
             start_time: startTime,
             end_time: endTime,
@@ -297,7 +305,10 @@ async function _createUploadedClip(req, res) {
 // ── List ─────────────────────────────────────────────────────
 // Filters follow the inherited query shapes: vod_id, stream_id, user_id
 // (creator), channel_user_id / source_streamer_id (owner of the clipped
-// channel), hide_self, include_private, order, limit/offset.
+// channel), hide_self, include_private, order, limit/offset. Also:
+//   auto_generated=1|0   clips the app's automation cut (1) or a person made (0)
+//   status=ready         playable clips only (no processing / failed rows)
+//   since=<datetime>     created at or after (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC)
 router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
@@ -313,6 +324,9 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
             // Only the owning app may list private/unlisted rows (see vods list).
             include_private: req.authType === 'app' && ['1', 'true'].includes(String(req.query.include_private || '')),
             order: req.query.order || req.query.sort,   // `sort` = inherited alias
+            auto_generated: flag(req.query.auto_generated),
+            ready_only: String(req.query.status || '') === 'ready',
+            since: req.query.since || null,
         };
         const clips = db.listClips(req.appId, filters);
         const total = db.countClips(req.appId, filters);
@@ -368,12 +382,17 @@ router.put('/:id', tenantAuth(), (req, res) => {
     try {
         const clip = _getClipScoped(req, res);
         if (!clip) return;
-        const { title, visibility } = req.body || {};
+        const { title, visibility, auto_generated: autoGen } = req.body || {};
         if (title !== undefined) {
             const t = sanitizeClipTitle(title, '');
             if (!t) return res.status(400).json({ error: 'Title must be 1-200 characters' });
             db.run('UPDATE clips SET title = ? WHERE id = ?', [t, clip.id]);
             if (visibility === undefined) objects.safeSync('clip', clip.id);
+        }
+        // Only the app itself (its automation's own records) may say a clip was machine-made.
+        if (autoGen !== undefined && flag(autoGen) !== null) {
+            if (req.authType !== 'app') return res.status(403).json({ error: 'auto_generated is set by the app only' });
+            db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]);
         }
         if (visibility !== undefined) db.setClipVisibility(clip.id, visibility);
         res.json({ clip: clipPublic(db.getClipById(clip.id, req.appId)) });

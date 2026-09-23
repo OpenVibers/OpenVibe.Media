@@ -269,7 +269,7 @@ router.post('/:id/finalize', tenantAuth(), _finalizeHandler);
 // ── List ─────────────────────────────────────────────────────
 // Filters follow the inherited query shapes: user_id, stream_id,
 // managed_stream_id, include_private (private+unlisted too), order
-// (newest|oldest|views|peak_viewers), limit/offset.
+// (newest|oldest|views|peak_viewers), since (created at or after), limit/offset.
 router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
@@ -286,6 +286,8 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
             // apps surface the live recording via their own dedicated card.
             includeRecording: ['1', 'true'].includes(String(req.query.include_recording || '')),
             order: req.query.order || req.query.sort,   // `sort` = inherited alias
+            // Created at or after (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC): "top this week".
+            since: req.query.since || null,
         };
         const vods = db.listVods(req.appId, filters);
         const total = db.countVods(req.appId, filters);

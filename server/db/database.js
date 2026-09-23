@@ -320,7 +320,19 @@ const LIST_ORDERS = {
 };
 function _listOrder(order) { return LIST_ORDERS[order] || LIST_ORDERS.newest; }
 
-function _vodConds(appId, { user_id = null, stream_id = null, managed_stream_id = null, include_private = false, includeRecording = true } = {}) {
+/**
+ * A list's `since` filter as an SQLite datetime ('YYYY-MM-DD HH:MM:SS', UTC), or null. Accepts that
+ * form or anything Date.parse reads (ISO 8601); anything else is ignored rather than refused.
+ */
+function sinceParam(value) {
+    if (value == null || value === '') return null;
+    const s = String(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/.test(s)) return s.length === 10 ? `${s} 00:00:00` : s;
+    const t = Date.parse(s);
+    return Number.isFinite(t) ? new Date(t).toISOString().replace('T', ' ').slice(0, 19) : null;
+}
+
+function _vodConds(appId, { user_id = null, stream_id = null, managed_stream_id = null, include_private = false, includeRecording = true, since = null } = {}) {
     const conds = ['app_id = ?', 'COALESCE(clips_only, 0) = 0'];
     const params = [appId];
     if (!includeRecording) conds.push('COALESCE(is_recording, 0) = 0');
@@ -328,6 +340,10 @@ function _vodConds(appId, { user_id = null, stream_id = null, managed_stream_id 
     if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
     if (stream_id != null) { conds.push('stream_id = ?'); params.push(stream_id); }
     if (managed_stream_id != null) { conds.push('managed_stream_id = ?'); params.push(managed_stream_id); }
+    // Created at or after this moment (the "top this week" windows). datetime() on both sides so
+    // an imported row stored as ISO text compares by time, not by string.
+    const after = sinceParam(since);
+    if (after) { conds.push('datetime(created_at) >= datetime(?)'); params.push(after); }
     return { conds, params };
 }
 
@@ -508,10 +524,16 @@ function getClipById(id, appId = null) {
     return get(`SELECT * FROM clips WHERE id = ?${clause}`, params);
 }
 
-function _clipConds(appId, { vod_id = null, stream_id = null, user_id = null, channel_user_id = null, include_private = false, hide_self = false } = {}) {
+function _clipConds(appId, { vod_id = null, stream_id = null, user_id = null, channel_user_id = null, include_private = false, hide_self = false, auto_generated = null, ready_only = false, since = null } = {}) {
     const conds = ['app_id = ?'];
     const params = [appId];
     if (!include_private) conds.push('is_public = 1');
+    // Made by the app's own automation (1) or by a person (0); null = both.
+    if (auto_generated === 0 || auto_generated === 1) { conds.push('COALESCE(auto_generated, 0) = ?'); params.push(auto_generated); }
+    // Only clips that can be played: not still cutting, not failed. Imported rows have no status.
+    if (ready_only) conds.push("COALESCE(status, 'ready') = 'ready'");
+    const after = sinceParam(since);
+    if (after) { conds.push('datetime(created_at) >= datetime(?)'); params.push(after); }
     if (vod_id != null) { conds.push('vod_id = ?'); params.push(vod_id); }
     if (stream_id != null) { conds.push('stream_id = ?'); params.push(stream_id); }
     if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
