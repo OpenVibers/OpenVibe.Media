@@ -7,7 +7,10 @@ projection over an object through its `object_id` column. Every existing URL and
 unchanged. New code talks to objects through the [v2 API](#object-api-v2).
 
 Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`, `invariant.js`,
-`signing.js`, `verify-job.js`, `copy-report.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`.
+`signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`) and the job system in
+`server/jobs/` (`queue.js`, `worker.js`, `routes.js`, `types.js`, `thumbnail.js`, `invariant-scan.js`,
+`derive.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`, `test/jobs*.test.js`,
+`test/r2-eviction-drill.test.js`.
 
 ## Tables
 
@@ -17,7 +20,8 @@ Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`,
 | `media_locations` | one row per provider copy (`UNIQUE(object_id, provider)`): `provider` (`local` `b2` `r2`), `bucket`, `key` (absolute path for local, object key for B2/R2), `storage_class` (`hot` local, `cold` B2, `cache` R2), `state`, `checksum`, `size_bytes`, `verified_at` |
 | `media_relationships` | `from_object_id`, `relation`, `to_object_id`, `metadata`. In use: `clip_of` (clip to vod, with start/end), `thumbnail_of` (thumbnail to vod/clip). Reserved: `derived_from`, `screenshot_of` |
 | `media_variants` | `object_id`, `variant_name`, `derived_object_id`, `recipe`. In use: `thumbnail` |
-| `media_jobs` | generic derivative/maintenance jobs (`job_type`, `status`, `attempts`, `checkpoint`, `error`). **Schema only in this pass:** nothing enqueues or consumes jobs yet |
+| `media_jobs` | derivative/maintenance jobs: `id` (mjob_…), `app_id`, `object_id`, `job_type`, `status`, `idempotency_key`, `params`, `result`, `attempts`/`max_attempts`, `run_after`, `lease_until`, `checkpoint`, `error`/`error_code`, `cancel_requested`, `created_by`, `decided_by`. See [Jobs](#jobs) |
+| `media_uploads`, `media_upload_parts` | multipart upload sessions and the parts received (size, sha256). See [Multipart uploads](#multipart-uploads) |
 | `media_holds` | retention holds, see [Holds](#retention-holds) |
 | `media_invariant_violations` | public playback objects over the size policy, see [Invariant](#public-object-size-invariant) |
 
@@ -129,9 +133,15 @@ All routes live under `/api/v2/:app/objects`.
 
 | method | path | notes |
 |---|---|---|
-| POST | `/` | init. `{ kind, visibility (default private), mime_type, size_bytes, filename, content_hash (expected sha256), metadata (≤ 16 KB), user_id }` returns 201 `{ id, object, upload: { method: 'PUT', url, token, expires_at, max_bytes, complete_url } }`. Checks at init: `size_bytes` against `MEDIA_OBJECT_MAX_MB` (413), the quota including reservations (413 `media.quota.exceeded`), and the public-size invariant (422) |
+| POST | `/` | init. `{ kind, visibility (default private), mime_type, size_bytes, filename, content_hash (expected sha256), metadata (≤ 16 KB), user_id, upload_ttl (60-86400 s), multipart, part_size }` returns 201 `{ id, object, upload: { method: 'PUT', url, token, expires_at, max_bytes, content_type, complete_url, multipart_url } }`. `url` is a [presigned PUT URL](#presigned-uploads). With `multipart: true` (required above `MEDIA_OBJECT_MAX_MB`): `method: 'multipart'`, `url: null`, and `upload.multipart` is the new [session](#multipart-uploads). Checks at init: `size_bytes` against `MEDIA_OBJECT_MAX_MB` (single part) or `MEDIA_MULTIPART_MAX_MB` (413), the quota including reservations (413 `media.quota.exceeded`), the public-size invariant (422) and the [content type](#content-types) for the kind (415 `media.object.unsupported_type`) |
+| POST | `/:id/upload-url` | a fresh presigned single-PUT URL for an uploading object (`{ ttl }` 60-86400 s) |
 | PUT | `/:id/content` | the bytes, single part. Auth is the upload token (`?token=` from init, or `X-Upload-Token`) or the usual credential. Streams to disk computing sha256. Refuses more than the declared size or the limit (413), a size mismatch (400) and quota overrun (413). Stored at `OBJECTS_PATH/<app>/<id>` with a verified local location. Mounted ahead of the JSON body parser, so any Content-Type is taken as raw bytes; the Content-Type becomes `mime_type` when init set none. Can be repeated while the object is `uploading` |
-| POST | `/:id/complete` | checks the expected hash (422 `media.object.hash_mismatch`), the invariant and the quota. Sets `ready` and sends the `media.object.uploaded` webhook. Also accepts the upload token |
+| POST | `/:id/complete` | checks the expected hash (422 `media.object.hash_mismatch`), the invariant, the quota and the bytes against the type (415 `media.object.content_mismatch`). Sets `ready` and sends the `media.object.uploaded` webhook. Also accepts the upload token |
+| POST | `/:id/multipart` | start a [multipart session](#multipart-uploads) `{ part_size, size_bytes (when init declared none) }` → 201 |
+| GET | `/:id/multipart/:uploadId` | the session: `parts` received (number, size, sha256), `missing`, `received_bytes`, `expires_at` |
+| PUT | `/:id/multipart/:uploadId/parts/:n` | one part, raw bytes of exactly its size; optional `X-Content-SHA256` |
+| POST | `/:id/multipart/:uploadId/complete` | `{ content_hash, parts: [{ part_number, sha256 }] }` (both optional): assembles, then the checks of `/complete` |
+| DELETE | `/:id/multipart/:uploadId` | abort: parts deleted, the object stays `uploading` |
 | GET | `/:id` | metadata: providers and states of each copy, never paths or keys |
 | GET | `/` | cursor list, newest first. `?limit (≤200)&cursor&kind&visibility&status&owner (usr_…)&user_id&include_deleted` returns `{ objects, next_cursor }` |
 | DELETE | `/:id` | soft delete: `lifecycle_status = deleted`, and the bytes are kept for `MEDIA_DELETE_RETENTION_DAYS` (default 30). 409 `media.object.held` under a hold. 409 `media.object.legacy_managed` for projected objects, which are deleted through their v1 route |
@@ -149,10 +159,71 @@ All routes live under `/api/v2/:app/objects`.
 - A local copy streams with Range support. Otherwise the route redirects 302 to a presigned R2 URL, then a presigned B2 URL.
 - Headers: `X-Content-Type-Options: nosniff` and `X-Robots-Tag: noindex`. Content is `inline` only for images (not SVG), video, audio, PDF and plain text, and `attachment` for everything else.
 
-**Signing.** HMAC-SHA256 over the purpose (`get` or `put`), the object id and the expiry, keyed with
-`MEDIA_SIGNING_SECRET`. A download signature cannot be used as an upload token, or the other way
-round. Without the secret, a random per-process secret is used and a warning is logged, so links
-stop working at the next restart. **Set `MEDIA_SIGNING_SECRET` in production.**
+**Signing.** HMAC-SHA256 keyed with `MEDIA_SIGNING_SECRET` over a purpose and what the link may do:
+downloads (`get`) over the object id and expiry; upload tokens (`put2`) over the tenant, the object,
+its size and the expiry; multipart sessions (`mpart`) over the tenant, the object, the session, its
+total size and the expiry. A signature for one purpose is never valid for another. Without the
+secret, a random per-process secret is used and a warning is logged, so links stop working at the
+next restart. **Set `MEDIA_SIGNING_SECRET` in production.**
+
+### Presigned uploads
+
+The `url` from init (or `POST /:id/upload-url`) is a presigned single-PUT URL:
+`…/objects/<id>/content?token=v2.<exp>.<size>.<mac>`. No other credential is needed, so a browser
+can send the bytes straight to Media. The token is scoped:
+
+- to the **tenant** and the **object**: a token for another object or another tenant never verifies,
+  and the URL must address the object's tenant;
+- to the **size** the object declared (the PUT must be exactly that many bytes). An object created
+  without a size gets a size-0 token: any size up to `MEDIA_OBJECT_MAX_MB`;
+- in **time**: `upload_ttl` / `ttl` (60 s to 24 h, default `MEDIA_UPLOAD_TOKEN_TTL_S`).
+
+The size is part of the signature, so it cannot be edited. Tokens of the earlier form `<exp>.<mac>`
+(object only) are accepted until they expire. These are Media-signed URLs: the bytes land on Media's
+disk, not directly in a bucket.
+
+### Multipart uploads
+
+For objects above `MEDIA_OBJECT_MAX_MB` (up to `MEDIA_MULTIPART_MAX_MB`, default 20 GB), or whenever a
+client asks with `multipart: true`. Code: `server/objects/multipart.js`.
+
+1. **Initiate** at init (`multipart: true`) or with `POST /:id/multipart`. The object must declare its
+   size. `part_size` is `MEDIA_MULTIPART_MIN_PART_MB` (5) to `MEDIA_MULTIPART_MAX_PART_MB` (256) MB,
+   default `MEDIA_MULTIPART_PART_MB` (64), and grows if there would be more than 10,000 parts. The
+   answer carries `upload_id`, `parts_expected`, and a session `token` (`mp1.…`) already in
+   `part_url_template`, `status_url`, `complete_url` and `abort_url`. The quota is checked (the
+   declared size is reserved from init), and there must be free disk for twice the size plus
+   `MEDIA_UPLOAD_MIN_FREE_MB` (507 `media.storage.insufficient`). A new session replaces an open one.
+2. **Upload parts** (`PUT …/parts/<n>`, any order, in parallel). Every part but the last is exactly
+   `part_size` bytes and the last is the rest; any other size is refused (400/413). A part is written
+   to a temp file and renamed when complete, so a dropped connection leaves nothing half-written.
+   Sending a part again replaces it. `X-Content-SHA256` is checked when sent.
+3. **Resume** after a drop: `GET` the session and send the parts in `missing`.
+4. **Complete**: every part must be there (409 `media.upload.parts_missing` lists `missing`); a
+   `parts` list with sha256 values must match what was received. The parts are concatenated into
+   `OBJECTS_PATH/<app>/<id>` while hashing, the parts are deleted, and the checks of `/complete`
+   follow (expected hash, invariant, quota, content). If one of those fails, the object stays
+   `uploading` with its content and can be sent again.
+5. **Abort** (`DELETE`) deletes the parts; the object stays `uploading`. A single-part PUT is refused
+   while a session is open (409 `media.upload.multipart_active`).
+
+Sessions expire after `MEDIA_MULTIPART_TTL_HOURS` (24): the hourly purge deletes their parts and any
+part directory no session owns. `media_uploads_open` on `/metrics` counts open sessions, and
+reconciliation reports sessions left open past their expiry (`incomplete_multipart`).
+
+### Content types
+
+Code: `server/objects/content-type.js`.
+
+- **The type must suit the kind** (415 `media.object.unsupported_type`, at init or at the PUT when
+  init declared none): `vod` video/* or audio/*, `clip` video/*, `thumbnail` / `screenshot` / `avatar`
+  image/* but not SVG. `file` and `asset` take any well-formed type.
+- **Inline-served bytes must be what their type says** (415 `media.object.content_mismatch` at
+  complete): `/o/:id` serves image/*, video/*, audio/* and PDF inline, so for those types (and every
+  kind with a rule) the first bytes must match a known signature of that family: JPEG, PNG, GIF, WebP,
+  BMP, AVIF/HEIC; Matroska/WebM, MP4/MOV, Ogg, AVI, MPEG-TS; MP3, WAV, FLAC, M4A; PDF.
+- Everything else is served as an attachment with `nosniff`, so its declared type is taken as given.
+  The declared type wins over the PUT's `Content-Type` (declared at init: the PUT header is ignored).
 
 **Quota.** `apps.quota_bytes` is compared against v1 file bytes plus native objects that are
 `uploading` (their declared size counts as a reservation) or `ready`. Soft-deleted objects do not
@@ -204,9 +275,10 @@ The exit code is 1 when issues were found.
 | `orphan_location` | a location row whose object does not exist |
 | `deleted_publicly_reachable` | a deleted object whose inherited row still serves it, or a thumbnail of a deleted object that is still served by name |
 | `missing_projection` | an inherited row with no object yet (run the backfill) |
+| `incomplete_multipart` | a multipart session still open past its expiry (the hourly purge should have removed it) |
 
 **Not covered yet:** orphan *provider* objects (bucket keys with no row, which needs bucket
-listing) and incomplete multipart uploads. `server/objects/reconcile.js` takes a `head` function,
+listing). `server/objects/reconcile.js` takes a `head` function,
 so tests run it against a fake provider.
 
 ## Scheduled verification
@@ -260,9 +332,124 @@ A *public playback object* is a `ready` vod or clip whose visibility is `public`
 
   Lists every public playback object above target, largest first, records the rows, and resolves rows that no longer apply. `--dry-run` writes nothing.
 
-**Nothing is re-encoded in this pass.** Most whole-stream VODs are far above 500 MB. They will show
-up as violations until the segment-native model lands (roadmap W4 deliverable 7, capture in W7),
-which splits playback into objects that fit.
+- **Validator job.** `invariant.scan` (see [Jobs](#jobs)) runs per tenant every
+  `MEDIA_INVARIANT_SCAN_HOURS` (24) and on demand. It records the violations and **proposes** one job
+  per public playback object above the max: `object.split` into stream-copy parts of about the target
+  size when the duration is known, `object.remux` when it is not (the remux writes the duration, so a
+  split can be planned next). **Proposals never run by themselves**: they wait in status `proposed`
+  until the owner approves or cancels them. A cancelled proposal is not proposed again; a proposal
+  whose object stopped violating (made private, deleted) is withdrawn. `scripts/media-jobs.js scan`
+  shows what would be proposed without writing anything.
+
+**Nothing is re-encoded, and nothing is made private automatically.** A split makes private parts next
+to the unchanged source; the source stays a violation until its owner decides (make the parts public
+and the source private, or leave it). The segment-native model (roadmap W4 deliverable 7, capture in
+W7) is what will make every new recording fit.
+
+## Jobs
+
+Code: `server/jobs/`. Tests: `test/jobs.test.js`, `test/jobs-invariant.test.js`.
+
+**States.** `proposed` (waiting for the owner; the worker never takes it) → `queued` → `running` →
+`succeeded` | `failed` | `cancelled`. A failed attempt goes back to `queued` with `run_after` (backoff
+30 s, 2 min, 8 min, …, at most 1 h) until `max_attempts`; a handler can mark a failure permanent.
+
+**Events.** Every state change and its `media.job.<transition>` event (`proposed`, `queued`,
+`started`, `retrying`, `succeeded`, `failed`, `cancelled`; subject `job <id>`, payload the job)
+commit in one SQLite transaction through Media's outbox, the same rule as the outcome events
+(`webhooks.announce()`): no change without its event, no event for a change that rolled back.
+Progress events are `low` priority; outcomes and proposals are `important`. Job events go to
+OpenVibe.Events only, not to app webhooks.
+
+**Idempotency.** `Idempotency-Key` (or `idempotency_key`) is unique per tenant: the same key with the
+same request (type, object, params) answers with the job it made (`Idempotent-Replayed: true`); a
+different request under a used key is 409 `media.job.idempotency_conflict`. At most 50 jobs per tenant
+may be queued or running (429 `media.job.too_many`).
+
+**Cancellation, by the owner.** A proposed or queued job is cancelled at once. A running job gets
+`cancel_requested`; the worker aborts it (its ffmpeg is killed) and it ends `cancelled`. Finished
+jobs answer 409. The owner is the tenant (app key, service token for the namespace, or the project's
+app token); a caller acting for one of the app's users (`X-OV-User-Id`) sees and decides only the jobs
+it created and the jobs on objects it owns.
+
+**Worker.** In-process, polling every `MEDIA_JOBS_POLL_MS`, in two lanes: `light`
+(`MEDIA_JOBS_LIGHT_CONCURRENCY`, 2) and `heavy` (`MEDIA_JOBS_HEAVY_CONCURRENCY`, 1; waits while a
+recording runs unless `MEDIA_JOBS_HEAVY_WHILE_RECORDING=1`). A running job holds a lease
+(`MEDIA_JOBS_LEASE_S`) renewed by a heartbeat; at start, jobs the previous process left `running` are
+requeued (or failed when out of attempts). Handlers checkpoint progress and resume from it.
+`MEDIA_JOBS_ENABLED=0` stops the worker. Finished thumbnail jobs are pruned after
+`MEDIA_JOBS_RETENTION_DAYS`; other jobs are kept.
+
+| type | lane | what it does |
+|---|---|---|
+| `thumbnail.regenerate` | light | (Re)generates a vod/clip thumbnail from its media (local file or presigned cloud copy). `params { kind, id }`, or an object that is a projected vod/clip. Result `{ url }` |
+| `invariant.scan` | light | The [size-invariant validator](#public-object-size-invariant): records violations, proposes `object.split` / `object.remux`, withdraws moot proposals. Tenant-wide (no object) |
+| `object.split` | heavy | Stream-copies a vod/clip (or a video/audio object) into parts (`params.parts` 2-1000 or `segment_seconds`), each a new **private** object with a `derived_from` relationship (`job_id`, `part`, `start_seconds`, `duration_seconds`). Cuts land on keyframes, so neighbouring parts can overlap slightly. The source is never changed. Checkpointed per part |
+| `object.remux` | heavy | Stream-copy remux of the whole source (seek index, duration, MP4 faststart) into one new private object; also the source's `remux` variant |
+
+Split and remux refuse a source that is not ready, a tenant quota the output would exceed, and too
+little free disk (the source size plus `MEDIA_UPLOAD_MIN_FREE_MB`; retried after 30 min).
+
+**The v1 thumbnail route runs as a job.** `POST /api/v1/:app/thumbnails/:kind/:id` without an image
+queues `thumbnail.regenerate` (joining one already queued or running for the same item, so concurrent
+requests share one ffmpeg run), runs it at once and answers `{ url, job_id }` as before; 404 when
+there is no media, 500 when no frame came out. `?async=1` answers 202 `{ job }` without waiting.
+
+**API** (`/api/v2/:app/jobs`, same auth as the objects API; writes need `media.object.upload`, reads
+`media.object.read`):
+
+| method | path | notes |
+|---|---|---|
+| GET | `/` | cursor list, newest first: `?status&type&object_id&limit (≤200)&cursor` → `{ jobs, next_cursor }` |
+| POST | `/` | `{ type, object_id, params, max_attempts }` + `Idempotency-Key` → 202 `{ job }` (200 on a replay) |
+| GET | `/:jobId` | `{ job }` |
+| POST | `/:jobId/approve` | a proposal → `queued` (409 `media.job.not_proposed` otherwise) |
+| POST | `/:jobId/cancel`, DELETE `/:jobId` | 200 cancelled, 202 while a running job stops, 409 when finished |
+
+**Operator script.**
+
+```
+node scripts/media-jobs.js list [--status proposed] [--type object.split] [--app live] [--json]
+node scripts/media-jobs.js show <job id>
+node scripts/media-jobs.js scan [--app live] [--apply] [--json]   # dry run unless --apply
+node scripts/media-jobs.js approve <job id>... [--by <who>]
+node scripts/media-jobs.js cancel <job id>... [--by <who>] [--reason <text>]
+```
+
+It changes the database directly (the service's worker picks approved jobs up on its next poll) and,
+when the service's outbox is on, queues each change's event in the same transaction. It never runs a
+job. `media_jobs{type,status}` on `/metrics` counts jobs.
+
+## R2 eviction drill
+
+The exit criterion "the canonical B2 object survives R2 eviction", as a repeatable drill with a kept
+artifact. Code: `scripts/r2-eviction-drill.js`; test: `test/r2-eviction-drill.test.js` (a fake S3 and
+a local Media, through the real storage engine).
+
+```
+node scripts/r2-eviction-drill.js (--vod <id> | --pick) [--execute] [--base-url https://openvibe.media]
+                                  [--no-http] [--max-mb 512] [--out artifact.json] [--json]
+```
+
+- **Dry run by default:** it checks the preconditions and both copies, and writes the artifact. Nothing moves.
+- **Preconditions** (else it refuses, exit 2): the VOD is served from R2 (`storage_provider = r2`), is
+  not recording, is not held (a hold freezes placement), and is public or unlisted for the HTTP
+  checks; B2 and R2 are configured; the B2 and R2 copies have the same size (and the recorded size)
+  and the same first MiB. Evicting the cache in front of a corrupt canonical copy would lose the only
+  good one. `--pick` takes the smallest eligible VOD up to `--max-mb`.
+- **`--execute`**, through the storage engine's own tier moves: (1) `GET <base>/v/<id>?raw=1`
+  redirects to R2 and serves the expected first MiB; (2) `demoteFromR2` deletes the R2 copy (after
+  checking B2) and flips the row to `b2`; (3) R2 answers 404, and `/v/<id>` redirects to B2 serving the
+  same first MiB; (4) `promoteToR2` copies B2 back to R2 (verified by HEAD) and flips the row to `r2`;
+  (5) `/v/<id>` redirects to R2 again with the same bytes, and `media_locations` shows B2 and R2 present.
+- A failed step stops the drill (exit 1). After the eviction the VOD stays served from B2, which the
+  drill has just proven works. `--no-http` checks the playback decision in-process instead of
+  `GET /v`, which otherwise counts as one view from the drill's host.
+- **Artifact:** JSON (default `data/drills/r2-eviction-<vod>-<time>.json`) with every step, the HEAD
+  sizes, the first-MiB sha256 of each copy and of what was served, `media_locations` before, after the
+  eviction and after, and the verdict (`pass`, `fail`, `refused`, `dry-run`).
+
+Not run against production yet: it needs the owner's go-ahead.
 
 ## Configuration
 
@@ -273,7 +460,18 @@ which splits playback into objects that fit.
 | `MEDIA_DELETE_RETENTION_DAYS` | 30 | soft-deleted native bytes are kept this long |
 | `MEDIA_SIGNING_SECRET` | *(random per process)* | HMAC key for signed URLs and upload tokens |
 | `MEDIA_SIGNED_URL_TTL_S` | 300 | default signed download lifetime |
-| `MEDIA_UPLOAD_TOKEN_TTL_S` | 3600 | upload token lifetime |
+| `MEDIA_UPLOAD_TOKEN_TTL_S` | 3600 | default presigned upload URL lifetime (60 s to 24 h per request) |
+| `MEDIA_MULTIPART_MAX_MB` | 20480 | largest object a multipart upload may declare |
+| `MEDIA_MULTIPART_MIN_PART_MB` / `_MAX_PART_MB` / `_PART_MB` | 5 / 256 / 64 | part size bounds and default |
+| `MEDIA_MULTIPART_TTL_HOURS` | 24 | an unfinished multipart session is purged after this |
+| `MEDIA_UPLOAD_MIN_FREE_MB` | 10240 | free disk kept in reserve by multipart uploads and split/remux jobs |
+| `MEDIA_JOBS_ENABLED` | on | `0` stops the job worker |
+| `MEDIA_JOBS_POLL_MS` | 5000 | worker poll interval |
+| `MEDIA_JOBS_LIGHT_CONCURRENCY` / `_HEAVY_CONCURRENCY` | 2 / 1 | jobs per lane |
+| `MEDIA_JOBS_HEAVY_WHILE_RECORDING` | off | `1` lets split/remux run while a recording is being written |
+| `MEDIA_JOBS_LEASE_S` | 120 | running-job lease (renewed by the heartbeat) |
+| `MEDIA_INVARIANT_SCAN_HOURS` | 24 | the size-invariant validator's schedule per tenant (`0` = on demand only) |
+| `MEDIA_JOBS_RETENTION_DAYS` | 30 | finished thumbnail jobs are pruned after this |
 | `MEDIA_PUBLIC_OBJECT_{MAX,TARGET,WARN}_MB` | 500 / 256 / 384 | invariant thresholds |
 | `MEDIA_VERIFY_ENABLED` | on | `0` turns the scheduled verification off |
 | `MEDIA_VERIFY_INTERVAL_MIN` | 10 | minutes between verification runs |
@@ -284,10 +482,11 @@ which splits playback into objects that fit.
 
 ## Not in this pass
 
-- Multipart uploads and presigned direct-to-bucket uploads. Native bytes are stored locally.
+- Presigned direct-to-bucket uploads. Presigned URLs are Media-signed and native bytes are stored locally.
 - Tiering of native objects to B2/R2.
 - Copy/move aliases, lifecycle rules and an S3-compatible façade.
-- A `media_jobs` worker.
-- Orphan-bucket-object and incomplete-multipart detection.
+- Clip cutting and the finalize remux still run inline, not as jobs (thumbnail regeneration was the first
+  operation moved onto the job system).
+- Orphan-bucket-object detection.
 - The segment-native timeline.
 - App assets (emotes and sounds, the `assets` table) are not projected yet. The `asset` kind exists for v2 uploads.

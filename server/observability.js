@@ -77,6 +77,14 @@ function domainMetrics(registry, { db, recorder, events }) {
         },
     });
     registry.gauge({
+        name: 'media_jobs', help: 'Media jobs by type and status (proposed = waiting for the owner; see scripts/media-jobs.js)', labelNames: ['type', 'status'],
+        collect: () => db.all('SELECT job_type, status, COUNT(*) AS n FROM media_jobs GROUP BY job_type, status').map((r) => ({ labels: { type: r.job_type, status: r.status }, value: r.n })),
+    });
+    registry.gauge({
+        name: 'media_uploads_open', help: 'Multipart upload sessions still open (active or completing)',
+        collect: () => db.get("SELECT COUNT(*) AS n FROM media_uploads WHERE status IN ('active', 'completing')").n,
+    });
+    registry.gauge({
         name: 'media_events_outbox', help: 'Events outbox rows waiting to reach OpenVibe.Events, and rows Events rejected', labelNames: ['status'],
         collect: () => {
             const s = events.status();

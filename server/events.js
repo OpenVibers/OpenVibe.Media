@@ -9,6 +9,8 @@
  *   clip.ready | clip.failed         → media.clip.ready | media.clip.failed    (subject clip <id>)
  *   media.object.uploaded            → media.object.uploaded                   (subject object <id>)
  *   storage.alert | storage.recovered → media.storage.alert | media.storage.recovered
+ *   job state changes (server/jobs/queue.js) → media.job.proposed | queued | started | retrying |
+ *                                             succeeded | failed | cancelled   (subject job <id>; Events only, no webhook)
  *
  * The outbox row is written INSIDE the SQLite transaction that makes the state change it describes
  * (record(), called from webhooks.announce()): the event exists if and only if the change committed,
@@ -34,6 +36,12 @@ const TYPES = {
     'media.object.uploaded': ['media.object.uploaded', 'object'],
     'storage.alert': ['media.storage.alert', 'storage'],
     'storage.recovered': ['media.storage.recovered', 'storage'],
+};
+
+// media.job.<transition>: progress is low priority, the outcome (and a proposal waiting for its owner) important.
+const JOB_TRANSITIONS = {
+    proposed: 'important', queued: 'low', started: 'low', retrying: 'low',
+    succeeded: 'important', failed: 'important', cancelled: 'important',
 };
 
 let outbox = null;
@@ -80,10 +88,6 @@ function slim(appId, data) {
  * or the webhook event has no durable twin.
  */
 function record(webhookEvent, appId, data) {
-    if (!outbox) return null;
-    // Developer-project sandbox tenants (ADR-014) produce no platform events: sandbox activity must
-    // never reach production consumers.
-    if (appId && db.isSandboxTenant(appId)) return null;
     const map = TYPES[webhookEvent];
     if (!map) return null;
     const [eventType, subjectType] = map;
@@ -91,16 +95,49 @@ function record(webhookEvent, appId, data) {
     const subject = subjectType === 'storage'
         ? { type: 'storage', id: String((data && data.kind) || 'storage') }
         : { type: subjectType, id: String(id == null ? 'unknown' : id) };
+    return enqueue(eventType, appId, subject, data, eventType === 'media.storage.recovered' ? 'low' : 'important');
+}
+
+/**
+ * Queue media.job.<transition> for a job row (queue.jobPublic shape). Same rule as record(): call it
+ * inside the transaction that changes the job's state; it throws when the insert fails.
+ */
+function recordJob(transition, job) {
+    const priority = JOB_TRANSITIONS[transition];
+    if (!priority) throw new Error(`unknown job transition ${transition}`);
+    return enqueue(`media.job.${transition}`, job.app_id, { type: 'job', id: String(job.id) }, job, priority);
+}
+
+function enqueue(eventType, appId, subject, data, priority) {
+    if (!outbox) return null;
+    // Developer-project sandbox tenants (ADR-014) produce no platform events: sandbox activity must
+    // never reach production consumers.
+    if (appId && db.isSandboxTenant(appId)) return null;
     const env = outbox.enqueue({
         event_type: eventType,
         actor: { type: 'service', id: 'media' },
         subject,
         visibility: 'internal',
-        priority: eventType === 'media.storage.recovered' ? 'low' : 'important',
+        priority,
         payload: slim(appId, data),
     });
     stats.queued++;
     return env;
+}
+
+/**
+ * Operator scripts (scripts/media-jobs.js) change job state in the same database as the running
+ * service. When the service's outbox table exists (the outbox is on there), the script writes its
+ * events into it too, and the service's relay publishes them. No relay runs in the script.
+ */
+function initWriter() {
+    if (outbox) return outbox;
+    const raw = db.getDb();
+    if (!raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event_outbox'").get()) return null;
+    const client = createClient({ baseUrls: { events: 'http://127.0.0.1:9' }, retries: 0 });
+    outbox = createOutbox(raw, { events: createEventsClient(client, { source: 'media' }) });
+    outbox.ensureSchema();
+    return outbox;
 }
 
 /** Wake the relay once the transaction that queued events has committed. */
@@ -115,4 +152,4 @@ function status() {
 
 function _reset() { if (outbox) outbox.stop(); outbox = null; stats.queued = 0; stats.lastError = null; }
 
-module.exports = { init, record, kick, status, TYPES, _reset };
+module.exports = { init, initWriter, record, recordJob, kick, status, TYPES, JOB_TRANSITIONS, _reset };

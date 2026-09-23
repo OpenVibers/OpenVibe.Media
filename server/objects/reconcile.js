@@ -17,6 +17,8 @@
  *   orphan_location                 location rows whose object does not exist
  *   deleted_publicly_reachable      deleted object still served (legacy row, or a thumbnail of it)
  *   missing_projection              inherited rows with no object yet (run the backfill)
+ *   incomplete_multipart            multipart sessions still open past their expiry (the hourly purge
+ *                                   removes their parts; one listed here means the purge is not running)
  */
 'use strict';
 
@@ -27,7 +29,7 @@ const model = require('./model');
 
 const MB = 1024 * 1024;
 const ISSUES = ['no_canonical_location', 'canonical_missing_replica_present', 'no_present_copy', 'missing_local_file', 'remote_missing',
-    'size_mismatch', 'hash_mismatch', 'orphan_location', 'deleted_publicly_reachable', 'missing_projection'];
+    'size_mismatch', 'hash_mismatch', 'orphan_location', 'deleted_publicly_reachable', 'missing_projection', 'incomplete_multipart'];
 
 /** Real provider: undefined when the provider is not configured here (cannot verify), null on 404. */
 async function defaultHead(provider, key) {
@@ -179,6 +181,11 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
         for (const r of db.all(`SELECT ${keyCol} AS k FROM ${table} WHERE ${cond}${appId ? ' AND app_id = ?' : ''}`, appId ? [appId] : [])) {
             issue('missing_projection', { table, id: r.k });
         }
+    }
+
+    for (const u of db.all(`SELECT u.*, (SELECT COUNT(*) FROM media_upload_parts p WHERE p.upload_id = u.id) AS parts_received FROM media_uploads u
+                            WHERE u.status IN ('active', 'completing') AND u.expires_at < datetime('now')${appId ? ' AND u.app_id = ?' : ''}`, appId ? [appId] : [])) {
+        issue('incomplete_multipart', { upload_id: u.id, object_id: u.object_id, parts_received: u.parts_received, parts_expected: u.parts_expected, expires_at: u.expires_at });
     }
 
     report.total_issues = ISSUES.reduce((n, k) => n + report.issues[k].count, 0);

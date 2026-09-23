@@ -164,6 +164,10 @@ function bucketFor(name) {
     return (PROVIDER_ENV[name] && PROVIDER_ENV[name].bucket) || null;
 }
 
+function endpointFor(name) {
+    return (PROVIDER_ENV[name] && PROVIDER_ENV[name].endpoint) || null;
+}
+
 // Object model (Wave 4): holds freeze an object's placement, and every tier move
 // re-projects the VOD's media_locations. Lazy — the model requires this module.
 const objects = () => require('../objects/model');
@@ -1265,6 +1269,7 @@ module.exports = {
     isRemote,
     providerConfigured,
     bucketFor,
+    endpointFor,
     headObject,
     keyForVod,
     localPathForVod,

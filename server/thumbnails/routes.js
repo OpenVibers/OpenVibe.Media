@@ -4,7 +4,11 @@
  * POST /:kind/:id  (upload or generate) → { url }
  *   kind = 'vod' | 'clip'  → multipart 'thumbnail' (or JSON { image: base64 })
  *                            uploads a custom image; with no image, the
- *                            thumbnail is (re)generated from the media file.
+ *                            thumbnail is (re)generated from the media file by a
+ *                            thumbnail.regenerate job (server/jobs): the route queues
+ *                            it (joining one already queued or running for the same
+ *                            item), runs it at once and answers { url } as before.
+ *                            ?async=1 answers 202 { job } without waiting.
  *   kind = 'live'|'stream' → upload only; stored under a stable per-app/id
  *                            filename so the URL survives refreshes.
  *
@@ -72,16 +76,29 @@ router.post('/:kind/:id', tenantAuth({ allowUser: true }), upload.single('thumbn
             return res.json({ url });
         }
 
-        // Generate from the media file (local or presigned remote).
-        const vodStorage = require('../vod/vod-storage');
-        const source = await vodStorage.resolveMediaSource(row);
-        if (!source) return res.status(404).json({ error: 'Media file unavailable' });
-        const url = kind === 'vod'
-            ? await thumbService.generateVodThumbnail(numId, source.value)
-            : await thumbService.generateClipThumbnail(numId, source.value);
-        if (!url) return res.status(500).json({ error: 'Failed to generate thumbnail' });
-        res.json({ url });
+        // Generate from the media file (local or presigned remote) as a thumbnail.regenerate job.
+        const queue = require('../jobs/queue');
+        const worker = require('../jobs/worker');
+        const r = queue.enqueue({
+            appId: req.appId, type: 'thumbnail.regenerate', objectId: row.object_id || null, params: { kind, id: numId },
+            dedupeActive: true, maxAttempts: 1, createdBy: `app:${req.appId}${req.authType === 'user' ? `:user:${req.userId}` : ''}`,
+            ownerUserId: req.authType === 'user' ? req.userId : null,
+        });
+        if (['1', 'true'].includes(String(req.query.async || ''))) {
+            worker.kick();
+            return res.status(202).json({ job: queue.jobPublic(r.job) });
+        }
+        if (r.created || r.job.status === 'queued') worker.runNow(r.job.id).catch(() => {});   // claims it unless someone already has
+        const done = await queue.waitFor(r.job.id, 90 * 1000);
+        if (!done || done.status === 'queued' || done.status === 'running') return res.status(202).json({ job: queue.jobPublic(done || r.job) });
+        if (done.status === 'succeeded') return res.json({ url: queue.parseJson(done.result, {}).url, job_id: done.id });
+        if (done.error_code === 'media_unavailable') return res.status(404).json({ error: 'Media file unavailable', job_id: done.id });
+        res.status(500).json({ error: 'Failed to generate thumbnail', job_id: done.id });
     } catch (err) {
+        if (err && err.code === 'media.job.too_many') {
+            res.set('Retry-After', String(err.retryAfterS || 60));
+            return res.status(429).json({ error: err.message });
+        }
         console.error('[Thumbnails] Error:', err.message);
         res.status(500).json({ error: 'Failed to process thumbnail' });
     }

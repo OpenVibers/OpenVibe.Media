@@ -3,7 +3,14 @@
  *
  * HMAC-SHA256 over (purpose, object id, expiry) with MEDIA_SIGNING_SECRET.
  * Purposes are separate so a download signature can never be replayed as an
- * upload token or the other way round. Without the env secret a random
+ * upload token or the other way round.
+ *
+ * Upload tokens (presigned PUT URLs) are scoped to the tenant, the object and its size:
+ * "v2.<exp>.<size>.<mac>" over (put2, tenant, object id, size, exp); size 0 = "up to the
+ * single-part limit" (the object was created without a declared size). Tokens of the earlier
+ * form "<exp>.<mac>" (object only) are still accepted until they expire. Multipart sessions
+ * get one token for all their parts: "mp1.<exp>.<mac>" over (mpart, tenant, object id,
+ * upload id, total size, exp). Without the env secret a random
  * per-process secret is used (and a warning logged): links then stop working
  * at the next restart, which is safe but not what production wants.
  */
@@ -67,18 +74,70 @@ function verifyFile(key, exp, sig) {
     return safeEqual(sig, mac('getf', `file:${key}`, e));
 }
 
-/** Token for PUT /api/v2/:app/objects/:id/content: "<exp>.<mac>". */
-function uploadToken(objectId, ttlS = config.objects.uploadTokenTtlS) {
-    const exp = nowS() + Math.max(60, Number(ttlS) || 3600);
-    return { token: `${exp}.${mac('put', objectId, exp)}`, expires_at: new Date(exp * 1000).toISOString() };
+function macOf(parts) {
+    return crypto.createHmac('sha256', secret()).update(parts.map(String).join('\n')).digest('base64url');
 }
 
-function verifyUploadToken(objectId, token) {
-    const m = /^(\d+)\.([A-Za-z0-9_-]+)$/.exec(String(token || ''));
+/** Upload token lifetime: 60 s to 24 h (default MEDIA_UPLOAD_TOKEN_TTL_S). */
+function uploadTtl(ttlS) {
+    return Math.min(86400, Math.max(60, Number(ttlS) || config.objects.uploadTokenTtlS || 3600));
+}
+
+/**
+ * Token for PUT /api/v2/:app/objects/:id/content (a presigned single-PUT URL carries it as ?token=):
+ * "v2.<exp>.<size>.<mac>" scoped to tenant + object + size.
+ */
+function uploadToken(objectId, ttlS = config.objects.uploadTokenTtlS, { tenant = '', size = 0 } = {}) {
+    const exp = nowS() + uploadTtl(ttlS);
+    const n = Math.max(0, Math.floor(Number(size) || 0));
+    return { token: `v2.${exp}.${n}.${macOf(['put2', tenant, objectId, n, exp])}`, expires_at: new Date(exp * 1000).toISOString(), size: n };
+}
+
+/**
+ * Check an upload token's signature for this object and tenant. Returns { ok, size } where size is
+ * the byte count the token is scoped to (signed, so it cannot be altered): 0 = up to the single-part
+ * limit, null = an earlier-form token (object only).
+ */
+function checkUploadToken(objectId, token, { tenant = '' } = {}) {
+    const t = String(token || '');
+    const v2 = /^v2\.(\d+)\.(\d+)\.([A-Za-z0-9_-]+)$/.exec(t);
+    if (v2) {
+        const exp = Number(v2[1]), n = Number(v2[2]);
+        if (exp < nowS()) return { ok: false };
+        return { ok: safeEqual(v2[3], macOf(['put2', tenant, objectId, n, exp])), size: n };
+    }
+    const m = /^(\d+)\.([A-Za-z0-9_-]+)$/.exec(t);
+    if (!m) return { ok: false };
+    const exp = Number(m[1]);
+    if (exp < nowS()) return { ok: false };
+    return { ok: safeEqual(m[2], mac('put', objectId, exp)), size: null };
+}
+
+/**
+ * Valid for this object, in this tenant, for an object of `size` bytes: a token scoped to a size
+ * is valid only while the object declares exactly that size (a size-0 token: any size up to the limit).
+ */
+function verifyUploadToken(objectId, token, { tenant = '', size } = {}) {
+    const r = checkUploadToken(objectId, token, { tenant });
+    if (!r.ok) return false;
+    return size === undefined || r.size === null || r.size === 0 || r.size === Number(size);
+}
+
+/** One token for every part (and the status, complete and abort calls) of a multipart session. */
+function multipartToken({ tenant, objectId, uploadId, totalSize, expiresAt }) {
+    const exp = Math.floor(new Date(expiresAt).getTime() / 1000);
+    return { token: `mp1.${exp}.${macOf(['mpart', tenant, objectId, uploadId, totalSize, exp])}`, expires_at: new Date(exp * 1000).toISOString() };
+}
+
+function verifyMultipartToken(token, { tenant, objectId, uploadId, totalSize }) {
+    const m = /^mp1\.(\d+)\.([A-Za-z0-9_-]+)$/.exec(String(token || ''));
     if (!m) return false;
     const exp = Number(m[1]);
     if (exp < nowS()) return false;
-    return safeEqual(m[2], mac('put', objectId, exp));
+    return safeEqual(m[2], macOf(['mpart', tenant, objectId, uploadId, totalSize, exp]));
 }
 
-module.exports = { signedDownloadUrl, verifyDownload, signedFileUrl, verifyFile, uploadToken, verifyUploadToken };
+module.exports = {
+    signedDownloadUrl, verifyDownload, signedFileUrl, verifyFile,
+    uploadToken, uploadTtl, checkUploadToken, verifyUploadToken, multipartToken, verifyMultipartToken,
+};

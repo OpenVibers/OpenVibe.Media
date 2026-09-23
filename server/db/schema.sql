@@ -275,19 +275,64 @@ CREATE TABLE IF NOT EXISTS media_variants (
     UNIQUE(object_id, variant_name)
 );
 
--- Generic derivative/maintenance jobs (schema only in this pass — no worker consumes it yet).
+-- Generic derivative/maintenance jobs (server/jobs/; docs/object-model.md#jobs). A database made before
+-- the worker existed has the schema-only shape (integer id, no app_id); database.js migrateJobsTable()
+-- rebuilds it into this one. The other indexes are created there too, after the rebuild.
 CREATE TABLE IF NOT EXISTS media_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    object_id TEXT,
-    job_type TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'running', 'done', 'failed', 'cancelled')),
+    id TEXT PRIMARY KEY,                  -- mjob_<ULID>
+    app_id TEXT NOT NULL,                 -- the tenant that owns the job
+    object_id TEXT,                       -- the object it works on (NULL for tenant-wide jobs: invariant.scan)
+    job_type TEXT NOT NULL,               -- thumbnail.regenerate | invariant.scan | object.split | object.remux
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('proposed', 'queued', 'running', 'succeeded', 'failed', 'cancelled')),
+    idempotency_key TEXT,                 -- unique per tenant: a repeat answers with the same job
+    request_hash TEXT,                    -- sha256 of { type, object_id, params }: a different request under a used key is refused
+    params TEXT NOT NULL DEFAULT '{}',
+    result TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
-    checkpoint TEXT,
+    max_attempts INTEGER NOT NULL DEFAULT 3,
+    run_after DATETIME,                   -- queued: not before (retry backoff)
+    lease_until DATETIME,                 -- running: renewed while the worker holds the job
+    checkpoint TEXT,                      -- handler progress (JSON); a retry resumes from it
     error TEXT,
+    error_code TEXT,                      -- stable code of the last failure (media_unavailable, quota_exceeded, …)
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT,                      -- svc:<id> | app:<app> | app:<app>:user:<id> | system:<what>
+    owner_user_id INTEGER,                -- the app's user it was created for (X-OV-User-Id), if any
+    decided_by TEXT,                      -- who approved or rejected a proposal
+    decided_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    started_at DATETIME,
+    finished_at DATETIME
 );
 CREATE INDEX IF NOT EXISTS idx_media_jobs_status ON media_jobs(status, job_type);
+
+-- Multipart uploads of native v2 objects (server/objects/multipart.js). Parts are stored under
+-- OBJECTS_PATH/.parts/<upload id>/ and assembled at complete; one active session per object.
+CREATE TABLE IF NOT EXISTS media_uploads (
+    id TEXT PRIMARY KEY,                  -- mup_<ULID>
+    object_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    part_size INTEGER NOT NULL,
+    total_size INTEGER NOT NULL,
+    parts_expected INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'completing', 'completed', 'aborted', 'expired')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,
+    completed_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_media_uploads_object ON media_uploads(object_id, status);
+CREATE INDEX IF NOT EXISTS idx_media_uploads_expiry ON media_uploads(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS media_upload_parts (
+    upload_id TEXT NOT NULL,
+    part_number INTEGER NOT NULL,         -- 1-based
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (upload_id, part_number)
+);
 
 -- Retention holds: an object with an unreleased hold cannot be deleted or moved between tiers.
 CREATE TABLE IF NOT EXISTS media_holds (

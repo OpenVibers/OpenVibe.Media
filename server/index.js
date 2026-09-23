@@ -33,6 +33,7 @@ const observability = require('./observability');
 const instrumented = observability.instrument(app, { release: release.release });
 // Object API v2 content uploads read the raw request body, so they sit ahead of the body parsers.
 app.put('/api/v2/:app/objects/:id/content', ...require('./objects/routes').contentHandlers);
+app.put('/api/v2/:app/objects/:id/multipart/:uploadId/parts/:n', ...require('./objects/routes').partHandlers);
 app.use(express.json({ limit: '2mb' }));
 
 // ── Visitor sign-in (OAuth client `media` on the Network; same module as Community/Tools) ──
@@ -78,7 +79,7 @@ app.options(['/api/v1/:app/*', '/api/v2/:app/*'], (req, res) => {
     if (origin && appRow && db.appAllowedOrigins(appRow).includes(origin)) {
         res.set('Access-Control-Allow-Origin', origin);
         res.set('Vary', 'Origin');
-        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
+        res.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Upload-Token, X-Content-SHA256, Idempotency-Key');
         res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     }
     res.sendStatus(204);
@@ -143,6 +144,7 @@ app.use('/api/v1/:app/thumbnails', require('./thumbnails/routes'));
 app.use('/api/v1/:app/assets', require('./assets/routes'));
 app.use('/api/v1/:app/admin/storage', require('./admin/routes'));
 app.use('/api/v2/:app/objects', require('./objects/routes'));   // canonical object API (docs/object-model.md)
+app.use('/api/v2/:app/jobs', require('./jobs/routes'));         // media jobs: thumbnails, split/remux, invariant scans
 app.use('/o', require('./objects/routes').publicRouter);        // object bytes (public, or signed)
 app.use('/', require('./public/routes'));   // /v /c /p /t /f
 
@@ -173,6 +175,7 @@ vodStorage.start();                                        // tiering sweep
 healthJob.start();                                         // health scan + quarantine cleanup
 require('./vod/clip-jobs').start();                        // failed clip re-cuts (auto-retry, hot-fetch)
 require('./objects/verify-job').start();                   // scheduled copy verification (bounded batches; never deletes)
+require('./jobs/worker').start();                          // media_jobs worker (light + heavy lanes; proposals wait for their owner)
 // Descriptor watchdog: a leak here once pinned 80 GB of deleted recordings to the disk.
 every(5 * 60 * 1000, () => {
     try {
@@ -185,6 +188,8 @@ every(60 * 60 * 1000, () => thumbService.cleanupOldThumbnails());  // stale live
 // Object model: purge native objects whose soft-delete retention has passed (held ones are kept).
 every(60 * 60 * 1000, () => {
     try { const n = require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
+    // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
+    try { const r = require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
 });
 // Project rows that have no media_object yet (first boot after the upgrade: all of them).
 setTimeout(() => {
@@ -229,6 +234,7 @@ function shutdown(signal) {
     try { vodStorage.stop(); } catch { /* */ }
     try { healthJob.stop(); } catch { /* */ }
     try { require('./objects/verify-job').stop(); } catch { /* */ }
+    try { require('./jobs/worker').stop(); } catch { /* */ }
     try { auth.stopJwksRefresh(); } catch { /* */ }
     try { require('./events')._reset(); } catch { /* */ }
     for (const t of timers) clearInterval(t);

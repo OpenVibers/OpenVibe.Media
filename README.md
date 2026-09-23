@@ -41,11 +41,18 @@ server/
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
   public/routes.js       public /v /c /p /t /f
   objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
-                         backfill, reconcile, invariant, signing, verify-job (scheduled copy
-                         verification), copy-report — see docs/object-model.md
+                         backfill, reconcile, invariant, signing (presigned URLs), multipart,
+                         content-type, verify-job (scheduled copy verification), copy-report —
+                         see docs/object-model.md
+  jobs/                  media_jobs: queue (states, idempotency, media.job.* events in the state
+                         change's transaction), worker (light/heavy lanes, leases, retries,
+                         cancellation), routes (/api/v2/:app/jobs), types: thumbnail.regenerate,
+                         invariant.scan (proposes split/remux), object.split, object.remux
 (openvibe-shared: pinned OpenVibe.Shared v1.0.0 release, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
+scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
+scripts/r2-eviction-drill.js   evict one VOD's R2 copy, prove B2 serves it, re-warm R2; JSON artifact (dry run by default)
 ```
 
 ## Visitor sign-in

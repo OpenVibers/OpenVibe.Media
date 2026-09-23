@@ -55,6 +55,27 @@ const config = {
         publicMaxMb: intEnv('MEDIA_PUBLIC_OBJECT_MAX_MB', 500),
         publicTargetMb: intEnv('MEDIA_PUBLIC_OBJECT_TARGET_MB', 256),
         publicWarnMb: intEnv('MEDIA_PUBLIC_OBJECT_WARN_MB', 384),
+        // Multipart uploads (server/objects/multipart.js): parts are stored locally and assembled at complete.
+        multipartMaxMb: intEnv('MEDIA_MULTIPART_MAX_MB', 20480),         // largest object a multipart upload may declare
+        multipartMinPartMb: intEnv('MEDIA_MULTIPART_MIN_PART_MB', 5),    // every part but the last is at least this
+        multipartMaxPartMb: intEnv('MEDIA_MULTIPART_MAX_PART_MB', 256),
+        multipartDefaultPartMb: intEnv('MEDIA_MULTIPART_PART_MB', 64),
+        multipartTtlHours: intEnv('MEDIA_MULTIPART_TTL_HOURS', 24),      // an unfinished session's parts are purged after this
+        uploadMinFreeMb: intEnv('MEDIA_UPLOAD_MIN_FREE_MB', 10240),      // multipart needs 2x its size free plus this
+    },
+
+    // Job system (server/jobs/; docs/object-model.md#jobs).
+    jobs: {
+        enabled: !['0', 'false', 'off'].includes(String(process.env.MEDIA_JOBS_ENABLED || '').toLowerCase()),
+        pollMs: intEnv('MEDIA_JOBS_POLL_MS', 5000),
+        lightConcurrency: Math.max(1, intEnv('MEDIA_JOBS_LIGHT_CONCURRENCY', 2)),   // thumbnails, scans
+        heavyConcurrency: Math.max(1, intEnv('MEDIA_JOBS_HEAVY_CONCURRENCY', 1)),   // split, remux
+        // Heavy jobs wait while a recording is running (as the health job does), unless this is on.
+        heavyWhileRecording: ['1', 'true', 'on'].includes(String(process.env.MEDIA_JOBS_HEAVY_WHILE_RECORDING || '').toLowerCase()),
+        leaseS: Math.max(30, intEnv('MEDIA_JOBS_LEASE_S', 120)),
+        // The size-invariant validator runs this often (hours; 0 = only on demand). It proposes jobs, never runs them.
+        invariantScanHours: intEnv('MEDIA_INVARIANT_SCAN_HOURS', 24),
+        retentionDays: intEnv('MEDIA_JOBS_RETENTION_DAYS', 30),     // finished thumbnail jobs are pruned after this
     },
 
     // Scheduled copy verification (server/objects/verify-job.js; docs/object-model.md#scheduled-verification).

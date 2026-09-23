@@ -28,6 +28,7 @@ function getDb() {
     const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
     database.exec(schema);
     migrateColumns();
+    migrateJobsTable(schema);
     ensureObjectTriggers();
     normalizeThumbnailUrls();
     seedSettings();
@@ -87,6 +88,35 @@ function migrateColumns() {
             console.log(`[DB] Added ${table}.${name}`);
         }
     }
+}
+
+/**
+ * media_jobs was created schema-only (integer id, no app_id, status 'done') before the job worker
+ * existed; nothing ever wrote it. Rebuild that shape into the current one from schema.sql, keeping
+ * any rows (id mjob_legacy_<n>, tenant from the object, done -> succeeded), then create the indexes
+ * that need the new columns. Idempotent: a database already in the new shape only gets its indexes.
+ */
+function migrateJobsTable(schema) {
+    const cols = database.prepare('PRAGMA table_info(media_jobs)').all().map(c => c.name);
+    if (!cols.includes('app_id')) {
+        const ddl = /CREATE TABLE IF NOT EXISTS media_jobs \([\s\S]*?\n\);/.exec(schema);
+        if (!ddl) throw new Error('schema.sql has no media_jobs table');
+        database.transaction(() => {
+            database.exec('ALTER TABLE media_jobs RENAME TO media_jobs_v0');
+            database.exec(ddl[0]);
+            const moved = database.prepare(`INSERT INTO media_jobs (id, app_id, object_id, job_type, status, attempts, checkpoint, error, created_at, updated_at)
+                SELECT 'mjob_legacy_' || v.id, COALESCE((SELECT o.app_id FROM media_objects o WHERE o.id = v.object_id), 'unknown'), v.object_id, v.job_type,
+                       CASE v.status WHEN 'done' THEN 'succeeded' ELSE v.status END, v.attempts, v.checkpoint, v.error, v.created_at, v.updated_at
+                FROM media_jobs_v0 v`).run().changes;
+            database.exec('DROP TABLE media_jobs_v0');
+            console.log(`[DB] Rebuilt media_jobs for the job worker (${moved} row(s) kept)`);
+        })();
+    }
+    database.exec(`
+        CREATE INDEX IF NOT EXISTS idx_media_jobs_status ON media_jobs(status, job_type);
+        CREATE INDEX IF NOT EXISTS idx_media_jobs_app ON media_jobs(app_id, id);
+        CREATE INDEX IF NOT EXISTS idx_media_jobs_object ON media_jobs(object_id, job_type, status);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_media_jobs_idem ON media_jobs(app_id, idempotency_key) WHERE idempotency_key IS NOT NULL;`);
 }
 
 /**
