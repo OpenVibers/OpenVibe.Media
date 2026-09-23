@@ -1170,6 +1170,20 @@ async function bucketStatus() {
     return out;
 }
 
+/** Live HeadBucket probe of one configured provider (readiness); throws when unreachable. */
+async function probeProvider(name) {
+    if (!providerConfigured(name)) throw new Error(`${name} is not configured`);
+    loadSdk();
+    try {
+        await clientFor(name).send(new S3.HeadBucketCommand({ Bucket: PROVIDER_ENV[name].bucket }));
+        providerHealthy[name] = true;
+        return true;
+    } catch (err) {
+        providerHealthy[name] = false;
+        throw new Error(`${name} HeadBucket failed: ${err.name || 'error'}`);
+    }
+}
+
 function getStatus() {
     const settings = getSettings();
     const localDisk = diskUsage(config.vod.path);
@@ -1263,6 +1277,7 @@ module.exports = {
     stop,
     getStatus,
     bucketStatus,
+    probeProvider,
     getBucketUsage,
     estimateCloudCosts,
     getSettings,

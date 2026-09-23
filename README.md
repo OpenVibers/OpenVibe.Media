@@ -200,6 +200,14 @@ directories are shared across apps) and responses carry a `note` saying so.
 and header `X-OVMedia-Signature: sha256=<hex hmac-sha256 of the raw body with
 the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
 
+## Health, readiness and metrics
+
+| path | behavior |
+|---|---|
+| `GET /healthz` | liveness: the process answers (unchanged; it checks nothing else) |
+| `GET /api/ready` | readiness from real checks, each with `status`, `required`, `latency_ms`, `checked_at`. **Required** (503 when one fails): `db` (a query against the SQLite database), `storage_vods`, `storage_clips`, `storage_pastes`, `storage_thumbnails`, `storage_files`, `storage_objects` (a probe file is written and removed). **Optional** (listed in `degraded`, still 200): `network_jwks` (user JWTs and service tokens; app keys work without it), `remote_b2` / `remote_r2` (HeadBucket, at most once a minute; present only when the provider is configured), `events_outbox` (backlog over 1000 events). Also `recordings_in_progress`. |
+| `GET /metrics` | Prometheus text (openvibe-shared/metrics) for **direct loopback callers only**; 404 through nginx. HTTP golden signals by route template, process metrics, `release_info`, plus `media_recordings_in_progress`, `media_object_locations{provider,state}`, `media_objects{lifecycle_status}`, `media_events_outbox{status}` (only while the outbox runs). |
+
 ## Public serving (no auth unless the item is private)
 
 | path | behavior |

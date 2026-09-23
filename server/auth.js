@@ -60,6 +60,9 @@ function startJwksRefresh() {
     if (_jwksTimer.unref) _jwksTimer.unref();
 }
 
+/** Whether the Network public key has loaded (user JWTs and service tokens verify only once it has). */
+function jwksLoaded() { return !!_networkPublicKeyPem; }
+
 function stopJwksRefresh() {
     if (_jwksTimer) { clearInterval(_jwksTimer); _jwksTimer = null; }
 }
@@ -327,5 +330,6 @@ module.exports = {
     seedApps,
     startJwksRefresh,
     stopJwksRefresh,
+    jwksLoaded,
     fetchNetworkPublicKey,
 };

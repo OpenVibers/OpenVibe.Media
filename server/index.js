@@ -27,6 +27,10 @@ auth.startJwksRefresh();
 
 const app = express();
 app.set('trust proxy', true);
+// Metrics first, so every route below is measured (GET /metrics: loopback callers only).
+const release = require('openvibe-shared/release').createRelease({ service: 'media', root: require('path').join(__dirname, '..') });
+const observability = require('./observability');
+const instrumented = observability.instrument(app, { release: release.release });
 // Object API v2 content uploads read the raw request body, so they sit ahead of the body parsers.
 app.put('/api/v2/:app/objects/:id/content', ...require('./objects/routes').contentHandlers);
 app.use(express.json({ limit: '2mb' }));
@@ -83,7 +87,6 @@ app.options(['/api/v1/:app/*', '/api/v2/:app/*'], (req, res) => {
 // ── Routes ───────────────────────────────────────────────────
 
 // What this server runs (ADR-016); the shared navbar's release-watch polls it.
-const release = require('openvibe-shared/release').createRelease({ service: 'media', root: require('path').join(__dirname, '..') });
 app.get('/release.json', release.handler);
 
 app.get('/healthz', (req, res) => {
@@ -95,6 +98,17 @@ app.get('/healthz', (req, res) => {
         uptime_s: Math.round(process.uptime()),
     });
 });
+
+// Readiness: required = database + writable storage; optional (degraded) = Network key, remote tiers, events outbox.
+{
+    const vodStorageForReady = require('./vod/vod-storage');
+    observability.mountReady(app, instrumented.registry, {
+        release: release.release, db, config, auth,
+        recorder: require('./vod/recorder'),
+        events: require('./events'),
+        remote: { configured: (n) => vodStorageForReady.providerConfigured(n), probe: (n) => vodStorageForReady.probeProvider(n) },
+    });
+}
 
 // Per-app media stats (app-key only) — hero/dashboard counters in the owning app.
 app.get('/api/v1/:app/stats', auth.tenantAuth(), (req, res) => {
