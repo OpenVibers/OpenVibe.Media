@@ -1,6 +1,8 @@
 'use strict';
 // Media job system (server/jobs): the schema-only media_jobs table is rebuilt; every state change
-// commits with its media.job.* outbox row (and rolls back with it); idempotency keys; retries with
+// commits with its media.job.* outbox row (and rolls back with it), whose payload is the event
+// projection (ids, state, counters, ISO times, has_result; never params, result, error text, the
+// idempotency key or who created/decided it); idempotency keys; retries with
 // backoff, permanent failures, checkpoints; cancellation by the owner (queued at once, running through
 // the abort signal) and not by anyone else; interrupted jobs are requeued at start; the v1 thumbnail
 // route runs as a thumbnail.regenerate job and answers as before.
@@ -78,6 +80,23 @@ const waitFor = async (fn, ms = 5000) => {
     const conn = db.getDb();
     const outbox = () => conn.prepare('SELECT envelope FROM event_outbox ORDER BY id').all().map((r) => JSON.parse(r.envelope));
     const jobEvents = (id) => outbox().filter((e) => e.subject.type === 'job' && e.subject.id === id).map((e) => e.event_type);
+    const jobPayloads = (id) => outbox().filter((e) => e.subject.type === 'job' && e.subject.id === id).map((e) => e.payload);
+    // The media.job.* payload: exactly these fields. The rest stays behind the tenant-scoped jobs API.
+    const EVENT_KEYS = ['app_id', 'attempts', 'cancel_requested', 'created_at', 'decided_at', 'error_code', 'finished_at', 'has_result',
+        'id', 'max_attempts', 'object_id', 'run_after', 'started_at', 'status', 'type', 'updated_at'];
+    const LEFT_OUT = ['params', 'idempotency_key', 'error', 'result', 'created_by', 'decided_by', 'owner_user_id'];
+    const TIMES = ['run_after', 'decided_at', 'created_at', 'updated_at', 'started_at', 'finished_at'];
+    const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+    const TRANSITION_STATUS = { proposed: 'proposed', queued: 'queued', started: 'running', retrying: 'queued', succeeded: 'succeeded', failed: 'failed', cancelled: 'cancelled' };
+    const assertJobEvent = (env) => {
+        const p = env.payload, what = `${env.event_type} ${p.id}`;
+        assert.deepStrictEqual(Object.keys(p).sort(), EVENT_KEYS, `${what}: exactly the event projection`);
+        for (const k of LEFT_OUT) assert.ok(!(k in p), `${what}: no ${k}`);
+        for (const k of TIMES) assert.ok(p[k] === null || ISO.test(p[k]), `${what}: ${k} is ISO 8601 UTC or null (${p[k]})`);
+        assert.ok(ISO.test(p.created_at) && ISO.test(p.updated_at), `${what}: created_at and updated_at are always set`);
+        assert.strictEqual(typeof p.has_result, 'boolean');
+        assert.strictEqual(p.status, TRANSITION_STATUS[env.event_type.slice('media.job.'.length)], `${what}: status`);
+    };
     const failOutbox = (on) => conn.exec(on
         ? "CREATE TEMP TRIGGER outbox_boom BEFORE INSERT ON event_outbox BEGIN SELECT RAISE(ABORT, 'outbox insert failed'); END"
         : 'DROP TRIGGER IF EXISTS temp.outbox_boom');
@@ -112,6 +131,11 @@ const waitFor = async (fn, ms = 5000) => {
     assert.deepStrictEqual(jobEvents(a.job.id), ['media.job.queued']);
     const env = outbox().find((e) => e.subject.id === a.job.id);
     assert.deepStrictEqual([env.source, env.priority, env.visibility, env.payload.type, env.payload.status, env.payload.app_id], ['media', 'low', 'internal', 'test.flaky', 'queued', 'live']);
+    assertJobEvent(env);
+    const aRow = queue.get(a.job.id);
+    assert.deepStrictEqual([env.payload.created_at, env.payload.updated_at], [aRow.created_at, aRow.updated_at].map((t) => new Date(`${t.replace(' ', 'T')}Z`).toISOString()), 'times are the row\'s, in ISO 8601 UTC');
+    assert.deepStrictEqual([env.payload.attempts, env.payload.max_attempts, env.payload.error_code, env.payload.cancel_requested, env.payload.has_result, env.payload.object_id, env.payload.run_after, env.payload.started_at, env.payload.finished_at, env.payload.decided_at],
+        [0, 3, null, false, false, null, null, null, null, null]);
     const q2 = queue.enqueue({ appId: 'live', type: 'test.permanent' });
     failOutbox(true);
     assert.throws(() => queue.enqueue({ appId: 'live', type: 'test.flaky', params: { x: 2 } }), /outbox insert failed/);
@@ -126,6 +150,7 @@ const waitFor = async (fn, ms = 5000) => {
     const k1 = queue.enqueue({ appId: 'live', type: 'test.permanent', params: { n: 1 }, idempotencyKey: 'key-1' });
     const k2 = queue.enqueue({ appId: 'live', type: 'test.permanent', params: { n: 1 }, idempotencyKey: 'key-1' });
     assert.ok(k1.created && k2.replayed && k1.job.id === k2.job.id);
+    assert.ok(!JSON.stringify(jobPayloads(k1.job.id)).includes('key-1'), 'the idempotency key stays out of the event');
     assert.throws(() => queue.enqueue({ appId: 'live', type: 'test.permanent', params: { n: 2 }, idempotencyKey: 'key-1' }), (e) => e.code === 'media.job.idempotency_conflict' && e.status === 409);
     assert.ok(queue.enqueue({ appId: 'games', type: 'test.permanent', params: { n: 1 }, idempotencyKey: 'key-1' }).created, 'keys are per tenant');
     const d1 = queue.enqueue({ appId: 'live', type: 'test.permanent', params: { same: true }, dedupeActive: true });
@@ -150,7 +175,18 @@ const waitFor = async (fn, ms = 5000) => {
     assert.strictEqual(queue.get(always.job.id).attempts, 2, 'retried until max_attempts');
     assert.deepStrictEqual(jobEvents(always.job.id), ['media.job.queued', 'media.job.started', 'media.job.retrying', 'media.job.started', 'media.job.failed']);
     const failedEv = outbox().filter((e) => e.subject.id === always.job.id).pop();
-    assert.deepStrictEqual([failedEv.priority, failedEv.payload.error], ['important', 'nope']);
+    assert.deepStrictEqual([failedEv.priority, failedEv.payload.error_code, failedEv.payload.has_result, failedEv.payload.attempts], ['important', null, false, 2]);
+    assert.ok(!JSON.stringify(failedEv.payload).includes('nope'), 'the free-text error stays out of the event');
+    assert.strictEqual(queue.jobPublic(queue.get(always.job.id)).error, 'nope', 'GET the job for it');
+    const permEv = outbox().filter((e) => e.subject.id === perm.job.id).pop();
+    assert.deepStrictEqual([permEv.event_type, permEv.payload.error_code, permEv.payload.attempts], ['media.job.failed', 'bad_input', 1], 'the stable code is in the event');
+    assert.ok(!JSON.stringify(permEv.payload).includes('will never work'));
+    const [aQueued, aStarted, aRetrying, aStarted2, aSucceeded] = jobPayloads(a.job.id);
+    assert.deepStrictEqual([aQueued.status, aStarted.status, aRetrying.status, aStarted2.status, aSucceeded.status], ['queued', 'running', 'queued', 'running', 'succeeded']);
+    assert.ok(ISO.test(aRetrying.run_after) && ISO.test(aStarted.started_at) && aRetrying.finished_at === null, 'retrying: a backoff time, started, not finished');
+    assert.deepStrictEqual([aStarted.attempts, aStarted2.attempts, aStarted2.started_at], [1, 2, aStarted.started_at], 'started_at stays the first attempt\'s start');
+    assert.deepStrictEqual([aSucceeded.has_result, ISO.test(aSucceeded.finished_at), aSucceeded.error_code], [true, true, null]);
+    assert.ok(!JSON.stringify(aSucceeded).includes('resumed_from') && !JSON.stringify(jobPayloads(a.job.id)).includes('"x"'), 'neither the result nor the params are in the events');
     console.log('✅ worker: retries with backoff resume from the checkpoint; permanent failures stop; attempts are capped');
 
     // ── 5. Cancellation by the owner ──
@@ -181,6 +217,10 @@ const waitFor = async (fn, ms = 5000) => {
     assert.deepStrictEqual([r.status, r.body.job.cancel_requested], [202, true], 'a running job stops at its next check');
     assert.ok(await waitFor(() => queue.get(slow.job.id).status === 'cancelled'), 'the abort signal stopped it');
     assert.deepStrictEqual(jobEvents(slow.job.id), ['media.job.queued', 'media.job.started', 'media.job.cancelled']);
+    const slowCancelled = jobPayloads(slow.job.id).pop();
+    assert.deepStrictEqual([slowCancelled.cancel_requested, slowCancelled.error_code, ISO.test(slowCancelled.finished_at)], [true, 'cancelled', true]);
+    assert.ok(!/user:7|"owner_user_id"|"created_by"|"decided_by"/.test(JSON.stringify(jobPayloads(slow.job.id))), 'who created or cancelled it (tenant-local user ids) stays out of the events');
+    assert.deepStrictEqual([queue.jobPublic(queue.get(slow.job.id)).created_by, queue.jobPublic(queue.get(slow.job.id)).owner_user_id], ['app:live:user:7', 7], 'the jobs API still has them');
     r = await call('DELETE', `/api/v2/live/jobs/${slow.job.id}`);
     assert.deepStrictEqual([r.status, r.body.code], [409, 'media.job.finished']);
     const waiting = queue.enqueue({ appId: 'live', type: 'test.permanent', runAfterS: 3600 });
@@ -196,6 +236,8 @@ const waitFor = async (fn, ms = 5000) => {
     const back = queue.get(orphan.job.id);
     assert.deepStrictEqual([back.status, back.error_code], ['queued', 'interrupted']);
     assert.deepStrictEqual(jobEvents(orphan.job.id).slice(-1), ['media.job.retrying']);
+    const orphanRetry = jobPayloads(orphan.job.id).pop();
+    assert.deepStrictEqual([orphanRetry.status, orphanRetry.error_code, ISO.test(orphanRetry.run_after)], ['queued', 'interrupted', true]);
     queue.cancel(orphan.job.id, { by: 'test' });
     console.log('✅ a job left running by a dead process is requeued (or failed when out of attempts)');
 
@@ -213,6 +255,9 @@ const waitFor = async (fn, ms = 5000) => {
     assert.deepStrictEqual([r.status, r.body.code], [409, 'media.job.not_proposed']);
     r = await call('GET', `/api/v2/live/jobs?type=invariant.scan`);
     assert.deepStrictEqual(r.body.jobs.map((j) => j.id), [scanId]);
+    r = await call('GET', `/api/v2/live/jobs/${scanId}`);
+    assert.deepStrictEqual([r.status, r.body.job.idempotency_key, r.body.job.params, r.body.job.created_by, r.body.job.created_at.includes('T')], [200, 'scan-1', {}, 'app:live', false],
+        'GET the job answers as before (queue.jobPublic: params, idempotency key, creator, SQLite times)');
     r = await call('GET', `/api/v2/games/jobs/${scanId}`, { key: 'games-key' });
     assert.strictEqual(r.status, 404, 'tenants are isolated');
     r = await call('GET', `/api/v2/live/jobs?status=bogus`);
@@ -235,6 +280,9 @@ const waitFor = async (fn, ms = 5000) => {
     const tj = queue.get(t1.body.job_id);
     assert.deepStrictEqual([tj.job_type, tj.status, tj.object_id], ['thumbnail.regenerate', 'succeeded', db.get('SELECT object_id FROM vods WHERE id = 1').object_id]);
     assert.deepStrictEqual(jobEvents(tj.id), ['media.job.queued', 'media.job.started', 'media.job.succeeded']);
+    const thumbDone = jobPayloads(tj.id).pop();
+    assert.deepStrictEqual([thumbDone.has_result, thumbDone.object_id], [true, tj.object_id]);
+    assert.ok(!JSON.stringify(jobPayloads(tj.id)).includes('/t/vod-1'), 'a thumbnail URL (of a VOD that may be private) stays out of the event');
     r = await call('POST', '/api/v1/live/thumbnails/vod/2');
     assert.deepStrictEqual([r.status, r.body.error], [404, 'Media file unavailable'], 'no media is still a 404');
     assert.strictEqual(queue.get(r.body.job_id).error_code, 'media_unavailable');
@@ -247,6 +295,13 @@ const waitFor = async (fn, ms = 5000) => {
     assert.deepStrictEqual([r.status, r.body.job.params], [202, { kind: 'vod', id: 1 }], 'the v2 API takes the object and finds the row');
     assert.ok(await waitFor(() => queue.get(r.body.job.id).status === 'succeeded'));
     console.log('✅ the v1 thumbnail route runs a thumbnail.regenerate job and answers { url } as before (404 without media)');
+
+    // Every job event this run queued has the projection's shape and its transition's status.
+    const all = outbox().filter((e) => e.event_type.startsWith('media.job.'));
+    assert.ok(all.length > 30);
+    for (const e of all) assertJobEvent(e);
+    assert.deepStrictEqual([...new Set(all.map((e) => e.event_type))].sort(), Object.keys(TRANSITION_STATUS).filter((t) => t !== 'proposed').map((t) => `media.job.${t}`).sort());
+    console.log(`✅ ${all.length} media.job.* events: the projection only (no params, result, error text, idempotency key, creator/decider or owner user id), ISO 8601 UTC times`);
 
     worker.stop();
     events._reset();

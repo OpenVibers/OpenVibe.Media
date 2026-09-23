@@ -356,11 +356,30 @@ Code: `server/jobs/`. Tests: `test/jobs.test.js`, `test/jobs-invariant.test.js`.
 30 s, 2 min, 8 min, …, at most 1 h) until `max_attempts`; a handler can mark a failure permanent.
 
 **Events.** Every state change and its `media.job.<transition>` event (`proposed`, `queued`,
-`started`, `retrying`, `succeeded`, `failed`, `cancelled`; subject `job <id>`, payload the job)
-commit in one SQLite transaction through Media's outbox, the same rule as the outcome events
-(`webhooks.announce()`): no change without its event, no event for a change that rolled back.
-Progress events are `low` priority; outcomes and proposals are `important`. Job events go to
-OpenVibe.Events only, not to app webhooks.
+`started`, `retrying`, `succeeded`, `failed`, `cancelled`; subject `job <id>`) commit in one SQLite
+transaction through Media's outbox, the same rule as the outcome events (`webhooks.announce()`): no
+change without its event, no event for a change that rolled back. Progress events are `low`
+priority; outcomes and proposals are `important`. Job events go to OpenVibe.Events only, not to app
+webhooks.
+
+The payload is the event projection (`queue.jobEvent`, contracts `media.job.<transition>@1`), not
+the job as the API answers it:
+
+```json
+{ "app_id": "live", "id": "mjob_…", "object_id": "med_…", "type": "object.split",
+  "status": "succeeded", "attempts": 1, "max_attempts": 3, "error_code": null,
+  "cancel_requested": false, "has_result": true,
+  "run_after": null, "decided_at": null, "created_at": "2026-09-23T21:06:24.000Z",
+  "updated_at": "…Z", "started_at": "…Z", "finished_at": "…Z" }
+```
+
+`object_id` is null for a tenant-wide job (`invariant.scan`). `status` is the job's state after the
+change (`retrying` carries `queued`, `started` carries `running`); times are ISO 8601 UTC or null;
+`error_code` is the stable code only. The tenant's `params`, the `idempotency_key`, the free-text
+`error`, the `result` (a thumbnail URL of a private VOD, for one), `created_by`/`decided_by` and
+`owner_user_id` (tenant-local user ids) are left out: events travel beyond the tenant. A consumer
+that needs them GETs the job with its own tenant-scoped token (`GET /api/v2/:app/jobs/:id`);
+`has_result` says whether there is a result to fetch.
 
 **Idempotency.** `Idempotency-Key` (or `idempotency_key`) is unique per tenant: the same key with the
 same request (type, object, params) answers with the job it made (`Idempotent-Replayed: true`); a

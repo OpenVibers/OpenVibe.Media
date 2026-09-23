@@ -10,7 +10,8 @@
  *   media.object.uploaded            → media.object.uploaded                   (subject object <id>)
  *   storage.alert | storage.recovered → media.storage.alert | media.storage.recovered
  *   job state changes (server/jobs/queue.js) → media.job.proposed | queued | started | retrying |
- *                                             succeeded | failed | cancelled   (subject job <id>; Events only, no webhook)
+ *                                             succeeded | failed | cancelled   (subject job <id>; Events only, no webhook;
+ *                                             payload queue.jobEvent, not the tenant's params/result/error)
  *
  * The outbox row is written INSIDE the SQLite transaction that makes the state change it describes
  * (record(), called from webhooks.announce()): the event exists if and only if the change committed,
@@ -99,8 +100,10 @@ function record(webhookEvent, appId, data) {
 }
 
 /**
- * Queue media.job.<transition> for a job row (queue.jobPublic shape). Same rule as record(): call it
- * inside the transaction that changes the job's state; it throws when the insert fails.
+ * Queue media.job.<transition> for a job (queue.jobEvent: ids, state, counters, ISO times and
+ * has_result; never params, result, error text, idempotency key or who created/decided it; the
+ * tenant-scoped GET /api/v2/:app/jobs/:id has those). Same rule as record(): call it inside the
+ * transaction that changes the job's state; it throws when the insert fails.
  */
 function recordJob(transition, job) {
     const priority = JOB_TRANSITIONS[transition];

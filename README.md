@@ -45,7 +45,8 @@ server/
                          content-type, verify-job (scheduled copy verification), copy-report —
                          see docs/object-model.md
   jobs/                  media_jobs: queue (states, idempotency, media.job.* events in the state
-                         change's transaction), worker (light/heavy lanes, leases, retries,
+                         change's transaction; payload queue.jobEvent: ids, state, ISO times,
+                         has_result, never params/result/error text/creator), worker (light/heavy lanes, leases, retries,
                          cancellation), routes (/api/v2/:app/jobs), types: thumbnail.regenerate,
                          invariant.scan (proposes split/remux), object.split, object.remux
 (openvibe-shared: pinned OpenVibe.Shared v1.0.0 release, installed by npm)
@@ -152,7 +153,7 @@ MEDIA_APP_KEYS="live:key1,games:key2"
 | POST | `/vods/:id/complete` | finalize chunked upload (user JWT ok) |
 | POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, webhook |
 | GET | `/vods/:id` | `{ id, title, status, duration, playback_url, thumbnail_url, storage_provider, … }` |
-| GET | `/vods?limit&offset&user_id&stream_id&managed_stream_id&include_private&order` | list; `include_private` app-key only; `order` = newest\|oldest\|views |
+| GET | `/vods?limit&offset&user_id&stream_id&managed_stream_id&include_private&order&since` | list; `include_private` app-key only; `order` = newest\|oldest\|views; `since` = created at or after (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC) |
 | PUT | `/vods/:id` | `{ title?, description?, visibility? }` |
 | DELETE | `/vods/:id` | deletes local + B2 + R2 objects + row |
 
@@ -170,10 +171,10 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 
 | method | path | notes |
 |---|---|---|
-| POST | `/clips` | `{ vod_id, start_s, end_s, title?, user_id?, visibility? }` → **202** `{ id, status: 'processing' }`; cut runs in background (from the local file or a presigned B2/R2 URL); duplicate windows are deduplicated; live recordings are clamped to flushed footage. Multipart `video` = direct upload of an already-cut blob → **201** ready |
+| POST | `/clips` | `{ vod_id, start_s, end_s, title?, description?, user_id?, visibility?, auto_generated? }` → **202** `{ id, status: 'processing' }`; cut runs in background (from the local file or a presigned B2/R2 URL); duplicate windows are deduplicated; live recordings are clamped to flushed footage. Multipart `video` = direct upload of an already-cut blob → **201** ready |
 | GET | `/clips/:id` | status: `processing | ready | failed` |
-| GET | `/clips?limit&offset&vod_id&stream_id&user_id&channel_user_id&hide_self&include_private&order` | list; `channel_user_id` = clipped-channel owner; `include_private` app-key only |
-| PUT | `/clips/:id` | `{ title?, visibility? }` |
+| GET | `/clips?limit&offset&vod_id&stream_id&user_id&channel_user_id&hide_self&include_private&order&auto_generated&status&since` | list; `channel_user_id` = clipped-channel owner; `include_private` app-key only; `auto_generated=1\|0` = cut by the app's automation (AI auto-clips) or made by a person; `status=ready` = playable clips only; `since` as for VODs |
+| PUT | `/clips/:id` | `{ title?, visibility?, auto_generated? }` (`auto_generated` app key only, 403 when acting for a user) |
 | DELETE | `/clips/:id` | local + offloaded objects + row |
 
 ### Pastes

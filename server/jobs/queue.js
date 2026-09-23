@@ -28,7 +28,6 @@ const STATUSES = ['proposed', 'queued', 'running', 'succeeded', 'failed', 'cance
 const FINISHED = ['succeeded', 'failed', 'cancelled'];
 const ACTIVE = ['queued', 'running'];
 const MAX_ACTIVE_PER_TENANT = 50;   // queued + running jobs one tenant may have (proposals excluded)
-const RESULT_EVENT_MAX = 8192;      // a larger result is left out of the event payload (GET the job for it)
 
 const bus = new EventEmitter();
 bus.setMaxListeners(0);
@@ -123,10 +122,41 @@ function jobPublic(row) {
     };
 }
 
-function eventPayload(row) {
-    const pub = jobPublic(row);
-    if (pub.result && JSON.stringify(pub.result).length > RESULT_EVENT_MAX) pub.result = { omitted: true, reason: 'larger than the event limit; GET the job' };
-    return pub;
+/** A SQLite UTC time ('YYYY-MM-DD HH:MM:SS') as ISO 8601 UTC ('…T…Z'), or null. */
+function isoTime(v) {
+    if (v == null || v === '') return null;
+    const s = String(v);
+    const d = new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s) ? `${s.replace(' ', 'T')}Z` : s);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+/**
+ * The media.job.<transition> event payload: the job's identity, state, counters and times, and whether
+ * it has a result. Deliberately not the tenant's params, the idempotency key, the free-text error, the
+ * result (a thumbnail URL of a private VOD, for one), created_by/decided_by or owner_user_id (tenant-local
+ * user ids): events travel beyond the tenant, and a consumer that needs those GETs the job with its own
+ * tenant-scoped token (GET /api/v2/:app/jobs/:id, queue.jobPublic, unchanged).
+ */
+function jobEvent(row) {
+    if (!row) return null;
+    return {
+        id: row.id,
+        app_id: row.app_id,
+        object_id: row.object_id || null,
+        type: row.job_type,
+        status: row.status,
+        attempts: row.attempts,
+        max_attempts: row.max_attempts,
+        error_code: row.error_code || null,
+        cancel_requested: !!row.cancel_requested,
+        has_result: parseJson(row.result, null) != null,
+        run_after: isoTime(row.run_after),
+        decided_at: isoTime(row.decided_at),
+        created_at: isoTime(row.created_at),
+        updated_at: isoTime(row.updated_at),
+        started_at: isoTime(row.started_at),
+        finished_at: isoTime(row.finished_at),
+    };
 }
 
 /**
@@ -139,7 +169,7 @@ function commit(id, transition, change) {
     db.getDb().transaction(() => {
         if (!change()) return;
         row = get(id);
-        if (transition) events.recordJob(transition, eventPayload(row));
+        if (transition) events.recordJob(transition, jobEvent(row));
     })();
     if (row) {
         if (transition) events.kick();
@@ -201,7 +231,7 @@ function enqueue({ appId, type, objectId = null, params = {}, status = 'queued',
         [id, appId, objectId, type, status, key, hash, JSON.stringify(params || {}),
             Math.max(1, Math.min(10, Number(maxAttempts) || spec.maxAttempts)), createdBy, ownerUserId ?? null]);
         const row = get(id);
-        events.recordJob(status, eventPayload(row));
+        events.recordJob(status, jobEvent(row));
         out = { job: row, created: true, replayed: false, deduped: false };
     })();
     if (out.created) { events.kick(); bus.emit('change', out.job); }
@@ -254,7 +284,7 @@ function claim(types, { leaseS = 120, id = null } = {}) {
         if (!update(next.id, 'queued', `status = 'running', attempts = attempts + 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                                           lease_until = datetime('now', '+${Math.round(leaseS)} seconds'), run_after = NULL`)) return;
         row = get(next.id);
-        events.recordJob('started', eventPayload(row));
+        events.recordJob('started', jobEvent(row));
     })();
     if (row) { events.kick(); bus.emit('change', row); }
     return row;
@@ -366,7 +396,7 @@ function prune({ days = 30, types = ['thumbnail.regenerate'] } = {}) {
 module.exports = {
     STATUSES, FINISHED, ACTIVE, MAX_ACTIVE_PER_TENANT, JobError, bus,
     register, typeSpec, typeNames, requestHash, parseJson,
-    get, getForApp, jobPublic, list, counts,
+    get, getForApp, jobPublic, jobEvent, list, counts,
     enqueue, approve, cancel,
     claim, renew, saveCheckpoint, succeed, fail, markCancelled, recoverInterrupted, waitFor, prune,
 };
