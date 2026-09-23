@@ -23,7 +23,8 @@ server/
   config.js              env config (PORT, DB_PATH, *_PATH, MEDIA_B2_*/R2_*, RTP pool, OV_NETWORK_URL)
   auth.js                tenancy + auth middleware, JWKS fetch, app seeding
   webhooks.js            HMAC-signed outbound webhooks
-  db/schema.sql          apps, vods, clips, pastes(+likes/comments), files, content_views, media_settings
+  db/schema.sql          apps, vods, clips, pastes(+likes/comments), files, content_views, media_settings,
+                         media_objects/locations/relationships/variants/jobs/holds/invariant_violations
   db/database.js         better-sqlite3 helpers, all app_id-scoped; legacy row importer
   vod/recorder.js        ffmpeg recording: RTMP pull + RTP (SDP) ingest, codec passthrough
   vod/media-tools.js     probes, seekable remux, DVR sidecar, chunk-segment concat
@@ -39,8 +40,11 @@ server/
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
   public/routes.js       public /v /c /p /t /f
+  objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
+                         backfill, reconcile, invariant, signing — see docs/object-model.md
 vendor/openvibe-shared/  vendored shared helpers (do not edit; re-sync from canonical)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
+scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js   object-model operator tools
 ```
 
 ## Visitor sign-in
@@ -192,7 +196,7 @@ directories are shared across apps) and responses carry a `note` saying so.
 ### Webhooks (outbound)
 
 `POST` to the app's `webhook_url` with body
-`{ "event": "vod.ready"|"vod.failed"|"clip.ready"|"clip.failed", "app_id", "data" }`
+`{ "event": "vod.ready"|"vod.failed"|"clip.ready"|"clip.failed"|"media.object.uploaded", "app_id", "data" }`
 and header `X-OVMedia-Signature: sha256=<hex hmac-sha256 of the raw body with
 the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
 
@@ -215,6 +219,42 @@ the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
 
 Private items respond 403/404 unless the request bears the owning app's API
 key or the owning user's JWT.
+
+`GET /o/:id` serves object bytes by canonical id (`med_…`): public/unlisted
+objects openly, private ones only with a valid signature from
+`/api/v2/:app/objects/:id/download`, deleted ones 410 (see below).
+
+## Object model and API v2
+
+Every stored blob is a **media object** (`med_<ULID>`, `media_objects`) with one
+`media_locations` row per copy (local / B2 canonical / R2 cache, each `present`,
+`missing`, `pending` or `corrupt`). The `vods`, `clips`, `files` and screenshot
+`pastes` rows are typed projections over objects (`object_id` column); every
+existing route and response is unchanged, and the old write paths keep the
+model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
+
+- **Backfill** — `node scripts/backfill-objects.js [--dry-run]`: one object per
+  vod, clip, file, screenshot, avatar and thumbnail; idempotent; never moves
+  bytes or calls B2/R2 (remote copies stay `pending`). The service runs the
+  `--only-missing` form 15 s after boot.
+- **API** — `/api/v2/:app/objects`: init → `PUT /:id/content` (sha256, size,
+  quota) → `/:id/complete`; `GET /:id`, cursor `GET /`, soft `DELETE /:id`
+  (bytes kept `MEDIA_DELETE_RETENTION_DAYS`), `/:id/restore`, `/:id/download`
+  (302 for public, HMAC-signed short-lived URL for private —
+  `MEDIA_SIGNING_SECRET`). App key, or a Network service token with
+  `media.object.upload` / `media.object.read` for namespace `:app`;
+  `X-OV-Subject` sets the owner.
+- **Retention holds** — `media_holds` (`moderation`, `dmca`, `creator_pin`,
+  `admin`, `evidence`; `/:id/holds`, app key only): a held object cannot be
+  deleted by any path (409 / DB trigger) or moved between tiers.
+- **Reconciliation** — `node scripts/reconcile-objects.js [--verify] [--hash]`:
+  read-only by default; `--verify` HEADs B2/R2 and records location states.
+  Reports missing canonical copies, lost local files, size/hash mismatches,
+  orphan locations, deleted-but-still-served objects and unprojected rows.
+- **Public object-size invariant** — `MEDIA_PUBLIC_OBJECT_MAX_MB` (500) /
+  `_TARGET_MB` (256) / `_WARN_MB` (384): v2 refuses oversized public playback
+  uploads; `node scripts/object-invariant.js` lists offenders and records them in
+  `media_invariant_violations`. No automatic re-encoding.
 
 ## Storage tiering
 

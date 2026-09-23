@@ -136,6 +136,8 @@ async function finalizeVod(vodId, opts = {}) {
         return await _doFinalize(vodId, opts);
     } finally {
         _finalizing.delete(vodId);
+        // Every outcome (ready, quarantined, failed) re-projects the object; a deleted row was already marked by trigger.
+        require('../objects/model').safeSync('vod', vodId);
     }
 }
 

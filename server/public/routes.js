@@ -513,3 +513,4 @@ router.get('/p/:slug/screenshot', (req, res) => {
 });
 
 module.exports = router;
+module.exports.streamFileWithRange = streamFileWithRange;

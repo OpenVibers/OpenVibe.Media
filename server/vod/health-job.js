@@ -123,6 +123,10 @@ async function _scanPass(deep) {
 // Delete a VOD's files everywhere + its DB row. Mirrors the manual delete route.
 function _hardDeleteVod(vod) {
     try {
+        if (require('../objects/model').isHeldRow(db.get('SELECT object_id FROM vods WHERE id = ?', [vod.id]))) {
+            console.log(`[VOD-Health] vod ${vod.id} is under a retention hold — not deleting`);
+            return false;
+        }
         if (vod.file_path) {
             try { require('./vod-storage').deleteVodObjects(vod).catch(() => {}); } catch { /* */ }
             // Local file + sidecars (.seekable.webm / .seekable.mp4, .master.mkv).

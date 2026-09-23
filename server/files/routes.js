@@ -171,6 +171,7 @@ router.delete('/:key', tenantAuth({ allowUser: true }), (req, res) => {
         if (req.authType === 'user' && !(req.userId != null && row.user_id === req.userId)) {
             return res.status(403).json({ error: 'Not authorized to delete this file' });
         }
+        if (require('../objects/model').isHeldRow(row)) return res.status(409).json({ error: 'File is under a retention hold', code: 'media.object.held' });
 
         const filePath = filePathForKey(row);
         try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* */ }

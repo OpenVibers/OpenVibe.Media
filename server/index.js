@@ -16,7 +16,7 @@ const auth = require('./auth');
 
 // ── Bootstrap ────────────────────────────────────────────────
 
-for (const dir of [config.vod.path, config.vod.clipsPath, config.pastes.path, config.thumbnails.path, config.files.path]) {
+for (const dir of [config.vod.path, config.vod.clipsPath, config.pastes.path, config.thumbnails.path, config.files.path, config.objects.path]) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
@@ -27,6 +27,8 @@ auth.startJwksRefresh();
 
 const app = express();
 app.set('trust proxy', true);
+// Object API v2 content uploads read the raw request body, so they sit ahead of the body parsers.
+app.put('/api/v2/:app/objects/:id/content', ...require('./objects/routes').contentHandlers);
 app.use(express.json({ limit: '2mb' }));
 
 // ── Visitor sign-in (OAuth client `media` on the Network; same module as Community/Tools) ──
@@ -66,7 +68,7 @@ app.use('/auth', userAuth.createAuthRoutes(userAuthConfig, userAuth.createAuthCl
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // CORS preflight for tenant API routes (per-app allow-list; auth-less OPTIONS).
-app.options('/api/v1/:app/*', (req, res) => {
+app.options(['/api/v1/:app/*', '/api/v2/:app/*'], (req, res) => {
     const origin = req.headers.origin;
     const appRow = db.getApp(String(req.params.app || ''));
     if (origin && appRow && db.appAllowedOrigins(appRow).includes(origin)) {
@@ -122,6 +124,8 @@ app.use('/api/v1/:app/files', require('./files/routes'));
 app.use('/api/v1/:app/thumbnails', require('./thumbnails/routes'));
 app.use('/api/v1/:app/assets', require('./assets/routes'));
 app.use('/api/v1/:app/admin/storage', require('./admin/routes'));
+app.use('/api/v2/:app/objects', require('./objects/routes'));   // canonical object API (docs/object-model.md)
+app.use('/o', require('./objects/routes').publicRouter);        // object bytes (public, or signed)
 app.use('/', require('./public/routes'));   // /v /c /p /t /f
 
 // eslint-disable-next-line no-unused-vars
@@ -159,6 +163,18 @@ every(5 * 60 * 1000, () => {
 });
 every(60 * 1000, () => recorder.checkDisk());              // disk guardian
 every(60 * 60 * 1000, () => thumbService.cleanupOldThumbnails());  // stale live thumbs
+// Object model: purge native objects whose soft-delete retention has passed (held ones are kept).
+every(60 * 60 * 1000, () => {
+    try { const n = require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
+});
+// Project rows that have no media_object yet (first boot after the upgrade: all of them).
+setTimeout(() => {
+    try {
+        const bf = require('./objects/backfill');
+        const r = bf.backfill({ onlyMissing: true });
+        if (r.totals.created || r.totals.updated || r.errors.length) console.log(`[Objects] Backfill: ${bf.summarize(r)}`);
+    } catch (err) { console.warn('[Objects] Backfill failed:', err.message); }
+}, 15 * 1000).unref?.();
 
 // Recover from an unclean shutdown: rows stuck in is_recording with no live
 // ffmpeg are finalized from whatever hit the disk.

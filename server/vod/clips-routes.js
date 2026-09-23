@@ -23,6 +23,7 @@ const tools = require('./media-tools');
 const cutter = require('./clip-cutter');
 const { tenantAuth, tenantCors } = require('../auth');
 const { sendWebhook } = require('../webhooks');
+const objects = require('../objects/model');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
@@ -197,6 +198,7 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
             if (cut.ok) {
                 db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
                     [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId]);
+                objects.safeSync('clip', clipId);
                 try {
                     await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath);
                 } catch { /* */ }
@@ -207,6 +209,7 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
                 // (attempt 2 pulls a cloud-stored VOD back to local disk first).
                 const nextAt = new Date(Date.now() + 2 * 60000).toISOString().replace('T', ' ').slice(0, 19);
                 db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_attempts = 1, cut_next_at = ? WHERE id = ?", [String(cut.error || 'cut failed').slice(0, 500), nextAt, clipId]);
+                objects.safeSync('clip', clipId);
                 console.warn(`[Clips] Clip ${clipId} failed: ${cut.error} — auto-retry in 2 min`);
                 sendWebhook(appId, 'clip.failed', clipPublic(db.getClipById(clipId))).catch(() => {});
             }
@@ -351,6 +354,7 @@ router.put('/:id', tenantAuth(), (req, res) => {
             const t = sanitizeClipTitle(title, '');
             if (!t) return res.status(400).json({ error: 'Title must be 1-200 characters' });
             db.run('UPDATE clips SET title = ? WHERE id = ?', [t, clip.id]);
+            if (visibility === undefined) objects.safeSync('clip', clip.id);
         }
         if (visibility !== undefined) db.setClipVisibility(clip.id, visibility);
         res.json({ clip: clipPublic(db.getClipById(clip.id, req.appId)) });
@@ -364,6 +368,7 @@ router.delete('/:id', tenantAuth(), (req, res) => {
     try {
         const clip = _getClipScoped(req, res);
         if (!clip) return;
+        if (objects.isHeldRow(clip)) return res.status(409).json({ error: 'Clip is under a retention hold', code: 'media.object.held' });
 
         // Delete the local file + any offloaded B2/R2 object (clips carry
         // storage_provider/storage_key like VODs).

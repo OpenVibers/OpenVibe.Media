@@ -196,6 +196,7 @@ async function generateVodThumbnail(vodId, filePath, opts = {}) {
         // Clean up the previous thumbnail for this VOD
         _removeOldThumb(db.get('SELECT thumbnail_url FROM vods WHERE id = ?', [vodId])?.thumbnail_url, thumbUrl);
         db.run('UPDATE vods SET thumbnail_url = ? WHERE id = ?', [thumbUrl, vodId]);
+        require('../objects/model').safeSync('vod', vodId);   // the thumbnail object follows the picture
     }
     return thumbUrl;
 }
@@ -206,6 +207,7 @@ async function generateClipThumbnail(clipId, filePath) {
     if (thumbUrl) {
         _removeOldThumb(db.get('SELECT thumbnail_url FROM clips WHERE id = ?', [clipId])?.thumbnail_url, thumbUrl);
         db.run('UPDATE clips SET thumbnail_url = ? WHERE id = ?', [thumbUrl, clipId]);
+        require('../objects/model').safeSync('clip', clipId);
     }
     return thumbUrl;
 }

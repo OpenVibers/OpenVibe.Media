@@ -43,6 +43,20 @@ const config = {
         maxSizeMb: intEnv('MAX_FILE_SIZE_MB', 256),
     },
 
+    // Canonical object model (Wave 4): native v2 uploads, signed delivery, retention,
+    // and the public playback object-size invariant (policy, not a copied constant).
+    objects: {
+        path: process.env.OBJECTS_PATH || './data/objects',
+        maxUploadMb: intEnv('MEDIA_OBJECT_MAX_MB', 256),          // single-part upload limit
+        retentionDays: intEnv('MEDIA_DELETE_RETENTION_DAYS', 30),  // soft-deleted bytes kept this long
+        signingSecret: process.env.MEDIA_SIGNING_SECRET || '',
+        signedUrlTtlS: intEnv('MEDIA_SIGNED_URL_TTL_S', 300),
+        uploadTokenTtlS: intEnv('MEDIA_UPLOAD_TOKEN_TTL_S', 3600),
+        publicMaxMb: intEnv('MEDIA_PUBLIC_OBJECT_MAX_MB', 500),
+        publicTargetMb: intEnv('MEDIA_PUBLIC_OBJECT_TARGET_MB', 256),
+        publicWarnMb: intEnv('MEDIA_PUBLIC_OBJECT_WARN_MB', 384),
+    },
+
     rtp: {
         portMin: intEnv('RTP_PORT_MIN', 12000),
         portMax: intEnv('RTP_PORT_MAX', 12199),
@@ -71,6 +85,7 @@ config.pastes.path = path.resolve(config.pastes.path);
 config.assets.path = path.resolve(config.assets.path);
 config.thumbnails.path = path.resolve(config.thumbnails.path);
 config.files.path = path.resolve(config.files.path);
+config.objects.path = path.resolve(config.objects.path);
 config.db.path = path.resolve(config.db.path);
 
 module.exports = config;

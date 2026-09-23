@@ -214,6 +214,7 @@ router.delete('/vods/bulk', async (req, res) => {
             try {
                 const vod = Number.isFinite(id) ? db.getVodById(id, req.appId) : null;
                 if (!vod) { result.error = 'VOD not found'; results.push(result); continue; }
+                if (require('../objects/model').isHeldRow(vod)) { result.error = 'VOD is under a retention hold'; results.push(result); continue; }
 
                 if (recorder.isRecording(vod.id)) recorder.stopRecording(vod.id);
                 try { require('../vod/routes').activeChunkUploads.delete(vod.id); } catch { /* */ }

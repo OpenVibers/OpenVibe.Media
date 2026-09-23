@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS vods (
     ai_transcript TEXT,
     ai_analyzed_at DATETIME,
     meta_json TEXT DEFAULT '{}',
+    object_id TEXT,                       -- media_objects.id (Wave 4 object model)
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_vods_app ON vods(app_id, created_at DESC);
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS clips (
     ai_overview TEXT,
     ai_transcript TEXT,
     ai_analyzed_at DATETIME,
+    object_id TEXT,                       -- media_objects.id
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_clips_app ON clips(app_id, created_at DESC);
@@ -126,6 +128,7 @@ CREATE TABLE IF NOT EXISTS pastes (
     ai_summary TEXT,                      -- kept for import; Live owns AI generation
     ai_tags TEXT,
     ai_analyzed_at DATETIME,
+    object_id TEXT,                       -- media_objects.id of the screenshot/avatar bytes (text pastes have none)
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (forked_from) REFERENCES pastes(id) ON DELETE SET NULL
@@ -169,6 +172,7 @@ CREATE TABLE IF NOT EXISTS files (
     size INTEGER NOT NULL DEFAULT 0,
     mime TEXT DEFAULT 'application/octet-stream',
     sha256 TEXT,
+    object_id TEXT,                       -- media_objects.id
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_files_app ON files(app_id, created_at DESC);
@@ -202,3 +206,110 @@ CREATE TABLE IF NOT EXISTS assets (
 );
 CREATE INDEX IF NOT EXISTS idx_assets_app_kind ON assets(app_id, kind, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_identity ON assets(app_id, kind, name, channel_username);
+
+-- ── Canonical object model (roadmap Wave 4; docs/object-model.md) ──
+-- Every stored byte-blob is a media_object. The vods/clips/files/pastes rows
+-- above are typed projections over it (their object_id column), so the old
+-- APIs and URLs keep working while new code speaks in med_<ULID> ids.
+CREATE TABLE IF NOT EXISTS media_objects (
+    id TEXT PRIMARY KEY,                  -- med_<ULID> (time-sortable)
+    app_id TEXT NOT NULL,                 -- tenant
+    namespace TEXT NOT NULL,              -- capability namespace (= app_id today; projects later)
+    kind TEXT NOT NULL CHECK(kind IN ('vod', 'clip', 'file', 'thumbnail', 'screenshot', 'avatar', 'asset')),
+    owner_subject TEXT,                   -- canonical subject (usr_<ULID>) when known
+    owner_app TEXT,                       -- legacy owner: the app whose user-id space owner_user_id is in
+    owner_user_id INTEGER,
+    visibility TEXT NOT NULL DEFAULT 'private' CHECK(visibility IN ('public', 'unlisted', 'private')),
+    lifecycle_status TEXT NOT NULL DEFAULT 'uploading' CHECK(lifecycle_status IN ('uploading', 'ready', 'failed', 'archived', 'deleted')),
+    mime_type TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT,                    -- sha256 hex
+    canonical_provider TEXT,              -- local | b2 | r2
+    canonical_key TEXT,
+    legacy_ref TEXT UNIQUE,               -- legacy:<app>:<kind>:<id> for projected rows; NULL = native v2 object
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    deleted_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_media_objects_app ON media_objects(app_id, id);
+CREATE INDEX IF NOT EXISTS idx_media_objects_kind ON media_objects(app_id, kind);
+CREATE INDEX IF NOT EXISTS idx_media_objects_owner ON media_objects(owner_subject);
+CREATE INDEX IF NOT EXISTS idx_media_objects_lifecycle ON media_objects(lifecycle_status);
+
+-- Where the bytes are. One row per provider copy; the canonical one is named on the object.
+CREATE TABLE IF NOT EXISTS media_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('local', 'b2', 'r2')),
+    bucket TEXT,
+    key TEXT NOT NULL,                    -- absolute path for local, object key for b2/r2
+    storage_class TEXT,                   -- hot (local) | cold (b2 canonical) | cache (r2)
+    state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('present', 'missing', 'pending', 'corrupt')),
+    checksum TEXT,
+    size_bytes INTEGER,
+    verified_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(object_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS media_relationships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_object_id TEXT NOT NULL,
+    relation TEXT NOT NULL,               -- clip_of | thumbnail_of | derived_from | screenshot_of
+    to_object_id TEXT NOT NULL,
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(from_object_id, relation, to_object_id)
+);
+CREATE INDEX IF NOT EXISTS idx_media_relationships_to ON media_relationships(to_object_id, relation);
+
+CREATE TABLE IF NOT EXISTS media_variants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id TEXT NOT NULL,              -- the source object
+    variant_name TEXT NOT NULL,           -- thumbnail | 720p | waveform | …
+    derived_object_id TEXT NOT NULL,
+    recipe TEXT,                          -- how it was made (name@version)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(object_id, variant_name)
+);
+
+-- Generic derivative/maintenance jobs (schema only in this pass — no worker consumes it yet).
+CREATE TABLE IF NOT EXISTS media_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id TEXT,
+    job_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued', 'running', 'done', 'failed', 'cancelled')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    checkpoint TEXT,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_media_jobs_status ON media_jobs(status, job_type);
+
+-- Retention holds: an object with an unreleased hold cannot be deleted or moved between tiers.
+CREATE TABLE IF NOT EXISTS media_holds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('moderation', 'dmca', 'creator_pin', 'admin', 'evidence')),
+    reason TEXT NOT NULL DEFAULT '',
+    created_by TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    released_at DATETIME,
+    released_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_media_holds_object ON media_holds(object_id, released_at);
+
+-- Public playback objects above the size policy (MEDIA_PUBLIC_OBJECT_*_MB). One row per object.
+CREATE TABLE IF NOT EXISTS media_invariant_violations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id TEXT NOT NULL UNIQUE,
+    level TEXT NOT NULL CHECK(level IN ('warn', 'violation')),
+    size_bytes INTEGER NOT NULL,
+    threshold_bytes INTEGER NOT NULL,
+    detected_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME
+);

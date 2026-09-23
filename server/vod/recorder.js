@@ -218,6 +218,7 @@ class StreamRecorder {
         this.activeRecordings.set(vod.id, recording);
         db.run('UPDATE vods SET is_recording = 1, file_path = ? WHERE id = ?', [filePath, vod.id]);
         if (masterPath) db.run('UPDATE vods SET master_file_path = ? WHERE id = ?', [masterPath, vod.id]);
+        require('../objects/model').safeSync('vod', vod.id);
         return recording;
     }
 

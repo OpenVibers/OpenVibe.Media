@@ -247,6 +247,9 @@ function _getPasteScoped(req, res) {
 // Fully remove a paste's screenshot from local disk AND any legacy B2 object.
 function removePasteScreenshot(paste) {
     if (!paste) return;
+    // A held screenshot keeps its bytes (the row delete that follows is refused by the hold trigger).
+    const objects = require('../objects/model');
+    if (objects.isHeldRow(paste.object_id !== undefined ? paste : db.get('SELECT object_id FROM pastes WHERE id = ?', [paste.id]))) return;
     if (paste.screenshot_path) {
         try { fs.unlinkSync(paste.screenshot_path); } catch { /* ignore */ }
     }
@@ -413,6 +416,7 @@ router.post('/:slug/censor', tenantAuth(), (req, res) => {
     if (paste.type !== 'screenshot' || !paste.screenshot_path) {
         return res.status(400).json({ error: 'Not a screenshot paste' });
     }
+    if (require('../objects/model').isHeldRow(paste)) return res.status(409).json({ error: 'Screenshot is under a retention hold', code: 'media.object.held' });
 
     const censorUpload = multer({
         storage: screenshotStorage,
@@ -432,6 +436,7 @@ router.post('/:slug/censor', tenantAuth(), (req, res) => {
             try { fs.unlinkSync(paste.screenshot_path); } catch { /* */ }
             db.run('UPDATE pastes SET screenshot_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
                 [req.file.path, paste.id]);
+            require('../objects/model').safeSync('paste', paste.id);
             res.json({ paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
         } catch (err2) {
             console.error('[Pastes] Censor error:', err2.message);
@@ -526,6 +531,7 @@ router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('scree
             );
 
             const paste = db.getPasteBySlug(slug, req.appId);
+            require('../objects/model').safeSync('paste', paste.id);
             return res.status(201).json({ id: paste.id, slug, url: `/p/${slug}`, paste: pastePublic(paste) });
         }
 

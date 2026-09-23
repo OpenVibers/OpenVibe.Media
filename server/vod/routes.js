@@ -25,6 +25,7 @@ const recorder = require('./recorder');
 const tools = require('./media-tools');
 const { finalizeVod, vodPublic } = require('./finalize');
 const { tenantAuth, tenantCors } = require('../auth');
+const objects = require('../objects/model');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
@@ -101,6 +102,7 @@ router.post('/', tenantAuth(), (req, res) => {
         const id = result.lastInsertRowid;
         if (clips_only) db.run('UPDATE vods SET clips_only = 1 WHERE id = ?', [id]);
         if (visibility) db.setVodVisibility(id, visibility);
+        else if (!clips_only) objects.safeSync('vod', id);
         res.status(201).json({ id });
     } catch (err) {
         console.error('[VOD] Create error:', err.message);
@@ -342,6 +344,7 @@ router.put('/:id', tenantAuth(), (req, res) => {
             db.run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
         }
         if (visibility !== undefined) db.setVodVisibility(vod.id, visibility);
+        else if (updates.length) objects.safeSync('vod', vod.id);
         res.json({ vod: vodPublic(db.getVodById(vod.id, req.appId)) });
     } catch (err) {
         console.error('[VOD] Update error:', err.message);
@@ -354,6 +357,7 @@ router.delete('/:id', tenantAuth(), (req, res) => {
     try {
         const vod = _getVodScoped(req, res);
         if (!vod) return;
+        if (objects.isHeldRow(vod)) return res.status(409).json({ error: 'VOD is under a retention hold', code: 'media.object.held' });
 
         if (recorder.isRecording(vod.id)) recorder.stopRecording(vod.id);
         activeChunkUploads.delete(vod.id);

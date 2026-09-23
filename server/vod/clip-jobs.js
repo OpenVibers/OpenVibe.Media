@@ -77,6 +77,7 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
     if (!cut.ok) return fail(clipId, clip, attempt, cut.error);
     db.run("UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?",
         [cut.filePath, cut.duration, startTime + cut.duration, clipId]);
+    require('../objects/model').safeSync('clip', clipId);
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
     sendWebhook(clip.app_id, 'clip.ready', _clipPublic(db.getClipById(clipId))).catch(() => {});
@@ -92,6 +93,7 @@ function fail(clipId, clip, attempt, error) {
     const mins = BACKOFF_MIN[Math.min(attempt - 1, BACKOFF_MIN.length - 1)];
     const nextAt = more ? new Date(Date.now() + mins * 60000).toISOString().replace('T', ' ').slice(0, 19) : null;
     db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId]);
+    require('../objects/model').safeSync('clip', clipId);
     console.warn(`[Clips] Clip ${clipId} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}${more ? ` — retry in ${mins} min` : ' — giving up'}`);
     sendWebhook(clip.app_id, 'clip.failed', _clipPublic(db.getClipById(clipId))).catch(() => {});
     return { ok: false, error: msg, retry_at: nextAt };

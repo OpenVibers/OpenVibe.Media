@@ -28,6 +28,7 @@ function getDb() {
     const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
     database.exec(schema);
     migrateColumns();
+    ensureObjectTriggers();
     normalizeThumbnailUrls();
     seedSettings();
     recoverInterruptedClips();
@@ -71,8 +72,10 @@ function normalizeThumbnailUrls() {
 // (CREATE TABLE IF NOT EXISTS won't add columns to an existing table).
 function migrateColumns() {
     const wanted = {
-        vods: [['managed_stream_id', 'INTEGER']],
-        clips: [['channel_user_id', 'INTEGER'], ['cut_error', 'TEXT'], ['cut_attempts', 'INTEGER DEFAULT 0'], ['cut_next_at', 'DATETIME']],
+        vods: [['managed_stream_id', 'INTEGER'], ['object_id', 'TEXT']],
+        clips: [['channel_user_id', 'INTEGER'], ['cut_error', 'TEXT'], ['cut_attempts', 'INTEGER DEFAULT 0'], ['cut_next_at', 'DATETIME'], ['object_id', 'TEXT']],
+        files: [['object_id', 'TEXT']],
+        pastes: [['object_id', 'TEXT']],
     };
     for (const [table, cols] of Object.entries(wanted)) {
         const existing = database.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
@@ -82,6 +85,43 @@ function migrateColumns() {
             console.log(`[DB] Added ${table}.${name}`);
         }
     }
+}
+
+/**
+ * Object-model guards that must hold on EVERY delete path, including the many
+ * inherited ones that DELETE a vods/clips/files/pastes row directly:
+ *   - a row whose object is under an unreleased retention hold cannot be deleted;
+ *   - deleting a projected row marks its media_object deleted (bytes accounting
+ *     and reconciliation keep working without touching each call site).
+ * Created here, after migrateColumns, because they reference object_id.
+ */
+function ensureObjectTriggers() {
+    const held = (ref) => `EXISTS (SELECT 1 FROM media_holds WHERE object_id = ${ref} AND released_at IS NULL)`;
+    for (const table of ['vods', 'clips', 'files', 'pastes']) {
+        database.exec(`
+            CREATE TRIGGER IF NOT EXISTS trg_${table}_hold_guard BEFORE DELETE ON ${table}
+            WHEN OLD.object_id IS NOT NULL AND ${held('OLD.object_id')}
+            BEGIN SELECT RAISE(ABORT, 'media object is under a retention hold'); END;
+            CREATE TRIGGER IF NOT EXISTS trg_${table}_object_deleted AFTER DELETE ON ${table}
+            WHEN OLD.object_id IS NOT NULL
+            BEGIN
+                UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP),
+                       updated_at = CURRENT_TIMESTAMP
+                WHERE id = OLD.object_id AND lifecycle_status != 'deleted';
+            END;`);
+    }
+    database.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_media_objects_hold_guard BEFORE UPDATE OF lifecycle_status ON media_objects
+        WHEN NEW.lifecycle_status = 'deleted' AND OLD.lifecycle_status != 'deleted' AND ${held('OLD.id')}
+        BEGIN SELECT RAISE(ABORT, 'media object is under a retention hold'); END;
+        CREATE TRIGGER IF NOT EXISTS trg_media_objects_hold_delete BEFORE DELETE ON media_objects
+        WHEN ${held('OLD.id')}
+        BEGIN SELECT RAISE(ABORT, 'media object is under a retention hold'); END;`);
+}
+
+/** Keep a projected row's media_object current. Never throws — the legacy write already happened. */
+function _syncObject(kind, id) {
+    return require('../objects/model').safeSync(kind, id);
 }
 
 function seedSettings() {
@@ -317,7 +357,9 @@ function _normVisibility(v) { return VALID_VISIBILITY.has(v) ? v : 'public'; }
 // Set VOD/clip visibility; is_public mirrors (1 iff public) so listing filters hold.
 function setVodVisibility(vodId, visibility) {
     const vis = _normVisibility(visibility);
-    return run('UPDATE vods SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, vodId]);
+    const r = run('UPDATE vods SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, vodId]);
+    _syncObject('vod', vodId);
+    return r;
 }
 
 function updateVodHealth(vodId, { status, score, issues = [], probeDuration, probeFormat, quarantine = false, keepPublic = false }) {
@@ -335,7 +377,9 @@ function updateVodHealth(vodId, { status, score, issues = [], probeDuration, pro
     updates.push("last_health_scan_at = datetime('now')");
     params.push(vodId);
     if (!updates.length) return null;
-    return run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
+    const r = run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
+    _syncObject('vod', vodId);
+    return r;
 }
 
 function repairVodDuration(vodId, duration, fileSize) {
@@ -380,13 +424,15 @@ function vodStatus(vod) {
 
 function createClip({ app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, auto_generated, status }) {
     const pub = (is_public === 0 || is_public === false) ? 0 : 1;
-    return run(
+    const r = run(
         `INSERT INTO clips (app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [app_id, vod_id || null, stream_id || null, user_id || null, channel_user_id || null, title || 'Untitled Clip', description || '',
          file_path || '', thumbnail_url || null, start_time || 0, end_time || 0, duration_seconds || 0,
          pub, pub ? 'public' : 'unlisted', auto_generated ? 1 : 0, status || 'ready']
     );
+    _syncObject('clip', r.lastInsertRowid);
+    return r;
 }
 
 function getClipById(id, appId = null) {
@@ -423,7 +469,9 @@ function countClips(appId, filters = {}) {
 
 function setClipVisibility(clipId, visibility) {
     const vis = _normVisibility(visibility);
-    return run('UPDATE clips SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, clipId]);
+    const r = run('UPDATE clips SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, clipId]);
+    _syncObject('clip', clipId);
+    return r;
 }
 
 function findDuplicateClip({ appId, streamId = null, vodId = null, startTime = 0, endTime = 0, startWindow = 8, endWindow = 10, createdSinceMinutes = 10 }) {
@@ -564,11 +612,13 @@ function getRecentPasteCommentsByIp(ip, seconds = 10) {
 // ── File helpers ─────────────────────────────────────────────
 
 function createFile({ key, app_id, user_id, original_name, size, mime, sha256 }) {
-    return run(
+    const r = run(
         `INSERT INTO files (key, app_id, user_id, original_name, size, mime, sha256)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [key, app_id, user_id || null, original_name || null, size || 0, mime || 'application/octet-stream', sha256 || null]
     );
+    _syncObject('file', key);
+    return r;
 }
 
 function getFileByKey(key, appId = null) {
@@ -651,7 +701,7 @@ function importLegacyRows(table, rows, appId = 'live') {
 }
 
 module.exports = {
-    getDb, run, get, all, close,
+    getDb, run, get, all, close, syncObject: _syncObject,
     getSetting, setSetting,
     // apps
     hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins,

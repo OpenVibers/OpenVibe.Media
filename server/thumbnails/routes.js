@@ -68,6 +68,7 @@ router.post('/:kind/:id', tenantAuth({ allowUser: true }), upload.single('thumbn
             const url = `/t/${filename}`;
             const table = kind === 'vod' ? 'vods' : 'clips';
             db.run(`UPDATE ${table} SET thumbnail_url = ? WHERE id = ?`, [url, numId]);
+            require('../objects/model').safeSync(kind, numId);
             return res.json({ url });
         }
 
