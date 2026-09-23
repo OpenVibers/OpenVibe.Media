@@ -1,7 +1,7 @@
 'use strict';
-// Media → OpenVibe.Events (roadmap Wave 3): webhook outcomes are also queued in the outbox and
+// Media → OpenVibe.Events (roadmap Wave 3): announced outcomes are queued in the outbox and
 // relayed with a service token; storage alerts are queued once, not once per app; disabled
-// without EVENTS_URL. Stub Network token endpoint + stub Events.
+// without EVENTS_URL. (Transactionality: test/outbox-transaction.test.js.) Stub Network token endpoint + stub Events.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -41,18 +41,21 @@ const stub = http.createServer((req, res) => {
     const db = require('../server/db/database');
     db.getDb();
     const events = require('../server/events');
-    const { sendWebhook } = require('../server/webhooks');
+    const { sendWebhook, announce } = require('../server/webhooks');
+    const inTx = (fn) => db.getDb().transaction(fn)();
 
     assert.strictEqual(events.init({ eventsUrl: '', clientSecret: '' }), null, 'off without EVENTS_URL');
-    assert.strictEqual(events.emit('vod.ready', 'live', { id: 1 }), null);
+    assert.strictEqual(inTx(() => events.record('vod.ready', 'live', { id: 1 })), null);
 
     const outbox = events.init({ eventsUrl: base, clientSecret: 's', networkUrl: base, intervalMs: 50 });
     assert.ok(outbox);
 
-    // A webhook to an app with no webhook URL still queues the durable event.
-    await sendWebhook('no-such-app', 'vod.ready', { id: 42, title: 'Stream', meta: { big: 'x'.repeat(100000) }, ai_overview: 'long text' });
-    await sendWebhook('no-such-app', 'clip.failed', { id: 7, status: 'failed' });
-    await sendWebhook('no-such-app', 'unknown.event', { id: 1 });
+    // An app with no webhook URL still gets the durable event.
+    announce('no-such-app', 'vod.ready', { payload: { id: 42, title: 'Stream', meta: { big: 'x'.repeat(100000) }, ai_overview: 'long text' } });
+    announce('no-such-app', 'clip.failed', { payload: { id: 7, status: 'failed' } });
+    assert.strictEqual(announce('no-such-app', 'unknown.event', { payload: { id: 1 } }).eventId, null, 'no durable twin');
+    // A bare webhook queues nothing (the event is written inside the state change's transaction).
+    await sendWebhook('no-such-app', 'vod.ready', { id: 43 });
     await outbox.flush();
     assert.strictEqual(published.length, 2);
     assert.strictEqual(published[0].event_type, 'media.vod.ready');
@@ -61,6 +64,7 @@ const stub = http.createServer((req, res) => {
     assert.strictEqual(published[0].visibility, 'internal');
     assert.strictEqual(published[0].payload.app_id, 'no-such-app');
     assert.ok(!('meta' in published[0].payload) && !('ai_overview' in published[0].payload), 'free text stays behind the API');
+    assert.strictEqual(published[0].priority, 'important', 'lifecycle outcomes are important (§6.3)');
     assert.strictEqual(published[1].event_type, 'media.clip.failed');
     assert.strictEqual(published[1].priority, 'important');
 
@@ -68,7 +72,7 @@ const stub = http.createServer((req, res) => {
     await sendWebhook('no-such-app', 'storage.alert', { kind: 'disk' });
     await outbox.flush();
     assert.strictEqual(published.length, 2);
-    events.emit('storage.alert', null, { kind: 'disk', free_gb: 3 });
+    inTx(() => events.record('storage.alert', null, { kind: 'disk', free_gb: 3 }));
     await outbox.flush();
     assert.strictEqual(published.length, 3);
     assert.deepStrictEqual(published[2].subject, { type: 'storage', id: 'disk' });

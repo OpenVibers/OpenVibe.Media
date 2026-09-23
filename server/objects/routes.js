@@ -37,7 +37,7 @@ const model = require('./model');
 const invariant = require('./invariant');
 const signing = require('./signing');
 const { tenantAuth, tenantCors, tenantPath } = require('../auth');
-const { sendWebhook } = require('../webhooks');
+const { announce } = require('../webhooks');
 
 const MB = 1024 * 1024;
 const upload = tenantAuth({ capability: 'media.object.upload' });
@@ -259,11 +259,15 @@ router.post('/:id/complete', contentAuth, tenantCors, (req, res) => {
             return problem(res, 422, 'media.invariant.public_object_too_large', `Public playback objects are limited to ${config.objects.publicMaxMb} MB`);
         }
         if (!quotaCheck(req, res, Number(obj.size_bytes) || 0, obj.id)) return;
-        model.updateObject(obj.id, { lifecycle_status: 'ready' });
-        const done = model.getObject(obj.id);
-        invariant.record(done);
-        const body = model.objectPublic(done);
-        sendWebhook(req.appId, 'media.object.uploaded', body).catch(() => {});
+        // The ready transition, its invariant row and the media.object.uploaded event commit
+        // together; the webhook follows the commit.
+        const { data: body } = announce(req.appId, 'media.object.uploaded', {
+            change: () => {
+                model.updateObject(obj.id, { lifecycle_status: 'ready' });
+                invariant.record(model.getObject(obj.id));
+            },
+            payload: () => model.objectPublic(model.getObject(obj.id)),
+        });
         res.json(body);
     } catch (err) {
         console.error('[Objects] complete error:', err.message);

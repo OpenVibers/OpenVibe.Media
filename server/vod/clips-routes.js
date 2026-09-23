@@ -22,7 +22,7 @@ const db = require('../db/database');
 const tools = require('./media-tools');
 const cutter = require('./clip-cutter');
 const { tenantAuth, tenantCors } = require('../auth');
-const { sendWebhook } = require('../webhooks');
+const { announce } = require('../webhooks');
 const objects = require('../objects/model');
 
 const router = express.Router({ mergeParams: true });
@@ -205,22 +205,28 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
         (async () => {
             const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
             if (cut.ok) {
-                db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
-                    [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId]);
-                objects.safeSync('clip', clipId);
+                // Thumbnail first so the clip.ready payload carries it; then the ready transition
+                // and its event commit together (webhooks.announce) and the webhook goes out.
                 try {
                     await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath);
                 } catch { /* */ }
+                announce(appId, 'clip.ready', {
+                    change: () => db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
+                        [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId]),
+                    payload: () => clipPublic(db.getClipById(clipId)),
+                });
+                objects.safeSync('clip', clipId);
                 console.log(`[Clips] Clip ${clipId} cut from vod ${vodId} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s)`);
-                sendWebhook(appId, 'clip.ready', clipPublic(db.getClipById(clipId))).catch(() => {});
             } else {
                 // First attempt failed: record why and let the retry sweeper take it from here
                 // (attempt 2 pulls a cloud-stored VOD back to local disk first).
                 const nextAt = new Date(Date.now() + 2 * 60000).toISOString().replace('T', ' ').slice(0, 19);
-                db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_attempts = 1, cut_next_at = ? WHERE id = ?", [String(cut.error || 'cut failed').slice(0, 500), nextAt, clipId]);
+                announce(appId, 'clip.failed', {
+                    change: () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_attempts = 1, cut_next_at = ? WHERE id = ?", [String(cut.error || 'cut failed').slice(0, 500), nextAt, clipId]),
+                    payload: () => clipPublic(db.getClipById(clipId)),
+                });
                 objects.safeSync('clip', clipId);
                 console.warn(`[Clips] Clip ${clipId} failed: ${cut.error} — auto-retry in 2 min`);
-                sendWebhook(appId, 'clip.failed', clipPublic(db.getClipById(clipId))).catch(() => {});
             }
         })().catch(err => console.error('[Clips] Background cut error:', err.message));
 

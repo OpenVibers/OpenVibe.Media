@@ -5,7 +5,12 @@
  * `X-OVMedia-Signature: sha256=<hmac>` — HMAC-SHA256 of the raw body using the
  * app's webhook_secret (per CONTRACTS.md). Fire-and-forget with small retries.
  *
- * Events: vod.ready | vod.failed | clip.ready | clip.failed
+ * Events: vod.ready | vod.failed | clip.ready | clip.failed | media.object.uploaded |
+ *         storage.alert | storage.recovered
+ *
+ * Outcomes go through announce(): the state change and its durable OpenVibe.Events outbox row
+ * commit in one SQLite transaction, then the webhook is sent with `event_id` = that event's id
+ * (absent when the outbox is off), so a consumer that also reads Events dedupes the pair.
  */
 'use strict';
 
@@ -35,24 +40,24 @@ async function _post(url, rawBody, signature) {
 
 /**
  * Send an event to an app's webhook. Silently no-ops when the app has no
- * webhook_url. Never throws.
+ * webhook_url. Never throws. Queues nothing: the durable event is written by
+ * announce() (or the caller) inside the state change's transaction.
  * @param {string|object} appOrId  app_id or apps row
  * @param {string} event           e.g. 'vod.ready'
  * @param {object} data            event payload
+ * @param {object} [opts]
+ * @param {string} [opts.eventId]  the OpenVibe.Events event_id of the same outcome
  */
-async function sendWebhook(appOrId, event, data) {
-    // The durable twin (OpenVibe.Events) is queued whether or not this app has a webhook URL.
-    // Storage alerts go to every app, so server/vod/vod-storage.js queues those once itself.
-    if (!String(event).startsWith('storage.')) {
-        try { require('./events').emit(event, typeof appOrId === 'string' ? appOrId : appOrId && appOrId.app_id, data); } catch { /* never blocks a webhook */ }
-    }
+async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
     let app = appOrId;
     if (typeof appOrId === 'string') {
         try { app = db.getApp(appOrId); } catch { app = null; }
     }
     if (!app || !app.webhook_url) return false;
 
-    const rawBody = JSON.stringify({ event, app_id: app.app_id, data });
+    const body = { event, app_id: app.app_id, data };
+    if (eventId) body.event_id = eventId;
+    const rawBody = JSON.stringify(body);
     const signature = sign(app.webhook_secret, rawBody);
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -70,4 +75,27 @@ async function sendWebhook(appOrId, event, data) {
     return false;
 }
 
-module.exports = { sendWebhook, sign };
+/**
+ * Commit an outcome and announce it. `change()` (synchronous DB writes, optional) and the outbox
+ * row for `event` run in ONE SQLite transaction, so the durable event exists if and only if the
+ * change committed: never lost after a commit, never announced for a rollback. `payload()` is read
+ * inside that transaction (the row as committed). After the commit the relay is woken and the
+ * app's webhook is sent with the same event_id. Returns { data, eventId }; throws (nothing changed,
+ * nothing queued, no webhook) when the transaction fails.
+ */
+function announce(appId, event, { change = null, payload }) {
+    const events = require('./events');
+    let data = null;
+    let env = null;
+    db.getDb().transaction(() => {
+        if (change) change();
+        data = typeof payload === 'function' ? payload() : payload;
+        env = events.record(event, appId, data);
+    })();
+    events.kick();
+    const eventId = env ? env.event_id : null;
+    sendWebhook(appId, event, data, { eventId }).catch(() => {});
+    return { data, eventId };
+}
+
+module.exports = { sendWebhook, announce, sign };

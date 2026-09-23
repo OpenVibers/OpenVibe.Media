@@ -3,7 +3,7 @@
  *
  *   recutClip(clipId, { reason })   the ONE code path that (re)cuts an existing clip row:
  *                                   resolves the source, cuts, updates the row, thumbnails,
- *                                   fires the webhook. Records cut_error / cut_attempts and
+ *                                   commits the outcome with its event, fires the webhook. Records cut_error / cut_attempts and
  *                                   schedules an automatic retry on failure.
  *   start()                         sweeper: every 3 min, failed clips that still have
  *                                   attempts left are re-cut. From the second attempt on, a
@@ -19,7 +19,7 @@ const db = require('../db/database');
 const config = require('../config');
 const cutter = require('./clip-cutter');
 const vodStorage = require('./vod-storage');
-const { sendWebhook } = require('../webhooks');
+const { announce } = require('../webhooks');
 
 const MAX_ATTEMPTS = 4;
 const BACKOFF_MIN = [2, 10, 30, 90];           // minutes before attempt 2, 3, 4, …
@@ -75,12 +75,16 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
     const duration = Math.max(1, (Number(clip.end_time) || 0) - startTime);
     const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
     if (!cut.ok) return fail(clipId, clip, attempt, cut.error);
-    db.run("UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?",
-        [cut.filePath, cut.duration, startTime + cut.duration, clipId]);
-    require('../objects/model').safeSync('clip', clipId);
+    // Thumbnail first (the clip.ready payload carries it), then the ready transition and its event
+    // in one transaction (webhooks.announce), then the webhook.
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
+    announce(clip.app_id, 'clip.ready', {
+        change: () => db.run("UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?",
+            [cut.filePath, cut.duration, startTime + cut.duration, clipId]),
+        payload: () => _clipPublic(db.getClipById(clipId)),
+    });
+    require('../objects/model').safeSync('clip', clipId);
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
-    sendWebhook(clip.app_id, 'clip.ready', _clipPublic(db.getClipById(clipId))).catch(() => {});
     return { ok: true };
 }
 
@@ -92,10 +96,12 @@ function fail(clipId, clip, attempt, error) {
     const more = attempt < MAX_ATTEMPTS && !hopeless;
     const mins = BACKOFF_MIN[Math.min(attempt - 1, BACKOFF_MIN.length - 1)];
     const nextAt = more ? new Date(Date.now() + mins * 60000).toISOString().replace('T', ' ').slice(0, 19) : null;
-    db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId]);
+    announce(clip.app_id, 'clip.failed', {
+        change: () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId]),
+        payload: () => _clipPublic(db.getClipById(clipId)),
+    });
     require('../objects/model').safeSync('clip', clipId);
     console.warn(`[Clips] Clip ${clipId} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}${more ? ` — retry in ${mins} min` : ' — giving up'}`);
-    sendWebhook(clip.app_id, 'clip.failed', _clipPublic(db.getClipById(clipId))).catch(() => {});
     return { ok: false, error: msg, retry_at: nextAt };
 }
 

@@ -10,10 +10,14 @@
  *   media.object.uploaded            → media.object.uploaded                   (subject object <id>)
  *   storage.alert | storage.recovered → media.storage.alert | media.storage.recovered
  *
- * The event is enqueued right after the state change commits (its own SQLite transaction, a local
- * insert): the loss window is a process crash between those two statements. Delivery from the
- * outbox on is at least once. Every event is `internal` visibility: a VOD's own visibility decides
- * who may see it, and consumers (Live, Search) apply it.
+ * The outbox row is written INSIDE the SQLite transaction that makes the state change it describes
+ * (record(), called from webhooks.announce()): the event exists if and only if the change committed,
+ * so a crash can neither lose an outcome nor announce one that rolled back. The webhook for the same
+ * outcome is sent after the commit and carries the envelope's event_id, so a consumer receiving it by
+ * both paths (Live during its webhook → Events transition) handles it once. Delivery from the outbox
+ * on is at least once. Every event is `internal` visibility: a VOD's own visibility decides who may
+ * see it, and consumers (Live, Search) apply it. Lifecycle outcomes are `important` (roadmap §6.3);
+ * only storage.recovered is `low`.
  *
  * Off unless EVENTS_URL and OV_OAUTH_CLIENT_SECRET are set (EVENTS_PUBLISH=off disables it).
  */
@@ -69,8 +73,13 @@ function slim(appId, data) {
     return { app_id: appId || null, ...rest };
 }
 
-/** Queue the durable twin of a webhook event. Never throws; returns the envelope or null. */
-function emit(webhookEvent, appId, data) {
+/**
+ * Queue the durable event for an outcome. MUST run inside the transaction that makes the change
+ * (the SDK outbox refuses otherwise), and throws if the insert fails, so the change rolls back with
+ * it. Returns the envelope (with event_id), or null when the outbox is off, the tenant is a sandbox
+ * or the webhook event has no durable twin.
+ */
+function record(webhookEvent, appId, data) {
     if (!outbox) return null;
     // Developer-project sandbox tenants (ADR-014) produce no platform events: sandbox activity must
     // never reach production consumers.
@@ -82,25 +91,21 @@ function emit(webhookEvent, appId, data) {
     const subject = subjectType === 'storage'
         ? { type: 'storage', id: String((data && data.kind) || 'storage') }
         : { type: subjectType, id: String(id == null ? 'unknown' : id) };
-    try {
-        let env = null;
-        db.getDb().transaction(() => {
-            env = outbox.enqueue({
-                event_type: eventType,
-                actor: { type: 'service', id: 'media' },
-                subject,
-                visibility: 'internal',
-                priority: /failed|alert/.test(eventType) ? 'important' : 'low',
-                payload: slim(appId, data),
-            });
-        })();
-        stats.queued++;
-        setImmediate(() => outbox && outbox.kick());
-        return env;
-    } catch (err) {
-        console.warn(`[Events] ${eventType} not queued:`, err.message);
-        return null;
-    }
+    const env = outbox.enqueue({
+        event_type: eventType,
+        actor: { type: 'service', id: 'media' },
+        subject,
+        visibility: 'internal',
+        priority: eventType === 'media.storage.recovered' ? 'low' : 'important',
+        payload: slim(appId, data),
+    });
+    stats.queued++;
+    return env;
+}
+
+/** Wake the relay once the transaction that queued events has committed. */
+function kick() {
+    if (outbox) setImmediate(() => outbox && outbox.kick());
 }
 
 function status() {
@@ -110,4 +115,4 @@ function status() {
 
 function _reset() { if (outbox) outbox.stop(); outbox = null; stats.queued = 0; stats.lastError = null; }
 
-module.exports = { init, emit, status, TYPES, _reset };
+module.exports = { init, record, kick, status, TYPES, _reset };

@@ -245,9 +245,17 @@ directories are shared across apps) and responses carry a `note` saying so.
 ### Webhooks (outbound)
 
 `POST` to the app's `webhook_url` with body
-`{ "event": "vod.ready"|"vod.failed"|"clip.ready"|"clip.failed"|"media.object.uploaded", "app_id", "data" }`
+`{ "event": "vod.ready"|"vod.failed"|"clip.ready"|"clip.failed"|"media.object.uploaded"|"storage.alert"|"storage.recovered", "app_id", "data", "event_id"? }`
 and header `X-OVMedia-Signature: sha256=<hex hmac-sha256 of the raw body with
 the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
+
+Each outcome is also a durable OpenVibe.Events event (`media.vod.ready|failed`,
+`media.clip.ready|failed`, `media.object.uploaded`, `media.storage.alert|recovered`;
+`server/events.js`). The outbox row is written in the **same SQLite transaction** as the state
+change it describes (`webhooks.announce()`), so an outcome is never lost or announced for a
+rolled-back change; the webhook follows the commit and carries `event_id` = that event's id
+(absent when the outbox is off), so an app that reads both paths (Live during its webhook →
+Events transition) handles each outcome once. Webhooks stay until every consumer reads Events.
 
 ## Health, readiness and metrics
 

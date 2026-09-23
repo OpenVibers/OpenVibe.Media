@@ -751,12 +751,20 @@ async function emitStorageEvent(event, kind, data, settings = getSettings()) {
     alertLastSentAt.set(cooldownKey, Date.now());
     const payload = { kind, ...data, at: new Date().toISOString() };
     (event === 'storage.alert' ? console.error : console.warn)(`[VodStorage] ${event} (${kind}): ${JSON.stringify(data)}`);
-    try { require('../events').emit(event, null, payload); } catch { /* never blocks the alert */ }
+    // No database state changes here (the cooldown is in memory): the outbox row is the whole
+    // commit, queued once for every app; each app's webhook carries its event_id.
+    let eventId = null;
+    try {
+        const events = require('../events');
+        const env = db.getDb().transaction(() => events.record(event, null, payload))();
+        eventId = env ? env.event_id : null;
+        events.kick();
+    } catch (err) { console.warn(`[VodStorage] ${event} not queued for Events:`, err.message); }
     let apps = [];
     try { apps = db.listApps().filter(a => a.webhook_url); } catch { apps = []; }
     let webhooks;
     try { webhooks = require('../webhooks'); } catch { return false; }
-    await Promise.all(apps.map(app => webhooks.sendWebhook(app.app_id, event, payload).catch(() => false)));
+    await Promise.all(apps.map(app => webhooks.sendWebhook(app.app_id, event, payload, { eventId }).catch(() => false)));
     return true;
 }
 
