@@ -117,6 +117,8 @@ function ensureTokenOnlyApps() {
         ['community', 'OpenVibe.Community', 10],
         ['tools', 'OpenVibe.Tools', 20],       // Wave 11 job results (TOOLS_JOB_RESULTS=media)
         ['games', 'OpenVibe.Games', 10],       // Wave 12 map-editor assets
+        ['wiki', 'OpenVibe.Wiki', 10],         // Wave 16 page attachments
+        ['blog', 'OpenVibe.Blog', 10],         // Wave 16 post attachments
     ]) {
         if (!db.getApp(appId)) db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, quotaGb * 1024 ** 3]);
     }
