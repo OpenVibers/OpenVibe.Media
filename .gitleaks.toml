@@ -15,3 +15,9 @@ description = "Throwaway app keys the local smoke test provisions for its own te
 condition = "AND"
 paths = ['''^scripts/smoke-test\.sh$''']
 regexes = ['''^(smoke-[a-z]+-key-[0-9]+|wrong-key)$''']
+
+[[allowlists]]
+description = "Made-up INTERNAL_API_KEY in the owner-subject test's environment (test/owner-subject.test.js); it opens nothing"
+condition = "AND"
+paths = ['''^test/owner-subject\.test\.js$''']
+regexes = ['''^internal-key-0123456789abcdef$''']
