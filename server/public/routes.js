@@ -526,6 +526,13 @@ router.get('/p/:slug/raw', (req, res) => {
 router.get('/p/:slug/screenshot', (req, res) => {
     try {
         const paste = db.getPasteBySlug(String(req.params.slug));
+        // Pastes made since the move live in Community only: send an unknown slug there, like
+        // /p/:slug and /p/:slug/raw (Community answers with the image, or its own 404). Stored
+        // hero-moment thumbnails pointed here and showed broken images.
+        if ((!paste || paste.visibility === 'private') && movedTo()) {   // private answers like missing
+            res.set('Cache-Control', 'public, max-age=3600');
+            return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(String(req.params.slug))}/screenshot`);
+        }
         if (!paste || !paste.screenshot_path) return res.status(404).send('Not found');
         if (paste.visibility === 'private') return res.status(404).send('Not found');
         if (!fs.existsSync(paste.screenshot_path)) return res.status(404).send('Not found');

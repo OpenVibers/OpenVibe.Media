@@ -143,6 +143,12 @@ const server = http.createServer(app);
     assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/no-such/raw'], 'moved: every slug goes to Community');
     r = await get('/p/priv-shot/raw');
     assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/priv-shot/raw'], 'moved: a private screenshot is not bounced to /screenshot');
+    // /p/:slug/screenshot: a slug Media doesn't hold (pastes made in Community since the move, whose
+    // screenshots hero moments linked here) goes to Community; a private one answers the same way.
+    r = await get('/p/no-such/screenshot');
+    assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/no-such/screenshot'], 'moved: an unknown screenshot slug goes to Community');
+    r = await get('/p/priv-shot/screenshot');
+    assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/priv-shot/screenshot'], 'moved: a private screenshot looks like an unknown one');
     delete process.env.PASTES_MOVED_TO;
     console.log('✅ /p/:slug/raw: private looks missing');
 
