@@ -1,7 +1,7 @@
 /**
  * OpenVibe.Media — the shell every server-rendered page shares.
  *
- * One place for: the network chrome (openvibe.network's theme-loader before
+ * One place for: the OpenVibe Frame (openvibe.network's theme-loader before
  * paint, navbar + footer after), the SEO head (title, description, canonical,
  * robots, Open Graph, Twitter card, JSON-LD) and the page palette, which
  * reads the shared theme tokens (--bg-primary, --accent, …) that
@@ -134,14 +134,15 @@ function baseCss() {
  *   history  { type, title } → recorded to the signed-in user's network history
  *   footer   { variant: 'full' | 'compact', links: [{ heading, items: [{ label, href }] }] }
  */
-function chromeScripts({ history, footer } = {}) {
-    const navOpts = { service: 'media', apiBase: NETWORK_URL, silentLogin: `${config.publicUrl}/auth/login?silent=1&next={url}`, fedcmLogin: `${config.publicUrl}/auth/fedcm`, loginUrl: `${config.publicUrl}/auth/login?next={url}`, sessionUrl: '/auth/me' };
+function frameScripts({ history, footer } = {}) {
+    const navOpts = { service: 'media', apiBase: NETWORK_URL, silentLogin: `${config.publicUrl}/auth/login?silent=1&next={url}`, fedcmLogin: `${config.publicUrl}/auth/fedcm`, loginUrl: `${config.publicUrl}/auth/login?next={url}`, logoutUrl: '/auth/logout?next={path}', sessionUrl: '/auth/me' };
     if (history) navOpts.history = history;
     const footOpts = {
         service: 'media',
         variant: (footer && footer.variant) || 'compact',
         links: (footer && footer.links) || defaultFooterLinks(),
         mount: '#ov-footer',
+        updates: '/updates',   // the footer's "shipped X ago" line and Updates link open this site's log
     };
     return `<script src="${NETWORK_URL}/shared/navbar.js" defer></script>
 <script src="${NETWORK_URL}/shared/footer.js" defer></script>
@@ -174,7 +175,7 @@ function defaultFooterLinks() {
 
 /**
  * A whole document: `seo` → headTags, `css` extra styles, `body` the <main>
- * contents, `history` / `footer` → chromeScripts.
+ * contents, `history` / `footer` → frameScripts.
  */
 function page({ seo, css = '', body, history, footer }) {
     return `<!DOCTYPE html>
@@ -184,12 +185,12 @@ ${headTags(seo)}
 <style>${baseCss()}${css}</style>
 </head>
 <body>
-<div id="navbar-mount"></div>${require('openvibe-shared/chrome-ssr').noscriptNav({ name: 'OpenVibe.Media', links: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }] })}
+<div id="navbar-mount"></div>${require('openvibe-shared/frame').noscriptNav({ name: 'OpenVibe.Media', links: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }] })}
 <main>
 ${body}
 </main>
-${require('openvibe-shared/footer').ssr({ service: 'media', variant: 'compact' })}
-${chromeScripts({ history, footer })}
+${require('openvibe-shared/frame').footer({ service: 'media', variant: 'compact', updates: '/updates' })}
+${frameScripts({ history, footer })}
 </body>
 </html>`;
 }
@@ -197,5 +198,5 @@ ${chromeScripts({ history, footer })}
 module.exports = {
     NETWORK_URL, SITE_NAME, DEFAULT_OG_IMAGE, APP_PUBLIC_URLS, appUrl,
     esc, abs, snip, isoDate, isoDuration, fmtDuration, fmtDate, jsonForScript,
-    headTags, baseCss, chromeScripts, defaultFooterLinks, page,
+    headTags, baseCss, frameScripts, defaultFooterLinks, page,
 };

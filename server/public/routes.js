@@ -329,6 +329,17 @@ router.get('/a/:id', (req, res) => {
 // Clips / Images / Text / Thumbnails / Files), each card linking back to its
 // source page in the owning app. See public/browse.js.
 router.get('/', (req, res) => require('./browse').handle(req, res));
+
+// What shipped on OpenVibe.Media: the shared update log every OpenVibe site has.
+router.get('/updates', (req, res) => {
+    const pf = require('./page-frame');
+    const frame = require('openvibe-shared/frame');
+    res.set('Cache-Control', 'public, max-age=60').type('html').send(pf.page({
+        seo: { title: 'What shipped on OpenVibe.Media', description: 'Every change deployed to OpenVibe.Media, newest first, with the Patch notes that gather them.', canonical: pf.abs('/updates') },
+        body: frame.updatesBody({ service: 'media', siteName: 'OpenVibe.Media' }) + frame.shippedScript(),
+        footer: { variant: 'full' },
+    }));
+});
 router.get('/browse', (req, res) => require('./browse').handle(req, res));
 
 // ── Dev data APIs: transcripts / AI timelines / chat insight ─

@@ -15,9 +15,9 @@
 
 const path = require('path');
 const config = require('../config');
-const chrome = require('./page-chrome');
+const pageFrame = require('./page-frame');
 
-const { esc, abs, snip, appUrl, isoDate, isoDuration, fmtDuration, fmtDate, SITE_NAME, NETWORK_URL } = chrome;
+const { esc, abs, snip, appUrl, isoDate, isoDuration, fmtDuration, fmtDate, SITE_NAME, NETWORK_URL } = pageFrame;
 
 const VIDEO_MIME = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska' };
 /** Link-preview and search crawlers: they want the page, never the bytes. */
@@ -140,7 +140,7 @@ function renderWatchPage(kind, record) {
   .player video { display: block; width: 100%; max-height: 72vh; background: #000; }
   .h2 { font-size: 1rem; margin: 1.2rem 0 .3rem; color: var(--text); }`;
 
-    return chrome.page({
+    return pageFrame.page({
         seo: {
             title: `${title} — ${SITE_NAME}`, description, canonical, robots,
             image: thumb || undefined, ogType: 'video.other',
@@ -212,7 +212,7 @@ function renderPastePage(paste) {
   .shot { margin: 0 0 1rem; }
   .shot img { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }`;
 
-    return chrome.page({
+    return pageFrame.page({
         seo: {
             title: `${title} — ${SITE_NAME}`, description,
             // Canonical on Community: search engines index the paste there, not here.

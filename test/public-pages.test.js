@@ -1,6 +1,6 @@
 'use strict';
 // The public pages: /v and /c watch pages on browser navigation (bytes otherwise),
-// the paste viewer's Community canonical, and the shared chrome + SEO on all of them.
+// the paste viewer's Community canonical, and the OpenVibe Frame + SEO on all of them.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -14,7 +14,7 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
 const db = require('../server/db/database');
 require('../server/views/service').ensureSchema();
 const pages = require('../server/public/pages');
-const chrome = require('../server/public/page-chrome');
+const pageFrame = require('../server/public/page-frame');
 
 // ── wantsHtmlPage: navigations and preview bots get the page, players get bytes ──
 const req = (headers, query = {}) => ({ method: 'GET', headers, query });
@@ -27,7 +27,7 @@ assert.strictEqual(pages.wantsHtmlPage(req({ accept: '*/*' })), false, 'curl / f
 assert.strictEqual(pages.wantsHtmlPage(req({ accept: '*/*', 'user-agent': 'Mozilla/5.0 (compatible; Discordbot/2.0)' })), true, 'preview bots get the page');
 assert.strictEqual(pages.wantsHtmlPage({ method: 'POST', headers: { accept: 'text/html' }, query: {} }), false);
 
-// ── Watch page: SEO + chrome + canonical rules ──
+// ── Watch page: SEO + Frame + canonical rules ──
 const vod = {
     id: 42, app_id: 'live', title: 'Late night <build>', description: 'We built a thing & it worked.',
     file_path: '/x/vod-42.mp4', thumbnail_url: '/t/vod-42-1.jpg', duration_seconds: 3725, view_count: 1234,
@@ -75,7 +75,7 @@ assert.strictEqual(pld.keywords, 'js, demo');
 const shot = pages.renderPastePage({ ...paste, slug: 'img-1', type: 'screenshot', screenshot_path: '/x/y.png', content: 'a caption' });
 assert.ok(shot.includes('<meta property="og:image" content="https://media.test/p/img-1/screenshot">'));
 assert.ok(shot.includes('"@type":"ImageObject"'));
-assert.ok(!/\bfree\b/i.test(html + ph + shot + chrome.baseCss()), 'no cost claims in served HTML');
+assert.ok(!/\bfree\b/i.test(html + ph + shot + pageFrame.baseCss()), 'no cost claims in served HTML');
 
 // ── End to end through the router: navigation → page, ?raw=1 → bytes path ──
 const express = require('express');

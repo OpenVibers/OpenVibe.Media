@@ -18,7 +18,8 @@ const PAGE_SIZE = 48;
 const THUMB_DIR = path.resolve(config.thumbnails.path);
 
 // Public base URL per app for "source" links — shared with the watch/paste pages.
-const { appUrl } = require('./page-chrome');
+const { appUrl } = require('./page-frame');
+const frame = require('openvibe-shared/frame');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`));
@@ -270,13 +271,14 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 ${require('openvibe-shared/app-icon').headTags({ site: 'media', iconBase: '/assets' })}
 </head><body>
-<div id="navbar-mount"></div>${require('openvibe-shared/chrome-ssr').noscriptNav({ name: 'OpenVibe.Media' })}
+<div id="navbar-mount"></div>${frame.noscriptNav({ name: 'OpenVibe.Media' })}
 <header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, images, pastes &amp; thumbnails from all OpenVibe sites</span></header>
 <nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>
-${require('openvibe-shared/footer').ssr({ service: 'media', variant: 'full' })}
-${require('./page-chrome').chromeScripts({ footer: { variant: 'full' } })}
+${tab === 'all' && page === 1 ? `<div style="max-width:1200px;margin:0 auto;padding:0 1rem">${frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' })}</div>` : ''}
+${frame.footer({ service: 'media', variant: 'full', updates: '/updates' })}
+${require('./page-frame').frameScripts({ footer: { variant: 'full' } })}
 </body></html>`;
 }
 
