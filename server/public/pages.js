@@ -51,6 +51,22 @@ function sourcePage(kind, record) {
     return `${base}/${kind === 'vod' ? 'vod' : 'clip'}/${record.id}`;
 }
 
+/** A clip the owning app's automation cut (AI moments), not a person. */
+function isAiClip(kind, record) {
+    return kind === 'clip' && !!Number(record.auto_generated || 0);
+}
+
+/**
+ * May search engines index this watch page? Only when it is public, Media is its canonical home (the
+ * owning app is not Live, which serves its own /vod and /clip pages), and a person made it: AI clips
+ * are noindex, as on Live. The sitemap lists exactly these pages (server/public/crawl.js).
+ */
+function watchIndexable(kind, record) {
+    const visibility = record.visibility || (record.is_public ? 'public' : 'private');
+    const ownedByLive = (record.app_id || 'live') === 'live';
+    return visibility === 'public' && !ownedByLive && !isAiClip(kind, record);
+}
+
 /**
  * /v/:id and /c/:id as a page. Canonical stays with the owning app when that
  * app serves the item (Live's /vod/:id and /clip/:id); anything else is
@@ -62,14 +78,16 @@ function renderWatchPage(kind, record) {
     const self = `${config.publicUrl}/${isVod ? 'v' : 'c'}/${id}`;
     const rawUrl = `${self}?raw=1`;
     const title = snip(record.title || (isVod ? `VOD #${id}` : `Clip #${id}`), 120);
-    const by = creatorLine(record);
-    const description = snip(record.description || record.ai_overview || `${isVod ? 'A recorded live stream' : 'A clip'}${by ? ` by ${by}` : ''} on the OpenVibe network.`, 200);
+    const ai = isAiClip(kind, record);
+    // An AI clip is attributed to no person: the automation cut it from someone's stream.
+    const by = ai ? null : creatorLine(record);
+    const description = snip(record.description || record.ai_overview || `${isVod ? 'A recorded live stream' : ai ? 'An AI-picked clip from a live stream' : 'A clip'}${by ? ` by ${by}` : ''} on the OpenVibe network.`, 200);
     const thumb = abs(record.thumbnail_url);
     const ownedByLive = (record.app_id || 'live') === 'live';
     const canonical = ownedByLive ? sourcePage(kind, record) : self;
-    const visibility = record.visibility || (record.is_public ? 'public' : 'private');
-    // The owning app has the canonical page; unlisted items never index.
-    const robots = ownedByLive || visibility !== 'public' ? 'noindex, follow' : 'index, follow';
+    // The owning app has the canonical page; unlisted items and AI clips never index.
+    const robots = watchIndexable(kind, record) ? 'index, follow' : 'noindex, follow';
+    const sourceVod = ai && record.vod_id ? `${config.publicUrl}/v/${record.vod_id}` : null;
     const mime = VIDEO_MIME[path.extname(record.file_path || '').toLowerCase()] || 'video/mp4';
     const uploadDate = isoDate(record.created_at);
     const duration = isoDuration(record.duration_seconds);
@@ -86,13 +104,15 @@ function renderWatchPage(kind, record) {
         ...(uploadDate ? { uploadDate } : {}),
         ...(duration ? { duration } : {}),
         ...(by ? { author: { '@type': 'Person', name: by } } : {}),
+        ...(ai ? { creator: { '@type': 'Organization', name: 'OpenVibe AI', url: NETWORK_URL } } : {}),
+        ...(sourceVod ? { isBasedOn: sourceVod } : {}),
         ...(record.view_count ? { interactionStatistic: { '@type': 'InteractionCounter', interactionType: 'https://schema.org/WatchAction', userInteractionCount: record.view_count } } : {}),
         publisher: { '@type': 'Organization', name: 'OpenVibe', url: NETWORK_URL },
         isFamilyFriendly: true,
     };
 
     const metaBits = [
-        isVod ? 'VOD' : 'Clip',
+        isVod ? 'VOD' : ai ? 'AI clip' : 'Clip',
         record.duration_seconds ? fmtDuration(record.duration_seconds) : null,
         record.view_count != null ? `${Number(record.view_count).toLocaleString('en-US')} views` : null,
         fmtDate(record.created_at) || null,
@@ -125,7 +145,8 @@ function renderWatchPage(kind, record) {
             title: `${title} — ${SITE_NAME}`, description, canonical, robots,
             image: thumb || undefined, ogType: 'video.other',
             video: { url: rawUrl, type: mime },
-            jsonLd: [videoObject],
+            // Structured data describes public items only; unlisted and private pages carry none.
+            jsonLd: (record.visibility || (record.is_public ? 'public' : 'private')) === 'public' ? [videoObject] : [],
         },
         css, body,
         history: { type: isVod ? 'vod' : 'clip', title },
@@ -206,4 +227,4 @@ function renderPastePage(paste) {
     });
 }
 
-module.exports = { wantsHtmlPage, renderWatchPage, renderPastePage, sourcePage };
+module.exports = { wantsHtmlPage, renderWatchPage, renderPastePage, sourcePage, watchIndexable, isAiClip };

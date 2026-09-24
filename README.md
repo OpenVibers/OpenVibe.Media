@@ -338,7 +338,15 @@ never the headers (`test/trust-proxy.test.js`).
 | `GET /live/:sel/transcript.json` | **transcript + AI timeline API** — full audio-transcription log and AI overview timeline. `:sel` = slot id / slot slug → slot-scoped sessions; **`@username`** → user-scoped (all their slots, works while offline). Returns `{ live, current, sessions[] (each: ai_overview, transcript, duration…), streamer (overview + stream memories), user }`. `?limit=1..50` sessions (default 10), `?app=`. Cached **30s** (that's the rate limit), CORS-open. |
 | `GET /live/:sel/chat-insight.json` | **chat insight API** — a user's chat-related AI insight/timeline (`:sel` = `@username` or numeric user id): today-vs-alltime chat overviews, condensed memory, event timeline, plus their streamer overview + stream memories when they stream. Proxied from the app's public chat-AI API over loopback; cached **30s**, CORS-open. |
 | `GET /v/:id/transcript.json` | **VOD transcript API** — transcript + AI overview for one existing VOD id (`{ vod_id, title, duration_seconds, ai_overview, transcript, ai_analyzed_at }`). Private VODs → 404. Cached 30s, CORS-open. |
+| `GET /robots.txt` | crawler policy (`openvibe-shared/seo.robotsTxt`: AI and search crawlers named, `/api/`, `/auth/`, `/internal/`, `/o/`, `/metrics`, `/live/` disallowed) and the sitemap |
+| `GET /sitemap.xml` | the media index and the watch pages Media is the canonical home of: public, ready VODs and clips of apps other than Live (Live lists its own `/vod` and `/clip` pages), never AI clips, private, unlisted, sandbox, recording or failed items; thumbnails as image entries. Every listed page renders `index, follow` |
+| `GET /llms.txt` | a map of the site for language-model crawlers |
 | `GET /live/:sel/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot, extracted from its in-progress recording. `:sel` = slot id (`1`), slot **slug** (`whip`), or **`@username`** (that streamer's top-viewed live slot; slug/username resolve via the app's `/api/streams` listing, cached 5s). Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`; internal base URLs from `APP_INTERNAL_URLS` JSON env or `LIVE_APP_INTERNAL_URL`). Cached **5s per slot** (that cache is the rate limit), CORS-open for external APIs/bots/dashboards. Not live → **404 with a styled OFFLINE card** (real JPEG bytes — dev pipelines decode the body as image/jpeg) so `<img>` embeds degrade nicely (`?format=json` for JSON errors); `503` + card when live but a frame can't be cut. |
+
+Watch pages (`/v/:id`, `/c/:id` on a browser navigation) carry a schema.org `VideoObject` when the
+item is public (none on unlisted or private pages). AI clips (`auto_generated`) are `noindex, follow`
+wherever they belong, labelled "AI clip", attributed to no person (`creator` OpenVibe AI) and
+`isBasedOn` their source VOD, as on Live.
 
 Private items (and legacy rows with no visibility and `is_public = 0`) answer
 exactly like a missing id — the same 404 and body — unless the request bears the

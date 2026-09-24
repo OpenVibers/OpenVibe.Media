@@ -13,6 +13,8 @@
  * GET /t/:id             thumbnails (id = filename)
  * GET /f/:key            files with correct Content-Type + Range
  * GET /og-image.png      the site's share card
+ * GET /robots.txt, /sitemap.xml, /llms.txt   crawler files (crawl.js): the sitemap lists only
+ *                        the watch pages Media is canonical for (public, not Live's, not AI clips)
  *
  * /v /c /t /f bytes carry X-Robots-Tag: noindex — the owning app has the
  * canonical page (the watch page says so with rel=canonical). The paste
@@ -32,6 +34,8 @@ const pages = require('./pages');
 const drill = require('../drill');
 
 const router = express.Router();
+// /robots.txt, /sitemap.xml, /llms.txt (server/public/crawl.js).
+router.use(require('./crawl'));
 
 const MIME_TYPES = {
     '.webm': 'video/webm', '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
