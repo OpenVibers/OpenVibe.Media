@@ -10,6 +10,7 @@
 'use strict';
 
 const config = require('../config');
+const ovServe = require('openvibe-shared/serve');
 
 const NETWORK_URL = (config.network && config.network.url) || 'https://openvibe.network';
 const SITE_NAME = 'OpenVibe.Media';
@@ -79,7 +80,7 @@ function headTags(seo) {
         `<meta name="description" content="${description}">`,
         // Applies the user's theme to <html> synchronously; must run before any CSS paints.
         require('openvibe-shared/app-icon').headTags({ site: 'media', iconBase: '/assets' }),
-        `<script src="${NETWORK_URL}/shared/theme-loader.js" defer></script>`,
+        `<script src="${ovServe.url('theme-loader.js')}" defer></script>`,
         seo.canonical ? `<link rel="canonical" href="${esc(seo.canonical)}">` : '',
         `<meta name="robots" content="${esc(seo.robots || 'index, follow')}">`,
         `<meta property="og:site_name" content="${SITE_NAME}">`,
@@ -144,8 +145,8 @@ function frameScripts({ history, footer } = {}) {
         mount: '#ov-footer',
         updates: '/updates',   // the footer's "shipped X ago" line and Updates link open this site's log
     };
-    return `<script src="${NETWORK_URL}/shared/navbar.js" defer></script>
-<script src="${NETWORK_URL}/shared/footer.js" defer></script>
+    return `<script src="${ovServe.url('navbar.js')}" defer></script>
+<script src="${ovServe.url('footer.js')}" defer></script>
 <script>
 (function () {
   var tries = 0;

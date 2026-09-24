@@ -23,6 +23,7 @@
 'use strict';
 
 const express = require('express');
+const ovServe = require('openvibe-shared/serve');
 const path = require('path');
 const fs = require('fs');
 const db = require('../db/database');
@@ -336,7 +337,7 @@ router.get('/updates', (req, res) => {
     const frame = require('openvibe-shared/frame');
     res.set('Cache-Control', 'public, max-age=60').type('html').send(pf.page({
         seo: { title: 'What shipped on OpenVibe.Media', description: 'Every change deployed to OpenVibe.Media, newest first, with the Patch notes that gather them.', canonical: pf.abs('/updates') },
-        body: frame.updatesBody({ service: 'media', siteName: 'OpenVibe.Media' }) + frame.shippedScript(),
+        body: frame.updatesBody({ service: 'media', siteName: 'OpenVibe.Media' }) + `<script src="${ovServe.url('shipped.js')}" defer></script>`,
         footer: { variant: 'full' },
     }));
 });
