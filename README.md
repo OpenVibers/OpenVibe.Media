@@ -152,7 +152,7 @@ MEDIA_APP_KEYS="live:key1,games:key2"
 | method | path | notes |
 |---|---|---|
 | POST | `/vods` | `{ title?, stream_id?, stream_key?, managed_stream_id?, user_id?, meta?, visibility?, clips_only? }` → `{ id }` |
-| POST | `/vods/:id/ingest/rtmp` | `{ rtmp_url }` → **202**; ffmpeg pulls the URL, lossless stream-copy → fragmented `.mp4` |
+| POST | `/vods/:id/ingest/rtmp` | `{ rtmp_url }` → **202**; ffmpeg pulls the URL, lossless stream-copy → fragmented `.mp4`. Only allow-listed RTMP servers (`MEDIA_RTMP_PULL_ALLOW`, `host:port` list, default `127.0.0.1:1935,localhost:1935,[::1]:1935`: Live's RTMP server on this host) and a plain `rtmp[s]://host[:port]/path` shape (no user info, whitespace or backslash); anything else is **400** and starts nothing |
 | POST | `/vods/:id/ingest/rtp/start` | `{ video: {payloadType, codec, clockRate, ssrc?, parameters?}, audio?: {…} }` → `{ videoPort, audioPort }` from UDP 12000-12199; point PlainRtpTransports at `127.0.0.1` (RTCP = port+1) |
 | POST | `/vods/:id/ingest/rtp/stop` | finalizes the recording |
 | POST | `/vods/:id/chunks` | multipart `chunk` (+`segmentId`), user JWT ok — browser MediaRecorder append flow |

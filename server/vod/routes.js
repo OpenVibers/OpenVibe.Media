@@ -121,7 +121,7 @@ router.post('/:id/ingest/rtmp', tenantAuth(), (req, res) => {
         const vod = _getVodScoped(req, res);
         if (!vod) return;
         const result = recorder.startRtmp(vod, req.body?.rtmp_url);
-        if (!result.ok) return res.status(409).json({ error: result.error });
+        if (!result.ok) return res.status(result.status || 409).json({ error: result.error });
         res.status(202).json({ id: vod.id, status: 'recording' });
     } catch (err) {
         console.error('[VOD] RTMP ingest error:', err.message);

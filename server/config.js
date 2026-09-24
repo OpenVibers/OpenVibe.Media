@@ -96,6 +96,13 @@ const config = {
         intervalMin: intEnv('MEDIA_OWNER_SUBJECT_INTERVAL_MIN', 10),
     },
 
+    // Where POST /vods/:id/ingest/rtmp may make ffmpeg connect (an SSRF guard): host:port entries,
+    // by default Live's RTMP server on this host. A URL without a port means 1935 (rtmp) / 443 (rtmps).
+    rtmpPull: {
+        allow: String(process.env.MEDIA_RTMP_PULL_ALLOW || '127.0.0.1:1935,localhost:1935,[::1]:1935')
+            .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+    },
+
     rtp: {
         portMin: intEnv('RTP_PORT_MIN', 12000),
         portMax: intEnv('RTP_PORT_MAX', 12199),
