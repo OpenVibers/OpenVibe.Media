@@ -144,7 +144,11 @@ async function tick() {
             kicked = false;
             queue.recoverInterrupted({ except: new Set(running.keys()) });
             const now = Date.now();
-            if (now - lastScheduleAt > 10 * 60 * 1000) { lastScheduleAt = now; scheduleInvariantScans(now); }
+            if (now - lastScheduleAt > 10 * 60 * 1000) {
+                lastScheduleAt = now;
+                scheduleInvariantScans(now);
+                try { require('./duration-reconcile').schedule(now); } catch (err) { console.warn('[Jobs] duration reconcile schedule:', err.message); }
+            }
             try { require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
             if (now - lastPruneAt > 6 * 3600 * 1000) {
                 lastPruneAt = now;

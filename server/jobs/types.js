@@ -6,6 +6,7 @@
  *   object.split           heavy   stream-copy parts of a large vod/clip as new private objects
  *   object.remux           heavy   a stream-copy remux of a vod/clip as a new private object
  *   vod.finalize           finalize  finalize a recording whose finalize failed or never ran (orphans), with backoff
+ *   vod.duration.reconcile heavy   stored VOD durations vs a measurement of the real file (local or B2/R2), one batch
  */
 'use strict';
 
@@ -16,5 +17,6 @@ queue.register('invariant.scan', require('./invariant-scan').spec);
 queue.register('object.split', require('./derive').split);
 queue.register('object.remux', require('./derive').remux);
 queue.register('vod.finalize', require('./vod-finalize').spec);
+queue.register('vod.duration.reconcile', require('./duration-reconcile').spec);
 
 module.exports = { names: () => queue.typeNames() };

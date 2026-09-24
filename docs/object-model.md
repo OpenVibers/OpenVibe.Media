@@ -458,6 +458,7 @@ requeued (or failed when out of attempts). Handlers checkpoint progress and resu
 | `invariant.scan` | light | The [size-invariant validator](#public-object-size-invariant): records violations, proposes `object.split` / `object.remux`, withdraws moot proposals. Tenant-wide (no object) |
 | `object.split` | heavy | Stream-copies a vod/clip (or a video/audio object) into parts (`params.parts` 2-1000 or `segment_seconds`), each a new **private** object with a `derived_from` relationship (`job_id`, `part`, `start_seconds`, `duration_seconds`). Cuts land on keyframes, so neighbouring parts can overlap slightly. The source is never changed. Checkpointed per part |
 | `object.remux` | heavy | Stream-copy remux of the whole source (seek index, duration, MP4 faststart) into one new private object; also the source's `remux` variant |
+| `vod.duration.reconcile` | heavy | One bounded batch of the tenant's finished VODs: stored duration vs a measurement of the real file, local or the B2/R2 copy (ffprobe over a presigned URL, ranged reads). `params { limit (1-200, 25), after_id?, apply (false), confirm_remote (false) }`; without `after_id` it walks the library from where the last run stopped. Repairs only confirmed, clearly wrong values when `apply`. Result `{ counts, range, next_after_id, report }`. See [Duration reconciliation](#duration-reconciliation) |
 | `vod.finalize` | finalize | Finalizes a recording whose finalize failed or never ran. `params { vod_id }`. Queued by the orphan sweep (a row still `is_recording = 1` that no recorder, chunk upload or finalize holds and whose file has been idle for `MEDIA_FINALIZE_ORPHAN_GRACE_S`, 180 s; at boot and every `MEDIA_FINALIZE_SWEEP_S`, 120 s) and by finalize itself when it could not settle a recording (nothing measurable, a stat failure, a throw; first run after 5 min). Still unmeasurable: retried (5 min, 15 min, 45 min, 2 h 15, 6 h; 6 attempts), then the VOD stays `needs_review`, hidden. Never stops a live recording. Result `{ outcome: ready \| needs_review \| corrupt \| deleted \| skipped, duration_seconds, duration_source }` |
 
 Split and remux refuse a source that is not ready, a tenant quota the output would exceed, and too
@@ -492,6 +493,45 @@ node scripts/media-jobs.js cancel <job id>... [--by <who>] [--reason <text>]
 It changes the database directly (the service's worker picks approved jobs up on its next poll) and,
 when the service's outbox is on, queues each change's event in the same transaction. It never runs a
 job. `media_jobs{type,status}` on `/metrics` counts jobs.
+
+## Duration reconciliation
+
+Code: `server/vod/duration-reconcile.js`, the job `vod.duration.reconcile`, `scripts/vod-duration-reconcile.js`.
+Test: `test/duration-reconcile.test.js` (a fake S3 through the real SDK, real ffmpeg files).
+
+Stored VOD durations are compared with a measurement of the real file, in bounded batches walked by
+id. A local file is probed where it is; an offloaded one is probed in B2/R2 through a presigned GET
+URL (ffprobe reads the index with ranged requests; nothing is downloaded). Verdicts: `ok` (within
+2 s), `mismatch` (reported only), `wrong` (more than 60 s **and** 2% off), `missing` (nothing
+stored, the file measures), `unmeasurable`, `skipped` (`zero_byte`/`missing_file`). A `wrong` or
+`missing` value is repaired only when a second measurement confirms it: for a local file a
+stream-copy pass over its packets (when the container disagrees with the packets, the packets are
+used, `duration_source = remux`); for a remote copy the container must agree with its own streams'
+durations (`--confirm-remote` / `confirm_remote` reads the whole copy instead, which is egress). A
+repair writes `duration_seconds`, `probe_duration_seconds` and `duration_source` only while the row
+still holds the value that was read, and re-projects the object. Every run writes a JSON report
+(`<data>/reports/duration-reconcile-*.json`) listing each VOD with stored and measured values.
+
+```
+node scripts/vod-duration-reconcile.js [--app live] [--batch 50] [--after <id>] [--all] [--ids 1,2] [--confirm-remote]   # dry run
+node scripts/vod-duration-reconcile.js --apply --backup <file.json> [same selection]   # checked DB backup first; file = rollback
+node scripts/vod-duration-reconcile.js --rollback <file.json> [--apply]
+```
+
+The job is not scheduled unless `MEDIA_DURATION_RECONCILE_HOURS` > 0, and scheduled runs repair only
+with `MEDIA_DURATION_RECONCILE_APPLY=1` (batch `MEDIA_DURATION_RECONCILE_BATCH`, 25).
+
+### `vods-orphans/` report
+
+`scripts/vods-orphans-report.js [--prefix vods-orphans/] [--provider b2] [--out file] [--json]`
+(`server/vod/orphans-report.js`) lists the B2 prefix where orphaned recordings were parked (hazard
+H3), matches each object to a VOD or clip (file name, storage key, or the recorder's
+`vod-<app>-<id>-<ms>` name), HEADs that row's canonical copy and checks its local file, and
+recommends: `keep_only_copy` (the row exists and this is its only copy: restore it, never delete),
+`keep_until_offloaded`, `delete_duplicate` (the canonical copy has the same size),
+`review_size_differs`, `delete_row_gone` (the row was deleted; its object says when),
+`review_row_mismatch`, `review_unknown`. Totals per recommendation in objects and bytes. It only
+lists and HEADs: nothing is deleted, moved or written. `delete_*` rows are for the owner to approve.
 
 ## R2 eviction drill
 
@@ -542,6 +582,8 @@ Not run against production yet: it needs the owner's go-ahead.
 | `MEDIA_JOBS_POLL_MS` | 5000 | worker poll interval |
 | `MEDIA_JOBS_LIGHT_CONCURRENCY` / `_HEAVY_CONCURRENCY` / `_FINALIZE_CONCURRENCY` | 2 / 1 / 1 | jobs per lane |
 | `MEDIA_FINALIZE_ORPHAN_GRACE_S` / `MEDIA_FINALIZE_SWEEP_S` | 180 / 120 | an orphaned recording's file must be idle this long; the orphan sweep runs this often |
+| `MEDIA_DURATION_RECONCILE_HOURS` | 0 | schedule `vod.duration.reconcile` per tenant this often (`0` = only on demand) |
+| `MEDIA_DURATION_RECONCILE_APPLY` / `_BATCH` | off / 25 | scheduled runs repair (`1`) or only report; VODs per scheduled run |
 | `MEDIA_JOBS_HEAVY_WHILE_RECORDING` | off | `1` lets split/remux run while a recording is being written |
 | `MEDIA_JOBS_LEASE_S` | 120 | running-job lease (renewed by the heartbeat) |
 | `MEDIA_INVARIANT_SCAN_HOURS` | 24 | the size-invariant validator's schedule per tenant (`0` = on demand only) |

@@ -316,6 +316,21 @@ async function deleteLegacyPasteScreenshot(pasteId) {
     }
 }
 
+/** Every object under `prefix` in one provider's bucket: [{ key, size, last_modified }] (read-only). */
+async function listObjects(provider, prefix) {
+    const client = clientFor(provider);
+    if (!client) throw new Error(`${provider} is not configured`);
+    loadSdk();
+    const out = [];
+    let token;
+    do {
+        const r = await client.send(new S3.ListObjectsV2Command({ Bucket: PROVIDER_ENV[provider].bucket, Prefix: prefix, ContinuationToken: token, MaxKeys: 1000 }));
+        for (const o of (r.Contents || [])) out.push({ key: o.Key, size: Number(o.Size || 0), last_modified: o.LastModified ? new Date(o.LastModified).toISOString() : null });
+        token = r.IsTruncated ? r.NextContinuationToken : null;
+    } while (token);
+    return out;
+}
+
 async function presignGet(provider, key, expiresInSeconds = 900) {
     const client = clientFor(provider);
     if (!client) return null;
@@ -1271,6 +1286,7 @@ module.exports = {
     bucketFor,
     endpointFor,
     headObject,
+    listObjects,
     keyForVod,
     localPathForVod,
     resolvePlayback,
