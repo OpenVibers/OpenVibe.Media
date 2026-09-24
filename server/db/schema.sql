@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS vods (
     file_size INTEGER DEFAULT 0,
     duration_seconds INTEGER DEFAULT 0,
     probe_duration_seconds REAL DEFAULT 0,
+    duration_source TEXT,                 -- probe | remux | unknown: where duration_seconds came from (NULL: before it was recorded)
     probe_format_json TEXT DEFAULT '',
     health_status TEXT DEFAULT 'unknown',
     health_score INTEGER DEFAULT 0,

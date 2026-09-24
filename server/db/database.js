@@ -59,7 +59,7 @@ function normalizeThumbnailUrls() {
 // (CREATE TABLE IF NOT EXISTS won't add columns to an existing table).
 function migrateColumns() {
     const wanted = {
-        vods: [['managed_stream_id', 'INTEGER'], ['object_id', 'TEXT']],
+        vods: [['managed_stream_id', 'INTEGER'], ['object_id', 'TEXT'], ['duration_source', 'TEXT']],
         clips: [['channel_user_id', 'INTEGER'], ['cut_error', 'TEXT'], ['cut_attempts', 'INTEGER DEFAULT 0'], ['cut_next_at', 'DATETIME'], ['object_id', 'TEXT']],
         files: [['object_id', 'TEXT']],
         pastes: [['object_id', 'TEXT']],
@@ -451,10 +451,11 @@ function updateVodHealth(vodId, { status, score, issues = [], probeDuration, pro
     return r;
 }
 
-function repairVodDuration(vodId, duration, fileSize) {
+/** A measured duration (source probe | remux) replaces the stored one. */
+function repairVodDuration(vodId, duration, fileSize, source = 'probe') {
     return run(
-        `UPDATE vods SET duration_seconds = ?, file_size = ?, probe_duration_seconds = ?, last_health_scan_at = datetime('now') WHERE id = ?`,
-        [duration, fileSize, duration, vodId]
+        `UPDATE vods SET duration_seconds = ?, file_size = ?, probe_duration_seconds = ?, duration_source = ?, last_health_scan_at = datetime('now') WHERE id = ?`,
+        [duration, fileSize, duration, source, vodId]
     );
 }
 

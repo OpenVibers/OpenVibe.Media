@@ -161,6 +161,17 @@ MEDIA_APP_KEYS="live:key1,games:key2"
 `status`: `pending → recording → ready | failed` (derived; failures come from
 health quarantine: corrupt / zero-byte / missing file).
 
+**Durations are measured, never estimated.** Finalize stores what the file says and
+records where it came from in `duration_source`: `probe` (ffprobe's container
+duration), `remux` (the last packet time of a stream-copy pass, used when the header
+has none or is far longer than the packets) or `unknown` (nothing measurable: the
+duration is stored as **0**, `health_status` is `needs_review` with `probe_failed` or
+`inflated_duration`, and the VOD is hidden until a later finalize measures it). The
+wall clock only bounds a recording the recorder saw start (a value longer than 1.5x
+its run + 30 s is refused); an orphan finalized after a restart has no bound and is
+never measured as now - created_at. While recording, `duration` is the live elapsed
+time; finalize replaces it.
+
 **Recording formats** (inherited codec-passthrough behavior — VODs are *not*
 always `.webm`): RTMP and RTP-H.264 record by lossless stream copy into a
 fragmented **`.mp4`** (audio → AAC on the RTP path); RTP-VP8/VP9 copies into

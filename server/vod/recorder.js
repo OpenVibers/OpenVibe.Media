@@ -261,7 +261,8 @@ class StreamRecorder {
             require('./finalize').finalizeVod(vodId, { startTimeMs: rec?.startTime }).catch(() => {
                 // Never bare-mark a failed recording as ready — that published
                 // 0:00 ghosts. Quarantine it out of listings instead.
-                db.run(`UPDATE vods SET is_recording = 0, health_status = 'needs_review',
+                // The live duration updates were wall-clock estimates: none of it is kept.
+                db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
                         health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
                     [JSON.stringify(['finalize_failed']), vodId]);
             });

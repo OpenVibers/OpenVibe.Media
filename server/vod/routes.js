@@ -327,7 +327,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
             const duration = await tools.probeVodDuration(vod.file_path);
             if (duration > 0) {
                 const fileSize = tools.getFileSizeSafe(vod.file_path);
-                db.run('UPDATE vods SET duration_seconds = ?, file_size = ? WHERE id = ?', [duration, fileSize, vod.id]);
+                db.run("UPDATE vods SET duration_seconds = ?, file_size = ?, duration_source = 'probe' WHERE id = ?", [duration, fileSize, vod.id]);
                 vod.duration_seconds = duration;
                 vod.file_size = fileSize;
             }

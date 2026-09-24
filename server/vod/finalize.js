@@ -50,6 +50,8 @@ function vodPublic(vod) {
         status: db.vodStatus(vod),
         duration: vod.duration_seconds || 0,
         duration_seconds: vod.duration_seconds || 0,
+        // Where the duration came from: probe (ffprobe), remux (packet timeline) or unknown (stored 0).
+        duration_source: vod.duration_source || null,
         file_size: vod.file_size || 0,
         // Basename only (server paths stay private) — the inherited SPA derives
         // its /file/<name> playback URL from this.
@@ -150,11 +152,27 @@ async function finalizeVod(vodId, opts = {}) {
     }
 }
 
+// Health issues finalize itself records when it cannot settle a recording. A later successful
+// finalize (the vod.finalize retry job) lifts the quarantine they caused.
+const FINALIZE_ISSUES = ['probe_failed', 'inflated_duration', 'stat_failed', 'finalize_failed'];
+
+function _issuesOf(vod) {
+    try { const v = JSON.parse(vod.health_issues_json || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+
+/** Quarantined by finalize (not by the health job or an operator): a good finalize lifts it. */
+function _finalizeQuarantined(vod) {
+    return !!vod.quarantined_at && _issuesOf(vod).some(i => FINALIZE_ISSUES.includes(i));
+}
+
 async function _doFinalize(vodId, opts) {
     const vod = db.getVodById(vodId);
     if (!vod) return null;
     const filePath = vod.file_path;
-    const startTime = opts.startTimeMs || new Date(String(vod.created_at).replace(' ', 'T') + 'Z').getTime();
+    // The recorder's own start time bounds the duration (a container claiming more than the
+    // recorder ran is corrupt). An orphan has none: created_at is when the row was made, and
+    // now - created_at says nothing about the footage, so it is never used.
+    const wallClockSeconds = opts.startTimeMs ? Math.max(0, Math.round((Date.now() - opts.startTimeMs) / 1000)) : null;
 
     // Ephemeral clips-only recording: it existed only to serve live clips. Never
     // published — delete the file (+ any offloaded object) and its row.
@@ -177,17 +195,17 @@ async function _doFinalize(vodId, opts) {
         return null;
     }
 
+    const issues = [];
     // Merge any pending browser-chunk segments before remuxing.
     if (opts.segmentPath && opts.segmentPath !== filePath) {
-        await tools.concatWebmFiles(filePath, opts.segmentPath);
+        if (!(await tools.concatWebmFiles(filePath, opts.segmentPath))) issues.push('merge_failed');
     }
-    await tools.mergePendingSegments(filePath);
+    if (await tools.mergePendingSegments(filePath)) { if (!issues.includes('merge_failed')) issues.push('merge_failed'); }
 
     // A recording that never received media (e.g. an RTP ingest that was
     // started and stopped without packets) leaves a zero-byte file. There is
     // nothing to review, so treat it like a missing file: report the failure and
-    // delete the row and file — the wall-clock fallback below must never mark it
-    // ready, and a 0:00 ghost must never reach listings.
+    // delete the row and file — a 0:00 ghost must never reach listings.
     if (tools.getFileSizeSafe(filePath) === 0) {
         console.warn(`[VOD] vod ${vodId}: zero-byte recording — deleting empty recording`);
         try { fs.unlinkSync(filePath); } catch { /* */ }
@@ -198,32 +216,26 @@ async function _doFinalize(vodId, opts) {
         return null;
     }
 
-    // Remux for proper seeking support (fast copy-mode, no re-encode)
-    await tools.remuxForSeeking(filePath);
+    // Remux for proper seeking support (fast copy-mode, no re-encode). Its last packet time is a
+    // measurement of the file (source 'remux'); a failed remux measures nothing.
+    const remux = await tools.remuxForSeekingDetailed(filePath);
+    if (!remux.ok && remux.error !== 'unsupported container') issues.push('remux_failed');
 
     // Clean up the live seekable copy (no longer needed after final remux)
     tools.cleanupSeekableFile(filePath);
 
-    // Probe actual duration with ffprobe
-    const wallClockSeconds = Math.max(0, Math.round((Date.now() - startTime) / 1000));
-    let durationSeconds = wallClockSeconds;
-    let probeFormatJson = JSON.stringify({});
-    try {
-        const probeInfo = await tools.probeVodInfo(filePath);
-        if (probeInfo.duration > 0) {
-            // Guard against a corrupt/inflated container duration: real footage can
-            // never be meaningfully longer than the wall-clock recording time.
-            if (wallClockSeconds > 0 && probeInfo.duration > wallClockSeconds * 1.5 + 30) {
-                console.warn(`[VOD] vod ${vodId}: probed duration ${probeInfo.duration}s >> wall-clock ${wallClockSeconds}s — using wall-clock (inflated/corrupt container)`);
-                durationSeconds = wallClockSeconds;
-            } else {
-                durationSeconds = probeInfo.duration;
-            }
-        }
-        probeFormatJson = JSON.stringify(probeInfo.format || {});
-    } catch (probeErr) {
-        console.warn(`[VOD] ffprobe failed for vod ${vodId}:`, probeErr.message);
-    }
+    // The duration is what the file says: ffprobe's, else the packets' (a stream-copy pass when the
+    // remux gave none), never the wall clock. Nothing measurable: 0 and needs_review.
+    const measure = async (p, remuxS) => {
+        const probe = await tools.probeDuration(p);
+        let packets = remuxS || 0;
+        if (!packets && !(probe.seconds > 0)) packets = (await tools.streamCopyDuration(p)).seconds;
+        return { probe, choice: tools.chooseDuration({ probeS: probe.seconds, remuxS: packets, wallS: wallClockSeconds }) };
+    };
+    let { probe, choice } = await measure(filePath, remux.ok ? remux.seconds : 0);
+    let durationSeconds = choice.seconds;
+    let probeFormatJson = JSON.stringify(probe.format || {});
+    if (!probe.ok) console.warn(`[VOD] ffprobe failed for vod ${vodId}: ${probe.error}`);
 
     // ── Recover from the lossless master if the served webm came out truncated ──
     // Only WebM recordings have a separate lossless master; an RTMP/H.264 MP4 is
@@ -233,16 +245,19 @@ async function _doFinalize(vodId, opts) {
         : null;
     let masterDur = 0;
     if (masterPath && fs.existsSync(masterPath)) {
-        try { const mi = await tools.probeVodInfo(masterPath); masterDur = mi.duration || 0; } catch { /* */ }
+        try { const mi = await tools.probeDuration(masterPath); masterDur = mi.seconds || 0; } catch { /* */ }
         if (masterDur > 0 && masterDur > durationSeconds + 15 && masterDur > durationSeconds * 1.15) {
             console.warn(`[VOD] vod ${vodId}: webm ${durationSeconds}s is short vs master ${masterDur}s — rebuilding webm from master`);
             const ok = await rebuildWebmFromMaster(masterPath, filePath);
             if (ok) {
-                try { await tools.remuxForSeeking(filePath); tools.cleanupSeekableFile(filePath); } catch { /* */ }
-                try {
-                    const mi2 = await tools.probeVodInfo(filePath);
-                    if (mi2.duration > durationSeconds) { durationSeconds = mi2.duration; probeFormatJson = JSON.stringify(mi2.format || {}); }
-                } catch { /* */ }
+                let again = { ok: false, seconds: 0 };
+                try { again = await tools.remuxForSeekingDetailed(filePath); tools.cleanupSeekableFile(filePath); } catch { /* */ }
+                const rebuilt = await measure(filePath, again.ok ? again.seconds : 0);
+                if (rebuilt.choice.seconds > durationSeconds) {
+                    ({ probe, choice } = rebuilt);
+                    durationSeconds = choice.seconds;
+                    probeFormatJson = JSON.stringify(probe.format || {});
+                }
                 console.log(`[VOD] vod ${vodId}: recovered from master → ${durationSeconds}s`);
             } else {
                 console.warn(`[VOD] vod ${vodId}: master recovery failed — keeping master for manual recovery`);
@@ -250,10 +265,24 @@ async function _doFinalize(vodId, opts) {
         }
     }
 
+    for (const i of choice.issues) if (!issues.includes(i)) issues.push(i);
+    const durationSource = choice.source;
+    const stored = Math.round(durationSeconds);
+    const measured = durationSeconds > 0 ? durationSeconds : 0;
+
     if (opts.ffmpegCorrupted) {
         console.warn(`[VOD] Finalized VOD ${vodId} marked corrupt by FFmpeg diagnostics; quarantining without deletion`);
-        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
-            ['corrupt', JSON.stringify(['ffmpeg-corruption-detected']), durationSeconds > 0 ? durationSeconds : 0, probeFormatJson, vodId]));
+        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+            [stored, durationSource, 'corrupt', JSON.stringify(['ffmpeg-corruption-detected', ...issues]), measured, probeFormatJson, vodId]));
+        return db.getVodById(vodId);
+    }
+
+    // Nothing measurable (ffprobe and the packet pass both failed, or every value is impossible):
+    // the stored duration is 0 and the recording waits for review, hidden. Never the wall clock.
+    if (durationSource === 'unknown') {
+        console.warn(`[VOD] vod ${vodId}: no measurable duration (${issues.join(', ')}) — stored 0, needs_review`);
+        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review', health_issues_json = ?, probe_duration_seconds = 0, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+            [JSON.stringify(issues), probeFormatJson, vodId]));
         return db.getVodById(vodId);
     }
 
@@ -261,8 +290,8 @@ async function _doFinalize(vodId, opts) {
     const MIN_VOD_SECONDS = parseInt(process.env.MIN_VOD_SECONDS || '2', 10);
     if (durationSeconds < MIN_VOD_SECONDS) {
         console.log(`[VOD] Quarantining short vod ${vodId}: duration ${durationSeconds}s`);
-        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
-            ['needs_review', JSON.stringify(['short_duration']), durationSeconds > 0 ? durationSeconds : 0, probeFormatJson, vodId]));
+        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+            [stored, durationSource, 'needs_review', JSON.stringify(['short_duration', ...issues]), measured, probeFormatJson, vodId]));
         return db.getVodById(vodId);
     }
 
@@ -270,8 +299,11 @@ async function _doFinalize(vodId, opts) {
     try {
         stat = fs.statSync(filePath);
     } catch (err) {
+        // The file vanished between the probe and here. Record it (no wall-clock duration left
+        // behind by the live updates) and leave it for review.
         console.error(`[VOD] Failed to stat finalized VOD ${vodId}:`, err.message);
-        db.run('UPDATE vods SET is_recording = 0 WHERE id = ?', [vodId]);
+        db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
+                health_issues_json = ?, last_health_scan_at = datetime('now') WHERE id = ?`, [JSON.stringify(['stat_failed', ...issues]), vodId]);
         return null;
     }
     // The lossless .master.mkv archive is only a fallback. Delete it ONLY once
@@ -304,15 +336,19 @@ async function _doFinalize(vodId, opts) {
         console.warn(`[VOD] Thumbnail generation failed for vod ${vodId}:`, err.message);
     }
 
+    // A quarantine an earlier finalize attempt left (nothing measurable then) is lifted: the
+    // recording is back to the visibility its owner chose.
+    const lift = _finalizeQuarantined(db.getVodById(vodId) || vod);
+
     // The ready transition and the vod.ready event commit together (then the webhook goes out).
     // A failed commit throws, as the plain UPDATE did before.
     announce(vod.app_id, 'vod.ready', {
-        change: () => db.run('UPDATE vods SET is_recording = 0, duration_seconds = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ? WHERE id = ?',
-            [durationSeconds, stat.size, durationSeconds, probeFormatJson, 'ok', vodId]),
+        change: () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
+            [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId]),
         payload: () => vodPublic(db.getVodById(vodId)),
     });
-    console.log(`[VOD] Finalized: vod ${vodId}, ${durationSeconds}s, ${(stat.size / 1024 / 1024).toFixed(1)}MB`);
+    console.log(`[VOD] Finalized: vod ${vodId}, ${stored}s (${durationSource}), ${(stat.size / 1024 / 1024).toFixed(1)}MB`);
     return db.getVodById(vodId);
 }
 
-module.exports = { finalizeVod, isFinalizing, vodPublic, rebuildWebmFromMaster, _absUrl };
+module.exports = { finalizeVod, isFinalizing, vodPublic, rebuildWebmFromMaster, _absUrl, FINALIZE_ISSUES };
