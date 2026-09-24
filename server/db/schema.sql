@@ -360,6 +360,29 @@ CREATE TABLE IF NOT EXISTS media_invariant_violations (
     resolved_at DATETIME
 );
 
+-- R2 tier decisions (server/vod/vod-storage.js recordTierDecision): one row for every promotion to and
+-- demotion from the R2 popularity cache, whoever asked (the sweep, an admin move, the eviction drill),
+-- with the inputs it saw, the policy thresholds in force and the reason. Read by the staff policy
+-- endpoint (GET /api/v1/:app/admin/storage/tiers/policy and /tiers/decisions).
+CREATE TABLE IF NOT EXISTS media_tier_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    vod_id INTEGER NOT NULL,
+    app_id TEXT,
+    object_id TEXT,
+    action TEXT NOT NULL CHECK(action IN ('promote', 'demote')),
+    from_provider TEXT,
+    to_provider TEXT,
+    outcome TEXT NOT NULL CHECK(outcome IN ('done', 'already', 'refused', 'failed')),
+    trigger TEXT NOT NULL,                -- sweep | admin | drill | clip | manual
+    reason TEXT NOT NULL,
+    inputs TEXT NOT NULL DEFAULT '{}',    -- JSON: view_count, last_accessed_at, storage_provider, is_recording, held, file_size, created_at
+    thresholds TEXT NOT NULL DEFAULT '{}',-- JSON: the R2 policy in force, each value with its source (default | setting)
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_media_tier_decisions_vod ON media_tier_decisions(vod_id, id);
+CREATE INDEX IF NOT EXISTS idx_media_tier_decisions_app ON media_tier_decisions(app_id, id);
+
 -- Object changes waiting to become events (server/events.js recordObjectChanges): media_objects
 -- triggers (database.js ensureObjectTriggers) write one row per visibility change and per deletion,
 -- in the transaction that makes the change, whatever path made it; the rows become

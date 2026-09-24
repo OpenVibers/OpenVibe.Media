@@ -16,6 +16,11 @@
  * POST   /tiers/move       { vod_id, target: local|hot|b2|cold|r2 }
  * POST   /tiers/bulk-move  { ids: [...], target } (max 50)
  * GET    /buckets          sanitized B2/R2 bucket config + live reachability probe
+ * GET    /tiers/policy     read-only R2 popularity policy: each threshold with its source (default |
+ *                           setting), the promote/demote rules, providers, and this app's recent
+ *                           decisions (media_tier_decisions) with 24-hour counts
+ * GET    /tiers/decisions  this app's R2 promote/demote decisions, newest first
+ *                           (?vod_id&action=promote|demote&outcome&limit≤200&before_id)
  */
 'use strict';
 
@@ -328,6 +333,67 @@ router.put('/tiers/settings', (req, res) => {
     }
 });
 
+// ── R2 policy and decision log (read-only) ──────────────────
+function _decisionPublic(r) {
+    const parse = (v) => { try { return JSON.parse(v || '{}'); } catch { return {}; } };
+    return {
+        id: r.id, decided_at: r.decided_at, vod_id: r.vod_id, object_id: r.object_id || null, action: r.action,
+        from_provider: r.from_provider, to_provider: r.to_provider, outcome: r.outcome, trigger: r.trigger, reason: r.reason,
+        inputs: parse(r.inputs), thresholds: parse(r.thresholds), error: r.error || null,
+    };
+}
+
+router.get('/tiers/policy', (req, res) => {
+    try {
+        const status = vodStorage.getStatus();
+        const counts = { promote: { done: 0, already: 0, refused: 0, failed: 0 }, demote: { done: 0, already: 0, refused: 0, failed: 0 } };
+        for (const r of db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_tier_decisions
+                                WHERE app_id = ? AND decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') GROUP BY action, outcome`, [req.appId])) {
+            if (counts[r.action]) counts[r.action][r.outcome] = r.n;
+        }
+        res.json({
+            r2: {
+                ...vodStorage.r2Policy(status.settings),
+                enabled: !!status.settings.r2Enabled,
+                provider: status.providers.r2,
+                canonical: status.providers.b2,
+            },
+            decisions: {
+                last_24h: counts,
+                recent: db.all('SELECT * FROM media_tier_decisions WHERE app_id = ? ORDER BY id DESC LIMIT 20', [req.appId]).map(_decisionPublic),
+            },
+            note: 'Read-only. Thresholds change through PUT /tiers/settings (media_settings storage_tier.*); decisions are this app\'s only.',
+        });
+    } catch (err) {
+        console.error('[Admin] Tier policy error:', err.message);
+        res.status(500).json({ error: 'Failed to read the tier policy' });
+    }
+});
+
+router.get('/tiers/decisions', (req, res) => {
+    try {
+        const q = req.query;
+        const conds = ['app_id = ?'], params = [req.appId];
+        if (q.vod_id != null) { conds.push('vod_id = ?'); params.push(parseInt(q.vod_id, 10) || 0); }
+        if (q.action) {
+            if (!['promote', 'demote'].includes(String(q.action))) return res.status(400).json({ error: 'action must be promote or demote' });
+            conds.push('action = ?'); params.push(String(q.action));
+        }
+        if (q.outcome) {
+            if (!['done', 'already', 'refused', 'failed'].includes(String(q.outcome))) return res.status(400).json({ error: 'outcome must be done, already, refused or failed' });
+            conds.push('outcome = ?'); params.push(String(q.outcome));
+        }
+        if (q.before_id != null) { conds.push('id < ?'); params.push(parseInt(q.before_id, 10) || 0); }
+        const limit = Math.min(Math.max(parseInt(q.limit, 10) || 50, 1), 200);
+        const rows = db.all(`SELECT * FROM media_tier_decisions WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, limit + 1]);
+        const page = rows.slice(0, limit);
+        res.json({ decisions: page.map(_decisionPublic), next_before_id: rows.length > limit ? page[page.length - 1].id : null, limit });
+    } catch (err) {
+        console.error('[Admin] Tier decisions error:', err.message);
+        res.status(500).json({ error: 'Failed to list tier decisions' });
+    }
+});
+
 // ── POST /tiers/sweep — trigger a sweep now ──────────────────
 router.post('/tiers/sweep', async (req, res) => {
     try {
@@ -341,18 +407,19 @@ router.post('/tiers/sweep', async (req, res) => {
 });
 
 // target → mover (predecessor's hot/cold vocabulary kept as aliases)
+// ctx { trigger, reason } goes into the R2 decision log (media_tier_decisions) for moves into or out of R2.
 const MOVERS = {
-    local: (id) => vodStorage.moveToHot(id),
-    hot: (id) => vodStorage.moveToHot(id),
+    local: (id, ctx) => vodStorage.moveToHot(id, ctx),
+    hot: (id, ctx) => vodStorage.moveToHot(id, ctx),
     b2: (id) => vodStorage.moveToCold(id),
     cold: (id) => vodStorage.moveToCold(id),
-    r2: (id) => vodStorage.promoteToR2(id),
+    r2: (id, ctx) => vodStorage.promoteToR2(id, ctx),
 };
 
 async function _moveScoped(appId, rawId, target) {
     const id = parseInt(rawId, 10);
     if (!Number.isFinite(id) || !db.getVodById(id, appId)) return { ok: false, error: 'VOD not found' };
-    return MOVERS[target](id);
+    return MOVERS[target](id, { trigger: 'admin', reason: `admin move to ${target} (app ${appId})` });
 }
 
 // ── POST /tiers/move — move one VOD between tiers ────────────

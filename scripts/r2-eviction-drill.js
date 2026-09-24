@@ -171,7 +171,7 @@ async function runDrill(opts, deps) {
     const before = await served();
     if (!step('before: served from R2', before.provider === 'r2' && before.first_mib_sha256 === expectSha, before)) return fail('playback is not coming from R2 before the eviction');
     // 2. evict
-    const ev = await storage.demoteFromR2(vod.id);
+    const ev = await storage.demoteFromR2(vod.id, { trigger: 'drill', reason: 'R2 eviction drill: evict the R2 copy' });
     const rowAfterEvict = db.get('SELECT storage_provider FROM vods WHERE id = ?', [vod.id]);
     const r2Gone = await storage.headObject('r2', art.key);
     art.locations.after_evict = locations();
@@ -185,7 +185,7 @@ async function runDrill(opts, deps) {
         return fail('after the eviction the VOD is not served from B2');
     }
     // 4. re-warm
-    const pr = await storage.promoteToR2(vod.id);
+    const pr = await storage.promoteToR2(vod.id, { trigger: 'drill', reason: 'R2 eviction drill: re-warm R2 from B2' });
     const r2Back = await storage.headObject('r2', art.key);
     const rowAfterWarm = db.get('SELECT storage_provider FROM vods WHERE id = ?', [vod.id]);
     if (!step('re-warm: R2 copy restored from B2', !!(pr && pr.ok) && !!r2Back && r2Back.size === b2.size && rowAfterWarm.storage_provider === 'r2', { result: pr, r2_head: r2Back, storage_provider: rowAfterWarm.storage_provider })) {

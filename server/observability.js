@@ -57,6 +57,11 @@ function storageDirs(config) {
 function domainMetrics(registry, { db, recorder, events }) {
     registry.gauge({ name: 'media_recordings_in_progress', help: 'Recordings ffmpeg is writing right now', collect: () => recorder.activeCount() });
     registry.gauge({
+        name: 'media_tier_decisions_24h', help: 'R2 promotions and demotions decided in the last 24 hours, by action and outcome (media_tier_decisions)', labelNames: ['action', 'outcome'],
+        collect: () => db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_tier_decisions WHERE decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
+                               GROUP BY action, outcome`).map((r) => ({ labels: { action: r.action, outcome: r.outcome }, value: r.n })),
+    });
+    registry.gauge({
         name: 'media_object_locations', help: 'Stored copies of media objects by provider and verification state', labelNames: ['provider', 'state'],
         collect: () => db.all('SELECT provider, state, COUNT(*) AS n FROM media_locations GROUP BY provider, state').map((r) => ({ labels: { provider: r.provider, state: r.state }, value: r.n })),
     });

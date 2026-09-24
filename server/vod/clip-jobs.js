@@ -62,7 +62,7 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
         const need = (Number(vod.file_size) || 0) * HOT_FETCH_FREE_MULTIPLE;
         if (need && freeBytes() > need) {
             console.log(`[Clips] clip ${clipId}: pulling vod ${vod.id} (${(vod.file_size / 1048576).toFixed(0)} MB) back to local disk for a reliable cut`);
-            const r = await vodStorage.moveToHot(vod.id).catch(e => ({ ok: false, error: e.message }));
+            const r = await vodStorage.moveToHot(vod.id, { trigger: 'clip', reason: `fetched to local disk to cut clip ${clipId}` }).catch(e => ({ ok: false, error: e.message }));
             if (r && r.ok) source = await vodStorage.resolveMediaSource(db.get('SELECT * FROM vods WHERE id = ?', [vod.id]));
             else console.warn(`[Clips] clip ${clipId}: hot fetch failed: ${r && r.error}`);
         } else {

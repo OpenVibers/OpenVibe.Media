@@ -138,6 +138,68 @@ function setSetting(key, value) {
     else db.run('INSERT INTO media_settings (key, value) VALUES (?, ?)', [dbKey, JSON.stringify(value)]);
 }
 
+/** Is this storage_tier.* setting overridden in media_settings? ('setting') or the built-in default ('default'). */
+function settingSource(key) {
+    try { return db.get('SELECT 1 AS x FROM media_settings WHERE key = ?', [`storage_tier.${key}`]) ? 'setting' : 'default'; } catch { return 'default'; }
+}
+
+// r2Enabled, r2MinViews, r2RecentAccessDays, r2MaxIdleDays, r2MaxPerSweep
+const R2_THRESHOLDS = Object.keys(DEFAULTS).filter(k => /^r2[A-Z]/.test(k));
+const R2_DEMOTE_PER_SWEEP = 10;
+
+/**
+ * The R2 popularity policy in force (read-only; PUT /admin/storage/tiers/settings changes it):
+ * each threshold as { value, default, source }, plus the rules the sweep applies.
+ */
+function r2Policy(settings = getSettings()) {
+    const t = {};
+    for (const k of R2_THRESHOLDS) t[k] = { value: settings[k], default: DEFAULTS[k], source: settingSource(k) };
+    return {
+        thresholds: t,
+        promote: `a local or B2 VOD that is not recording, with view_count >= r2MinViews (${settings.r2MinViews}) and last accessed within r2RecentAccessDays (${settings.r2RecentAccessDays} days); at most r2MaxPerSweep (${settings.r2MaxPerSweep}) per sweep`,
+        demote: `an R2 VOD not accessed for r2MaxIdleDays (${settings.r2MaxIdleDays} days), or never; at most ${R2_DEMOTE_PER_SWEEP} per sweep; the B2 canonical copy is checked (or copied back) first, and a held VOD is never moved`,
+        demote_per_sweep: R2_DEMOTE_PER_SWEEP,
+    };
+}
+
+function _thresholdSnapshot(settings = getSettings()) {
+    const out = {};
+    for (const k of R2_THRESHOLDS) out[k] = { value: settings[k], source: settingSource(k) };
+    return out;
+}
+
+function _tierInputs(vod) {
+    if (!vod) return {};
+    return {
+        view_count: Number(vod.view_count) || 0, last_accessed_at: vod.last_accessed_at || null, storage_provider: providerOf(vod),
+        is_recording: !!vod.is_recording, held: _held(vod), file_size: Number(vod.file_size) || 0, created_at: vod.created_at || null,
+    };
+}
+
+function _outcomeOf(result, action, from) {
+    if (!result) return 'failed';
+    // Promoting a VOD R2 already serves (the copy is re-checked) changes nothing: 'already'.
+    if (result.ok) return result.already || (action === 'promote' && from === 'r2') ? 'already' : 'done';
+    if (result.held || /recording|not configured|not available|not found|No source/i.test(String(result.error || ''))) return 'refused';
+    return 'failed';
+}
+
+/**
+ * Log one R2 promotion or demotion (media_tier_decisions): what the VOD looked like, the thresholds
+ * in force, why, and how it ended. Never throws: the move already happened (or did not).
+ */
+function recordTierDecision({ vod, vodId, action, from, to, result, trigger = 'manual', reason = 'requested' }) {
+    try {
+        db.run(`INSERT INTO media_tier_decisions (vod_id, app_id, object_id, action, from_provider, to_provider, outcome, trigger, reason, inputs, thresholds, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [Number(vodId), vod ? vod.app_id : null, vod ? vod.object_id || null : null, action, from || null, to || null, _outcomeOf(result, action, from),
+            String(trigger).slice(0, 40), String(reason).slice(0, 500), JSON.stringify(_tierInputs(vod)), JSON.stringify(_thresholdSnapshot()),
+            result && !result.ok ? String(result.error || 'failed').slice(0, 500) : null]);
+    } catch (err) {
+        console.warn(`[VodStorage] tier decision for VOD ${vodId} not logged: ${err.message}`);
+    }
+}
+
 // ── Provider clients ─────────────────────────────────────────
 
 function providerConfigured(name) {
@@ -457,7 +519,17 @@ function cleanupStaleDownloads() {
     } catch { /* */ }
 }
 
-async function moveToHot(vodId) {
+/** Restore an offloaded VOD to local disk. Restoring one served from R2 drops its R2 copy: logged as a demotion. */
+async function moveToHot(vodId, ctx = {}) {
+    const before = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const result = await _moveToHot(vodId);
+    if (before && providerOf(before) === 'r2') {
+        recordTierDecision({ vod: before, vodId, action: 'demote', from: 'r2', to: 'local', result, trigger: ctx.trigger || 'manual', reason: ctx.reason || 'restored to local disk' });
+    }
+    return result;
+}
+
+async function _moveToHot(vodId) {
     const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
 
@@ -525,8 +597,18 @@ async function moveToHot(vodId) {
     }
 }
 
-/** Promote a popular VOD to R2 (free egress). Keeps the B2 canonical copy. */
-async function promoteToR2(vodId) {
+/**
+ * Promote a VOD to R2 (free egress), keeping the B2 canonical copy, and log the decision.
+ * ctx { trigger: sweep | admin | drill | manual, reason } says who asked and why.
+ */
+async function promoteToR2(vodId, ctx = {}) {
+    const before = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const result = await _promoteToR2(vodId);
+    recordTierDecision({ vod: before, vodId, action: 'promote', from: before ? providerOf(before) : null, to: 'r2', result, ...ctx });
+    return result;
+}
+
+async function _promoteToR2(vodId) {
     const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
     if (vod.is_recording) return { ok: false, error: 'VOD is currently recording' };
@@ -571,8 +653,15 @@ async function promoteToR2(vodId) {
     }
 }
 
-/** Demote a stale R2 VOD back to B2-only. */
-async function demoteFromR2(vodId) {
+/** Demote an R2 VOD back to B2-only, and log the decision (ctx as for promoteToR2). */
+async function demoteFromR2(vodId, ctx = {}) {
+    const before = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const result = await _demoteFromR2(vodId);
+    recordTierDecision({ vod: before, vodId, action: 'demote', from: before ? providerOf(before) : null, to: 'b2', result, ...ctx });
+    return result;
+}
+
+async function _demoteFromR2(vodId) {
     const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod) return { ok: false, error: 'VOD not found' };
     if (providerOf(vod) !== 'r2') return { ok: true, already: true };
@@ -919,7 +1008,7 @@ async function runSweep() {
         // 2) R2 promotion for popular VODs
         if (settings.r2Enabled && providerConfigured('r2') && providerHealthy.r2 !== false) {
             const popular = db.all(`
-                SELECT id FROM vods
+                SELECT id, view_count, last_accessed_at FROM vods
                 WHERE COALESCE(storage_provider, 'local') IN ('local', 'b2')
                   AND COALESCE(is_recording, 0) = 0
                   AND COALESCE(view_count, 0) >= ?
@@ -928,7 +1017,8 @@ async function runSweep() {
                 LIMIT ?
             `, [settings.r2MinViews, `-${settings.r2RecentAccessDays} days`, settings.r2MaxPerSweep]);
             for (const vod of popular) {
-                const result = await promoteToR2(vod.id);
+                const result = await promoteToR2(vod.id, { trigger: 'sweep',
+                    reason: `view_count ${vod.view_count || 0} >= r2MinViews ${settings.r2MinViews} and last accessed ${vod.last_accessed_at} (within r2RecentAccessDays ${settings.r2RecentAccessDays})` });
                 if (result.ok && !result.already) { promoted++; bytesFreed += result.bytes || 0; }
                 else if (result.held) skippedHeld++;
                 else if (!result.ok) errors.push({ id: vod.id, error: result.error });
@@ -936,13 +1026,14 @@ async function runSweep() {
 
             // 3) R2 demotion for stale VODs
             const stale = db.all(`
-                SELECT id FROM vods
+                SELECT id, last_accessed_at FROM vods
                 WHERE storage_provider = 'r2'
                   AND (last_accessed_at IS NULL OR last_accessed_at <= datetime('now', ?))
-                LIMIT 10
+                LIMIT ${R2_DEMOTE_PER_SWEEP}
             `, [`-${settings.r2MaxIdleDays} days`]);
             for (const vod of stale) {
-                const result = await demoteFromR2(vod.id);
+                const result = await demoteFromR2(vod.id, { trigger: 'sweep',
+                    reason: `last accessed ${vod.last_accessed_at || 'never'} (idle longer than r2MaxIdleDays ${settings.r2MaxIdleDays})` });
                 if (result.ok && !result.already) demoted++;
             }
         }
@@ -1295,6 +1386,8 @@ module.exports = {
     moveToHot,
     promoteToR2,
     demoteFromR2,
+    r2Policy,
+    recordTierDecision,
     deleteVodObjects,
     deleteObject,
     deleteLegacyPasteScreenshot,

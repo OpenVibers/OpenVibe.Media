@@ -265,6 +265,8 @@ directories are shared across apps) and responses carry a `note` saying so.
 | POST | `/admin/storage/tiers/sweep` | run the tiering sweep now → sweep summary |
 | POST | `/admin/storage/tiers/move` | `{ vod_id, target: local\|hot\|b2\|cold\|r2 }` — reuses the storage engine's verified move logic; VOD must belong to the app |
 | POST | `/admin/storage/tiers/bulk-move` | `{ ids: [...], target }` (max 50) → `{ moved, bytes, errors? }` |
+| GET | `/admin/storage/tiers/policy` | **read-only R2 policy**: each threshold (`r2Enabled`, `r2MinViews`, `r2RecentAccessDays`, `r2MaxIdleDays`, `r2MaxPerSweep`) as `{ value, default, source: default\|setting }`, the promote and demote rules in words, the R2/B2 provider status, and this app's decisions: `last_24h` counts per action and outcome and the 20 most recent |
+| GET | `/admin/storage/tiers/decisions?vod_id&action&outcome&limit&before_id` | this app's R2 promote/demote decisions, newest first: `{ id, decided_at, vod_id, object_id, action, from_provider, to_provider, outcome: done\|already\|refused\|failed, trigger: sweep\|admin\|clip\|drill\|manual, reason, inputs, thresholds, error }` → `{ decisions, next_before_id }` |
 | GET | `/admin/storage/buckets` | sanitized bucket status per provider: `{ configured, endpoint, bucket, region, healthy, reachable }` via a live HeadBucket probe — **credentials are never returned** |
 
 ### Webhooks (outbound)
@@ -409,7 +411,11 @@ model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
 R2 popularity cache; verified uploads before any deletion; periodic sweep
 (offload by age/views/last-access, aggressive drain under disk pressure, R2
 promote/demote); presigned-302 playback. Knobs live in `media_settings` under
-`storage_tier.*` (JSON values). CLI:
+`storage_tier.*` (JSON values). Every promotion to and demotion from R2 (the sweep, an admin move, a
+clip cut fetching an R2 VOD home, the eviction drill) is logged in `media_tier_decisions` with the
+inputs it saw (views, last access, provider, recording, hold, size), the thresholds in force and their
+source, the reason and the outcome; `/admin/storage/tiers/policy` shows the policy and the log, and
+`media_tier_decisions_24h{action,outcome}` counts them on `/metrics` (`test/tier-decisions.test.js`). CLI:
 
 ```
 node server/vod/vod-storage.js check|migrate-legacy|drain [targetPct]
