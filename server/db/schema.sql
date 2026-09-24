@@ -360,6 +360,19 @@ CREATE TABLE IF NOT EXISTS media_invariant_violations (
     resolved_at DATETIME
 );
 
+-- Object changes waiting to become events (server/events.js recordObjectChanges): media_objects
+-- triggers (database.js ensureObjectTriggers) write one row per visibility change and per deletion,
+-- in the transaction that makes the change, whatever path made it; the rows become
+-- media.object.visibility_changed / media.object.deleted outbox envelopes and are removed.
+CREATE TABLE IF NOT EXISTS media_object_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    object_id TEXT NOT NULL,
+    change TEXT NOT NULL CHECK(change IN ('deleted', 'visibility_changed')),
+    previous_visibility TEXT,
+    visibility TEXT,
+    changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 -- Scheduled copy verification (server/objects/verify-job.js). One row per ready object: when it was
 -- last checked and what that check found; the least recently verified objects go first in each run.
 -- Verification only records and restores copies — it never deletes bytes or rows.

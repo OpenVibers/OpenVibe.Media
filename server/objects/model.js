@@ -409,8 +409,16 @@ function syncThumbnail(parentRow, parentObjectId, parentKind) {
     return { ...r, locations: [local.state] };
 }
 
+/** One projection in one transaction, with the object-change events it caused (server/events.js). */
 function _syncTx(fn, arg) {
-    return db.getDb().transaction(() => fn(arg))();
+    const events = require('../events');
+    const out = db.getDb().transaction(() => {
+        const r = fn(arg);
+        events.recordObjectChanges();
+        return r;
+    })();
+    events.kick();
+    return out;
 }
 
 /** Re-project one inherited row: kind vod|clip|file|paste, id = row id (file key for files). */
@@ -465,8 +473,13 @@ function softDelete(obj, { by = null } = {}) {
     md.pre_delete_status = obj.lifecycle_status;
     md.retention_until = new Date(Date.now() + config.objects.retentionDays * 864e5).toISOString();
     if (by) md.deleted_by = by;
-    db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = CURRENT_TIMESTAMP, metadata = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?`, [JSON.stringify(md), obj.id]);
+    const events = require('../events');
+    db.getDb().transaction(() => {
+        db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = CURRENT_TIMESTAMP, metadata = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?`, [JSON.stringify(md), obj.id]);
+        events.recordObjectChanges();       // media.object.deleted commits with the delete
+    })();
+    events.kick();
     return getObject(obj.id);
 }
 

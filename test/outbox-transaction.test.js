@@ -139,7 +139,11 @@ const waitFor = async (fn, ms = 3000) => {
     await finalizeVod(20);
     assert.ok(!raw.prepare('SELECT 1 FROM vods WHERE id = 20').get(), 'deleted');
     rows = outboxRows();
-    assert.strictEqual(rows.length, 3);
+    // The row's object is marked deleted by the row-delete trigger in the same transaction, so its
+    // media.object.deleted is queued with media.vod.failed.
+    assert.strictEqual(rows.length, 4);
+    assert.strictEqual(rows[3].env.event_type, 'media.object.deleted');
+    assert.strictEqual(rows[3].env.payload.legacy_ref, 'legacy:live:vod:20');
     assert.strictEqual(rows[2].env.event_type, 'media.vod.failed');
     assert.deepStrictEqual(rows[2].env.subject, { type: 'vod', id: '20' });
     assert.strictEqual(rows[2].env.priority, 'important');

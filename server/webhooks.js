@@ -93,6 +93,7 @@ function announce(appId, event, { change = null, payload }) {
         if (change) change();
         data = typeof payload === 'function' ? payload() : payload;
         env = events.record(event, appId, data);
+        events.recordObjectChanges();       // a row the change deleted: media.object.deleted, same transaction
     })();
     events.kick();
     const eventId = env ? env.event_id : null;

@@ -282,6 +282,17 @@ rolled-back change; the webhook follows the commit and carries `event_id` = that
 (absent when the outbox is off), so an app that reads both paths (Live during its webhook →
 Events transition) handles each outcome once. Webhooks stay until every consumer reads Events.
 
+Two object events go to OpenVibe.Events only (no webhook): **`media.object.deleted`**
+`{ object_id, app_id, kind, legacy_ref, deleted_at }` and **`media.object.visibility_changed`**
+`{ object_id, app_id, kind, legacy_ref, visibility, previous_visibility, changed_at }` (subject
+`object <id>`, `important`, times ISO 8601 UTC, `legacy_ref` null for native objects). Nothing
+else about the object is in them (no title, owner, keys or sizes). Triggers on `media_objects`
+stage every deletion and visibility change in the transaction that makes it, whichever path made it
+(a v1 visibility change, a row delete, a v2 soft delete, operator SQL); the staged rows become outbox
+envelopes inside Media's own transactions (projection sync, `announce()`, soft delete), so those
+commit with their change, and the relay drains anything else. No visibility event for an object
+that is deleted; none for sandbox tenants. `test/object-events.test.js`.
+
 ## Restore drills (`MEDIA_DRILL=1`)
 
 `ovhost drill media` (OpenVibe.Host `docs/restore-drills.md`) restores `media.db` from the latest

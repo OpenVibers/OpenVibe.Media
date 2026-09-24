@@ -135,6 +135,16 @@ function ensureObjectTriggers() {
         CREATE TRIGGER IF NOT EXISTS trg_media_objects_hold_delete BEFORE DELETE ON media_objects
         WHEN ${held('OLD.id')}
         BEGIN SELECT RAISE(ABORT, 'media object is under a retention hold'); END;`);
+    // media.object.visibility_changed / media.object.deleted: staged in the changing transaction,
+    // whichever path changed the object (projection sync, soft delete, the row-delete triggers above,
+    // operator SQL); server/events.js turns the rows into outbox envelopes.
+    database.exec(`
+        CREATE TRIGGER IF NOT EXISTS trg_media_objects_visibility_event AFTER UPDATE OF visibility ON media_objects
+        WHEN OLD.visibility IS NOT NEW.visibility AND NEW.lifecycle_status != 'deleted'
+        BEGIN INSERT INTO media_object_changes (object_id, change, previous_visibility, visibility) VALUES (NEW.id, 'visibility_changed', OLD.visibility, NEW.visibility); END;
+        CREATE TRIGGER IF NOT EXISTS trg_media_objects_deleted_event AFTER UPDATE OF lifecycle_status ON media_objects
+        WHEN NEW.lifecycle_status = 'deleted' AND OLD.lifecycle_status != 'deleted'
+        BEGIN INSERT INTO media_object_changes (object_id, change, previous_visibility) VALUES (NEW.id, 'deleted', OLD.visibility); END;`);
 }
 
 /** Keep a projected row's media_object current. Never throws — the legacy write already happened. */

@@ -12,6 +12,9 @@
  *   job state changes (server/jobs/queue.js) → media.job.proposed | queued | started | retrying |
  *                                             succeeded | failed | cancelled   (subject job <id>; Events only, no webhook;
  *                                             payload queue.jobEvent, not the tenant's params/result/error)
+ *   an object deleted / its visibility changed → media.object.deleted | media.object.visibility_changed
+ *                                             (subject object <id>; Events only; payload object id, tenant,
+ *                                             kind, legacy_ref and the times/visibilities, nothing else)
  *
  * The outbox row is written INSIDE the SQLite transaction that makes the state change it describes
  * (record(), called from webhooks.announce()): the event exists if and only if the change committed,
@@ -46,6 +49,7 @@ const JOB_TRANSITIONS = {
 };
 
 let outbox = null;
+let drainTimer = null;
 const stats = { queued: 0, lastError: null };
 
 function init({
@@ -58,7 +62,14 @@ function init({
     if (outbox) return outbox;
     // A restore drill (MEDIA_DRILL) relays nothing: its outbox rows describe a restored copy.
     if (require('./drill').enabled) return null;
-    if (process.env.EVENTS_PUBLISH === 'off' || !eventsUrl || !clientSecret) return null;
+    if (process.env.EVENTS_PUBLISH === 'off' || !eventsUrl || !clientSecret) {
+        // No outbox: object changes staged by the triggers are not events here; drop them hourly.
+        if (!drainTimer) {
+            drainTimer = setInterval(() => { try { discardObjectChanges(); } catch { /* next hour */ } }, 60 * 60 * 1000);
+            if (drainTimer.unref) drainTimer.unref();
+        }
+        return null;
+    }
     const tokens = createServiceTokenClient({ tokenUrl: `${networkUrl}/oauth/token`, clientId, clientSecret, fetch: fetchImpl });
     const client = createClient({ baseUrls: { events: eventsUrl }, tokenProvider: tokens, fetch: fetchImpl, retries: 0 });
     outbox = createOutbox(db.getDb(), {
@@ -74,6 +85,11 @@ function init({
     outbox.start();
     const prune = setInterval(() => { try { outbox.prune(); } catch { /* next time */ } }, 6 * 60 * 60 * 1000);
     if (prune.unref) prune.unref();
+    // Object changes that no Media transaction recorded (a row deleted outside one, operator SQL).
+    if (drainTimer) clearInterval(drainTimer);
+    drainTimer = setInterval(() => { try { drainObjectChanges(); } catch (err) { console.warn('[Events] object changes:', err.message); } }, intervalMs);
+    if (drainTimer.unref) drainTimer.unref();
+    try { drainObjectChanges(); } catch { /* the timer retries */ }
     console.log(`[Events] media outcomes → ${eventsUrl} (${outbox.pending()} pending)`);
     return outbox;
 }
@@ -145,6 +161,66 @@ function initWriter() {
     return outbox;
 }
 
+const isoTime = (v) => {
+    if (!v) return new Date().toISOString();
+    const s = String(v);
+    const d = new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s) ? `${s.replace(' ', 'T')}Z` : s);
+    return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+};
+
+/**
+ * The event for one staged object change: [event_type, payload]. Minimal on purpose: which object
+ * (id, tenant, kind, the inherited row it projects) and what changed. Never its title, metadata,
+ * owner, storage keys or size: consumers GET the object with a tenant-scoped token when they need more.
+ */
+function objectChangeEvent(change, obj) {
+    const base = { object_id: obj.id, app_id: obj.app_id, kind: obj.kind, legacy_ref: obj.legacy_ref || null };
+    if (change.change === 'deleted') return ['media.object.deleted', { ...base, deleted_at: isoTime(change.changed_at) }];
+    return ['media.object.visibility_changed', {
+        ...base, visibility: change.visibility, previous_visibility: change.previous_visibility, changed_at: isoTime(change.changed_at),
+    }];
+}
+
+/**
+ * media.object.deleted / media.object.visibility_changed. The media_objects triggers
+ * (server/db/database.js) stage one media_object_changes row per change inside the transaction that
+ * makes it, whatever path made it. This turns the staged rows into outbox envelopes and removes
+ * them; it MUST run inside a transaction (throws otherwise), so each event and the removal of its
+ * staged row commit together. Media calls it at the end of its own transactions (projection sync,
+ * announce(), soft delete), so those events commit with their change; the relay's drain takes the
+ * rest. With the outbox off it does nothing (the rows wait, or the service drops them hourly).
+ * Returns how many rows it turned into events (sandbox tenants' rows are removed without one).
+ */
+function recordObjectChanges({ limit = 1000 } = {}) {
+    if (!outbox) return 0;
+    const raw = db.getDb();
+    if (!raw.inTransaction) throw new Error('recordObjectChanges() must run inside the transaction that changed the objects');
+    const rows = raw.prepare('SELECT * FROM media_object_changes ORDER BY id LIMIT ?').all(limit);
+    let n = 0;
+    for (const c of rows) {
+        const obj = raw.prepare('SELECT id, app_id, kind, legacy_ref FROM media_objects WHERE id = ?').get(c.object_id);
+        if (obj) {
+            const [type, payload] = objectChangeEvent(c, obj);
+            if (enqueue(type, obj.app_id, { type: 'object', id: obj.id }, payload, 'important')) n++;
+        }
+        raw.prepare('DELETE FROM media_object_changes WHERE id = ?').run(c.id);
+    }
+    return n;
+}
+
+/** Drain staged object changes in a transaction of their own (the relay's timer). */
+function drainObjectChanges() {
+    if (!outbox) return 0;
+    let n = 0;
+    db.getDb().transaction(() => { n = recordObjectChanges(); })();
+    if (n) kick();
+    return n;
+}
+
+function discardObjectChanges() {
+    return db.run('DELETE FROM media_object_changes').changes;
+}
+
 /** Wake the relay once the transaction that queued events has committed. */
 function kick() {
     if (outbox) setImmediate(() => outbox && outbox.kick());
@@ -155,6 +231,11 @@ function status() {
     return { enabled: true, pending: outbox.pending(), rejected: outbox.rejected(), queued_since_boot: stats.queued, last_error: stats.lastError };
 }
 
-function _reset() { if (outbox) outbox.stop(); outbox = null; stats.queued = 0; stats.lastError = null; }
+function _reset() {
+    if (outbox) outbox.stop();
+    outbox = null;
+    if (drainTimer) { clearInterval(drainTimer); drainTimer = null; }
+    stats.queued = 0; stats.lastError = null;
+}
 
-module.exports = { init, initWriter, record, recordJob, kick, status, TYPES, JOB_TRANSITIONS, _reset };
+module.exports = { init, initWriter, record, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, JOB_TRANSITIONS, _reset };
