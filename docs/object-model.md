@@ -348,6 +348,17 @@ For each object it:
 
 **It never deletes anything.** No file, remote object or row is removed, and no lifecycle is changed.
 
+**Content hashes.** Most objects were projected without a hash, which left step 1's hash check
+inert. The `object.hash` job (`server/jobs/content-hash.js`, light lane, queued per tenant every
+`MEDIA_HASH_INTERVAL_MIN`, 15) reads ready objects' present local copies in bounded batches (50
+objects, `MEDIA_HASH_BUDGET_MB` 4096 per run; one file up to `MEDIA_HASH_MAX_FILE_MB` 20480) and
+records the sha256 on the object (`content_hash`, with `metadata.hash_basis` = the file and size it
+read) and on the local location (`checksum`, `verified_at`). It skips a file changed in the last
+`MEDIA_HASH_SETTLE_S` (120 s) or while it was read, and a local copy whose size differs from the
+object's (another version). A re-projection that finds the local copy at another path or size (a
+remux, a re-cut, a regenerated thumbnail) drops a hash this job made, so it never goes stale; a copy
+that only moved to B2/R2 keeps it. Test: `test/content-hash.test.js`.
+
 **No good copy.** A ready object has *no good copy* when none of its locations is `present` or
 `pending`. This includes ready objects with no location row at all. They show up in three places:
 
@@ -449,7 +460,7 @@ recording runs unless `MEDIA_JOBS_HEAVY_WHILE_RECORDING=1`) and `finalize`
 (`MEDIA_JOBS_FINALIZE_CONCURRENCY`, 1; runs while recording, as the recorder's own finalize does). A running job holds a lease
 (`MEDIA_JOBS_LEASE_S`) renewed by a heartbeat; at start, jobs the previous process left `running` are
 requeued (or failed when out of attempts). Handlers checkpoint progress and resume from it.
-`MEDIA_JOBS_ENABLED=0` stops the worker. Finished thumbnail jobs are pruned after
+`MEDIA_JOBS_ENABLED=0` stops the worker. Finished thumbnail and `object.hash` jobs are pruned after
 `MEDIA_JOBS_RETENTION_DAYS`; other jobs are kept.
 
 | type | lane | what it does |
@@ -458,6 +469,7 @@ requeued (or failed when out of attempts). Handlers checkpoint progress and resu
 | `invariant.scan` | light | The [size-invariant validator](#public-object-size-invariant): records violations, proposes `object.split` / `object.remux`, withdraws moot proposals. Tenant-wide (no object) |
 | `object.split` | heavy | Stream-copies a vod/clip (or a video/audio object) into parts (`params.parts` 2-1000 or `segment_seconds`), each a new **private** object with a `derived_from` relationship (`job_id`, `part`, `start_seconds`, `duration_seconds`). Cuts land on keyframes, so neighbouring parts can overlap slightly. The source is never changed. Checkpointed per part |
 | `object.remux` | heavy | Stream-copy remux of the whole source (seek index, duration, MP4 faststart) into one new private object; also the source's `remux` variant |
+| `object.hash` | light | sha256 of ready objects' present local copies that have no hash yet, onto the object (`content_hash`, `metadata.hash_basis`) and the local location (`checksum`). Tenant-wide batch (`params { limit (1-500, 50), budget_mb }`) or one object. Scheduled per tenant every `MEDIA_HASH_INTERVAL_MIN`. Result `{ hashed, bytes, skipped, remaining }`. See [Scheduled verification](#scheduled-verification) |
 | `vod.duration.reconcile` | heavy | One bounded batch of the tenant's finished VODs: stored duration vs a measurement of the real file, local or the B2/R2 copy (ffprobe over a presigned URL, ranged reads). `params { limit (1-200, 25), after_id?, apply (false), confirm_remote (false) }`; without `after_id` it walks the library from where the last run stopped. Repairs only confirmed, clearly wrong values when `apply`. Result `{ counts, range, next_after_id, report }`. See [Duration reconciliation](#duration-reconciliation) |
 | `vod.finalize` | finalize | Finalizes a recording whose finalize failed or never ran. `params { vod_id }`. Queued by the orphan sweep (a row still `is_recording = 1` that no recorder, chunk upload or finalize holds and whose file has been idle for `MEDIA_FINALIZE_ORPHAN_GRACE_S`, 180 s; at boot and every `MEDIA_FINALIZE_SWEEP_S`, 120 s) and by finalize itself when it could not settle a recording (nothing measurable, a stat failure, a throw; first run after 5 min). Still unmeasurable: retried (5 min, 15 min, 45 min, 2 h 15, 6 h; 6 attempts), then the VOD stays `needs_review`, hidden. Never stops a live recording. Result `{ outcome: ready \| needs_review \| corrupt \| deleted \| skipped, duration_seconds, duration_source }` |
 
@@ -582,6 +594,8 @@ Not run against production yet: it needs the owner's go-ahead.
 | `MEDIA_JOBS_POLL_MS` | 5000 | worker poll interval |
 | `MEDIA_JOBS_LIGHT_CONCURRENCY` / `_HEAVY_CONCURRENCY` / `_FINALIZE_CONCURRENCY` | 2 / 1 / 1 | jobs per lane |
 | `MEDIA_FINALIZE_ORPHAN_GRACE_S` / `MEDIA_FINALIZE_SWEEP_S` | 180 / 120 | an orphaned recording's file must be idle this long; the orphan sweep runs this often |
+| `MEDIA_HASH_INTERVAL_MIN` | 15 | queue `object.hash` per tenant this often (`0` = only on demand) |
+| `MEDIA_HASH_BUDGET_MB` / `_MAX_FILE_MB` / `_SETTLE_S` | 4096 / 20480 / 120 | bytes read per run; largest file hashed; a file changed this recently waits |
 | `MEDIA_DURATION_RECONCILE_HOURS` | 0 | schedule `vod.duration.reconcile` per tenant this often (`0` = only on demand) |
 | `MEDIA_DURATION_RECONCILE_APPLY` / `_BATCH` | off / 25 | scheduled runs repair (`1`) or only report; VODs per scheduled run |
 | `MEDIA_JOBS_HEAVY_WHILE_RECORDING` | off | `1` lets split/remux run while a recording is being written |

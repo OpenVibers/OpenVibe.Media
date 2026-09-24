@@ -387,8 +387,8 @@ function counts() {
     return out;
 }
 
-/** Delete finished jobs of high-volume types older than `days` (thumbnail requests). Others are kept. */
-function prune({ days = 30, types = ['thumbnail.regenerate'] } = {}) {
+/** Delete finished jobs of high-volume types older than `days` (thumbnail requests, scheduled hashing). Others are kept. */
+function prune({ days = 30, types = ['thumbnail.regenerate', 'object.hash'] } = {}) {
     return db.run(`DELETE FROM media_jobs WHERE status IN ('succeeded', 'failed', 'cancelled') AND job_type IN (${types.map(() => '?').join(', ')})
                    AND finished_at < datetime('now', ?)`, [...types, `-${Math.max(1, days)} days`]).changes;
 }

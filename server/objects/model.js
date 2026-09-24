@@ -158,7 +158,7 @@ function upsertLocation(objectId, loc) {
                    updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
     [loc.bucket ?? existing.bucket, loc.key, loc.storage_class || existing.storage_class,
         keep ? existing.state : (loc.state || 'pending'),
-        loc.checksum ?? (existing.key === loc.key ? existing.checksum : null),
+        loc.clearChecksum ? null : (loc.checksum ?? (existing.key === loc.key ? existing.checksum : null)),
         keep ? existing.size_bytes : (loc.size_bytes ?? null),
         keep ? existing.verified_at : (verifiedAt || (existing.key === loc.key && loc.state === existing.state ? existing.verified_at : null)),
         existing.id]);
@@ -205,11 +205,24 @@ function project(p) {
         legacy_ref: p.legacy_ref, metadata: p.metadata || {},
     };
     let id, created = false;
+    let staleHash = false;
     if (found) {
         id = found.id;
         // Knowledge the row doesn't carry survives a re-projection.
         if (!fields.content_hash) fields.content_hash = found.content_hash;
         fields.metadata = { ...parseJson(found.metadata, {}), ...fields.metadata };
+        // A hash the content-hash job computed (hash_basis: the local file it read) holds only while
+        // that file is unchanged: a present local copy at another path or of another size (a remux,
+        // a re-cut, a regenerated thumbnail) makes it stale. A copy that moved to B2/R2 keeps it.
+        const basis = fields.metadata.hash_basis;
+        if (basis && fields.content_hash === found.content_hash && !p.content_hash) {
+            const local = p.locations.find(l => l.provider === 'local' && l.state === 'present');
+            if (local && (local.key !== basis.key || Number(local.size_bytes) !== Number(basis.size))) {
+                fields.content_hash = null;
+                delete fields.metadata.hash_basis;
+                staleHash = true;
+            }
+        }
         if (found.lifecycle_status === 'deleted') fields.deleted_at = null;   // the row exists, so the object does
         // owner_subject (filled by the owner-subject job) is the subject of owner_user_id; a different owner
         // drops it until the job resolves the new one.
@@ -222,7 +235,7 @@ function project(p) {
         created = true;
     }
     const keep = new Set(p.locations.map(l => l.provider));
-    for (const loc of p.locations) upsertLocation(id, loc);
+    for (const loc of p.locations) upsertLocation(id, staleHash && loc.provider === 'local' ? { ...loc, clearChecksum: true } : loc);
     for (const l of listLocations(id)) if (!keep.has(l.provider)) db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
     return { id, created };
 }

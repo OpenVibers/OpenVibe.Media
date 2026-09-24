@@ -148,11 +148,12 @@ async function tick() {
                 lastScheduleAt = now;
                 scheduleInvariantScans(now);
                 try { require('./duration-reconcile').schedule(now); } catch (err) { console.warn('[Jobs] duration reconcile schedule:', err.message); }
+                try { require('./content-hash').schedule(now); } catch (err) { console.warn('[Jobs] content hash schedule:', err.message); }
             }
             try { require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
             if (now - lastPruneAt > 6 * 3600 * 1000) {
                 lastPruneAt = now;
-                try { const n = queue.prune({ days: cfg().retentionDays }); if (n) console.log(`[Jobs] pruned ${n} finished thumbnail job(s)`); } catch { /* next time */ }
+                try { const n = queue.prune({ days: cfg().retentionDays }); if (n) console.log(`[Jobs] pruned ${n} finished thumbnail/hash job(s)`); } catch { /* next time */ }
             }
             for (const lane of lanes()) {
                 if (lane.name === 'heavy' && !cfg().heavyWhileRecording && recordingActive()) continue;
