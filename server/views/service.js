@@ -85,9 +85,9 @@ function ensureSchema() {
     } catch { /* */ }
 }
 
-function clientIp(req) {
-    return (req.headers['cf-connecting-ip'] || (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || (req.socket && req.socket.remoteAddress) || 'unknown').toString();
-}
+// req.ip under 'trust proxy' = loopback (server/client-ip.js): the forwarding headers count only
+// when the local proxy sent them, so a direct caller cannot pose as many visitors.
+const { clientIp } = require('../client-ip');
 function visitorForIp(ip) { return 'ip:' + crypto.createHmac('sha256', secret()).update(String(ip || 'unknown')).digest('hex').slice(0, 24); }
 
 // Per-IP event budget (sliding minute), in memory — protects the DB from a spammer, not a metric.

@@ -38,10 +38,6 @@ const MIME_TYPES = {
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.gif': 'image/gif',
 };
 
-function getRequesterIp(req) {
-    return req.headers['cf-connecting-ip'] || req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip || req.socket?.remoteAddress || 'unknown';
-}
-
 const views = require('../views/service');
 // Views + unique views live in ../views/service (visit-based with a cooldown, hashed
 // visitors, owner/bot/rate-limit exclusions). A playback session counts once: only the

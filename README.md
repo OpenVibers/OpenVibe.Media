@@ -49,12 +49,17 @@ server/
                          change's transaction; payload queue.jobEvent: ids, state, ISO times,
                          has_result, never params/result/error text/creator), worker (light/heavy lanes, leases, retries,
                          cancellation), routes (/api/v2/:app/jobs), types: thumbnail.regenerate,
-                         invariant.scan (proposes split/remux), object.split, object.remux
+                         invariant.scan (proposes split/remux), object.split, object.remux,
+                         vod.finalize (orphans and failed finalizes, with backoff),
+                         vod.duration.reconcile (stored vs measured durations, local and B2/R2)
+  client-ip.js           trust proxy = loopback; req.ip is the only client address
 (openvibe-shared v1.5.1, openvibe-contracts v0.33.0, openvibe-sdk v0.5.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
 scripts/r2-eviction-drill.js   evict one VOD's R2 copy, prove B2 serves it, re-warm R2; JSON artifact (dry run by default)
+scripts/vod-duration-reconcile.js   stored VOD durations vs the real files (dry run by default; --apply --backup; --rollback)
+scripts/vods-orphans-report.js      read-only report on the B2 vods-orphans/ prefix (matches, sizes, recommendations)
 ```
 
 ## Visitor sign-in
@@ -299,6 +304,14 @@ backup and starts a second Media from this checkout on 127.0.0.1:14100 with `MED
 
 `test/drill-mode.test.js` boots the real server that way against a copy whose app has a webhook URL
 and checks each point.
+
+## Client addresses
+
+Express `trust proxy` is `loopback` (`server/client-ip.js`): `req.ip` is the `X-Forwarded-For` that the
+local nginx set when the request came through it, and the socket address for anyone else. A caller
+that reaches port 4100 directly cannot choose its IP by sending `X-Forwarded-For` or
+`CF-Connecting-IP` itself. View counting, paste limits and the live-frame rate limit read `req.ip`,
+never the headers (`test/trust-proxy.test.js`).
 
 ## Health, readiness and metrics
 

@@ -48,7 +48,10 @@ if (!drill.enabled) {
 }
 
 const app = express();
-app.set('trust proxy', true);
+// Only the local reverse proxy (nginx on this host) is trusted to say who the client is: req.ip is
+// its X-Forwarded-For for loopback peers and the socket address for anyone else, so a direct caller
+// cannot pick its own IP (views, rate limits). `true` trusted every peer's header.
+app.set('trust proxy', require('./client-ip').TRUST_PROXY);
 // Metrics first, so every route below is measured (GET /metrics: loopback callers only).
 const release = require('openvibe-shared/release').createRelease({ service: 'media', root: require('path').join(__dirname, '..') });
 const observability = require('./observability');
