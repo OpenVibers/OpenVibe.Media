@@ -465,7 +465,7 @@ requeued (or failed when out of attempts). Handlers checkpoint progress and resu
 
 | type | lane | what it does |
 |---|---|---|
-| `thumbnail.regenerate` | light | (Re)generates a vod/clip thumbnail from its media (local file or presigned cloud copy). `params { kind, id }`, or an object that is a projected vod/clip. Result `{ url }` |
+| `thumbnail.regenerate` | light | (Re)generates a vod/clip thumbnail from its media (local file or presigned cloud copy). `params { kind, id }`, or an object that is a projected vod/clip. Result `{ url }`. A recording that is empty (0 bytes, or health `zero_byte`) or gone (`missing_file`, no cloud copy) fails at once as `media_unavailable` (permanent; the v1 route answers 404) instead of running ffmpeg |
 | `invariant.scan` | light | The [size-invariant validator](#public-object-size-invariant): records violations, proposes `object.split` / `object.remux`, withdraws moot proposals. Tenant-wide (no object) |
 | `object.split` | heavy | Stream-copies a vod/clip (or a video/audio object) into parts (`params.parts` 2-1000 or `segment_seconds`), each a new **private** object with a `derived_from` relationship (`job_id`, `part`, `start_seconds`, `duration_seconds`). Cuts land on keyframes, so neighbouring parts can overlap slightly. The source is never changed. Checkpointed per part |
 | `object.remux` | heavy | Stream-copy remux of the whole source (seek index, duration, MP4 faststart) into one new private object; also the source's `remux` variant |

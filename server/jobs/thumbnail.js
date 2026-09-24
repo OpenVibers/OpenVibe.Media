@@ -7,8 +7,9 @@
  *
  *   params { kind: 'vod' | 'clip', id: <row id> }   (derived from the object's legacy ref when omitted)
  *   result { url, kind, id }
- * Failures: media_unavailable (no local file and no cloud copy; permanent), not_found (permanent),
- * generate_failed (ffmpeg produced no frame; retried).
+ * Failures: media_unavailable (no local file and no cloud copy, an empty file, or a recording the
+ * health scan found zero-byte / missing; permanent, answered 404 by the v1 route), not_found
+ * (permanent), generate_failed (ffmpeg produced no frame from real media; retried).
  */
 'use strict';
 
@@ -45,10 +46,20 @@ async function run(job) {
     const row = rowOf(job.app_id, kind, id);
     if (!row) throw new JobError('not_found', `${kind} ${id} not found`, { permanent: true });
     const thumbService = require('../thumbnails/thumbnail-service');
+    // A recording the health scan found empty or gone has no frame to take (five such VODs failed as
+    // generate_failed on 2026-09-23: ffmpeg was run on 0-byte files and Live got a 500).
+    if (kind === 'vod' && ['zero_byte', 'missing_file'].includes(row.health_status)) {
+        throw new JobError('media_unavailable', `The recording is ${row.health_status === 'zero_byte' ? 'empty (0 bytes)' : 'missing'}`, { permanent: true, status: 404 });
+    }
     let source = null;
-    if (kind === 'clip' && row.file_path && require('fs').existsSync(row.file_path)) source = { value: row.file_path };
+    if (kind === 'clip' && row.file_path && require('fs').existsSync(row.file_path)) source = { kind: 'file', value: row.file_path };
     else source = await require('../vod/vod-storage').resolveMediaSource(row);
     if (!source) throw new JobError('media_unavailable', 'Media file unavailable', { permanent: true, status: 404 });
+    if (source.kind === 'file') {
+        let size = 0;
+        try { size = require('fs').statSync(source.value).size; } catch { size = 0; }
+        if (!size) throw new JobError('media_unavailable', 'The media file is empty (0 bytes)', { permanent: true, status: 404 });
+    }
     const url = kind === 'vod'
         ? await thumbService.generateVodThumbnail(id, source.value)
         : await thumbService.generateClipThumbnail(id, source.value);
