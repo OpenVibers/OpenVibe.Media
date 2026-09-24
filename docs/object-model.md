@@ -400,7 +400,7 @@ W7) is what will make every new recording fit.
 
 ## Jobs
 
-Code: `server/jobs/`. Tests: `test/jobs.test.js`, `test/jobs-invariant.test.js`.
+Code: `server/jobs/`. Tests: `test/jobs.test.js`, `test/jobs-invariant.test.js`, `test/vod-finalize-job.test.js`.
 
 **States.** `proposed` (waiting for the owner; the worker never takes it) → `queued` → `running` →
 `succeeded` | `failed` | `cancelled`. A failed attempt goes back to `queued` with `run_after` (backoff
@@ -443,9 +443,10 @@ jobs answer 409. The owner is the tenant (app key, service token for the namespa
 app token); a caller acting for one of the app's users (`X-OV-User-Id`) sees and decides only the jobs
 it created and the jobs on objects it owns.
 
-**Worker.** In-process, polling every `MEDIA_JOBS_POLL_MS`, in two lanes: `light`
-(`MEDIA_JOBS_LIGHT_CONCURRENCY`, 2) and `heavy` (`MEDIA_JOBS_HEAVY_CONCURRENCY`, 1; waits while a
-recording runs unless `MEDIA_JOBS_HEAVY_WHILE_RECORDING=1`). A running job holds a lease
+**Worker.** In-process, polling every `MEDIA_JOBS_POLL_MS`, in three lanes: `light`
+(`MEDIA_JOBS_LIGHT_CONCURRENCY`, 2), `heavy` (`MEDIA_JOBS_HEAVY_CONCURRENCY`, 1; waits while a
+recording runs unless `MEDIA_JOBS_HEAVY_WHILE_RECORDING=1`) and `finalize`
+(`MEDIA_JOBS_FINALIZE_CONCURRENCY`, 1; runs while recording, as the recorder's own finalize does). A running job holds a lease
 (`MEDIA_JOBS_LEASE_S`) renewed by a heartbeat; at start, jobs the previous process left `running` are
 requeued (or failed when out of attempts). Handlers checkpoint progress and resume from it.
 `MEDIA_JOBS_ENABLED=0` stops the worker. Finished thumbnail jobs are pruned after
@@ -457,6 +458,7 @@ requeued (or failed when out of attempts). Handlers checkpoint progress and resu
 | `invariant.scan` | light | The [size-invariant validator](#public-object-size-invariant): records violations, proposes `object.split` / `object.remux`, withdraws moot proposals. Tenant-wide (no object) |
 | `object.split` | heavy | Stream-copies a vod/clip (or a video/audio object) into parts (`params.parts` 2-1000 or `segment_seconds`), each a new **private** object with a `derived_from` relationship (`job_id`, `part`, `start_seconds`, `duration_seconds`). Cuts land on keyframes, so neighbouring parts can overlap slightly. The source is never changed. Checkpointed per part |
 | `object.remux` | heavy | Stream-copy remux of the whole source (seek index, duration, MP4 faststart) into one new private object; also the source's `remux` variant |
+| `vod.finalize` | finalize | Finalizes a recording whose finalize failed or never ran. `params { vod_id }`. Queued by the orphan sweep (a row still `is_recording = 1` that no recorder, chunk upload or finalize holds and whose file has been idle for `MEDIA_FINALIZE_ORPHAN_GRACE_S`, 180 s; at boot and every `MEDIA_FINALIZE_SWEEP_S`, 120 s) and by finalize itself when it could not settle a recording (nothing measurable, a stat failure, a throw; first run after 5 min). Still unmeasurable: retried (5 min, 15 min, 45 min, 2 h 15, 6 h; 6 attempts), then the VOD stays `needs_review`, hidden. Never stops a live recording. Result `{ outcome: ready \| needs_review \| corrupt \| deleted \| skipped, duration_seconds, duration_source }` |
 
 Split and remux refuse a source that is not ready, a tenant quota the output would exceed, and too
 little free disk (the source size plus `MEDIA_UPLOAD_MIN_FREE_MB`; retried after 30 min).
@@ -538,7 +540,8 @@ Not run against production yet: it needs the owner's go-ahead.
 | `MEDIA_UPLOAD_MIN_FREE_MB` | 10240 | free disk kept in reserve by multipart uploads and split/remux jobs |
 | `MEDIA_JOBS_ENABLED` | on | `0` stops the job worker |
 | `MEDIA_JOBS_POLL_MS` | 5000 | worker poll interval |
-| `MEDIA_JOBS_LIGHT_CONCURRENCY` / `_HEAVY_CONCURRENCY` | 2 / 1 | jobs per lane |
+| `MEDIA_JOBS_LIGHT_CONCURRENCY` / `_HEAVY_CONCURRENCY` / `_FINALIZE_CONCURRENCY` | 2 / 1 / 1 | jobs per lane |
+| `MEDIA_FINALIZE_ORPHAN_GRACE_S` / `MEDIA_FINALIZE_SWEEP_S` | 180 / 120 | an orphaned recording's file must be idle this long; the orphan sweep runs this often |
 | `MEDIA_JOBS_HEAVY_WHILE_RECORDING` | off | `1` lets split/remux run while a recording is being written |
 | `MEDIA_JOBS_LEASE_S` | 120 | running-job lease (renewed by the heartbeat) |
 | `MEDIA_INVARIANT_SCAN_HOURS` | 24 | the size-invariant validator's schedule per tenant (`0` = on demand only) |

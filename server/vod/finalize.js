@@ -126,6 +126,7 @@ function _commitVodOutcome(vod, event, change, row = () => db.getVodById(vod.id)
  * @param {number} [opts.startTimeMs]  wall-clock recording start (for duration sanity)
  * @param {boolean} [opts.ffmpegCorrupted]  recorder flagged heavy corruption
  * @param {string} [opts.segmentPath]  trailing chunk segment not yet merged
+ * @param {boolean} [opts.fromJob]  run by the vod.finalize job (which retries itself; queue no retry)
  */
 async function finalizeVod(vodId, opts = {}) {
     vodId = Number(vodId);
@@ -145,11 +146,24 @@ async function finalizeVod(vodId, opts = {}) {
 
     try {
         return await _doFinalize(vodId, opts);
+    } catch (err) {
+        // A finalize that throws leaves the recording unsettled: the vod.finalize job tries again.
+        _queueRetry(vodId, 'finalize_failed', opts);
+        throw err;
     } finally {
         _finalizing.delete(vodId);
         // Every outcome (ready, quarantined, failed) re-projects the object; a deleted row was already marked by trigger.
         require('../objects/model').safeSync('vod', vodId);
     }
+}
+
+/**
+ * Queue a vod.finalize retry (server/jobs/vod-finalize.js; first attempt in 5 minutes), unless this
+ * finalize IS that job (it retries itself with backoff).
+ */
+function _queueRetry(vodId, reason, opts = {}) {
+    if (opts.fromJob) return;
+    try { require('../jobs/vod-finalize').queueFinalize(vodId, reason, { runAfterS: 300 }); } catch { /* the orphan sweep and the reconcile job remain */ }
 }
 
 // Health issues finalize itself records when it cannot settle a recording. A later successful
@@ -283,6 +297,7 @@ async function _doFinalize(vodId, opts) {
         console.warn(`[VOD] vod ${vodId}: no measurable duration (${issues.join(', ')}) — stored 0, needs_review`);
         _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review', health_issues_json = ?, probe_duration_seconds = 0, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
             [JSON.stringify(issues), probeFormatJson, vodId]));
+        _queueRetry(vodId, issues.includes('probe_failed') ? 'probe_failed' : 'inflated_duration', opts);
         return db.getVodById(vodId);
     }
 
@@ -304,6 +319,7 @@ async function _doFinalize(vodId, opts) {
         console.error(`[VOD] Failed to stat finalized VOD ${vodId}:`, err.message);
         db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
                 health_issues_json = ?, last_health_scan_at = datetime('now') WHERE id = ?`, [JSON.stringify(['stat_failed', ...issues]), vodId]);
+        _queueRetry(vodId, 'stat_failed', opts);
         return null;
     }
     // The lossless .master.mkv archive is only a fallback. Delete it ONLY once

@@ -5,6 +5,8 @@
  *   light  thumbnail.regenerate, invariant.scan      MEDIA_JOBS_LIGHT_CONCURRENCY (2)
  *   heavy  object.split, object.remux                 MEDIA_JOBS_HEAVY_CONCURRENCY (1); waits while a
  *                                                     recording runs unless MEDIA_JOBS_HEAVY_WHILE_RECORDING=1
+ *   finalize  vod.finalize                            MEDIA_JOBS_FINALIZE_CONCURRENCY (1); runs while recording
+ *                                                     (it is the work the recorder does when a stream ends)
  *
  * A running job holds a lease (MEDIA_JOBS_LEASE_S) that a heartbeat renews; the heartbeat also notices
  * an owner's cancel request. At start every job left `running` by the previous process is retried (or
@@ -13,7 +15,8 @@
  * from the checkpoint on a retry.
  *
  * Scheduling: the size-invariant validator (invariant.scan) is enqueued per tenant every
- * MEDIA_INVARIANT_SCAN_HOURS (it proposes split/remux jobs; it never runs them).
+ * MEDIA_INVARIANT_SCAN_HOURS (it proposes split/remux jobs; it never runs them). Orphaned recordings
+ * get a vod.finalize every MEDIA_FINALIZE_SWEEP_S (server/jobs/vod-finalize.js).
  */
 'use strict';
 
@@ -36,6 +39,7 @@ function lanes() {
     return [
         { name: 'light', types: by('light'), max: cfg().lightConcurrency },
         { name: 'heavy', types: by('heavy'), max: cfg().heavyConcurrency },
+        { name: 'finalize', types: by('finalize'), max: cfg().finalizeConcurrency },
     ];
 }
 
@@ -141,6 +145,7 @@ async function tick() {
             queue.recoverInterrupted({ except: new Set(running.keys()) });
             const now = Date.now();
             if (now - lastScheduleAt > 10 * 60 * 1000) { lastScheduleAt = now; scheduleInvariantScans(now); }
+            try { require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
             if (now - lastPruneAt > 6 * 3600 * 1000) {
                 lastPruneAt = now;
                 try { const n = queue.prune({ days: cfg().retentionDays }); if (n) console.log(`[Jobs] pruned ${n} finished thumbnail job(s)`); } catch { /* next time */ }

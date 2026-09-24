@@ -234,9 +234,10 @@ if (!drill.enabled) {
         } catch (err) { console.warn('[Objects] Backfill failed:', err.message); }
     }, 15 * 1000).unref?.();
 
-    // Recover from an unclean shutdown: rows stuck in is_recording with no live
-    // ffmpeg are finalized from whatever hit the disk.
-    setTimeout(() => {
+    // Recover from an unclean shutdown: rows stuck in is_recording with no live ffmpeg are finalized
+    // from whatever hit the disk. With the job worker on, its orphan sweep queues a vod.finalize job
+    // for each (retried with backoff; server/jobs/vod-finalize.js); without it, once, here.
+    if (!config.jobs.enabled) setTimeout(() => {
         try {
             const stuck = db.all('SELECT id FROM vods WHERE is_recording = 1');
             for (const row of stuck) {

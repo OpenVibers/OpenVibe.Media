@@ -5,6 +5,7 @@
  *   invariant.scan         light   the size-invariant validator: proposes object.split / object.remux
  *   object.split           heavy   stream-copy parts of a large vod/clip as new private objects
  *   object.remux           heavy   a stream-copy remux of a vod/clip as a new private object
+ *   vod.finalize           finalize  finalize a recording whose finalize failed or never ran (orphans), with backoff
  */
 'use strict';
 
@@ -14,5 +15,6 @@ queue.register('thumbnail.regenerate', require('./thumbnail').spec);
 queue.register('invariant.scan', require('./invariant-scan').spec);
 queue.register('object.split', require('./derive').split);
 queue.register('object.remux', require('./derive').remux);
+queue.register('vod.finalize', require('./vod-finalize').spec);
 
 module.exports = { names: () => queue.typeNames() };
