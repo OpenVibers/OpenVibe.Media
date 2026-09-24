@@ -49,8 +49,19 @@ async function _appJson(appId, apiPath) {
     }
 }
 
-/** Resolve @username → app user id (live list first, channel lookup as fallback). */
+/**
+ * Resolve @username → app user id. For Live, its canonical lineage resolver answers (D20); the old
+ * lookups (live list, then the public channel API) remain only for other apps or when Live cannot
+ * be asked.
+ */
 async function _resolveUser(appId, name) {
+    if (appId === 'live') {
+        try {
+            const ch = await require('../lineage-client').lineage().channelBySlug(name);
+            if (!ch) return null;
+            if (ch.live_user_id) return { uid: ch.live_user_id, username: ch.slug };
+        } catch { /* resolver off or down: the lookups below */ }
+    }
     const lower = String(name).toLowerCase();
     const streams = await frames.appLiveStreams(appId);
     const live = streams.find(s => String(s.username || '').toLowerCase() === lower);
