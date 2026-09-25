@@ -22,7 +22,11 @@ const ev = (over = {}) => ({ event_id: 'evt_01J8Z3Q4R5S6T7V8W9X0Y1Z2A3', event_t
 
 (async () => {
     const app = express();
+    // As in server/index.js: mounted before the JSON parser (the signature is over the raw body).
+    const src = fs.readFileSync(path.join(__dirname, '../server/index.js'), 'utf8');
+    assert.ok(src.indexOf("app.post('/internal/events'") < src.indexOf("app.use(express.json("), 'the events route comes before express.json()');
     app.post('/internal/events', ...revocations.handler());
+    app.use(express.json());
     const srv = http.createServer(app);
     await new Promise((r) => srv.listen(0, '127.0.0.1', r));
     const url = `http://127.0.0.1:${srv.address().port}/internal/events`;

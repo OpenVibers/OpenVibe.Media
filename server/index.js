@@ -62,6 +62,9 @@ if (drill.enabled) app.use(drill.readOnly);
 // Object API v2 content uploads read the raw request body, so they sit ahead of the body parsers.
 app.put('/api/v2/:app/objects/:id/content', ...require('./objects/routes').contentHandlers);
 app.put('/api/v2/:app/objects/:id/multipart/:uploadId/parts/:n', ...require('./objects/routes').partHandlers);
+// Network's sign-out-everywhere cutoffs (server/revocations.js): signed, loopback-only. Before the JSON
+// parser, which would consume the raw body the signature is over.
+app.post('/internal/events', ...require('./revocations').handler());
 app.use(express.json({ limit: '2mb' }));
 
 // ── Visitor sign-in (OAuth client `media` on the Network; same module as Community/Tools) ──
@@ -93,8 +96,6 @@ app.get('/manifest.webmanifest', (_req, res) => res.type('application/manifest+j
     const pastes = require('./pastes/routes');
     app.post('/internal/avatar-ingest', internalOnly, require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config, screenshotsDir: pastes.SCREENSHOTS_DIR, generateSlug: pastes.generateSlug }));
 }
-// Network's sign-out-everywhere cutoffs (server/revocations.js): signed, loopback-only, like the rest of /internal.
-app.post('/internal/events', ...require('./revocations').handler());
 const userAuth = require('./user-auth');
 const userAuthConfig = {
     baseUrl: config.publicUrl, networkUrl: config.network.url, networkInternalUrl: config.network.internalUrl,
