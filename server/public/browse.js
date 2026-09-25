@@ -222,7 +222,7 @@ const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['images
 
 function renderPage(tab, page, data, counts) {
     const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
-    const nav = (p, label, dis) => dis ? `<span class="pg dis">${label}</span>` : `<a class="pg" href="/?tab=${tab}&page=${p}">${label}</a>`;
+    const nav = (p, label, dis) => dis ? `<span class="pg dis" aria-disabled="true">${label}</span>` : `<a class="pg" href="/?tab=${tab}&page=${p}">${label}</a>`;
     return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenVibe.Media — Media Index</title>
@@ -250,7 +250,7 @@ header.intro .sub{color:var(--muted);font-size:.85rem}
 nav.tabs{display:flex;gap:.25rem;padding:.2rem 1.4rem .7rem;flex-wrap:wrap}
 nav.tabs a{color:var(--muted);text-decoration:none;padding:.45rem .9rem;border-radius:999px;font-size:.88rem;border:1px solid transparent}
 nav.tabs a:hover{color:var(--text)}nav.tabs a.on{color:var(--on-accent-strong,#fff);background:var(--accent-strong,#1d4ed8)}
-nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
+nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{opacity:1}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem;padding:0 1.4rem}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
 .thumb{position:relative;display:block;aspect-ratio:16/9;background:#0b0f18}
