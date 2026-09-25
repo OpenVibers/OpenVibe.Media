@@ -19,7 +19,7 @@
  *     Watch pages and the media index render from the database only and still answer.
  *   - server/index.js opens the database and serves HTTP, and starts nothing else: no app seeding, no
  *     JWKS refresh, no health job, junk sweep, tiering sweep, clip re-cuts, copy verification, jobs
- *     worker (thumbnails, split/remux, invariant scans), disk guardian, thumbnail cleanup, object purge,
+ *     worker (thumbnails, split/remux, invariant scans, storage orphan scans), disk guardian, thumbnail cleanup, object purge,
  *     backfill, orphan-recording finalize or Events relay; webhooks are never sent. Timers that modules
  *     start when they are loaded check `enabled` as well. Readiness does not probe storage (a drill
  *     writes none) or the remote tiers.

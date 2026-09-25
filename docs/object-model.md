@@ -367,9 +367,45 @@ The exit code is 1 when issues were found.
 | `missing_projection` | an inherited row with no object yet (run the backfill) |
 | `incomplete_multipart` | a multipart session still open past its expiry (the hourly purge should have removed it) |
 
-**Not covered yet:** orphan *provider* objects (bucket keys with no row, which needs bucket
-listing). `server/objects/reconcile.js` takes a `head` function,
-so tests run it against a fake provider.
+Bucket keys and local files that no row names are the [storage orphan report](#storage-orphan-report)'s.
+`server/objects/reconcile.js` takes a `head` function, so tests run it against a fake provider.
+
+## Storage orphan report
+
+Code: `server/vod/orphans-report.js` (`buildStorageReport`), the job `storage.orphans.scan`
+(`server/jobs/storage-orphans.js`), `scripts/vods-orphans-report.js --storage`. Test: `test/storage-orphans.test.js`
+(a fake S3 through the real SDK that refuses and counts any write).
+
+It compares what storage holds with what the database names, and **only reports**: it walks the data
+directories, lists the B2/R2 buckets (keys and open multipart uploads), reads the database and writes
+`<data>/reports/storage-orphans-<time>.json`. It never deletes, moves or changes a file, a bucket object
+or a row.
+
+| section | what it lists |
+|---|---|
+| `unreferenced_local` | files under `VOD_PATH`, `CLIPS_PATH`, `THUMBNAILS_PATH`, `FILES_PATH`, `PASTES_PATH`, `OBJECTS_PATH`, `ASSETS_PATH` that no row names (`media_locations`, `vods` with their sidecars, masters and chunk segments, `clips`, `files`, `pastes`, `assets`, open upload sessions, unfinished jobs). A file whose only row is a deleted object's location counts, unless that object is native and inside its retention period, or held. Largest first, with a hint: a recorder name whose VOD row is gone, bytes of a deleted object, parts of a session that no longer exists, a temp file of an upload that never finished |
+| `unreferenced_remote` | B2/R2 keys that no `media_locations` row and no `vods`/`clips` row names; hints for `vods-orphans/` (see below), an R2 copy left behind after its VOD went back to B2, legacy paste screenshots, recorder names |
+| `missing` | copies the database records for objects that are not deleted, whose bytes are not there: no local file, or a key absent from its bucket's listing |
+| `multipart_local` | Media's own multipart sessions still open (`media_uploads` active or completing), with `expired` when past `expires_at` |
+| `multipart_remote` | multipart uploads the buckets still hold open (a killed upload leaves its parts stored and billed) |
+
+Totals count everything; each list holds at most `limit` items (2000). Live thumbnails
+(`stream-<app>-<id>.jpg`) and upload temps or partial downloads younger than an hour are counted as
+`expected`, not listed. A provider that is not configured, or whose listing fails, is marked not listed
+and nothing is concluded about its keys.
+
+**When it runs.** The job worker queues `storage.orphans.scan` every `MEDIA_ORPHAN_SCAN_DAYS` (30; `0`
+= never). Storage is shared by every tenant, so the job belongs to none: it runs under the system app
+`_media` (no apps row, so no API credential reaches it), announces no `media.job.*` event, and
+`POST /api/v2/:app/jobs` refuses it with 403 `media.job.forbidden`. The worker does not start in a
+restore drill. On demand:
+
+```
+node scripts/vods-orphans-report.js --storage [--no-remote] [--limit 2000] [--out report.json] [--json] [--db ./data/media.db]
+```
+
+`--no-remote` lists no bucket. The detailed per-object recommendations for the `vods-orphans/` prefix
+stay with the prefix report below (`scripts/vods-orphans-report.js` without `--storage`).
 
 ## Scheduled verification
 
@@ -509,6 +545,7 @@ requeued (or failed when out of attempts). Handlers checkpoint progress and resu
 | `object.remux` | heavy | Stream-copy remux of the whole source (seek index, duration, MP4 faststart) into one new private object; also the source's `remux` variant |
 | `object.hash` | light | sha256 of ready objects' present local copies that have no hash yet, onto the object (`content_hash`, `metadata.hash_basis`) and the local location (`checksum`). Tenant-wide batch (`params { limit (1-500, 50), budget_mb }`) or one object. Scheduled per tenant every `MEDIA_HASH_INTERVAL_MIN`. Result `{ hashed, bytes, skipped, remaining }`. See [Scheduled verification](#scheduled-verification) |
 | `vod.duration.reconcile` | heavy | One bounded batch of the tenant's finished VODs: stored duration vs a measurement of the real file, local or the B2/R2 copy (ffprobe over a presigned URL, ranged reads). `params { limit (1-200, 25), after_id?, apply (false), confirm_remote (false) }`; without `after_id` it walks the library from where the last run stopped. Repairs only confirmed, clearly wrong values when `apply`. Result `{ counts, range, next_after_id, report }`. See [Duration reconciliation](#duration-reconciliation) |
+| `storage.orphans.scan` | light | The [storage orphan report](#storage-orphan-report), service-wide, under the system app `_media`; report only. `params { limit (1-100000, 2000) }`. Result `{ totals, providers, summary, report }` (the report file under `<data>/reports/`). Scheduled every `MEDIA_ORPHAN_SCAN_DAYS`; tenants cannot enqueue it (403) |
 | `vod.finalize` | finalize | Finalizes a recording whose finalize failed or never ran. `params { vod_id }`. Queued by the orphan sweep (a row still `is_recording = 1` that no recorder, chunk upload or finalize holds and whose file has been idle for `MEDIA_FINALIZE_ORPHAN_GRACE_S`, 180 s; at boot and every `MEDIA_FINALIZE_SWEEP_S`, 120 s) and by finalize itself when it could not settle a recording (nothing measurable, a stat failure, a throw; first run after 5 min). Still unmeasurable: retried (5 min, 15 min, 45 min, 2 h 15, 6 h; 6 attempts), then the VOD stays `needs_review`, hidden. Never stops a live recording. Result `{ outcome: ready \| needs_review \| corrupt \| deleted \| skipped, duration_seconds, duration_source }` |
 
 Split and remux refuse a source that is not ready, a tenant quota the output would exceed, and too
@@ -634,6 +671,7 @@ Not run against production yet: it needs the owner's go-ahead.
 | `MEDIA_FINALIZE_ORPHAN_GRACE_S` / `MEDIA_FINALIZE_SWEEP_S` | 180 / 120 | an orphaned recording's file must be idle this long; the orphan sweep runs this often |
 | `MEDIA_HASH_INTERVAL_MIN` | 15 | queue `object.hash` per tenant this often (`0` = only on demand) |
 | `MEDIA_HASH_BUDGET_MB` / `_MAX_FILE_MB` / `_SETTLE_S` | 4096 / 20480 / 120 | bytes read per run; largest file hashed; a file changed this recently waits |
+| `MEDIA_ORPHAN_SCAN_DAYS` | 30 | queue the storage orphan report this often (`0` = only on demand) |
 | `MEDIA_DURATION_RECONCILE_HOURS` | 0 | schedule `vod.duration.reconcile` per tenant this often (`0` = only on demand) |
 | `MEDIA_DURATION_RECONCILE_APPLY` / `_BATCH` | off / 25 | scheduled runs repair (`1`) or only report; VODs per scheduled run |
 | `MEDIA_JOBS_HEAVY_WHILE_RECORDING` | off | `1` lets split/remux run while a recording is being written |
@@ -657,6 +695,5 @@ Not run against production yet: it needs the owner's go-ahead.
 - Copy/move aliases, lifecycle rules and an S3-compatible façade.
 - Clip cutting and the finalize remux still run inline, not as jobs (thumbnail regeneration was the first
   operation moved onto the job system).
-- Orphan-bucket-object detection.
 - The segment-native timeline.
 - App assets (emotes and sounds, the `assets` table) are not projected yet. The `asset` kind exists for v2 uploads.

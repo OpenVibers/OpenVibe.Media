@@ -393,6 +393,27 @@ async function listObjects(provider, prefix) {
     return out;
 }
 
+/**
+ * Multipart uploads still open in one provider's bucket (started, never completed or aborted: a killed
+ * process leaves them, and their parts are stored and billed): [{ key, upload_id, initiated }] (read-only).
+ */
+async function listMultipartUploads(provider, prefix = '') {
+    const client = clientFor(provider);
+    if (!client) throw new Error(`${provider} is not configured`);
+    loadSdk();
+    const out = [];
+    let keyMarker, idMarker;
+    for (;;) {
+        const r = await client.send(new S3.ListMultipartUploadsCommand({ Bucket: PROVIDER_ENV[provider].bucket, Prefix: prefix || undefined,
+            KeyMarker: keyMarker, UploadIdMarker: idMarker, MaxUploads: 1000 }));
+        for (const u of (r.Uploads || [])) out.push({ key: u.Key, upload_id: u.UploadId, initiated: u.Initiated ? new Date(u.Initiated).toISOString() : null });
+        if (!r.IsTruncated || !r.NextKeyMarker) break;
+        keyMarker = r.NextKeyMarker;
+        idMarker = r.NextUploadIdMarker;
+    }
+    return out;
+}
+
 async function presignGet(provider, key, expiresInSeconds = 900) {
     const client = clientFor(provider);
     if (!client) return null;
@@ -1378,6 +1399,7 @@ module.exports = {
     endpointFor,
     headObject,
     listObjects,
+    listMultipartUploads,
     keyForVod,
     localPathForVod,
     resolvePlayback,

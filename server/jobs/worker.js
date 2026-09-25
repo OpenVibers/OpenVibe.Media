@@ -16,7 +16,8 @@
  *
  * Scheduling: the size-invariant validator (invariant.scan) is enqueued per tenant every
  * MEDIA_INVARIANT_SCAN_HOURS (it proposes split/remux jobs; it never runs them). Orphaned recordings
- * get a vod.finalize every MEDIA_FINALIZE_SWEEP_S (server/jobs/vod-finalize.js).
+ * get a vod.finalize every MEDIA_FINALIZE_SWEEP_S (server/jobs/vod-finalize.js). The storage orphan
+ * report (storage.orphans.scan, report only) runs every MEDIA_ORPHAN_SCAN_DAYS under queue.SYSTEM_APP.
  */
 'use strict';
 
@@ -149,6 +150,7 @@ async function tick() {
                 scheduleInvariantScans(now);
                 try { require('./duration-reconcile').schedule(now); } catch (err) { console.warn('[Jobs] duration reconcile schedule:', err.message); }
                 try { require('./content-hash').schedule(now); } catch (err) { console.warn('[Jobs] content hash schedule:', err.message); }
+                try { require('./storage-orphans').schedule(now); } catch (err) { console.warn('[Jobs] storage orphan scan schedule:', err.message); }
             }
             try { require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
             if (now - lastPruneAt > 6 * 3600 * 1000) {

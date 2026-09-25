@@ -52,7 +52,8 @@ server/
                          cancellation), routes (/api/v2/:app/jobs), types: thumbnail.regenerate,
                          invariant.scan (proposes split/remux), object.split, object.remux,
                          vod.finalize (orphans and failed finalizes, with backoff),
-                         vod.duration.reconcile (stored vs measured durations, local and B2/R2)
+                         vod.duration.reconcile (stored vs measured durations, local and B2/R2),
+                         storage.orphans.scan (monthly storage orphan report, service-wide, report only)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
 (openvibe-shared v1.5.1, openvibe-contracts v0.33.0, openvibe-sdk v0.5.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
@@ -60,7 +61,9 @@ scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-go
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
 scripts/r2-eviction-drill.js   evict one VOD's R2 copy, prove B2 serves it, re-warm R2; JSON artifact (dry run by default)
 scripts/vod-duration-reconcile.js   stored VOD durations vs the real files (dry run by default; --apply --backup; --rollback)
-scripts/vods-orphans-report.js      read-only report on the B2 vods-orphans/ prefix (matches, sizes, recommendations)
+scripts/vods-orphans-report.js      read-only report on the B2 vods-orphans/ prefix (matches, sizes, recommendations);
+                                    --storage: the whole storage against the database (files and keys no row names,
+                                    copies that are not there, open multipart uploads), as the monthly job does
 ```
 
 ## Visitor sign-in
@@ -410,6 +413,10 @@ model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
   read-only by default; `--verify` HEADs B2/R2 and records location states.
   Reports missing canonical copies, lost local files, size/hash mismatches,
   orphan locations, deleted-but-still-served objects and unprojected rows.
+- **Orphan report** — monthly job `storage.orphans.scan` (`MEDIA_ORPHAN_SCAN_DAYS`, 30) and
+  `node scripts/vods-orphans-report.js --storage [--no-remote]`: local files and B2/R2 keys no row
+  names, recorded copies that are not there, open multipart uploads (Media's and the buckets').
+  Report only: it never deletes anything ([docs](docs/object-model.md#storage-orphan-report)).
 - **Public object-size invariant** — `MEDIA_PUBLIC_OBJECT_MAX_MB` (500) /
   `_TARGET_MB` (256) / `_WARN_MB` (384): v2 refuses oversized public playback
   uploads; `node scripts/object-invariant.js` lists offenders and records them in

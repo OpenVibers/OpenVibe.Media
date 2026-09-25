@@ -28,6 +28,9 @@ const STATUSES = ['proposed', 'queued', 'running', 'succeeded', 'failed', 'cance
 const FINISHED = ['succeeded', 'failed', 'cancelled'];
 const ACTIVE = ['queued', 'running'];
 const MAX_ACTIVE_PER_TENANT = 50;   // queued + running jobs one tenant may have (proposals excluded)
+// Service-wide maintenance jobs (storage.orphans.scan) belong to no tenant: they run under this app id,
+// which has no apps row, so no API credential reaches them, and they announce no events.
+const SYSTEM_APP = '_media';
 
 const bus = new EventEmitter();
 bus.setMaxListeners(0);
@@ -394,7 +397,7 @@ function prune({ days = 30, types = ['thumbnail.regenerate', 'object.hash'] } = 
 }
 
 module.exports = {
-    STATUSES, FINISHED, ACTIVE, MAX_ACTIVE_PER_TENANT, JobError, bus,
+    STATUSES, FINISHED, ACTIVE, MAX_ACTIVE_PER_TENANT, SYSTEM_APP, JobError, bus,
     register, typeSpec, typeNames, requestHash, parseJson,
     get, getForApp, jobPublic, jobEvent, list, counts,
     enqueue, approve, cancel,

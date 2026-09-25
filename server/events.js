@@ -126,6 +126,8 @@ function record(webhookEvent, appId, data) {
 function recordJob(transition, job) {
     const priority = JOB_TRANSITIONS[transition];
     if (!priority) throw new Error(`unknown job transition ${transition}`);
+    // A service-wide maintenance job (queue.SYSTEM_APP) is no tenant's: nothing to announce.
+    if (job.app_id === require('./jobs/queue').SYSTEM_APP) return null;
     return enqueue(`media.job.${transition}`, job.app_id, { type: 'job', id: String(job.id) }, job, priority);
 }
 
