@@ -164,11 +164,12 @@ function defaultFooterLinks() {
     return [
         {
             heading: 'Media',
+            // The shared footer's items are { name, url } (label/href rendered as empty links).
             items: [
-                { label: 'Media index', href: `${config.publicUrl}/` },
-                { label: 'Videos', href: `${config.publicUrl}/?tab=videos` },
-                { label: 'Clips', href: `${config.publicUrl}/?tab=clips` },
-                { label: 'Pastes', href: `${appUrl('community')}/pastes` },
+                { name: 'Media index', url: `${config.publicUrl}/` },
+                { name: 'Videos', url: `${config.publicUrl}/?tab=videos` },
+                { name: 'Clips', url: `${config.publicUrl}/?tab=clips` },
+                { name: 'Pastes', url: `${appUrl('community')}/pastes` },
             ],
         },
     ];
