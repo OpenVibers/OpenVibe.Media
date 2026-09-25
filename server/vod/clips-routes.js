@@ -54,9 +54,11 @@ const clipUpload = multer({
     },
 });
 
-function clipPublic(clip) {
+// { readiness: true } (API responses) adds the object's readiness levels (server/objects/readiness.js);
+// the clip.ready / clip.failed payloads leave them out, as vodPublic's do.
+function clipPublic(clip, { readiness = false } = {}) {
     if (!clip) return null;
-    return {
+    const out = {
         unique_views: clip.unique_views || 0,
 
         id: clip.id,
@@ -90,6 +92,8 @@ function clipPublic(clip) {
         view_count: clip.view_count || 0,
         created_at: clip.created_at,
     };
+    if (readiness) out.readiness = require('../objects/readiness').forRow(clip);
+    return out;
 }
 
 /** Sanitize user-provided title: strip HTML tags, limit length */
@@ -294,7 +298,7 @@ async function _createUploadedClip(req, res) {
             .catch(err => console.warn(`[Clips] Thumbnail failed for clip ${clipId}:`, err.message));
 
         console.log(`[Clips] Direct upload: clip ${clipId} (${req.appId}, ${duration.toFixed ? duration.toFixed(1) : duration}s)`);
-        res.status(201).json({ ...clipPublic(db.getClipById(clipId, req.appId)) });
+        res.status(201).json({ ...clipPublic(db.getClipById(clipId, req.appId), { readiness: true }) });
     } catch (err) {
         console.error('[Clips] Upload error:', err.message);
         tools.cleanupTempFile(clipPath);
@@ -330,7 +334,7 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
         };
         const clips = db.listClips(req.appId, filters);
         const total = db.countClips(req.appId, filters);
-        res.json({ clips: clips.map(clipPublic), total, limit, offset, hasMore: offset + clips.length < total });
+        res.json({ clips: clips.map(c => clipPublic(c, { readiness: true })), total, limit, offset, hasMore: offset + clips.length < total });
     } catch (err) {
         console.error('[Clips] List error:', err.message);
         res.status(500).json({ error: 'Failed to list clips' });
@@ -348,7 +352,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
         }
         // Bare object, mirroring GET /vods/:id per CONTRACTS.md.
         // Detail responses carry the transcript too (lists stay light).
-        res.json({ ...clipPublic(clip), ai_transcript: clip.ai_transcript || null });
+        res.json({ ...clipPublic(clip, { readiness: true }), ai_transcript: clip.ai_transcript || null });
     } catch (err) {
         res.status(500).json({ error: 'Failed to get clip' });
     }
@@ -395,7 +399,7 @@ router.put('/:id', tenantAuth(), (req, res) => {
             db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]);
         }
         if (visibility !== undefined) db.setClipVisibility(clip.id, visibility);
-        res.json({ clip: clipPublic(db.getClipById(clip.id, req.appId)) });
+        res.json({ clip: clipPublic(db.getClipById(clip.id, req.appId), { readiness: true }) });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update clip' });
     }

@@ -1,9 +1,9 @@
 'use strict';
 // Crawler basics at the origin (server/public/crawl.js, pages.js): /robots.txt names the sitemap and
 // keeps APIs out; /sitemap.xml lists the home and the watch pages Media is canonical for (public,
-// ready, not Live's, not AI clips, never private/unlisted/sandbox), and every listed page renders
-// `index, follow`; /llms.txt maps the site; public watch pages carry a VideoObject; AI clips are
-// noindex with no Person author, like on Live.
+// ready, playable: a copy whose bytes were verified; not Live's, not AI clips, never
+// private/unlisted/sandbox), and every listed page renders `index, follow`; /llms.txt maps the site;
+// public watch pages carry a VideoObject; AI clips are noindex with no Person author, like on Live.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -38,6 +38,18 @@ clip.run(12, 'games', 1, 'AI moment', 1, 'public', 1, 'ready', '2026-09-22 11:00
 clip.run(13, 'games', 1, 'Cutting', 1, 'public', 0, 'processing', '2026-09-22 12:00:00');
 clip.run(14, 'games', 1, 'Unlisted clip', 0, 'unlisted', 0, 'ready', '2026-09-22 13:00:00');
 clip.run(15, 'live', 4, 'Live clip', 1, 'public', 0, 'ready', '2026-09-22 14:00:00');
+// Public and finished, but its only copy (B2) has never been checked: not playable, never listed.
+raw.prepare(`INSERT INTO vods (id, app_id, title, file_path, is_public, visibility, health_status, storage_provider, created_at, duration_seconds)
+    VALUES (8, 'games', 'Games unverified', '/gone.mp4', 1, 'public', 'ok', 'b2', '2026-09-21 14:00:00', 60)`).run();
+// The files behind the rows, then their objects: the local copies are checked (present) when projected.
+fs.mkdirSync(path.join(tmp, 'vods'), { recursive: true });
+fs.mkdirSync(path.join(tmp, 'clips'), { recursive: true });
+fs.writeFileSync(path.join(tmp, 'vods', 'x.mp4'), 'video bytes');
+fs.writeFileSync(path.join(tmp, 'clips', 'c.webm'), 'clip bytes');
+const model = require('../server/objects/model');
+const readiness = require('../server/objects/readiness');
+for (const id of [1, 2, 3, 4, 5, 6, 7, 8]) model.sync('vod', id);
+for (const id of [11, 12, 13, 14, 15]) model.sync('clip', id);
 
 const app = express();
 app.use('/', require('../server/public/routes'));
@@ -66,14 +78,17 @@ const get = (p, headers = {}) => new Promise((resolve, reject) => {
     const locs = [...r.body.matchAll(/<loc>([^<]+)<\/loc>/g)].map(m => m[1]);
     assert.deepStrictEqual(locs.filter(l => !l.includes('/t/')).sort(), ['https://media.test/', 'https://media.test/c/11', 'https://media.test/v/1'].sort());
     assert.ok(r.body.includes('<image:loc>https://media.test/t/g1.jpg</image:loc>'), 'thumbnails as image entries');
-    for (const never of ['/v/2', '/v/3', '/v/4', '/v/5', '/v/6', '/v/7', '/c/12', '/c/13', '/c/14', '/c/15']) {
+    for (const never of ['/v/2', '/v/3', '/v/4', '/v/5', '/v/6', '/v/7', '/v/8', '/c/12', '/c/13', '/c/14', '/c/15']) {
         assert.ok(!locs.includes(`https://media.test${never}`), `${never} is not listed`);
     }
     // Every listed watch page renders index, follow (no "submitted URL marked noindex").
     const byId = (t, id) => db.get(`SELECT * FROM ${t} WHERE id = ?`, [id]);
-    assert.ok(pages.renderWatchPage('vod', byId('vods', 1)).includes('content="index, follow"'));
-    assert.ok(pages.renderWatchPage('clip', byId('clips', 11)).includes('content="index, follow"'));
-    console.log('✅ /sitemap.xml: public ready items Media is canonical for; private, unlisted, sandbox, Live-owned, AI, recording and failed never');
+    const page = (kind, row) => pages.renderWatchPage(kind, row, readiness.forRow(row));
+    assert.ok(page('vod', byId('vods', 1)).includes('content="index, follow"'));
+    assert.ok(page('clip', byId('clips', 11)).includes('content="index, follow"'));
+    assert.strictEqual(readiness.forRow(byId('vods', 8)).reason, 'verification_pending');
+    assert.ok(page('vod', byId('vods', 8)).includes('content="noindex, follow"'), 'a page without a player never indexes');
+    console.log('✅ /sitemap.xml: public playable items Media is canonical for; private, unlisted, sandbox, Live-owned, AI, recording, failed and unverified never');
 
     // ── llms.txt ──
     r = await get('/llms.txt');

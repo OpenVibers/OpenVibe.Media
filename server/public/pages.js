@@ -68,11 +68,33 @@ function watchIndexable(kind, record) {
 }
 
 /**
+ * What the watch page says instead of a player when the item is not playable (readiness.reason,
+ * server/objects/readiness.js): [heading, detail].
+ */
+function unavailableText(kind, reason) {
+    const isVod = kind === 'vod';
+    const thing = isVod ? 'recording' : 'clip';
+    switch (reason) {
+        case 'recording': return ['Still being recorded', 'This stream is still being recorded. It can be watched here once the recording is finished.'];
+        case 'processing': return ['Still processing', isVod ? 'This recording is still being processed. Check back in a few minutes.' : 'This clip is still being cut. Check back in a minute.'];
+        case 'verification_pending': return ['Still processing', `The stored copy of this ${thing} has not been checked yet. Check back soon.`];
+        case 'failed': return ['Not available', isVod ? 'This recording could not be processed.' : 'This clip could not be cut.'];
+        case 'no_verified_copy': return ['Not available', `No verified copy of this ${thing} can be found right now.`];
+        default: return ['Not available', `This ${thing} cannot be played right now.`];
+    }
+}
+
+/**
  * /v/:id and /c/:id as a page. Canonical stays with the owning app when that
  * app serves the item (Live's /vod/:id and /clip/:id); anything else is
  * self-canonical here.
+ *
+ * `readiness` (server/objects/readiness.js, computed by the route) decides whether a player is
+ * offered: when it is not playable the page says why (still recording, still processing, not
+ * available), offers no player or download, carries no video metadata and is noindex. Without it
+ * (callers that vouch for the bytes themselves) the player is rendered.
  */
-function renderWatchPage(kind, record) {
+function renderWatchPage(kind, record, readiness = null) {
     const isVod = kind === 'vod';
     const id = record.id;
     const self = `${config.publicUrl}/${isVod ? 'v' : 'c'}/${id}`;
@@ -85,8 +107,9 @@ function renderWatchPage(kind, record) {
     const thumb = abs(record.thumbnail_url);
     const ownedByLive = (record.app_id || 'live') === 'live';
     const canonical = ownedByLive ? sourcePage(kind, record) : self;
-    // The owning app has the canonical page; unlisted items and AI clips never index.
-    const robots = watchIndexable(kind, record) ? 'index, follow' : 'noindex, follow';
+    const playable = !readiness || !!readiness.playable;
+    // The owning app has the canonical page; unlisted items, AI clips and pages without a player never index.
+    const robots = playable && watchIndexable(kind, record) ? 'index, follow' : 'noindex, follow';
     const sourceVod = ai && record.vod_id ? `${config.publicUrl}/v/${record.vod_id}` : null;
     const mime = VIDEO_MIME[path.extname(record.file_path || '').toLowerCase()] || 'video/mp4';
     const uploadDate = isoDate(record.created_at);
@@ -119,17 +142,25 @@ function renderWatchPage(kind, record) {
         by ? `by ${esc(by)}` : null,
     ].filter(Boolean);
 
-    const body = `
-  <h1>${esc(title)}</h1>
-  <p class="meta">${metaBits.map(b => `<span>${b}</span>`).join('<span aria-hidden="true">·</span>')}</p>
-  <div class="player">
+    const [stateTitle, stateText] = playable ? [null, null] : unavailableText(kind, readiness.reason);
+    const player = playable
+        ? `<div class="player">
     <video controls playsinline preload="metadata"${thumb ? ` poster="${esc(thumb)}"` : ''} src="${esc(rawUrl)}">
       Your browser cannot play this video. <a href="${esc(rawUrl)}">Download it</a> instead.
     </video>
-  </div>
+  </div>`
+        : `<div class="player unavailable" role="status" data-readiness="${esc(readiness.reason || 'unavailable')}">
+    <p class="state">${esc(stateTitle)}</p>
+    <p class="state-detail">${esc(stateText)}</p>
+  </div>`;
+
+    const body = `
+  <h1>${esc(title)}</h1>
+  <p class="meta">${metaBits.map(b => `<span>${b}</span>`).join('<span aria-hidden="true">·</span>')}</p>
+  ${player}
   <div class="actions">
     ${ownedByLive ? `<a class="btn" href="${esc(canonical)}">${isVod ? 'Watch on OpenVibe.Live' : 'Watch on OpenVibe.Live'} — chat, transcript &amp; more</a>` : ''}
-    <a class="btn ghost" href="${esc(rawUrl)}" download>Download ${isVod ? 'VOD' : 'clip'}</a>
+    ${playable ? `<a class="btn ghost" href="${esc(rawUrl)}" download>Download ${isVod ? 'VOD' : 'clip'}</a>` : ''}
     ${isVod ? `<a class="btn ghost" href="${esc(`${self}/transcript.json`)}">Transcript (JSON)</a>` : ''}
   </div>
   ${record.description ? `<p class="desc">${esc(snip(record.description, 2000))}</p>` : ''}
@@ -138,15 +169,19 @@ function renderWatchPage(kind, record) {
     const css = `
   .player { background: #000; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); margin: 0 0 1rem; }
   .player video { display: block; width: 100%; max-height: 72vh; background: #000; }
+  .player.unavailable { background: var(--panel); padding: 2.5rem 1.2rem; text-align: center; }
+  .player .state { font-size: 1.15rem; font-weight: 600; margin: 0 0 .4rem; color: var(--text); }
+  .player .state-detail { margin: 0; color: var(--muted); }
   .h2 { font-size: 1rem; margin: 1.2rem 0 .3rem; color: var(--text); }`;
 
     return pageFrame.page({
         seo: {
             title: `${title} — ${SITE_NAME}`, description, canonical, robots,
-            image: thumb || undefined, ogType: 'video.other',
-            video: { url: rawUrl, type: mime },
+            image: thumb || undefined, ogType: playable ? 'video.other' : 'website',
+            // No playable bytes: no video URL for previews and no VideoObject that names them.
+            video: playable ? { url: rawUrl, type: mime } : undefined,
             // Structured data describes public items only; unlisted and private pages carry none.
-            jsonLd: (record.visibility || (record.is_public ? 'public' : 'private')) === 'public' ? [videoObject] : [],
+            jsonLd: playable && (record.visibility || (record.is_public ? 'public' : 'private')) === 'public' ? [videoObject] : [],
         },
         css, body,
         history: { type: isVod ? 'vod' : 'clip', title },

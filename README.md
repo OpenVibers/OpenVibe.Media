@@ -43,7 +43,8 @@ server/
   public/routes.js       public /v /c /p /t /f
   objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
                          backfill, reconcile, invariant, signing (presigned URLs), multipart,
-                         content-type, verify-job (scheduled copy verification), copy-report —
+                         content-type, verify-job (scheduled copy verification), copy-report,
+                         readiness (metadata / bytes_verified / playable) —
                          see docs/object-model.md
   jobs/                  media_jobs: queue (states, idempotency, media.job.* events in the state
                          change's transaction; payload queue.jobEvent: ids, state, ISO times,
@@ -158,13 +159,20 @@ MEDIA_APP_KEYS="live:key1,games:key2"
 | POST | `/vods/:id/chunks` | multipart `chunk` (+`segmentId`), user JWT ok — browser MediaRecorder append flow |
 | POST | `/vods/:id/complete` | finalize chunked upload (user JWT ok) |
 | POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, webhook |
-| GET | `/vods/:id` | `{ id, title, status, duration, playback_url, thumbnail_url, storage_provider, … }` |
+| GET | `/vods/:id` | `{ id, title, status, duration, playback_url, thumbnail_url, storage_provider, readiness, … }` (`readiness`: [below](#readiness)) |
 | GET | `/vods?limit&offset&user_id&stream_id&managed_stream_id&include_private&order&since` | list; `include_private` app-key only; `order` = newest\|oldest\|views; `since` = created at or after (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC) |
 | PUT | `/vods/:id` | `{ title?, description?, visibility? }` |
 | DELETE | `/vods/:id` | deletes local + B2 + R2 objects + row |
 
 `status`: `pending → recording → ready | failed` (derived; failures come from
 health quarantine: corrupt / zero-byte / missing file).
+
+<a id="readiness"></a>**Readiness.** VOD and clip answers (and v2 objects) also carry `readiness`
+`{ metadata, bytes_verified, playable, hash_verified, verified_copies, reason }`, read from the object
+model: `bytes_verified` needs a copy whose bytes a check found (local file, B2/R2 HEAD, sha256 when
+known), and `playable` adds a finished, not failed, not deleted VOD or clip. A B2 copy nobody has
+checked yet is not verified. The watch pages offer a player only when `playable` (see
+[docs/object-model.md](docs/object-model.md#readiness)).
 
 **Durations are measured, never estimated.** Finalize stores what the file says and
 records where it came from in `duration_source`: `probe` (ffprobe's container
@@ -352,12 +360,14 @@ never the headers (`test/trust-proxy.test.js`).
 | `GET /live/:sel/chat-insight.json` | **chat insight API** — a user's chat-related AI insight/timeline (`:sel` = `@username` or numeric user id): today-vs-alltime chat overviews, condensed memory, event timeline, plus their streamer overview + stream memories when they stream. Proxied from the app's public chat-AI API over loopback; cached **30s**, CORS-open. |
 | `GET /v/:id/transcript.json` | **VOD transcript API** — transcript + AI overview for one existing VOD id (`{ vod_id, title, duration_seconds, ai_overview, transcript, ai_analyzed_at }`). Private VODs → 404. Cached 30s, CORS-open. |
 | `GET /robots.txt` | crawler policy (`openvibe-shared/seo.robotsTxt`: AI and search crawlers named, `/api/`, `/auth/`, `/internal/`, `/o/`, `/metrics`, `/live/` disallowed) and the sitemap |
-| `GET /sitemap.xml` | the media index and the watch pages Media is the canonical home of: public, ready VODs and clips of apps other than Live (Live lists its own `/vod` and `/clip` pages), never AI clips, private, unlisted, sandbox, recording or failed items; thumbnails as image entries. Every listed page renders `index, follow` |
+| `GET /sitemap.xml` | the media index and the watch pages Media is the canonical home of: public, playable VODs and clips of apps other than Live (Live lists its own `/vod` and `/clip` pages), never AI clips, private, unlisted, sandbox, recording or failed items; thumbnails as image entries. Every listed page renders `index, follow` |
 | `GET /llms.txt` | a map of the site for language-model crawlers |
 | `GET /live/:sel/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot, extracted from its in-progress recording. `:sel` = slot id (`1`), slot **slug** (`whip`), or **`@username`** (that streamer's top-viewed live slot; slug/username resolve via the app's `/api/streams` listing, cached 5s). Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`; internal base URLs from `APP_INTERNAL_URLS` JSON env or `LIVE_APP_INTERNAL_URL`). Cached **5s per slot** (that cache is the rate limit), CORS-open for external APIs/bots/dashboards. Not live → **404 with a styled OFFLINE card** (real JPEG bytes — dev pipelines decode the body as image/jpeg) so `<img>` embeds degrade nicely (`?format=json` for JSON errors); `503` + card when live but a frame can't be cut. |
 
-Watch pages (`/v/:id`, `/c/:id` on a browser navigation) carry a schema.org `VideoObject` when the
-item is public (none on unlisted or private pages). AI clips (`auto_generated`) are `noindex, follow`
+Watch pages (`/v/:id`, `/c/:id` on a browser navigation) offer a player only when the item's
+[readiness](#readiness) is `playable`; otherwise they say why (still being recorded, still processing,
+not available) and are `noindex`. They carry a schema.org `VideoObject` when the item is public and
+playable (none on unlisted or private pages). AI clips (`auto_generated`) are `noindex, follow`
 wherever they belong, labelled "AI clip", attributed to no person (`creator` OpenVibe AI) and
 `isBasedOn` their source VOD, as on Live.
 

@@ -7,7 +7,7 @@ projection over an object through its `object_id` column. Every existing URL and
 unchanged. New code talks to objects through the [v2 API](#object-api-v2).
 
 Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`, `invariant.js`,
-`signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`) and the job system in
+`signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`, `readiness.js`) and the job system in
 `server/jobs/` (`queue.js`, `worker.js`, `routes.js`, `types.js`, `thumbnail.js`, `invariant-scan.js`,
 `derive.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`, `test/jobs*.test.js`,
 `test/r2-eviction-drill.test.js`.
@@ -193,7 +193,7 @@ All routes live under `/api/v2/:app/objects`.
 | PUT | `/:id/multipart/:uploadId/parts/:n` | one part, raw bytes of exactly its size; optional `X-Content-SHA256` |
 | POST | `/:id/multipart/:uploadId/complete` | `{ content_hash, parts: [{ part_number, sha256 }] }` (both optional): assembles, then the checks of `/complete` |
 | DELETE | `/:id/multipart/:uploadId` | abort: parts deleted, the object stays `uploading` |
-| GET | `/:id` | metadata: providers and states of each copy, never paths or keys |
+| GET | `/:id` | metadata: providers and states of each copy, never paths or keys, and its [readiness](#readiness) |
 | GET | `/` | cursor list, newest first. `?limit (≤200)&cursor&kind&visibility&status&owner (usr_…)&user_id&include_deleted` returns `{ objects, next_cursor }` |
 | DELETE | `/:id` | soft delete: `lifecycle_status = deleted`, and the bytes are kept for `MEDIA_DELETE_RETENTION_DAYS` (default 30). 409 `media.object.held` under a hold. 409 `media.object.legacy_managed` for projected objects, which are deleted through their v1 route |
 | POST | `/:id/restore` | undo a soft delete within the retention period (410 once purged) |
@@ -284,6 +284,44 @@ count, except in developer-project tenants, where they count until their bytes a
 **Purge.** Every hour, the service removes the bytes of native objects whose retention period has
 passed and that have no active hold. The object row stays `deleted` with `metadata.purged_at`.
 Projected objects are never purged by this job.
+
+## Readiness
+
+Code: `server/objects/readiness.js`. Test: `test/readiness.test.js`.
+
+Every object answer (v2 `GET /:id`, the v2 list, the `media.object.uploaded` payload) and the v1 VOD
+and clip answers (`GET`, list, update, finalize, upload; not the `vod.*`/`clip.*` webhook payloads,
+which are sent before the object is re-projected) carry `readiness`:
+
+```json
+{ "metadata": true, "bytes_verified": true, "playable": true, "hash_verified": false, "verified_copies": ["local"], "reason": null }
+```
+
+Each fact is read from what the database records, never assumed:
+
+- `metadata`: the object row exists and its metadata is readable. A v1 row with no object yet has `false`
+  everywhere and `reason: no_object`.
+- `bytes_verified`: at least one copy is `present` with a `verified_at`, which only a check of the bytes
+  writes: the local file found at its path (sha256-checked against `content_hash` by the
+  [scheduled verification](#scheduled-verification) when the object has one), a B2/R2 HEAD with the
+  right size (a tier move, the verification, `reconcile-objects.js --verify`), or a v2 upload hashed on
+  receipt. A copy whose recorded checksum contradicts `content_hash` does not count; neither do
+  `pending` (never checked), `missing` or `corrupt` copies. `hash_verified` says whether a verified
+  copy's sha256 equals `content_hash`; `verified_copies` names their providers.
+- `playable`: `bytes_verified`, a playback kind (`vod`, `clip`) and lifecycle `ready`: the recording is
+  finished or the clip cut, nothing failed, nothing deleted.
+
+`reason` says why it is not playable: `no_object`, `deleted`, `metadata_unreadable`, `failed`,
+`archived`, `recording`, `processing`, `verification_pending` (only unchecked copies),
+`no_verified_copy`, `not_playback_kind`; `null` when it is. The public-size invariant does not gate
+`playable`: it refuses oversized public v2 uploads (they never become ready) and only reports
+recordings.
+
+**Public players.** The `/v/:id` and `/c/:id` watch pages offer a player (and a download link, video
+preview tags and a `VideoObject`) only when `playable`. Otherwise the page says why (still being
+recorded, still processing, not available), is `noindex`, and a clip still being cut has a page
+instead of a 404. The sitemap lists only playable watch pages. The byte routes (`?raw=1`, `<video>`
+requests, `/o/:id`) are unchanged: Live's DVR player reads a recording while it is being written.
 
 ## Retention holds
 

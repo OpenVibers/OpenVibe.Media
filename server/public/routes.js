@@ -133,10 +133,13 @@ async function serveMediaRecord(kind, record, req, res) {
     if (visibility === 'private' && !canAccessPrivate(record, req)) return notFound(res);
 
     // A person (or a link-preview crawler) landing on the URL gets the watch
-    // page; its <video> comes back here with ?raw=1 for the bytes.
+    // page; its <video> comes back here with ?raw=1 for the bytes. The page offers a player only when
+    // the object is playable (server/objects/readiness.js: finished, and a copy whose bytes were
+    // verified); otherwise it says why. The bytes route below is unchanged: Live's DVR player reads a
+    // recording's sidecar through it while the stream is still being recorded.
     if (pages.wantsHtmlPage(req)) {
         res.set('Cache-Control', visibility === 'public' ? 'public, max-age=60' : 'private, no-store');
-        return res.type('html').send(pages.renderWatchPage(kind, record));
+        return res.type('html').send(pages.renderWatchPage(kind, record, require('../objects/readiness').forRow(record)));
     }
     if (drill.refuseBytes(res)) return;
 
@@ -217,7 +220,9 @@ router.get('/c/:id', optionalIdentity, async (req, res) => {
     try {
         if (!/^\d+$/.test(req.params.id)) return notFound(res);
         const clip = db.getClipById(parseInt(req.params.id, 10));
-        if (!clip || !clip.file_path) return notFound(res);
+        // A clip still being cut (or whose cut failed) has no file yet: its bytes are a 404, and a
+        // browser navigation gets the watch page saying so (private clips still look missing).
+        if (!clip || (!clip.file_path && !pages.wantsHtmlPage(req))) return notFound(res);
         await serveMediaRecord('clip', clip, req, res);
     } catch (err) {
         console.error('[Public] /c error:', err.message);

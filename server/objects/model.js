@@ -543,6 +543,7 @@ function legacyPublicUrl(obj) {
 
 function objectPublic(obj, { locations = true } = {}) {
     if (!obj) return null;
+    const locs = listLocations(obj.id);
     const out = {
         id: obj.id,
         media_ref: { media_id: obj.id },
@@ -558,6 +559,8 @@ function objectPublic(obj, { locations = true } = {}) {
         content_hash: obj.content_hash || null,
         metadata: parseJson(obj.metadata, {}),
         held: isHeld(obj.id),
+        // metadata / bytes_verified / playable, from this row and its copies' recorded checks (objects/readiness.js).
+        readiness: require('./readiness').compute(obj, locs),
         // Developer-project sandbox objects have no public URL: /download hands out signed ones.
         public_url: obj.visibility !== 'private' && obj.lifecycle_status === 'ready' && !db.isSandboxTenant(obj.app_id)
             ? (legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`) : null,
@@ -568,7 +571,7 @@ function objectPublic(obj, { locations = true } = {}) {
     if (db.isSandboxTenant(obj.app_id)) out.sandbox = true;
     // Where the bytes are, never the keys or paths themselves.
     if (locations) {
-        out.locations = listLocations(obj.id).map(l => ({
+        out.locations = locs.map(l => ({
             provider: l.provider, storage_class: l.storage_class, state: l.state, size_bytes: l.size_bytes,
             verified_at: l.verified_at, canonical: l.provider === obj.canonical_provider,
         }));

@@ -256,7 +256,7 @@ async function _finalizeHandler(req, res) {
             segmentPath: chunkRec && chunkRec.currentSegmentPath !== chunkRec.filePath ? chunkRec.currentSegmentPath : null,
         });
         if (!result) return res.status(409).json({ error: 'Nothing to finalize (finalization already in progress or VOD discarded)' });
-        res.json({ vod: vodPublic(result) });
+        res.json({ vod: vodPublic(result, { readiness: true }) });
     } catch (err) {
         console.error('[VOD] Finalize error:', err.message);
         res.status(500).json({ error: 'Failed to finalize VOD' });
@@ -291,7 +291,7 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
         };
         const vods = db.listVods(req.appId, filters);
         const total = db.countVods(req.appId, filters);
-        res.json({ vods: vods.map(vodPublic), total, limit, offset, hasMore: offset + vods.length < total });
+        res.json({ vods: vods.map(v => vodPublic(v, { readiness: true })), total, limit, offset, hasMore: offset + vods.length < total });
     } catch (err) {
         console.error('[VOD] List error:', err.message);
         res.status(500).json({ error: 'Failed to list VODs' });
@@ -335,7 +335,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
 
         // Bare object per CONTRACTS.md: { id, title, status, duration, … }
         // Detail responses carry the transcript too (lists stay light).
-        res.json({ ...vodPublic(vod), ai_transcript: vod.ai_transcript || null });
+        res.json({ ...vodPublic(vod, { readiness: true }), ai_transcript: vod.ai_transcript || null });
     } catch (err) {
         console.error('[VOD] Get error:', err.message);
         res.status(500).json({ error: 'Failed to get VOD' });
@@ -358,7 +358,7 @@ router.put('/:id', tenantAuth(), (req, res) => {
         }
         if (visibility !== undefined) db.setVodVisibility(vod.id, visibility);
         else if (updates.length) objects.safeSync('vod', vod.id);
-        res.json({ vod: vodPublic(db.getVodById(vod.id, req.appId)) });
+        res.json({ vod: vodPublic(db.getVodById(vod.id, req.appId), { readiness: true }) });
     } catch (err) {
         console.error('[VOD] Update error:', err.message);
         res.status(500).json({ error: 'Failed to update VOD' });

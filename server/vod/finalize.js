@@ -34,10 +34,12 @@ function isFinalizing(vodId) {
     return _finalizing.has(Number(vodId));
 }
 
-// Public shape of a vod row for API responses + webhooks.
-function vodPublic(vod) {
+// Public shape of a vod row for API responses + webhooks. { readiness: true } (API responses) adds the
+// object's readiness levels (server/objects/readiness.js); webhook payloads leave them out, because a
+// finalize announces before it re-projects the object.
+function vodPublic(vod, { readiness = false } = {}) {
     if (!vod) return null;
-    return {
+    const out = {
         unique_views: vod.unique_views || 0,
 
         id: vod.id,
@@ -75,6 +77,8 @@ function vodPublic(vod) {
         created_at: vod.created_at,
         meta: (() => { try { return JSON.parse(vod.meta_json || '{}'); } catch { return {}; } })(),
     };
+    if (readiness) out.readiness = require('../objects/readiness').forRow(vod);
+    return out;
 }
 
 // Re-encode the lossless master into the served WebM format. Heavy (a real

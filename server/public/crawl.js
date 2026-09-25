@@ -4,7 +4,9 @@
  * The sitemap lists the pages search engines may index here: the media index (/) and the watch
  * pages of public, ready VODs and clips that Media is the canonical home of (pages.watchIndexable:
  * not Live's, which Live lists under its own /vod and /clip pages; never AI clips; never private or
- * unlisted; never a developer project's sandbox). A URL here always renders `index, follow`.
+ * unlisted; never a developer project's sandbox), and only while they are playable (their object is
+ * ready and has a copy whose bytes were verified: server/objects/readiness.js). A URL here always
+ * renders `index, follow` with a player.
  */
 'use strict';
 
@@ -13,6 +15,7 @@ const config = require('../config');
 const db = require('../db/database');
 const seo = require('openvibe-shared/seo');
 const pages = require('./pages');
+const readiness = require('../objects/readiness');
 
 const MAX_URLS = 45000;          // under the 50,000-URL sitemap limit
 const router = express.Router();
@@ -36,7 +39,7 @@ function sitemapEntries() {
     const vods = db.all(`SELECT id, app_id, visibility, is_public, thumbnail_url, created_at FROM vods
         WHERE COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0 AND is_public = 1 AND COALESCE(visibility, 'public') = 'public'
           AND quarantined_at IS NULL AND COALESCE(health_status, 'ok') NOT IN ('corrupt', 'zero_byte', 'missing_file', 'needs_review')
-          AND file_path IS NOT NULL AND app_id != 'live'
+          AND file_path IS NOT NULL AND app_id != 'live' AND ${readiness.playableSql('vods.object_id')}
         ORDER BY created_at DESC LIMIT ?`, [MAX_URLS]);
     for (const v of vods) {
         if (sandbox.has(v.app_id) || !pages.watchIndexable('vod', v)) continue;
@@ -44,7 +47,7 @@ function sitemapEntries() {
     }
     const clips = db.all(`SELECT id, app_id, visibility, is_public, auto_generated, thumbnail_url, created_at FROM clips
         WHERE COALESCE(status, 'ready') = 'ready' AND COALESCE(is_public, 1) = 1 AND COALESCE(visibility, 'public') = 'public'
-          AND COALESCE(auto_generated, 0) = 0 AND COALESCE(file_path, '') != '' AND app_id != 'live'
+          AND COALESCE(auto_generated, 0) = 0 AND COALESCE(file_path, '') != '' AND app_id != 'live' AND ${readiness.playableSql('clips.object_id')}
         ORDER BY created_at DESC LIMIT ?`, [MAX_URLS]);
     for (const c of clips) {
         if (sandbox.has(c.app_id) || !pages.watchIndexable('clip', c)) continue;
