@@ -93,6 +93,8 @@ app.get('/manifest.webmanifest', (_req, res) => res.type('application/manifest+j
     const pastes = require('./pastes/routes');
     app.post('/internal/avatar-ingest', internalOnly, require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config, screenshotsDir: pastes.SCREENSHOTS_DIR, generateSlug: pastes.generateSlug }));
 }
+// Network's sign-out-everywhere cutoffs (server/revocations.js): signed, loopback-only, like the rest of /internal.
+app.post('/internal/events', ...require('./revocations').handler());
 const userAuth = require('./user-auth');
 const userAuthConfig = {
     baseUrl: config.publicUrl, networkUrl: config.network.url, networkInternalUrl: config.network.internalUrl,
@@ -259,6 +261,14 @@ if (!drill.enabled) {
 // ── Listen + graceful shutdown ───────────────────────────────
 
 const server = app.listen(config.port, config.host, () => {
+    // Subscribe to Network's sign-out-everywhere cutoffs (not on a restore drill; retried a few times).
+    if (!drill.enabled) {
+        const subscribe = (n) => require('./revocations').ensureSubscription().catch((e) => {
+            console.warn('[Events] token cutoff subscription not ready:', e.message);
+            if (n < 5) setTimeout(() => subscribe(n + 1), 60_000 * n).unref();
+        });
+        subscribe(1);
+    }
     if (drill.enabled) { console.log(`[Drill] Ready: http://${config.host}:${config.port} (reads only)`); return; }
     console.log(`[Media] OpenVibe.Media listening on ${config.host}:${config.port} (${config.nodeEnv})`);
     console.log(`[Media] Data: db=${config.db.path} vods=${config.vod.path} clips=${config.vod.clipsPath}`);

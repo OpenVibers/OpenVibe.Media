@@ -86,7 +86,10 @@ function createAuthClient(config) {
     async function verify(token) {
         if (!token) return null;
         await ensureKey();
-        return client.verifyToken(token);
+        const claims = await client.verifyToken(token);
+        // Signed out everywhere / password changed / banned since this token was issued (WS-B task 4).
+        if (claims && require('./revocations').isRevoked(claims)) return null;
+        return claims;
     }
 
     // Warm the key cache at boot (non-fatal if the Network is down). A restore drill asks Network
