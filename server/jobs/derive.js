@@ -50,7 +50,7 @@ function extFor(obj, sourcePath) {
 }
 
 function mimeFor(ext, obj) {
-    return { '.webm': 'video/webm', '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.m4a': 'audio/mp4', '.ogg': 'video/ogg', '.mp3': 'audio/mpeg' }[ext]
+    return { '.webm': 'video/webm', '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.m4a': 'audio/mp4', '.ogg': 'video/ogg', '.mp3': 'audio/mpeg', '.png': 'image/png', '.jpg': 'image/jpeg' }[ext]
         || obj.mime_type || 'application/octet-stream';
 }
 
@@ -168,7 +168,8 @@ function cleanupWork(jobId) {
  * move the bytes under OBJECTS_PATH/<app>/<id>, verified local location, relationship; `alsoInTx`
  * (the job checkpoint) commits with it. Returns the new object id.
  */
-async function adopt({ src, file, ext, job, relation, metadata, variant, saveCheckpoint, checkpointFor }) {
+// kind/suffix: a derived image (waveform, sprite) is an `asset` named <source>-<suffix>.<ext>; parts and remuxes keep the source's kind.
+async function adopt({ src, file, ext, job, relation, metadata, variant, saveCheckpoint, checkpointFor, kind = null, suffix = null }) {
     const size = fs.statSync(file).size;
     const hash = await sha256File(file);
     const md = model.parseJson(src.metadata, {});
@@ -181,9 +182,9 @@ async function adopt({ src, file, ext, job, relation, metadata, variant, saveChe
             db.run(`INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, owner_app, owner_user_id, visibility, lifecycle_status,
                         mime_type, size_bytes, content_hash, canonical_provider, canonical_key, legacy_ref, metadata)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'private', 'ready', ?, ?, ?, 'local', ?, NULL, ?)`,
-            [id, src.app_id, src.namespace || src.app_id, src.kind, src.owner_subject || null, src.owner_app || src.app_id, src.owner_user_id ?? null,
+            [id, src.app_id, src.namespace || src.app_id, kind || src.kind, src.owner_subject || null, src.owner_app || src.app_id, src.owner_user_id ?? null,
                 mimeFor(ext, src), size, hash, dest,
-                JSON.stringify({ title: md.title || null, derived_from: src.id, job_id: job.id, filename: `${src.id}${metadata.part ? `-part${metadata.part}` : '-remux'}${ext}`, ...metadata })]);
+                JSON.stringify({ title: md.title || null, derived_from: src.id, job_id: job.id, filename: `${src.id}${suffix ? `-${suffix}` : metadata.part ? `-part${metadata.part}` : '-remux'}${ext}`, ...metadata })]);
             model.upsertLocation(id, { provider: 'local', key: dest, state: 'present', size_bytes: size, checksum: hash, verified: true });
             model.setRelationship(id, 'derived_from', src.id, { job_id: job.id, ...relation });
             if (variant) model.setVariant(src.id, variant, id, `${job.type}@1`);
@@ -307,4 +308,6 @@ module.exports = {
     split: { lane: 'heavy', maxAttempts: 3, timeoutMs: 6 * 3600 * 1000, needsObject: true, validate: validateSplit, run: runSplit },
     remux: { lane: 'heavy', maxAttempts: 3, timeoutMs: 3 * 3600 * 1000, needsObject: true, validate: validateRemux, run: runRemux },
     resolveSource, isMediaObject, extFor,
+    // for the preview jobs (previews.js)
+    loadSource, adopt, ffmpeg, inputArgs, probeDuration, workDir, cleanupWork, existing, checkRoom,
 };

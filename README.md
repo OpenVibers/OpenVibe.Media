@@ -50,7 +50,7 @@ server/
                          change's transaction; payload queue.jobEvent: ids, state, ISO times,
                          has_result, never params/result/error text/creator), worker (light/heavy lanes, leases, retries,
                          cancellation), routes (/api/v2/:app/jobs), types: thumbnail.regenerate,
-                         invariant.scan (proposes split/remux), object.split, object.remux,
+                         invariant.scan (proposes split/remux), object.split, object.remux, object.waveform, object.sprite,
                          vod.finalize (orphans and failed finalizes, with backoff),
                          vod.duration.reconcile (stored vs measured durations, local and B2/R2),
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only)
