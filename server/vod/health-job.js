@@ -239,9 +239,16 @@ function sweepJunkVods() {
               AND COALESCE(file_size, 0) < 10000000
               AND (storage_provider IS NULL OR storage_provider = 'local')
               AND COALESCE(health_status, 'unknown') IN ('unknown', '')`);
-        let deleted = 0, quarantined = 0;
+        let deleted = 0, quarantined = 0, held = 0;
+        const objects = require('../objects/model');
         for (const v of rows) {
             const hasFile = v.file_path && fs.existsSync(v.file_path) && (() => { try { return fs.statSync(v.file_path).size > 0; } catch { return false; } })();
+            // A held row is never deleted (and its file never unlinked): it is left for its hold's owner.
+            if (!hasFile && objects.isHeldRow(db.get('SELECT object_id FROM vods WHERE id = ?', [v.id]))) {
+                console.log(`[VOD-Health] Junk sweep: vod ${v.id} has no media but is under a retention hold — not deleting`);
+                held++;
+                continue;
+            }
             if (!hasFile) {
                 try { if (v.file_path && fs.existsSync(v.file_path)) fs.unlinkSync(v.file_path); } catch { /* */ }
                 db.run('DELETE FROM vods WHERE id = ?', [v.id]);
@@ -252,7 +259,7 @@ function sweepJunkVods() {
                 quarantined++;
             }
         }
-        if (deleted || quarantined) console.log(`[VOD-Health] Junk sweep: deleted ${deleted} empty VODs, quarantined ${quarantined} short ones`);
+        if (deleted || quarantined || held) console.log(`[VOD-Health] Junk sweep: deleted ${deleted} empty VODs, quarantined ${quarantined} short ones${held ? `, kept ${held} under a retention hold` : ''}`);
     } catch (e) { console.warn('[VOD-Health] junk sweep error:', e.message); }
 }
 

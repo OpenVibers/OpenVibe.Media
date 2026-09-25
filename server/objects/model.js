@@ -99,14 +99,34 @@ function listHolds(objectId, { includeReleased = false } = {}) {
     return db.all(`SELECT * FROM media_holds WHERE object_id = ?${includeReleased ? '' : ' AND released_at IS NULL'} ORDER BY id`, [objectId]);
 }
 
-function isHeld(objectId) {
-    if (!objectId) return false;
-    return !!db.get('SELECT 1 AS x FROM media_holds WHERE object_id = ? AND released_at IS NULL LIMIT 1', [objectId]);
+/** Unreleased holds a clip inherits from its source VOD (clip_of, or the clip row's vod_id), each with inherited_from. */
+function inheritedHolds(objectId) {
+    if (!objectId) return [];
+    return db.all(`SELECT h.*, h.object_id AS inherited_from FROM media_holds h WHERE h.released_at IS NULL AND h.object_id != @id AND (
+        h.object_id IN (SELECT r.to_object_id FROM media_relationships r WHERE r.from_object_id = @id AND r.relation = 'clip_of')
+        OR h.object_id IN (SELECT v.object_id FROM clips c JOIN vods v ON v.id = c.vod_id WHERE c.object_id = @id)) ORDER BY h.id`, { id: objectId });
 }
 
-/** Hold check for an inherited row (vods/clips/files/pastes) — false when it has no object yet. */
+/** Under an unreleased hold: its own, or (a clip) its source VOD's. The delete triggers apply the same rule (db.heldSql). */
+function isHeld(objectId) {
+    if (!objectId) return false;
+    return !!db.get(`SELECT ${db.heldSql('@id')} AS held`, { id: objectId }).held;
+}
+
+/**
+ * Hold check for an inherited row (vods/clips/files/pastes). A clip row also follows its source VOD's
+ * hold before it has an object of its own; any other row with no object yet is not held.
+ */
 function isHeldRow(row) {
-    try { return !!(row && row.object_id && isHeld(row.object_id)); } catch { return false; }
+    try {
+        if (!row) return false;
+        if (row.object_id && isHeld(row.object_id)) return true;
+        if (row.vod_id != null) {
+            const vod = db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
+            return !!(vod && vod.object_id && isHeld(vod.object_id));
+        }
+        return false;
+    } catch { return false; }
 }
 
 // ── Writes ───────────────────────────────────────────────────
@@ -449,11 +469,18 @@ function afterTierMove(vodId, verifiedProviders = []) {
 
 // ── Holds ────────────────────────────────────────────────────
 
-function placeHold({ object_id, kind, reason = '', created_by = null }) {
+/** Place a hold. created_by (or placed_by) is who placed it; note is free text for staff (≤ 2000). */
+function placeHold({ object_id, kind, reason = '', created_by = null, placed_by = null, note = null }) {
     if (!HOLD_KINDS.includes(kind)) throw new Error(`hold kind must be one of ${HOLD_KINDS.join(', ')}`);
-    const r = db.run('INSERT INTO media_holds (object_id, kind, reason, created_by) VALUES (?, ?, ?, ?)',
-        [object_id, kind, String(reason || '').slice(0, 1000), created_by]);
+    const r = db.run('INSERT INTO media_holds (object_id, kind, reason, created_by, note) VALUES (?, ?, ?, ?, ?)',
+        [object_id, kind, String(reason || '').slice(0, 1000), placed_by ?? created_by, note == null || note === '' ? null : String(note).slice(0, 2000)]);
     return db.get('SELECT * FROM media_holds WHERE id = ?', [r.lastInsertRowid]);
+}
+
+/** A hold as the APIs answer it: the row, plus placed_by / placed_at (the names staff tools use for created_by / created_at). */
+function holdPublic(h) {
+    if (!h) return null;
+    return { ...h, note: h.note ?? null, placed_by: h.created_by ?? null, placed_at: h.created_at ?? null };
 }
 
 function releaseHold(holdId, releasedBy = null) {
@@ -582,10 +609,10 @@ function objectPublic(obj, { locations = true } = {}) {
 module.exports = {
     KINDS, VISIBILITIES, LIFECYCLES, HOLD_KINDS, HeldError,
     mimeFor, parseJson, parseLegacyRef, thumbFileFromUrl,
-    getObject, getObjectByLegacyRef, resolveObject, listLocations, listHolds, isHeld, isHeldRow,
+    getObject, getObjectByLegacyRef, resolveObject, listLocations, listHolds, inheritedHolds, isHeld, isHeldRow,
     createObject, updateObject, upsertLocation, setLocationState, setRelationship, setVariant, getVariant,
     syncVod, syncClip, syncFile, syncPaste, sync, safeSync, afterTierMove,
-    placeHold, releaseHold,
+    placeHold, releaseHold, holdPublic,
     objectFilePath, softDelete, restore, purgeExpired, usedBytes,
     legacyPublicUrl, objectPublic,
 };

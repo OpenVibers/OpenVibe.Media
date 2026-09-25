@@ -335,7 +335,10 @@ CREATE TABLE IF NOT EXISTS media_upload_parts (
     PRIMARY KEY (upload_id, part_number)
 );
 
--- Retention holds: an object with an unreleased hold cannot be deleted or moved between tiers.
+-- Retention holds: an object with an unreleased hold cannot be deleted or moved between tiers, and a
+-- clip follows its source VOD's hold (database.js heldSql). created_by / created_at are who placed it and
+-- when (placed_by / placed_at in the API); note is free text for staff. Placed and released through
+-- /api/v2/:app/objects/:id/holds and the staff routes /api/v1/:app/admin/storage/holds.
 CREATE TABLE IF NOT EXISTS media_holds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     object_id TEXT NOT NULL,
@@ -344,7 +347,8 @@ CREATE TABLE IF NOT EXISTS media_holds (
     created_by TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     released_at DATETIME,
-    released_by TEXT
+    released_by TEXT,
+    note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_media_holds_object ON media_holds(object_id, released_at);
 

@@ -22,7 +22,7 @@ Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`,
 | `media_variants` | `object_id`, `variant_name`, `derived_object_id`, `recipe`. In use: `thumbnail` |
 | `media_jobs` | derivative/maintenance jobs: `id` (mjob_…), `app_id`, `object_id`, `job_type`, `status`, `idempotency_key`, `params`, `result`, `attempts`/`max_attempts`, `run_after`, `lease_until`, `checkpoint`, `error`/`error_code`, `cancel_requested`, `created_by`, `decided_by`. See [Jobs](#jobs) |
 | `media_uploads`, `media_upload_parts` | multipart upload sessions and the parts received (size, sha256). See [Multipart uploads](#multipart-uploads) |
-| `media_holds` | retention holds, see [Holds](#retention-holds) |
+| `media_holds` | retention holds (with a staff `note`), see [Holds](#retention-holds) |
 | `media_invariant_violations` | public playback objects over the size policy, see [Invariant](#public-object-size-invariant) |
 
 Location `state`:
@@ -198,8 +198,8 @@ All routes live under `/api/v2/:app/objects`.
 | DELETE | `/:id` | soft delete: `lifecycle_status = deleted`, and the bytes are kept for `MEDIA_DELETE_RETENTION_DAYS` (default 30). 409 `media.object.held` under a hold. 409 `media.object.legacy_managed` for projected objects, which are deleted through their v1 route |
 | POST | `/:id/restore` | undo a soft delete within the retention period (410 once purged) |
 | GET | `/:id/download` | public or unlisted: 302 to the public location (the inherited URL for projected objects such as `/v/:id`, `/c/:id`, `/f/:key`, `/t/:name`, `/p/:slug/screenshot`; otherwise `/o/:id`). Private: `{ url, expires_at }` signed for `?ttl` seconds (30 to 3600, default `MEDIA_SIGNED_URL_TTL_S` = 300), or a 302 with `?redirect=1`. `?format=json` always answers JSON. 410 when deleted |
-| GET | `/:id/holds` | active holds (`?all=1` includes released ones) |
-| POST | `/:id/holds` | **app key only.** `{ kind, reason, created_by }` |
+| GET | `/:id/holds` | active holds (`?all=1` includes released ones), `inherited_holds` (a clip's VOD's) and `held` |
+| POST | `/:id/holds` | **app key only.** `{ kind, reason, note, placed_by \| created_by }` |
 | DELETE | `/:id/holds/:holdId` | **app key only.** Releases the hold (`released_at`, `released_by`) |
 
 **Public bytes: `GET /o/:id`.**
@@ -325,18 +325,40 @@ requests, `/o/:id`) are unchanged: Live's DVR player reads a recording while it 
 
 ## Retention holds
 
-`media_holds(object_id, kind, reason, created_by, created_at, released_at, released_by)`. The
-`kind` is one of `moderation`, `dmca`, `creator_pin`, `admin`, `evidence`. While any hold is
-unreleased:
+`media_holds(object_id, kind, reason, created_by, created_at, released_at, released_by, note)`: one
+table for the v2 routes (`/:id/holds`) and the staff routes (`/api/v1/:app/admin/storage/holds`).
+`created_by` / `created_at` are who placed the hold and when; the APIs also answer them as `placed_by` /
+`placed_at`. `note` is free text for staff. The `kind` is one of `moderation`, `dmca`, `creator_pin`,
+`admin`, `evidence`. Test: `test/retention-holds.test.js`.
+
+**Clips follow their VOD.** A clip cut from a held VOD is held too: through its `clip_of` relationship,
+or its row's `vod_id` when the clip has no object yet. One SQL rule (`database.js heldSql`) serves the
+triggers and `model.isHeld()`. `GET /:id/holds` on a clip lists the VOD's holds under `inherited_holds`.
+A hold on a clip does not hold its VOD.
+
+While any hold applies:
 
 - **No delete path works.**
   - v2 `DELETE` answers 409.
-  - The v1 deletes for vods, clips and files, and the admin bulk delete, answer 409 or report `held`.
-  - Quarantine cleanup skips the object.
+  - The v1 deletes for vods, clips, files and pastes, and the admin bulk delete, answer 409 or report `held`; the paste bulk delete skips it.
+  - Quarantine cleanup and the boot junk sweep skip the object.
+  - Finalize never deletes a held recording that turned out empty (no file, or zero bytes): it keeps the row and the file and settles it as failed (`missing_file` / `zero_byte`, quarantined, `vod.failed`).
   - `deleteVodObjects` keeps the bytes.
   - Paste screenshot removal keeps the file, and censor answers 409.
-  - A `BEFORE DELETE` trigger on each projected table, plus a trigger on `media_objects.lifecycle_status`, refuses the change, so paths nobody has hooked are still covered.
-- **No tier move.** `moveToCold`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }`, and the sweep counts these as `skippedHeld` instead of errors. A hold freezes an object's placement. `moveToHot` (restoring a copy to local disk) is still allowed.
+  - A `BEFORE DELETE` trigger on each projected table, plus a trigger on `media_objects.lifecycle_status`, refuses the change, so paths nobody has hooked are still covered. The triggers are the `_v2` ones (clip-aware); an older database has its first-version guards replaced at start.
+- **No tier move.** `moveToCold`, `moveToHot`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }` (the admin moves answer it, R2 moves are logged as `refused`), and the sweep counts these as `skippedHeld` instead of errors. A hold freezes an object's placement: `moveToHot` is refused too, because restoring flips the row to local and drops an R2 copy. A clip cut from a held VOD in B2/R2 is cut from the cloud copy instead of fetching the VOD home. Row updates that only record where the bytes already are (the sweep finding a local file gone while B2 has the copy, the legacy-tier migration) still happen: they move nothing.
+
+**Staff routes** (`/api/v1/:app/admin/storage/holds`, the app key like every admin route; a call acting
+for one of the app's users, `X-OV-User-Id`, gets 403):
+
+| method | path | notes |
+|---|---|---|
+| GET | `/holds` | this app's holds, newest first; `?all=1` includes released ones; `?object_id` / `?vod_id` / `?clip_id`; `?limit` (≤ 200) and `?before_id` page |
+| POST | `/holds` | `{ object_id (med_… or legacy ref) \| vod_id \| clip_id, reason (required), kind (default admin), note, placed_by }` → 201. A v1 row with no object yet is projected first; a clips-only recording (never published) has none: 409. The answer names the object and, for a VOD, `clips_protected` |
+| POST | `/holds/:holdId/release` | `{ released_by }` → the hold with `released_at` / `released_by`; 409 `media.hold.released` when it was released already. `DELETE /holds/:holdId` does the same |
+
+Released holds stay on record. Every placement and release is also logged as an `[Admin]` line (the
+admin routes' log), with who, the object, the kind and the reason.
 
 ## Reconciliation
 

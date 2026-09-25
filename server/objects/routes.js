@@ -16,9 +16,10 @@
  * DELETE /:id                 soft delete (bytes kept MEDIA_DELETE_RETENTION_DAYS); 409 when held
  * POST   /:id/restore         undo a soft delete inside the retention period
  * GET    /:id/download        302 to the public location, or a signed short-lived URL for private objects
- * GET    /:id/holds           retention holds (?all=1 includes released)
- * POST   /:id/holds           place a hold  { kind, reason, created_by }     (app key only)
- * DELETE /:id/holds/:holdId   release it                                      (app key only)
+ * GET    /:id/holds           retention holds (?all=1 includes released), and the holds a clip inherits from its VOD
+ * POST   /:id/holds           place a hold  { kind, reason, note, placed_by | created_by }   (app key only)
+ * DELETE /:id/holds/:holdId   release it                                                      (app key only)
+ *                              Staff place and release holds by vod/clip id at /api/v1/:app/admin/storage/holds.
  *
  * Auth: the app's API key, or a Network service token granting media.object.upload
  * (writes) / media.object.read (reads) for namespace = :app. Developer-project tenants
@@ -572,7 +573,13 @@ router.get('/:id/download', read, (req, res) => {
 router.get('/:id/holds', read, (req, res) => {
     const obj = load(req, res);
     if (!obj) return;
-    res.json({ object_id: obj.id, holds: model.listHolds(obj.id, { includeReleased: ['1', 'true'].includes(String(req.query.all || '')) }) });
+    res.json({
+        object_id: obj.id,
+        holds: model.listHolds(obj.id, { includeReleased: ['1', 'true'].includes(String(req.query.all || '')) }).map(model.holdPublic),
+        // A clip is held while its source VOD is (released holds are the VOD's to list).
+        inherited_holds: model.inheritedHolds(obj.id).map(model.holdPublic),
+        held: model.isHeld(obj.id),
+    });
 });
 
 router.post('/:id/holds', appOnly, (req, res) => {
@@ -580,8 +587,11 @@ router.post('/:id/holds', appOnly, (req, res) => {
     if (!obj) return;
     const b = req.body || {};
     if (!model.HOLD_KINDS.includes(b.kind)) return problem(res, 400, 'media.hold.invalid', `kind must be one of ${model.HOLD_KINDS.join(', ')}`);
-    const by = b.created_by ? String(b.created_by).slice(0, 200) : `app:${req.appId}${req.userId != null ? `:user:${req.userId}` : ''}`;
-    res.status(201).json(model.placeHold({ object_id: obj.id, kind: b.kind, reason: b.reason || '', created_by: by }));
+    const named = b.placed_by || b.created_by;
+    const by = named ? String(named).slice(0, 200) : `app:${req.appId}${req.userId != null ? `:user:${req.userId}` : ''}`;
+    const hold = model.placeHold({ object_id: obj.id, kind: b.kind, reason: b.reason || '', created_by: by, note: b.note });
+    console.log(`[Objects] Retention hold ${hold.id} placed on ${obj.id} (${obj.legacy_ref || obj.kind}) by ${by} (${req.appId}): ${hold.kind}`);
+    res.status(201).json(model.holdPublic(hold));
 });
 
 router.delete('/:id/holds/:holdId', appOnly, (req, res) => {
@@ -590,7 +600,9 @@ router.delete('/:id/holds/:holdId', appOnly, (req, res) => {
     const hold = db.get('SELECT * FROM media_holds WHERE id = ? AND object_id = ?', [parseInt(req.params.holdId, 10), obj.id]);
     if (!hold) return problem(res, 404, 'media.hold.not_found', 'No such hold on this object');
     const by = (req.body && req.body.released_by) ? String(req.body.released_by).slice(0, 200) : `app:${req.appId}`;
-    res.json(model.releaseHold(hold.id, by));
+    const out = model.releaseHold(hold.id, by);
+    if (!hold.released_at) console.log(`[Objects] Retention hold ${hold.id} on ${obj.id} released by ${by} (${req.appId})`);
+    res.json(model.holdPublic(out));
 });
 
 // ── Public bytes: GET /o/:id ─────────────────────────────────

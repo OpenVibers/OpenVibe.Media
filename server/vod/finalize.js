@@ -204,7 +204,19 @@ async function _doFinalize(vodId, opts) {
         return null;
     }
 
+    // A recording under a retention hold is never deleted here (the empty-row and zero-byte cases
+    // below): it is settled as failed and quarantined instead, file and row kept.
+    const keepHeld = (status) => {
+        console.warn(`[VOD] vod ${vodId}: ${status} recording under a retention hold — keeping its row and file, quarantined`);
+        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?,
+                quarantined_at = COALESCE(quarantined_at, datetime('now')), is_public = 0, last_health_scan_at = datetime('now') WHERE id = ?`,
+        [status, JSON.stringify([status, 'retention_hold']), vodId]));
+        return null;
+    };
+    const held = require('../objects/model').isHeldRow(vod);
+
     if (!filePath || !fs.existsSync(filePath)) {
+        if (held) return keepHeld('missing_file');
         // No media was ever written (ingest started but produced nothing, or the
         // process died before ffmpeg opened the file). Nothing to review — delete
         // the row so a 0:00 ghost never reaches listings.
@@ -225,6 +237,7 @@ async function _doFinalize(vodId, opts) {
     // nothing to review, so treat it like a missing file: report the failure and
     // delete the row and file — a 0:00 ghost must never reach listings.
     if (tools.getFileSizeSafe(filePath) === 0) {
+        if (held) return keepHeld('zero_byte');
         console.warn(`[VOD] vod ${vodId}: zero-byte recording — deleting empty recording`);
         try { fs.unlinkSync(filePath); } catch { /* */ }
         try { tools.cleanupSeekableFile(filePath); } catch { /* */ }

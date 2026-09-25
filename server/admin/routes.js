@@ -21,6 +21,13 @@
  *                           decisions (media_tier_decisions) with 24-hour counts
  * GET    /tiers/decisions  this app's R2 promote/demote decisions, newest first
  *                           (?vod_id&action=promote|demote&outcome&limit≤200&before_id)
+ * GET    /holds            this app's retention holds, newest first (?all=1 includes released;
+ *                           ?object_id|vod_id|clip_id; ?limit≤200&before_id)
+ * POST   /holds            place one: { object_id (med_… or legacy ref) | vod_id | clip_id, reason, kind
+ *                           (default admin), note, placed_by } → 201. A VOD's hold also protects the clips
+ *                           cut from it. The hold row (placed_by/at, released_by/at, note) is the record,
+ *                           and each change is logged as an [Admin] line
+ * POST   /holds/:holdId/release   { released_by } (also DELETE /holds/:holdId); 409 when already released
  */
 'use strict';
 
@@ -464,6 +471,117 @@ router.post('/tiers/bulk-move', async (req, res) => {
         res.status(500).json({ error: 'Bulk move failed' });
     }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// Retention holds (staff) — on media_holds, the same holds as /api/v2/:app/objects/:id/holds
+// ═══════════════════════════════════════════════════════════════
+
+const objectsModel = () => require('../objects/model');
+
+/** Staff actions are the app's own (its server fronts its admins), never a call acting for one of its users. */
+function _staffOnly(req, res) {
+    if (req.authType === 'app') return true;
+    res.status(403).json({ error: 'Retention holds are staff actions: call with the app key, not on behalf of a user', code: 'media.hold.forbidden' });
+    return false;
+}
+
+/**
+ * The object a hold request names, in this app: { obj } | { error, status }. object_id is a med_ id or a
+ * legacy ref; vod_id / clip_id name a v1 row, which is projected first when it has no object yet.
+ */
+function _holdTarget(appId, b, { project = true } = {}) {
+    const m = objectsModel();
+    if (b.object_id != null && b.object_id !== '') {
+        const obj = m.resolveObject(String(b.object_id), appId);
+        return obj ? { obj } : { status: 404, error: 'No such object in this app' };
+    }
+    for (const [field, table, kind] of [['vod_id', 'vods', 'vod'], ['clip_id', 'clips', 'clip']]) {
+        if (b[field] == null || b[field] === '') continue;
+        const id = parseInt(b[field], 10);
+        const row = Number.isFinite(id) ? db.get(`SELECT id, object_id FROM ${table} WHERE id = ? AND app_id = ?`, [id, appId]) : null;
+        if (!row) return { status: 404, error: `${kind === 'vod' ? 'VOD' : 'Clip'} not found` };
+        let objectId = row.object_id;
+        if (!objectId && project) { const r = m.safeSync(kind, id); objectId = r && r.id; }
+        if (!objectId) return { status: 409, error: `${kind} ${id} has no media object to hold (a clips-only recording is never published)` };
+        return { obj: m.getObject(objectId) };
+    }
+    return { status: 400, error: 'object_id, vod_id or clip_id required' };
+}
+
+/** A hold with the object it is on and, for a VOD, how many clips cut from it it protects. */
+function _holdOut(h) {
+    const m = objectsModel();
+    const obj = m.getObject(h.object_id);
+    const out = { ...m.holdPublic(h), object: obj ? { id: obj.id, kind: obj.kind, legacy_ref: obj.legacy_ref || null, lifecycle_status: obj.lifecycle_status } : null };
+    if (obj && obj.kind === 'vod') {
+        out.clips_protected = db.get(`SELECT COUNT(*) AS n FROM clips c WHERE c.vod_id IN (SELECT id FROM vods WHERE object_id = @o)
+                                      OR c.object_id IN (SELECT from_object_id FROM media_relationships WHERE to_object_id = @o AND relation = 'clip_of')`, { o: obj.id }).n;
+    }
+    return out;
+}
+
+router.get('/holds', (req, res) => {
+    try {
+        const q = req.query;
+        const conds = ['o.app_id = ?'], params = [req.appId];
+        if (!['1', 'true'].includes(String(q.all || ''))) conds.push('h.released_at IS NULL');
+        if (q.object_id != null || q.vod_id != null || q.clip_id != null) {
+            const t = _holdTarget(req.appId, { object_id: q.object_id, vod_id: q.vod_id, clip_id: q.clip_id }, { project: false });
+            if (!t.obj) return res.status(t.status).json({ error: t.error });
+            conds.push('h.object_id = ?'); params.push(t.obj.id);
+        }
+        if (q.before_id != null) { conds.push('h.id < ?'); params.push(parseInt(q.before_id, 10) || 0); }
+        const limit = Math.min(Math.max(parseInt(q.limit, 10) || 50, 1), 200);
+        const rows = db.all(`SELECT h.* FROM media_holds h JOIN media_objects o ON o.id = h.object_id WHERE ${conds.join(' AND ')} ORDER BY h.id DESC LIMIT ?`, [...params, limit + 1]);
+        const page = rows.slice(0, limit);
+        res.json({ holds: page.map(_holdOut), next_before_id: rows.length > limit ? page[page.length - 1].id : null, limit });
+    } catch (err) {
+        console.error('[Admin] Hold list error:', err.message);
+        res.status(500).json({ error: 'Failed to list holds' });
+    }
+});
+
+router.post('/holds', (req, res) => {
+    try {
+        if (!_staffOnly(req, res)) return;
+        const b = req.body || {};
+        const m = objectsModel();
+        const kind = b.kind == null || b.kind === '' ? 'admin' : String(b.kind);
+        if (!m.HOLD_KINDS.includes(kind)) return res.status(400).json({ error: `kind must be one of ${m.HOLD_KINDS.join(', ')}` });
+        const reason = String(b.reason || '').trim();
+        if (!reason) return res.status(400).json({ error: 'reason required (why the object must be kept)' });
+        const t = _holdTarget(req.appId, b);
+        if (!t.obj) return res.status(t.status).json({ error: t.error });
+        const by = String(b.placed_by || b.created_by || `app:${req.appId}`).slice(0, 200);
+        const hold = m.placeHold({ object_id: t.obj.id, kind, reason, created_by: by, note: b.note });
+        const out = _holdOut(hold);
+        console.log(`[Admin] Retention hold ${hold.id} placed on ${t.obj.id} (${t.obj.legacy_ref || t.obj.kind}) by ${by} (${req.appId}): ${kind}, ${JSON.stringify(reason.slice(0, 200))}`
+            + (out.clips_protected ? `; protects ${out.clips_protected} clip(s) cut from it` : ''));
+        res.status(201).json(out);
+    } catch (err) {
+        console.error('[Admin] Hold place error:', err.message);
+        res.status(500).json({ error: 'Failed to place the hold' });
+    }
+});
+
+function _releaseHold(req, res) {
+    try {
+        if (!_staffOnly(req, res)) return;
+        const hold = db.get('SELECT h.* FROM media_holds h JOIN media_objects o ON o.id = h.object_id WHERE h.id = ? AND o.app_id = ?',
+            [parseInt(req.params.holdId, 10) || 0, req.appId]);
+        if (!hold) return res.status(404).json({ error: 'No such hold in this app' });
+        if (hold.released_at) return res.status(409).json({ error: 'The hold was released already', code: 'media.hold.released', hold: _holdOut(hold) });
+        const by = String((req.body && req.body.released_by) || `app:${req.appId}`).slice(0, 200);
+        const out = _holdOut(objectsModel().releaseHold(hold.id, by));
+        console.log(`[Admin] Retention hold ${hold.id} on ${hold.object_id} released by ${by} (${req.appId})`);
+        res.json(out);
+    } catch (err) {
+        console.error('[Admin] Hold release error:', err.message);
+        res.status(500).json({ error: 'Failed to release the hold' });
+    }
+}
+router.post('/holds/:holdId/release', _releaseHold);
+router.delete('/holds/:holdId', _releaseHold);
 
 // ── GET /buckets — bucket usage scan + cost estimate + reachability ──
 // Full ListObjectsV2 walk per provider (10-min server cache; ?force=1 rescans).

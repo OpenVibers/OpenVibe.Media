@@ -65,6 +65,7 @@ function migrateColumns() {
         pastes: [['object_id', 'TEXT']],
         // Developer-project tenants (ADR-014): project_id prj_<ULID>, env sandbox|production. NULL on first-party tenants.
         apps: [['project_id', 'TEXT'], ['env', 'TEXT']],
+        media_holds: [['note', 'TEXT']],
     };
     for (const [table, cols] of Object.entries(wanted)) {
         const existing = database.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
@@ -106,19 +107,43 @@ function migrateJobsTable(schema) {
 }
 
 /**
+ * SQL: is the object named by the SQL expression `ref` under an unreleased retention hold? Its own
+ * hold, or, for a clip, its source VOD's (through the clip_of relationship, or the clip row's vod_id).
+ * One rule for the delete triggers below and objects/model.js isHeld().
+ */
+function heldSql(ref) {
+    return `EXISTS (SELECT 1 FROM media_holds h WHERE h.released_at IS NULL AND (h.object_id = ${ref}
+        OR h.object_id IN (SELECT r.to_object_id FROM media_relationships r WHERE r.from_object_id = ${ref} AND r.relation = 'clip_of')
+        OR h.object_id IN (SELECT v.object_id FROM clips c JOIN vods v ON v.id = c.vod_id WHERE c.object_id = ${ref})))`;
+}
+
+/**
  * Object-model guards that must hold on EVERY delete path, including the many
  * inherited ones that DELETE a vods/clips/files/pastes row directly:
- *   - a row whose object is under an unreleased retention hold cannot be deleted;
+ *   - a row whose object is under an unreleased retention hold cannot be deleted, and a clip whose
+ *     source VOD is held cannot either (even before the clip has an object);
  *   - deleting a projected row marks its media_object deleted (bytes accounting
  *     and reconciliation keep working without touching each call site).
- * Created here, after migrateColumns, because they reference object_id.
+ * Created here, after migrateColumns, because they reference object_id. The hold guards are the _v2
+ * triggers (clips follow their VOD's hold); the first-version ones are dropped.
  */
 function ensureObjectTriggers() {
-    const held = (ref) => `EXISTS (SELECT 1 FROM media_holds WHERE object_id = ${ref} AND released_at IS NULL)`;
+    // One transaction: replacing a first-version hold guard never leaves a moment without one.
+    database.transaction(_ensureObjectTriggers)();
+}
+
+function _ensureObjectTriggers() {
+    const held = heldSql;
+    // A clip's lookups by object id (the hold rule above) use this index.
+    database.exec('CREATE INDEX IF NOT EXISTS idx_clips_object ON clips(object_id)');
+    for (const old of ['trg_vods_hold_guard', 'trg_clips_hold_guard', 'trg_files_hold_guard', 'trg_pastes_hold_guard', 'trg_media_objects_hold_guard', 'trg_media_objects_hold_delete']) {
+        database.exec(`DROP TRIGGER IF EXISTS ${old}`);
+    }
+    const vodHeld = `(OLD.vod_id IS NOT NULL AND EXISTS (SELECT 1 FROM media_holds h JOIN vods v ON v.object_id = h.object_id WHERE v.id = OLD.vod_id AND h.released_at IS NULL))`;
     for (const table of ['vods', 'clips', 'files', 'pastes']) {
         database.exec(`
-            CREATE TRIGGER IF NOT EXISTS trg_${table}_hold_guard BEFORE DELETE ON ${table}
-            WHEN OLD.object_id IS NOT NULL AND ${held('OLD.object_id')}
+            CREATE TRIGGER IF NOT EXISTS trg_${table}_hold_guard_v2 BEFORE DELETE ON ${table}
+            WHEN (OLD.object_id IS NOT NULL AND ${held('OLD.object_id')})${table === 'clips' ? ` OR ${vodHeld}` : ''}
             BEGIN SELECT RAISE(ABORT, 'media object is under a retention hold'); END;
             CREATE TRIGGER IF NOT EXISTS trg_${table}_object_deleted AFTER DELETE ON ${table}
             WHEN OLD.object_id IS NOT NULL
@@ -129,10 +154,10 @@ function ensureObjectTriggers() {
             END;`);
     }
     database.exec(`
-        CREATE TRIGGER IF NOT EXISTS trg_media_objects_hold_guard BEFORE UPDATE OF lifecycle_status ON media_objects
+        CREATE TRIGGER IF NOT EXISTS trg_media_objects_hold_guard_v2 BEFORE UPDATE OF lifecycle_status ON media_objects
         WHEN NEW.lifecycle_status = 'deleted' AND OLD.lifecycle_status != 'deleted' AND ${held('OLD.id')}
         BEGIN SELECT RAISE(ABORT, 'media object is under a retention hold'); END;
-        CREATE TRIGGER IF NOT EXISTS trg_media_objects_hold_delete BEFORE DELETE ON media_objects
+        CREATE TRIGGER IF NOT EXISTS trg_media_objects_hold_delete_v2 BEFORE DELETE ON media_objects
         WHEN ${held('OLD.id')}
         BEGIN SELECT RAISE(ABORT, 'media object is under a retention hold'); END;`);
     // media.object.visibility_changed / media.object.deleted: staged in the changing transaction,
@@ -787,7 +812,7 @@ function importLegacyRows(table, rows, appId = 'live') {
 }
 
 module.exports = {
-    getDb, run, get, all, close, syncObject: _syncObject,
+    getDb, run, get, all, close, syncObject: _syncObject, heldSql,
     getSetting, setSetting,
     // apps
     hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins, projectTenantId, ensureProjectTenant, isSandboxTenant,

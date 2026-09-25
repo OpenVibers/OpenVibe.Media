@@ -207,7 +207,7 @@ function locationWanted(l) {
 
 const LOCATION_ROWS = `SELECT l.provider, l.bucket, l.key, o.id AS object_id, o.lifecycle_status, o.legacy_ref,
         CASE WHEN json_valid(o.metadata) THEN json_extract(o.metadata, '$.purged_at') END AS purged,
-        EXISTS (SELECT 1 FROM media_holds h WHERE h.object_id = o.id AND h.released_at IS NULL) AS held
+        ${db.heldSql('o.id')} AS held
     FROM media_locations l LEFT JOIN media_objects o ON o.id = l.object_id`;
 
 const sidecarsOf = (p) => [p.replace(/\.webm$/, '.seekable.webm'), p.replace(/\.mp4$/, '.seekable.mp4'), p.replace(/\.webm$/, '.master.mkv')].filter(x => x !== p);

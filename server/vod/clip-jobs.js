@@ -64,7 +64,7 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
             console.log(`[Clips] clip ${clipId}: pulling vod ${vod.id} (${(vod.file_size / 1048576).toFixed(0)} MB) back to local disk for a reliable cut`);
             const r = await vodStorage.moveToHot(vod.id, { trigger: 'clip', reason: `fetched to local disk to cut clip ${clipId}` }).catch(e => ({ ok: false, error: e.message }));
             if (r && r.ok) source = await vodStorage.resolveMediaSource(db.get('SELECT * FROM vods WHERE id = ?', [vod.id]));
-            else console.warn(`[Clips] clip ${clipId}: hot fetch failed: ${r && r.error}`);
+            else console.warn(`[Clips] clip ${clipId}: hot fetch ${r && r.held ? 'refused (the VOD is under a retention hold, its placement stays)' : `failed: ${r && r.error}`} — cutting from the cloud copy`);
         } else {
             console.log(`[Clips] clip ${clipId}: not enough free disk to pull vod ${vod.id} home — cutting from the cloud copy`);
         }

@@ -391,6 +391,8 @@ router.post('/bulk', tenantAuth(), (req, res) => {
             const paste = db.getPasteBySlug(String(slug), req.appId);
             if (!paste) { skipped++; continue; }
             if (action === 'delete') {
+                // A held screenshot is skipped (its row and bytes stay), not failed halfway.
+                if (require('../objects/model').isHeldRow(paste)) { skipped++; continue; }
                 removePasteScreenshot(paste);
                 db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
             } else {
@@ -635,6 +637,7 @@ router.delete('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
         if (req.authType === 'user' && !(req.userId != null && paste.user_id === req.userId)) {
             return res.status(403).json({ error: 'Not authorized for this paste' });
         }
+        if (require('../objects/model').isHeldRow(paste)) return res.status(409).json({ error: 'Screenshot is under a retention hold', code: 'media.object.held' });
 
         removePasteScreenshot(paste);
         db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);

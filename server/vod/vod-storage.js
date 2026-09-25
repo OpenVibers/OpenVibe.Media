@@ -230,8 +230,10 @@ function endpointFor(name) {
     return (PROVIDER_ENV[name] && PROVIDER_ENV[name].endpoint) || null;
 }
 
-// Object model (Wave 4): holds freeze an object's placement, and every tier move
-// re-projects the VOD's media_locations. Lazy — the model requires this module.
+// Object model (Wave 4): holds freeze an object's placement (moveToCold, moveToHot, promoteToR2 and
+// demoteFromR2 refuse a held VOD with { ok: false, held: true }; deleteVodObjects keeps a held object's
+// bytes, a clip's too while its source VOD is held), and every tier move re-projects the VOD's
+// media_locations. Lazy — the model requires this module.
 const objects = () => require('../objects/model');
 function _held(vod) { return objects().isHeldRow(vod); }
 function _moved(vodId, verified) { objects().afterTierMove(vodId, verified); }
@@ -553,6 +555,8 @@ async function moveToHot(vodId, ctx = {}) {
 async function _moveToHot(vodId) {
     const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
+    // A hold freezes placement: restoring would flip the row to local and drop an R2 copy.
+    if (_held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
 
     const key = keyForVod(vod);
     const local = localPathForVod(vod);

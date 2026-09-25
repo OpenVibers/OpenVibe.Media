@@ -278,6 +278,9 @@ directories are shared across apps) and responses carry a `note` saying so.
 | POST | `/admin/storage/tiers/bulk-move` | `{ ids: [...], target }` (max 50) → `{ moved, bytes, errors? }` |
 | GET | `/admin/storage/tiers/policy` | **read-only R2 policy**: each threshold (`r2Enabled`, `r2MinViews`, `r2RecentAccessDays`, `r2MaxIdleDays`, `r2MaxPerSweep`) as `{ value, default, source: default\|setting }`, the promote and demote rules in words, the R2/B2 provider status, and this app's decisions: `last_24h` counts per action and outcome and the 20 most recent |
 | GET | `/admin/storage/tiers/decisions?vod_id&action&outcome&limit&before_id` | this app's R2 promote/demote decisions, newest first: `{ id, decided_at, vod_id, object_id, action, from_provider, to_provider, outcome: done\|already\|refused\|failed, trigger: sweep\|admin\|clip\|drill\|manual, reason, inputs, thresholds, error }` → `{ decisions, next_before_id }` |
+| GET | `/admin/storage/holds?all&object_id&vod_id&clip_id&limit&before_id` | this app's retention holds, newest first (active only unless `all=1`) |
+| POST | `/admin/storage/holds` | `{ object_id \| vod_id \| clip_id, reason, kind?, note?, placed_by? }` → 201: the object is kept (no delete, no tier move) and so are the clips cut from a held VOD. Not for calls acting for a user (403) |
+| POST | `/admin/storage/holds/:holdId/release` | `{ released_by }` (also `DELETE /admin/storage/holds/:holdId`); 409 when already released. Holds stay on record |
 | GET | `/admin/storage/buckets` | sanitized bucket status per provider: `{ configured, endpoint, bucket, region, healthy, reachable }` via a live HeadBucket probe — **credentials are never returned** |
 
 ### Webhooks (outbound)
@@ -407,8 +410,11 @@ model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
   `media.object.upload` / `media.object.read` for namespace `:app`;
   `X-OV-Subject` sets the owner.
 - **Retention holds** — `media_holds` (`moderation`, `dmca`, `creator_pin`,
-  `admin`, `evidence`; `/:id/holds`, app key only): a held object cannot be
-  deleted by any path (409 / DB trigger) or moved between tiers.
+  `admin`, `evidence`; reason, placed by/at, released by/at, note; `/:id/holds`
+  and the staff routes `/api/v1/:app/admin/storage/holds`, app key only): a held
+  object cannot be deleted by any path (409 / DB trigger) or moved between tiers
+  (`moveToHot` included), and a clip cut from a held VOD is held too
+  ([docs](docs/object-model.md#retention-holds)).
 - **Reconciliation** — `node scripts/reconcile-objects.js [--verify] [--hash]`:
   read-only by default; `--verify` HEADs B2/R2 and records location states.
   Reports missing canonical copies, lost local files, size/hash mismatches,
