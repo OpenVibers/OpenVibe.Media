@@ -116,6 +116,28 @@ const get = (p, headers = {}) => new Promise((resolve, reject) => {
     assert.ok(r.body.includes('content="noindex, follow"'));
     console.log('✅ watch pages: VideoObject when public; AI clips noindex, attributed to OpenVibe AI and their source VOD');
 
+    // ── Search documents (search-documents.js): exactly the sitemap's watch pages; a page that stops
+    //    qualifying gets one tombstone; nothing is sent twice ──
+    const events = require('../server/events');
+    events.init({ eventsUrl: 'http://127.0.0.1:9', clientSecret: 's', intervalMs: 3_600_000, fetchImpl: async () => { throw new Error('offline'); } });
+    const search = require('../server/public/search-documents');
+    const queued = () => raw.prepare('SELECT envelope FROM event_outbox ORDER BY id').all().map((x) => JSON.parse(x.envelope)).filter((e) => /^media\.index_document\./.test(e.event_type));
+    const { validate } = require('openvibe-contracts');
+    search.sync();
+    const sent = queued();
+    assert.deepStrictEqual(sent.map((e) => e.payload.canonical_url).sort(), require('../server/public/crawl').sitemapEntries().map((e) => e.loc).sort(), 'the same pages as the sitemap');
+    for (const e of sent) { const v = validate(`${e.event_type}@1`, e.payload); assert.ok(v.valid, JSON.stringify(v.errors)); assert.strictEqual(e.priority, 'low'); assert.ok(!('app_id' in e.payload)); }
+    search.sync();
+    assert.strictEqual(queued().length, sent.length, 'unchanged: nothing sent again');
+    raw.prepare("UPDATE vods SET visibility = 'private', is_public = 0 WHERE id = 1").run();
+    search.sync();
+    const tomb = queued().at(-1);
+    assert.strictEqual(tomb.event_type, 'media.index_document.deleted');
+    assert.deepStrictEqual(tomb.payload, { type: 'vod', id: '1', revision: 2 });
+    assert.ok(validate('media.index_document.deleted@1', tomb.payload).valid);
+    events._reset && events._reset();
+    console.log('✅ search documents: the sitemap\'s pages, sent once, a tombstone when one goes private');
+
     server.close();
     db.close();
     fs.rmSync(tmp, { recursive: true, force: true });

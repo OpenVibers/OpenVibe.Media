@@ -276,6 +276,8 @@ const server = app.listen(config.port, config.host, () => {
     console.log(`[Media] RTP ingest pool: udp ${config.rtp.portMin}-${config.rtp.portMax} (127.0.0.1)`);
     // Durable events (roadmap Wave 3): webhook outcomes also go to OpenVibe.Events. Off without EVENTS_URL.
     try { require('./events').init(); } catch (err) { console.warn('[Events] not started:', err.message); }
+    // Media's own watch pages in OpenVibe.Search (WS-O task 10): media.index_document.* through the same outbox.
+    try { require('./public/search-documents').start(); } catch (err) { console.warn('[Search] documents not started:', err.message); }
 });
 
 // A drill whose port is taken stops instead of running unready.

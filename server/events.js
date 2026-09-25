@@ -149,6 +149,17 @@ function enqueue(eventType, appId, subject, data, priority) {
 }
 
 /**
+ * Queue a Search document or tombstone (media.index_document.*, ./public/search-documents.js) as is:
+ * no tenant field, low priority. Same rule as record(): inside the transaction that records the push.
+ */
+function recordIndexDocument(eventType, subject, payload) {
+    if (!outbox) return null;
+    const env = outbox.enqueue({ event_type: eventType, actor: { type: 'service', id: 'media' }, subject, visibility: 'internal', priority: 'low', payload });
+    stats.queued++;
+    return env;
+}
+
+/**
  * Operator scripts (scripts/media-jobs.js) change job state in the same database as the running
  * service. When the service's outbox table exists (the outbox is on there), the script writes its
  * events into it too, and the service's relay publishes them. No relay runs in the script.
@@ -240,4 +251,4 @@ function _reset() {
     stats.queued = 0; stats.lastError = null;
 }
 
-module.exports = { init, initWriter, record, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, JOB_TRANSITIONS, _reset };
+module.exports = { init, initWriter, record, recordIndexDocument, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, JOB_TRANSITIONS, _reset };
