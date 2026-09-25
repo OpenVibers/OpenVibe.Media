@@ -249,7 +249,7 @@ header.intro h1{font-size:1.15rem;margin:0}
 header.intro .sub{color:var(--muted);font-size:.85rem}
 nav.tabs{display:flex;gap:.25rem;padding:.2rem 1.4rem .7rem;flex-wrap:wrap}
 nav.tabs a{color:var(--muted);text-decoration:none;padding:.45rem .9rem;border-radius:999px;font-size:.88rem;border:1px solid transparent}
-nav.tabs a:hover{color:var(--text)}nav.tabs a.on{color:var(--on-accent,#fff);background:var(--accent-page)}
+nav.tabs a:hover{color:var(--text)}nav.tabs a.on{color:var(--on-accent-strong,#fff);background:var(--accent-strong,#1d4ed8)}
 nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem;padding:0 1.4rem}
 .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
