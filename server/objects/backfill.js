@@ -3,7 +3,7 @@
  *
  * One media_object (+ locations, relationships, thumbnail variant) per existing
  * vod, clip, file, screenshot/avatar paste and vod/clip thumbnail, derived by the
- * same sync functions the write hooks use. Idempotent: objects are keyed by their
+ * same sync functions every write uses (model.withObject). Idempotent: objects are keyed by their
  * legacy ref, so a re-run updates in place and creates nothing new.
  *
  * Never touches bytes and never calls B2/R2: local copies are 'present' when the

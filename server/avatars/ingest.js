@@ -118,11 +118,13 @@ function createIngestHandler({ db, config, screenshotsDir, generateSlug, log = c
             const file = path.join(screenshotsDir, `avatar-n${parseInt(user_id, 10) || 0}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.webp`);
             fs.writeFileSync(file, pic.buffer);
             const slug = generateSlug();
-            const info = db.run(`INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, screenshot_path, metadata, ip_address)
+            const insert = () => db.run(`INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, screenshot_path, metadata, ip_address)
                     VALUES ('network', ?, ?, 'screenshot', ?, '', 'text', 'unlisted', ?, ?, NULL)`,
                 [slug, parseInt(user_id, 10) || null, `Avatar${username ? ' of ' + String(username).slice(0, 40) : ''}`, file,
                     JSON.stringify({ kind: 'avatar', source_host: (() => { try { return new URL(url).hostname; } catch { return null; } })(), size_bytes: pic.buffer.length, mime_type: 'image/webp' })]);
-            if (info && typeof db.syncObject === 'function') db.syncObject('paste', info.lastInsertRowid);   // the avatar's media_object
+            // The row and the avatar's media_object in one transaction (a database without the object model: the row alone).
+            if (typeof db.withObject === 'function') db.withObject('paste', (r) => r.lastInsertRowid, insert);
+            else insert();
             res.json({ ok: true, slug, url: `${config.publicUrl}/p/${slug}/screenshot`, width: pic.width, height: pic.height, bytes: pic.buffer.length });
         } catch (err) {
             log.warn('[Avatar ingest]', err.message);

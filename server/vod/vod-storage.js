@@ -232,11 +232,15 @@ function endpointFor(name) {
 
 // Object model (Wave 4): holds freeze an object's placement (moveToCold, moveToHot, promoteToR2 and
 // demoteFromR2 refuse a held VOD with { ok: false, held: true }; deleteVodObjects keeps a held object's
-// bytes, a clip's too while its source VOD is held), and every tier move re-projects the VOD's
-// media_locations. Lazy — the model requires this module.
+// bytes, a clip's too while its source VOD is held), and every tier move writes the row's new
+// placement (`write`) and re-projects the VOD's media_locations in one transaction (WS-G task 1;
+// afterTierMove). Lazy — the model requires this module.
 const objects = () => require('../objects/model');
 function _held(vod) { return objects().isHeldRow(vod); }
-function _moved(vodId, verified) { objects().afterTierMove(vodId, verified); }
+function _moved(vodId, verified, write = null) { return objects().afterTierMove(vodId, verified, write); }
+// After a move removed the local copy (the row already names the remote one): the object's locations
+// follow the disk. File I/O after the commit, so a follow-up rather than part of the write.
+function _localRemoved(vodId) { objects().safeSync('vod', vodId); }
 
 function keyForVod(vod) {
     if (vod.storage_key) return vod.storage_key;
@@ -498,8 +502,7 @@ async function moveToCold(vodId) {
         if (!fs.existsSync(local)) {
             // Not local — maybe already offloaded
             if (await headObject('b2', key)) {
-                db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]);
-                _moved(vodId, ['b2']);
+                _moved(vodId, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));
                 return { ok: true, already: true };
             }
             // Neither here nor in B2: nothing to offload, ever. Quarantine the row so the
@@ -514,12 +517,12 @@ async function moveToCold(vodId) {
             await uploadFile('b2', key, local);
         }
 
-        db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]);
+        _moved(vodId, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));
         try { fs.unlinkSync(local); } catch (err) {
             console.error(`[VodStorage] Uploaded but failed to remove local file for VOD ${vodId}:`, err.message);
         }
         cleanupSidecar(local);
-        _moved(vodId, ['b2']);
+        _localRemoved(vodId);
 
         console.log(`[VodStorage] VOD ${vodId} offloaded to B2: ${key} (${(localSize / 1048576).toFixed(1)} MB)`);
         return { ok: true, bytes: localSize };
@@ -562,8 +565,7 @@ async function _moveToHot(vodId) {
     const local = localPathForVod(vod);
 
     if (fs.existsSync(local)) {
-        db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]);
-        _moved(vodId, []);
+        _moved(vodId, [], () => db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]));
         return { ok: true, already: true };
     }
 
@@ -612,8 +614,7 @@ async function _moveToHot(vodId) {
 
         // Restoring to local keeps the B2 canonical copy; drop any R2 copy.
         if (providerOf(vod) === 'r2' && providerConfigured('r2')) await deleteObject('r2', key);
-        db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]);
-        _moved(vodId, []);
+        _moved(vodId, [], () => db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]));
         console.log(`[VodStorage] VOD ${vodId} restored to local (${(head.size / 1048576).toFixed(1)} MB)`);
         return { ok: true, bytes: head.size };
     } catch (err) {
@@ -660,14 +661,14 @@ async function _promoteToR2(vodId) {
             else await copyBetweenProviders('b2', 'r2', key);
         }
 
-        db.run("UPDATE vods SET storage_provider = 'r2', storage_key = ? WHERE id = ?", [key, vodId]);
-        _moved(vodId, ['b2', 'r2']);
+        _moved(vodId, ['b2', 'r2'], () => db.run("UPDATE vods SET storage_provider = 'r2', storage_key = ? WHERE id = ?", [key, vodId]));
 
         // Popular VODs live in R2+B2; free the local copy
         let freed = 0;
         if (fs.existsSync(local)) {
             freed = fs.statSync(local).size;
             try { fs.unlinkSync(local); cleanupSidecar(local); } catch { freed = 0; }
+            if (freed) _localRemoved(vodId);
         }
 
         console.log(`[VodStorage] VOD ${vodId} promoted to R2: ${key}`);
@@ -701,8 +702,7 @@ async function _demoteFromR2(vodId) {
             if (!copied) return { ok: false, error: 'No B2 canonical and copy-back failed' };
         }
         await deleteObject('r2', key);
-        db.run("UPDATE vods SET storage_provider = 'b2' WHERE id = ?", [vodId]);
-        _moved(vodId, ['b2']);
+        _moved(vodId, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2' WHERE id = ?", [vodId]));
         console.log(`[VodStorage] VOD ${vodId} demoted from R2 to B2`);
         return { ok: true };
     } catch (err) {
@@ -783,13 +783,13 @@ const OFFLOADABLE_WHERE = `
 
 function quarantineMissing(vodId, reason) {
     try {
-        db.run(`UPDATE vods
+        objects().withObject('vod', vodId, () => db.run(`UPDATE vods
                 SET health_status = 'missing_file',
                     health_issues_json = ?,
                     last_health_scan_at = datetime('now'),
                     quarantined_at = COALESCE(quarantined_at, datetime('now')),
                     is_public = 0
-                WHERE id = ?`, [JSON.stringify(['missing_file', reason]), vodId]);
+                WHERE id = ?`, [JSON.stringify(['missing_file', reason]), vodId]));
     } catch (err) {
         console.warn(`[VodStorage] Could not quarantine VOD ${vodId}:`, err.message);
     }
@@ -802,19 +802,27 @@ function quarantineMissing(vodId, reason) {
  */
 function reconcileGhosts() {
     try {
-        const res = db.run(`UPDATE vods
-                SET health_status = 'missing_file',
-                    health_issues_json = ?,
-                    last_health_scan_at = datetime('now'),
-                    quarantined_at = COALESCE(quarantined_at, datetime('now')),
-                    is_public = 0
+        // The rows and their objects (-> failed) in one transaction.
+        const ids = objects().withObject('vod', (found) => found, () => {
+            const found = db.all(`SELECT id FROM vods
                 WHERE COALESCE(storage_provider, 'local') = 'local'
                   AND COALESCE(is_recording, 0) = 0
                   AND file_path IS NULL
                   AND created_at <= datetime('now', '-1 hour')
-                  AND COALESCE(health_status, 'ok') NOT IN ('missing_file', 'zero_byte')`,
-            [JSON.stringify(['missing_file', 'recording never produced a file'])]);
-        return (res && typeof res.changes === 'number') ? res.changes : 0;
+                  AND COALESCE(health_status, 'ok') NOT IN ('missing_file', 'zero_byte')`).map(r => r.id);
+            if (found.length) {
+                db.run(`UPDATE vods
+                    SET health_status = 'missing_file',
+                        health_issues_json = ?,
+                        last_health_scan_at = datetime('now'),
+                        quarantined_at = COALESCE(quarantined_at, datetime('now')),
+                        is_public = 0
+                    WHERE id IN (${found.map(() => '?').join(',')})`,
+                [JSON.stringify(['missing_file', 'recording never produced a file']), ...found]);
+            }
+            return found;
+        });
+        return ids.length;
     } catch (err) {
         console.warn('[VodStorage] Ghost reconcile failed:', err.message);
         return 0;
@@ -956,8 +964,7 @@ async function runSweep() {
             if (!fs.existsSync(localPathForVod(vod))) {
                 const key = keyForVod(vod);
                 if (await headObject('b2', key).catch(() => null)) {
-                    db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]);
-                    _moved(vod.id, ['b2']);
+                    _moved(vod.id, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]));
                 } else {
                     quarantineMissing(vod.id, `file not found at ${localPathForVod(vod)}`);
                     quarantined++;
@@ -1148,8 +1155,7 @@ async function migrateLegacy() {
         try {
             const head = await headObject('b2', key);
             if (head) {
-                db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]);
-                _moved(vod.id, ['b2']);
+                _moved(vod.id, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]));
                 flipped++;
             } else if (fs.existsSync(localPathForVod(vod))) {
                 restoredLocal++; // still local, sweep will re-offload
@@ -1419,6 +1425,8 @@ module.exports = {
     deleteLegacyPasteScreenshot,
     presignGet,
     runSweep,
+    reconcileGhosts,
+    quarantineMissing,
     checkProviders,
     migrateLegacy,
     start,

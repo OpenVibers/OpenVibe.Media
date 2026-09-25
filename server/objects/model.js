@@ -5,8 +5,10 @@
  * row per provider copy. The inherited vods/clips/files/pastes rows are typed
  * projections over objects: each carries object_id, and the sync*() functions
  * below derive the object + locations from the row as it is right now. The same
- * functions back the one-off backfill and the write hooks on the old APIs, so
- * the model cannot drift between "imported" and "written since".
+ * functions back the one-off backfill and every write on the old APIs, which
+ * writes the row and its object in one transaction (withObject, WS-G task 1), so
+ * the model cannot drift between "imported" and "written since". The drift
+ * report (./drift.js) checks that it has not.
  *
  * Location states: present (verified: the local file exists / a HEAD answered),
  * missing (verified absent), pending (believed there, not yet verified — every
@@ -294,6 +296,10 @@ function recordInvariant(objectId) {
 }
 
 // ── Per-kind projections ─────────────────────────────────────
+// <kind>Projection(row) derives what the object behind one inherited row must say (project()'s input).
+// Read-only (it stats local files, never writes), and shared by the sync*() writers below and the
+// drift report (./drift.js), so the report checks exactly what a write would have written. A row
+// that has no object of its own answers { skipped: reason }.
 
 function vodLifecycle(row) {
     const s = db.vodStatus(row);
@@ -301,14 +307,12 @@ function vodLifecycle(row) {
     return 'uploading';
 }
 
-function syncVod(idOrRow) {
-    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM vods WHERE id = ?', [idOrRow]);
-    if (!row) return null;
+function vodProjection(row) {
     if (row.clips_only) return { skipped: 'clips-only recording (ephemeral, never published)' };
     const vs = vodStorage();
     const { locs, canonical } = tieredLocations(row, [row.file_path ? vs.localPathForVod(row) : null, row.file_path]);
     const local = locs.find(l => l.provider === 'local' && l.state === 'present');
-    const r = project({
+    return {
         legacy_ref: legacyRef(row.app_id, 'vod', row.id), existingId: row.object_id,
         app_id: row.app_id, kind: 'vod', owner_user_id: row.user_id,
         visibility: rowVisibility(row), lifecycle_status: vodLifecycle(row),
@@ -317,22 +321,16 @@ function syncVod(idOrRow) {
         metadata: { title: row.title || null, duration_seconds: Number(row.duration_seconds) || 0, health_status: row.health_status || null,
             managed_stream_id: row.managed_stream_id || null, recording: !!row.is_recording },
         created_at: row.created_at, locations: locs, canonical,
-    });
-    linkRow('vods', 'id', row.id, r.id);
-    recordInvariant(r.id);
-    const thumbnail = syncThumbnail(row, r.id, 'vod');
-    return { ...r, locations: locs.map(l => l.state), thumbnail };
+    };
 }
 
-function syncClip(idOrRow) {
-    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM clips WHERE id = ?', [idOrRow]);
-    if (!row) return null;
+function clipProjection(row) {
     const clipsDir = path.resolve(config.vod.clipsPath);
     const { locs, canonical } = tieredLocations(row, [row.file_path || null, row.file_path ? path.join(clipsDir, path.basename(row.file_path)) : null]);
     const status = row.status || 'ready';
     const lifecycle = status === 'processing' ? 'uploading' : status === 'failed' ? 'failed' : (row.file_path ? 'ready' : 'failed');
     const local = locs.find(l => l.provider === 'local' && l.state === 'present');
-    const r = project({
+    return {
         legacy_ref: legacyRef(row.app_id, 'clip', row.id), existingId: row.object_id,
         app_id: row.app_id, kind: 'clip', owner_user_id: row.user_id,
         visibility: rowVisibility(row), lifecycle_status: lifecycle,
@@ -341,23 +339,13 @@ function syncClip(idOrRow) {
         metadata: { title: row.title || null, duration_seconds: Number(row.duration_seconds) || 0, start_time: row.start_time, end_time: row.end_time,
             channel_user_id: row.channel_user_id || null, auto_generated: !!row.auto_generated },
         created_at: row.created_at, locations: locs, canonical,
-    });
-    linkRow('clips', 'id', row.id, r.id);
-    if (row.vod_id) {
-        const vod = db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
-        if (vod && vod.object_id) setRelationship(r.id, 'clip_of', vod.object_id, { start_time: row.start_time, end_time: row.end_time });
-    }
-    recordInvariant(r.id);
-    const thumbnail = syncThumbnail(row, r.id, 'clip');
-    return { ...r, locations: locs.map(l => l.state), thumbnail };
+    };
 }
 
-function syncFile(keyOrRow) {
-    const row = typeof keyOrRow === 'object' ? keyOrRow : db.get('SELECT * FROM files WHERE key = ?', [keyOrRow]);
-    if (!row) return null;
+function fileProjection(row) {
     const local = localLocation([path.join(config.files.path, row.app_id, row.key)]);
     if (local.state === 'present' && row.sha256) local.checksum = row.sha256;
-    const r = project({
+    return {
         legacy_ref: legacyRef(row.app_id, 'file', row.key), existingId: row.object_id,
         app_id: row.app_id, kind: 'file', owner_user_id: row.user_id,
         visibility: 'public',                                       // /f/:key serves every file without auth
@@ -365,21 +353,17 @@ function syncFile(keyOrRow) {
         size_bytes: Number(row.size) || 0, content_hash: row.sha256 || null,
         metadata: { filename: row.original_name || null },
         created_at: row.created_at, locations: [local], canonical: 'local',
-    });
-    linkRow('files', 'key', row.key, r.id);
-    return { ...r, locations: [local.state] };
+    };
 }
 
 /** Screenshot pastes (and avatars, which are stored as screenshot pastes) — the bytes only; text is Community's. */
-function syncPaste(idOrRow) {
-    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM pastes WHERE id = ?', [idOrRow]);
-    if (!row) return null;
+function pasteProjection(row) {
     if (row.type !== 'screenshot') return { skipped: 'text paste (no bytes)' };
     if (!row.screenshot_path) return { skipped: 'screenshot paste without a file path' };
     const meta = parseJson(row.metadata, {}) || {};
     const kind = meta.kind === 'avatar' ? 'avatar' : 'screenshot';
     const local = localLocation([row.screenshot_path]);
-    const r = project({
+    return {
         legacy_ref: legacyRef(row.app_id, kind === 'avatar' ? 'avatar' : 'paste', row.slug), existingId: row.object_id,
         app_id: row.app_id, kind, owner_user_id: row.user_id,
         visibility: VISIBILITIES.includes(row.visibility) ? row.visibility : 'public', lifecycle_status: 'ready',
@@ -387,9 +371,53 @@ function syncPaste(idOrRow) {
         size_bytes: local.state === 'present' ? local.size_bytes : (Number(meta.size_bytes) || 0),
         metadata: { title: row.title || null, slug: row.slug },
         created_at: row.created_at, locations: [local], canonical: 'local',
-    });
+    };
+}
+
+function syncVod(idOrRow) {
+    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM vods WHERE id = ?', [idOrRow]);
+    if (!row) return null;
+    const p = vodProjection(row);
+    if (p.skipped) return p;
+    const r = project(p);
+    linkRow('vods', 'id', row.id, r.id);
+    recordInvariant(r.id);
+    const thumbnail = syncThumbnail(row, r.id, 'vod');
+    return { ...r, locations: p.locations.map(l => l.state), thumbnail };
+}
+
+function syncClip(idOrRow) {
+    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM clips WHERE id = ?', [idOrRow]);
+    if (!row) return null;
+    const p = clipProjection(row);
+    const r = project(p);
+    linkRow('clips', 'id', row.id, r.id);
+    if (row.vod_id) {
+        const vod = db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
+        if (vod && vod.object_id) setRelationship(r.id, 'clip_of', vod.object_id, { start_time: row.start_time, end_time: row.end_time });
+    }
+    recordInvariant(r.id);
+    const thumbnail = syncThumbnail(row, r.id, 'clip');
+    return { ...r, locations: p.locations.map(l => l.state), thumbnail };
+}
+
+function syncFile(keyOrRow) {
+    const row = typeof keyOrRow === 'object' ? keyOrRow : db.get('SELECT * FROM files WHERE key = ?', [keyOrRow]);
+    if (!row) return null;
+    const p = fileProjection(row);
+    const r = project(p);
+    linkRow('files', 'key', row.key, r.id);
+    return { ...r, locations: [p.locations[0].state] };
+}
+
+function syncPaste(idOrRow) {
+    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM pastes WHERE id = ?', [idOrRow]);
+    if (!row) return null;
+    const p = pasteProjection(row);
+    if (p.skipped) return p;
+    const r = project(p);
     linkRow('pastes', 'id', row.id, r.id);
-    return { ...r, kind, locations: [local.state] };
+    return { ...r, kind: p.kind, locations: [p.locations[0].state] };
 }
 
 /** Thumbnail file name behind a stored thumbnail_url, or null when it is not one of ours. */
@@ -407,64 +435,139 @@ function thumbFileFromUrl(u) {
 /**
  * A vod/clip's thumbnail is one object per parent, updated in place when the
  * picture is regenerated (live recordings refresh theirs every couple of minutes).
+ * null when the parent has no thumbnail.
  */
-function syncThumbnail(parentRow, parentObjectId, parentKind) {
+function thumbnailProjection(parentRow, parentKind) {
     if (!parentRow.thumbnail_url) return null;
     const name = thumbFileFromUrl(parentRow.thumbnail_url);
     if (!name) return { skipped: 'external thumbnail url' };
     const local = localLocation([path.join(path.resolve(config.thumbnails.path), name)]);
-    const variant = getVariant(parentObjectId, 'thumbnail');
     const parentVis = rowVisibility(parentRow);
-    const r = project({
-        legacy_ref: legacyRef(parentRow.app_id, 'thumbnail', name), existingId: variant ? variant.derived_object_id : null,
+    return {
+        legacy_ref: legacyRef(parentRow.app_id, 'thumbnail', name),
         app_id: parentRow.app_id, kind: 'thumbnail', owner_user_id: parentRow.user_id,
         // /t/<name> is served to anyone holding the name.
         visibility: parentVis === 'public' ? 'public' : 'unlisted', lifecycle_status: 'ready',
         mime_type: mimeFor(name, 'image/jpeg'), size_bytes: local.state === 'present' ? local.size_bytes : 0,
         metadata: { of: parentKind },
         created_at: parentRow.created_at, locations: [local], canonical: 'local',
-    });
-    setVariant(parentObjectId, 'thumbnail', r.id);
-    setRelationship(r.id, 'thumbnail_of', parentObjectId);
-    return { ...r, locations: [local.state] };
+    };
 }
 
-/** One projection in one transaction, with the object-change events it caused (server/events.js). */
-function _syncTx(fn, arg) {
+function syncThumbnail(parentRow, parentObjectId, parentKind) {
+    const p = thumbnailProjection(parentRow, parentKind);
+    if (!p || p.skipped) return p;
+    const variant = getVariant(parentObjectId, 'thumbnail');
+    const r = project({ ...p, existingId: variant ? variant.derived_object_id : null });
+    setVariant(parentObjectId, 'thumbnail', r.id);
+    setRelationship(r.id, 'thumbnail_of', parentObjectId);
+    return { ...r, locations: [p.locations[0].state] };
+}
+
+/**
+ * Projection work in one transaction, with the object-change events it caused (server/events.js).
+ * Nested in an outer transaction (webhooks.announce, another withObject) it is a savepoint, and the
+ * outer one records the changes at its end, in the same transaction and after its own outcome event,
+ * the order they had when the object was synced after the commit.
+ */
+function _syncTx(fn) {
     const events = require('../events');
-    const out = db.getDb().transaction(() => {
-        const r = fn(arg);
-        events.recordObjectChanges();
+    const raw = db.getDb();
+    const outer = raw.inTransaction;
+    const out = raw.transaction(() => {
+        const r = fn();
+        if (!outer) events.recordObjectChanges();
         return r;
     })();
-    events.kick();
+    if (!outer) events.kick();
     return out;
+}
+
+const SYNC_BY_KIND = { vod: syncVod, clip: syncClip, file: syncFile, paste: syncPaste };
+
+/** Row ids named by withObject()'s `ids` (a value, a list, or a function of write()'s result). */
+function _rowIds(ids, out) {
+    return [].concat((typeof ids === 'function' ? ids(out) : ids) ?? []).filter(id => id != null);
 }
 
 /** Re-project one inherited row: kind vod|clip|file|paste, id = row id (file key for files). */
 function sync(kind, id) {
-    const fn = { vod: syncVod, clip: syncClip, file: syncFile, paste: syncPaste }[kind];
+    const fn = SYNC_BY_KIND[kind];
     if (!fn || id == null) return null;
-    return _syncTx(fn, id);
+    return _syncTx(() => fn(id));
 }
 
-/** Never-throwing variant for write hooks outside database.js. */
+/**
+ * Never-throwing re-projection, for follow-ups that re-read what is on disk after a write already
+ * committed with its object (see withObject), and for scripts. Not a write path any more.
+ */
 function safeSync(kind, id) {
     try { return sync(kind, id); } catch (err) { console.warn(`[Objects] sync ${kind} ${id}:`, err.message); return null; }
 }
 
 /**
- * After a tier move that verified a copy (upload + HEAD, copy + HEAD): re-project,
- * then mark the verified providers present.
+ * Object-first write (WS-G task 1; retires compatibility shim C-75, "write the row, then sync its
+ * object"): write() changes inherited rows and the objects behind them are re-projected in the SAME
+ * SQLite transaction, so both commit or neither does: no crash or error between the two can leave
+ * an object behind its row. kind vod|clip|file|paste; ids the row id (a file's key), a list of them,
+ * or a function of write()'s result that gives them (an INSERT's lastInsertRowid). write() must be
+ * synchronous database work. Returns write()'s result; throws, with nothing written, when either
+ * part fails. Inside an outer transaction (webhooks.announce) it is a savepoint of that one.
+ *
+ * The projection stats local files (sizes, present/missing copies) but never reads them: content
+ * hashes stay with the content-hash job and remote copies stay 'pending' until reconciliation or a
+ * tier move verifies them (afterTierMove), as before. A row write() deleted needs nothing: the
+ * row-delete trigger marks its object deleted in the same statement (server/db/database.js).
  */
-function afterTierMove(vodId, verifiedProviders = []) {
-    try {
-        const r = sync('vod', vodId);
+function withObject(kind, ids, write) {
+    const fn = SYNC_BY_KIND[kind];
+    if (!fn) throw new Error(`withObject: unknown projection ${kind}`);
+    return _syncTx(() => {
+        const out = write();
+        for (const id of _rowIds(ids, out)) fn(id);
+        return out;
+    });
+}
+
+/**
+ * withObject() for a row write that records something already done outside the database (a
+ * recorder's ffmpeg is running): the row must say so whatever happens to its object. When the
+ * combined transaction fails, the row is written alone and the object re-projected after it (the
+ * pre-WS-G two steps; logged, and the drift report lists the row until a later write catches up).
+ */
+function withObjectOrRow(kind, ids, write) {
+    try { return withObject(kind, ids, write); } catch (err) {
+        console.warn(`[Objects] ${kind}: object not written with its row (${err.message}); writing the row alone`);
+        const out = write();
+        for (const id of _rowIds(ids, out)) safeSync(kind, id);
+        return out;
+    }
+}
+
+/**
+ * A tier move that verified a copy (upload + HEAD, copy + HEAD). write() flips the row's
+ * storage_provider / storage_key; the object is re-projected and the verified providers marked
+ * present in the same transaction. The bytes have already moved, so the flip is never lost to its
+ * object: when the combined transaction fails the row is flipped alone and re-projected after it
+ * (as withObjectOrRow). Without write(), the re-projection alone. The object part never throws.
+ */
+function afterTierMove(vodId, verifiedProviders = [], write = null) {
+    const reproject = () => {
+        const r = syncVod(vodId);
         if (!r || !r.id) return;
         for (const l of listLocations(r.id)) {
             if (verifiedProviders.includes(l.provider)) setLocationState(l.id, { state: 'present' });
         }
-    } catch (err) { console.warn(`[Objects] tier sync vod ${vodId}:`, err.message); }
+    };
+    let out;
+    if (write) {
+        try { return _syncTx(() => { const w = write(); reproject(); return w; }); } catch (err) {
+            console.warn(`[Objects] tier move vod ${vodId}: object not written with its row (${err.message}); flipping the row alone`);
+            out = write();
+        }
+    }
+    try { _syncTx(reproject); } catch (err) { console.warn(`[Objects] tier sync vod ${vodId}:`, err.message); }
+    return out;
 }
 
 // ── Holds ────────────────────────────────────────────────────
@@ -611,7 +714,8 @@ module.exports = {
     mimeFor, parseJson, parseLegacyRef, thumbFileFromUrl,
     getObject, getObjectByLegacyRef, resolveObject, listLocations, listHolds, inheritedHolds, isHeld, isHeldRow,
     createObject, updateObject, upsertLocation, setLocationState, setRelationship, setVariant, getVariant,
-    syncVod, syncClip, syncFile, syncPaste, sync, safeSync, afterTierMove,
+    vodProjection, clipProjection, fileProjection, pasteProjection, thumbnailProjection,
+    syncVod, syncClip, syncFile, syncPaste, sync, safeSync, withObject, withObjectOrRow, afterTierMove,
     placeHold, releaseHold, holdPublic,
     objectFilePath, softDelete, restore, purgeExpired, usedBytes,
     legacyPublicUrl, objectPublic,

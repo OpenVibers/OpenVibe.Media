@@ -207,37 +207,35 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
             end_time: endTime,
             duration_seconds: duration,
             is_public: visibility === 'public' ? 1 : 0,
+            visibility,
             status: 'processing',
-        });
+        });   // the row and its object (uploading) in one transaction
         const clipId = result.lastInsertRowid;
-        if (visibility !== 'public') db.setClipVisibility(clipId, visibility);
         const appId = req.appId;
 
         // Cut in the background; webhook on completion.
         (async () => {
             const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
             if (cut.ok) {
-                // Thumbnail first so the clip.ready payload carries it; then the ready transition
-                // and its event commit together (webhooks.announce) and the webhook goes out.
+                // Thumbnail first so the clip.ready payload carries it; then the ready transition,
+                // the clip's object and its event commit together (webhooks.announce) and the webhook goes out.
                 try {
                     await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath);
                 } catch { /* */ }
                 announce(appId, 'clip.ready', {
-                    change: () => db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
-                        [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId]),
+                    change: () => objects.withObject('clip', clipId, () => db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
+                        [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId])),
                     payload: () => clipPublic(db.getClipById(clipId)),
                 });
-                objects.safeSync('clip', clipId);
                 console.log(`[Clips] Clip ${clipId} cut from vod ${vodId} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s)`);
             } else {
                 // First attempt failed: record why and let the retry sweeper take it from here
                 // (attempt 2 pulls a cloud-stored VOD back to local disk first).
                 const nextAt = new Date(Date.now() + 2 * 60000).toISOString().replace('T', ' ').slice(0, 19);
                 announce(appId, 'clip.failed', {
-                    change: () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_attempts = 1, cut_next_at = ? WHERE id = ?", [String(cut.error || 'cut failed').slice(0, 500), nextAt, clipId]),
+                    change: () => objects.withObject('clip', clipId, () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_attempts = 1, cut_next_at = ? WHERE id = ?", [String(cut.error || 'cut failed').slice(0, 500), nextAt, clipId])),
                     payload: () => clipPublic(db.getClipById(clipId)),
                 });
-                objects.safeSync('clip', clipId);
                 console.warn(`[Clips] Clip ${clipId} failed: ${cut.error} — auto-retry in 2 min`);
             }
         })().catch(err => console.error('[Clips] Background cut error:', err.message));
@@ -289,10 +287,10 @@ async function _createUploadedClip(req, res) {
             end_time: Number.isFinite(endTime) ? endTime : duration,
             duration_seconds: duration,
             is_public: visibility === 'public' ? 1 : 0,
+            visibility,
             status: 'ready',
-        });
+        });   // the row and its object (ready, local copy present) in one transaction
         const clipId = result.lastInsertRowid;
-        if (visibility !== 'public') db.setClipVisibility(clipId, visibility);
 
         require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, clipPath)
             .catch(err => console.warn(`[Clips] Thumbnail failed for clip ${clipId}:`, err.message));
@@ -372,7 +370,7 @@ router.post('/:id/recut', tenantAuth(), async (req, res) => {
         if (!clip || clip.app_id !== req.appId) return res.status(404).json({ error: 'Clip not found' });
         if (clip.status === 'processing') return res.status(409).json({ error: 'Clip is already being cut' });
         if (!clip.vod_id) return res.status(422).json({ error: 'Clip has no source VOD to re-cut from' });
-        // A manual retry resets the attempt counter so it gets the full ladder again.
+        // A manual retry resets the attempt counter so it gets the full ladder again (not projected: no object change).
         db.run("UPDATE clips SET cut_attempts = 0 WHERE id = ?", [clipId]);
         require('./clip-jobs').recutClip(clipId, { reason: 're-cut' }).catch(err => console.error('[Clips] Background re-cut error:', err.message));
         res.status(202).json({ id: clipId, status: 'processing' });
@@ -390,13 +388,12 @@ router.put('/:id', tenantAuth(), (req, res) => {
         if (title !== undefined) {
             const t = sanitizeClipTitle(title, '');
             if (!t) return res.status(400).json({ error: 'Title must be 1-200 characters' });
-            db.run('UPDATE clips SET title = ? WHERE id = ?', [t, clip.id]);
-            if (visibility === undefined) objects.safeSync('clip', clip.id);
+            objects.withObject('clip', clip.id, () => db.run('UPDATE clips SET title = ? WHERE id = ?', [t, clip.id]));
         }
         // Only the app itself (its automation's own records) may say a clip was machine-made.
         if (autoGen !== undefined && flag(autoGen) !== null) {
             if (req.authType !== 'app') return res.status(403).json({ error: 'auto_generated is set by the app only' });
-            db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]);
+            objects.withObject('clip', clip.id, () => db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]));
         }
         if (visibility !== undefined) db.setClipVisibility(clip.id, visibility);
         res.json({ clip: clipPublic(db.getClipById(clip.id, req.appId), { readiness: true }) });
@@ -422,7 +419,7 @@ router.delete('/:id', tenantAuth(), (req, res) => {
                 console.warn(`[Clips] Remote object cleanup failed for clip ${clip.id}:`, err.message));
         }
 
-        db.run('DELETE FROM clips WHERE id = ?', [clip.id]);
+        db.run('DELETE FROM clips WHERE id = ?', [clip.id]);   // its object is marked deleted by the row-delete trigger, same statement
         res.json({ message: 'Clip deleted' });
     } catch (err) {
         res.status(500).json({ error: 'Failed to delete clip' });

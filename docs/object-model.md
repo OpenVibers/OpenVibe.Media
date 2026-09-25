@@ -54,8 +54,9 @@ Every v2 route that takes `:id` accepts either form. Native v2 objects have `leg
 
 ### How a row maps to its object
 
-`model.sync(kind, id)` derives the object and its locations from the row as it is at that moment.
-The backfill and every write hook use the same function.
+`model.sync(kind, id)` derives the object and its locations from the row as it is at that moment
+(the per-kind `<kind>Projection(row)` functions). The backfill, every write and the drift report use
+the same functions.
 
 - **vod / clip.**
   - Local copy: the file under `VOD_PATH` (vods, resolved by basename as playback does) or the clip's own path.
@@ -82,37 +83,70 @@ relationships and thumbnail variants.
 - **Never moves or deletes bytes, and never calls B2/R2.** A local copy is `present` when the file exists and `missing` when it does not. Remote copies stay `pending` until `reconcile-objects.js --verify` checks them.
 - **One transaction,** with one savepoint per row: a failing row is reported and leaves nothing half-written. `--dry-run` rolls everything back and only reports.
 - **Report:** counts per kind (seen, created, updated, skipped), location states, skipped rows with a reason, and errors. A real run stores the report in `media_settings` under `objects.backfill.last_report`.
-- **At boot:** the service runs the `--only-missing` form itself 15 s after start, for rows with no `object_id`. The first boot after the upgrade therefore projects everything.
+- **At boot:** the service runs the `--only-missing` form itself 15 s after start, for rows with no `object_id`. The first boot after the upgrade therefore projects everything. With object-first writes it should find nothing; it stays until the [drift report](#drift-report) shows zero drift across a release.
 
 Skip reasons today: `clips-only recording (ephemeral, never published)`, `screenshot paste without a file path`, `external thumbnail url`.
 
 The run holds SQLite's write lock for its duration, typically seconds. Prefer the boot backfill, or
 run the script while traffic is quiet.
 
-### Keeping the model current
+### Keeping the model current: object-first writes
 
-The old write paths re-project their row after they change it:
+Every write to a projected row writes its object in the same SQLite transaction
+(`model.withObject(kind, ids, write)`; roadmap WS-G task 1, which retires compatibility shim C-75,
+"write the row, then sync the object"). The row change and the re-projection commit together or
+not at all, so a crash or an error between them can no longer leave the object behind its row. A
+write whose object cannot be written fails as a whole and changes nothing. Inside
+`webhooks.announce()` the object joins the outcome's transaction, and its object events are queued
+after the outcome event.
 
-| path | hook |
+| path | where |
 |---|---|
-| vod create | `POST /vods` |
-| recording start | `recorder` sets `file_path` |
-| every finalize outcome | `finalize.finalizeVod` |
-| visibility | `db.setVodVisibility` / `setClipVisibility` |
-| health | `db.updateVodHealth` |
-| title | `PUT /vods/:id`, `PUT /clips/:id` |
+| vod create (visibility and clips-only in the same insert) | `db.createVod` (`POST /vods`) |
+| recording start | `recorder` sets `file_path` (see below) |
+| chunk upload, live progress | `POST /vods/:id/chunks`, recorder progress |
+| every finalize outcome | `finalize.finalizeVod`, inside the vod.ready / vod.failed transaction |
+| title, description, visibility | `PUT /vods/:id`, `PUT /clips/:id`, `db.setVodVisibility` / `setClipVisibility` |
+| health, duration repairs, quarantines | `db.updateVodHealth`, `db.repairVodDuration`, health job, duration reconcile, `vod-storage` quarantines |
 | clip create | `db.createClip` (API cuts, uploads and auto-clips) |
-| clip cut / re-cut result | clips routes and `clip-jobs` |
+| clip cut / re-cut result | clips routes and `clip-jobs`, inside the clip.ready / clip.failed transaction |
 | file upload | `db.createFile` |
 | thumbnail generate / upload | `thumbnail-service`, `POST /thumbnails` |
-| screenshot upload / censor | pastes routes |
+| screenshot upload / update / censor | pastes routes |
 | avatar ingest | `avatars/ingest` |
-| tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep, `migrateLegacy`: the copy the move verified is marked `present` |
+| tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep, `migrateLegacy`: the copy the move verified is marked `present` in the same transaction |
 
-**Deletes need no hook.** A SQLite trigger on `vods`, `clips`, `files` and `pastes` marks the
-object `deleted` whenever its row is deleted, which covers all of the inherited delete paths. Hooks
-never throw: the legacy write has already happened, so a failed sync only logs a warning. The next
-sync or backfill repairs it.
+**Deletes need nothing more.** A SQLite trigger on `vods`, `clips`, `files` and `pastes` marks the
+object `deleted` in the same statement whenever its row is deleted, which covers all of the
+inherited delete paths.
+
+**What stays outside the transaction.** The projection stats local files but never reads them:
+content hashes come from the content-hash job, and remote copies stay `pending` until a tier move or
+reconciliation verifies them. Two writes record something that already happened outside the
+database, so they never lose the row to its object: the recorder's start (ffmpeg is running) and the
+tier moves (the bytes have moved). If their combined transaction fails, the row is written alone and
+re-projected after it (`withObjectOrRow`), with a warning. After a move that removed the local file,
+and after a finalize that threw part-way, a follow-up re-projection re-reads the disk. Columns no
+object carries (view counts, `master_file_path`, `cut_attempts`, paste likes and AI fields) are
+written without one. `db.importLegacyRows` (the cutover import) is not converted: the boot backfill
+projects what it inserts.
+
+### Drift report
+
+```
+node scripts/object-drift-report.js [--app live] [--limit 20] [--json] [--out report.json] [--db ./data/media.db]
+```
+
+For every projected row, and each vod/clip thumbnail, the report derives what the object must say
+with the same projection functions and compares it with the object on record: `kind`, `visibility`,
+`lifecycle_status`, `size_bytes`, `legacy_ref`, `app_id`, `owner_app`, `owner_user_id`, and the link
+(the row's `object_id`, or the parent's `thumbnail` variant). A row is `missing` (no object),
+`unlinked` (the link names another object) or `mismatch` (a field differs). It prints counts per
+kind and up to `--limit` examples of each. The database is opened read-only and nothing is written;
+the exit code is always 0.
+
+The boot backfill (rows with no object) and the finalize follow-up stay until a release has run with
+zero drift. They are removed in a later, dated step.
 
 ## Owner subjects
 

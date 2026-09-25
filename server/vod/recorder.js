@@ -186,7 +186,7 @@ class StreamRecorder {
     _cleanupFailedVod(vodId, filePath) {
         if (!filePath || !fs.existsSync(filePath)) {
             try {
-                db.run('DELETE FROM vods WHERE id = ?', [vodId]);
+                db.run('DELETE FROM vods WHERE id = ?', [vodId]);   // its object is marked deleted by the row-delete trigger
                 console.log(`[VOD] Deleted stale failed VOD ${vodId}`);
             } catch (err) {
                 console.warn(`[VOD] Failed to delete stale VOD ${vodId}:`, err.message);
@@ -194,10 +194,10 @@ class StreamRecorder {
             return;
         }
         try {
-            db.run(
+            require('../objects/model').withObject('vod', vodId, () => db.run(
                 'UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?, quarantined_at = datetime(\'now\'), is_public = 0 WHERE id = ?',
                 ['corrupt', JSON.stringify(['failed_recording_start']), vodId]
-            );
+            ));
             console.log(`[VOD] Marked failed VOD ${vodId} as corrupt`);
         } catch (err) {
             console.warn(`[VOD] Failed to mark VOD ${vodId} as corrupt:`, err.message);
@@ -238,9 +238,13 @@ class StreamRecorder {
         }, 30000);
 
         this.activeRecordings.set(vod.id, recording);
-        db.run('UPDATE vods SET is_recording = 1, file_path = ? WHERE id = ?', [filePath, vod.id]);
-        if (masterPath) db.run('UPDATE vods SET master_file_path = ? WHERE id = ?', [masterPath, vod.id]);
-        require('../objects/model').safeSync('vod', vod.id);
+        // The row and its object in one transaction. ffmpeg is already running, so the row must say
+        // so even if the object cannot be written with it: withObjectOrRow then writes the row alone
+        // and re-projects after it (the finalize that follows re-projects every outcome as well).
+        require('../objects/model').withObjectOrRow('vod', vod.id, () => {
+            db.run('UPDATE vods SET is_recording = 1, file_path = ? WHERE id = ?', [filePath, vod.id]);
+            if (masterPath) db.run('UPDATE vods SET master_file_path = ? WHERE id = ?', [masterPath, vod.id]);
+        });
         return recording;
     }
 
@@ -282,10 +286,12 @@ class StreamRecorder {
             require('./finalize').finalizeVod(vodId, { startTimeMs: rec?.startTime }).catch(() => {
                 // Never bare-mark a failed recording as ready — that published
                 // 0:00 ghosts. Quarantine it out of listings instead.
-                // The live duration updates were wall-clock estimates: none of it is kept.
-                db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
-                        health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
-                    [JSON.stringify(['finalize_failed']), vodId]);
+                // The live duration updates were wall-clock estimates: none of it is kept. Row and object together.
+                try {
+                    require('../objects/model').withObject('vod', vodId, () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
+                            health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+                        [JSON.stringify(['finalize_failed']), vodId]));
+                } catch (e) { console.warn(`[VOD] Failed to quarantine vod ${vodId} after a failed finalize:`, e.message); }
             });
             if (filePath && !fs.existsSync(filePath)) this._cleanupFailedVod(vodId, filePath);
         });
@@ -312,8 +318,9 @@ class StreamRecorder {
         const elapsed = Math.round((Date.now() - rec.startTime) / 1000);
         try {
             const stat = fs.statSync(rec.filePath);
-            db.run('UPDATE vods SET duration_seconds = ?, file_size = ? WHERE id = ?',
-                [elapsed, stat.size, rec.vodId]);
+            // Progress estimate: the row and its object's size/duration together, or neither (next pass retries).
+            require('../objects/model').withObject('vod', rec.vodId, () => db.run('UPDATE vods SET duration_seconds = ?, file_size = ? WHERE id = ?',
+                [elapsed, stat.size, rec.vodId]));
         } catch {}
 
         tools.remuxForLiveSeeking(rec.filePath).catch(() => {});

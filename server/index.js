@@ -234,6 +234,10 @@ if (!drill.enabled) {
         try { const r = require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
     });
     // Project rows that have no media_object yet (first boot after the upgrade: all of them).
+    // C-75 catch-up: every write now makes its object in the same transaction (objects/model.js
+    // withObject, WS-G task 1), so this should find nothing. It stays until a release has run with
+    // `node scripts/object-drift-report.js` showing zero drift; then it goes, with the finalize
+    // follow-up re-projection (vod/finalize.js), in a dated later step.
     setTimeout(() => {
         try {
             const bf = require('./objects/backfill');

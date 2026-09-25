@@ -103,11 +103,10 @@ router.post('/', tenantAuth(), (req, res) => {
             user_id: user_id != null ? user_id : null,
             title: (title || 'Recording').toString().slice(0, 300),
             meta,
-        });
+            visibility: visibility || null,
+            clips_only: !!clips_only,
+        });   // the row (visibility and clips_only included) and its object in one transaction
         const id = result.lastInsertRowid;
-        if (clips_only) db.run('UPDATE vods SET clips_only = 1 WHERE id = ?', [id]);
-        if (visibility) db.setVodVisibility(id, visibility);
-        else if (!clips_only) objects.safeSync('vod', id);
         res.status(201).json({ id });
     } catch (err) {
         console.error('[VOD] Create error:', err.message);
@@ -188,8 +187,8 @@ router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('
             fs.copyFileSync(req.file.path, filePath);
             tools.cleanupTempFile(req.file.path);
 
-            db.run('UPDATE vods SET file_path = ?, file_size = ?, is_recording = 1 WHERE id = ?',
-                [filePath, fs.statSync(filePath).size, vod.id]);
+            objects.withObject('vod', vod.id, () => db.run('UPDATE vods SET file_path = ?, file_size = ?, is_recording = 1 WHERE id = ?',
+                [filePath, fs.statSync(filePath).size, vod.id]));
 
             rec = { filePath, startTime: Date.now(), chunkCount: 1, currentSegmentId: segmentId, currentSegmentPath: filePath };
             activeChunkUploads.set(vod.id, rec);
@@ -222,7 +221,7 @@ router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('
         const size = tools.getFileSizeSafe(rec.filePath)
             + (rec.currentSegmentPath && rec.currentSegmentPath !== rec.filePath ? tools.getFileSizeSafe(rec.currentSegmentPath) : 0);
         const elapsed = Math.round((Date.now() - rec.startTime) / 1000);
-        db.run('UPDATE vods SET file_size = ?, duration_seconds = ? WHERE id = ?', [size, elapsed, vod.id]);
+        objects.withObject('vod', vod.id, () => db.run('UPDATE vods SET file_size = ?, duration_seconds = ? WHERE id = ?', [size, elapsed, vod.id]));
 
         // Seekable sidecar for live DVR (every 2 chunks ≈ ~60s)
         if (rec.chunkCount >= 2 && rec.chunkCount % 2 === 0) {
@@ -327,7 +326,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
             const duration = await tools.probeVodDuration(vod.file_path);
             if (duration > 0) {
                 const fileSize = tools.getFileSizeSafe(vod.file_path);
-                db.run("UPDATE vods SET duration_seconds = ?, file_size = ?, duration_source = 'probe' WHERE id = ?", [duration, fileSize, vod.id]);
+                objects.withObject('vod', vod.id, () => db.run("UPDATE vods SET duration_seconds = ?, file_size = ?, duration_source = 'probe' WHERE id = ?", [duration, fileSize, vod.id]));
                 vod.duration_seconds = duration;
                 vod.file_size = fileSize;
             }
@@ -352,12 +351,14 @@ router.put('/:id', tenantAuth(), (req, res) => {
         const params = [];
         if (title !== undefined) { updates.push('title = ?'); params.push(String(title).slice(0, 300)); }
         if (description !== undefined) { updates.push('description = ?'); params.push(String(description)); }
-        if (updates.length) {
-            params.push(vod.id);
-            db.run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
-        }
-        if (visibility !== undefined) db.setVodVisibility(vod.id, visibility);
-        else if (updates.length) objects.safeSync('vod', vod.id);
+        // Title, description and visibility, and the object, in one transaction.
+        objects.withObject('vod', vod.id, () => {
+            if (updates.length) {
+                params.push(vod.id);
+                db.run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
+            }
+            if (visibility !== undefined) db.setVodVisibility(vod.id, visibility);
+        });
         res.json({ vod: vodPublic(db.getVodById(vod.id, req.appId), { readiness: true }) });
     } catch (err) {
         console.error('[VOD] Update error:', err.message);
@@ -384,7 +385,7 @@ router.delete('/:id', tenantAuth(), (req, res) => {
             try { if (vod.master_file_path && fs.existsSync(vod.master_file_path)) fs.unlinkSync(vod.master_file_path); } catch { /* */ }
         }
 
-        db.run('DELETE FROM vods WHERE id = ?', [vod.id]);
+        db.run('DELETE FROM vods WHERE id = ?', [vod.id]);   // its object is marked deleted by the row-delete trigger, same statement
         res.json({ message: 'VOD deleted' });
     } catch (err) {
         console.error('[VOD] Delete error:', err.message);

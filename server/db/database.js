@@ -172,9 +172,13 @@ function _ensureObjectTriggers() {
         BEGIN INSERT INTO media_object_changes (object_id, change, previous_visibility) VALUES (NEW.id, 'deleted', OLD.visibility); END;`);
 }
 
-/** Keep a projected row's media_object current. Never throws — the legacy write already happened. */
-function _syncObject(kind, id) {
-    return require('../objects/model').safeSync(kind, id);
+/**
+ * Object-first write (WS-G task 1, retiring C-75): run write() — a change to a projected
+ * vods/clips/files/pastes row — and re-project the row's media_object in the same transaction
+ * (objects/model.js withObject). Throws, with nothing written, when either part fails.
+ */
+function withObject(kind, ids, write) {
+    return require('../objects/model').withObject(kind, ids, write);
 }
 
 function seedSettings() {
@@ -299,14 +303,16 @@ function appAllowedOrigins(app) {
 
 // ── VOD helpers ──────────────────────────────────────────────
 
-function createVod({ app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, file_size, duration_seconds, thumbnail_url, master_file_path, meta }) {
-    return run(
-        `INSERT INTO vods (app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, master_file_path, file_size, duration_seconds, thumbnail_url, meta_json, is_public)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+// The row and its media_object in one transaction (a clips-only recording has no object).
+function createVod({ app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, file_size, duration_seconds, thumbnail_url, master_file_path, meta, visibility, clips_only }) {
+    const vis = visibility ? _normVisibility(visibility) : 'public';
+    return withObject('vod', (r) => r.lastInsertRowid, () => run(
+        `INSERT INTO vods (app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, master_file_path, file_size, duration_seconds, thumbnail_url, meta_json, is_public, visibility, clips_only)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [app_id, stream_id || null, stream_key || null, managed_stream_id || null, user_id || null, title || 'Recording', description || '',
          file_path || null, master_file_path || null, file_size || 0, duration_seconds || 0, thumbnail_url || null,
-         JSON.stringify(meta || {})]
-    );
+         JSON.stringify(meta || {}), vis === 'public' ? 1 : 0, vis, clips_only ? 1 : 0]
+    ));
 }
 
 /** Legacy lookup: resolve a row by its file's basename (old /api/vods/file/<name> URLs). */
@@ -458,12 +464,10 @@ function countVods(appId, filters = {}) {
 const VALID_VISIBILITY = new Set(['public', 'unlisted', 'private']);
 function _normVisibility(v) { return VALID_VISIBILITY.has(v) ? v : 'public'; }
 
-// Set VOD/clip visibility; is_public mirrors (1 iff public) so listing filters hold.
+// Set VOD/clip visibility; is_public mirrors (1 iff public) so listing filters hold. Row and object together.
 function setVodVisibility(vodId, visibility) {
     const vis = _normVisibility(visibility);
-    const r = run('UPDATE vods SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, vodId]);
-    _syncObject('vod', vodId);
-    return r;
+    return withObject('vod', vodId, () => run('UPDATE vods SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, vodId]));
 }
 
 function updateVodHealth(vodId, { status, score, issues = [], probeDuration, probeFormat, quarantine = false, keepPublic = false }) {
@@ -481,17 +485,15 @@ function updateVodHealth(vodId, { status, score, issues = [], probeDuration, pro
     updates.push("last_health_scan_at = datetime('now')");
     params.push(vodId);
     if (!updates.length) return null;
-    const r = run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
-    _syncObject('vod', vodId);
-    return r;
+    return withObject('vod', vodId, () => run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params));
 }
 
-/** A measured duration (source probe | remux) replaces the stored one. */
+/** A measured duration (source probe | remux) replaces the stored one (the object's size and duration with it). */
 function repairVodDuration(vodId, duration, fileSize, source = 'probe') {
-    return run(
+    return withObject('vod', vodId, () => run(
         `UPDATE vods SET duration_seconds = ?, file_size = ?, probe_duration_seconds = ?, duration_source = ?, last_health_scan_at = datetime('now') WHERE id = ?`,
         [duration, fileSize, duration, source, vodId]
-    );
+    ));
 }
 
 // VODs the periodic health job should scan: finished (not recording), and either never
@@ -527,17 +529,18 @@ function vodStatus(vod) {
 
 // ── Clip helpers ─────────────────────────────────────────────
 
-function createClip({ app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, auto_generated, status }) {
+// The row and its media_object in one transaction. `visibility` (public | unlisted | private), when
+// given, sets both columns; otherwise is_public picks public or unlisted as before.
+function createClip({ app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status }) {
     const pub = (is_public === 0 || is_public === false) ? 0 : 1;
-    const r = run(
+    const vis = visibility ? _normVisibility(visibility) : (pub ? 'public' : 'unlisted');
+    return withObject('clip', (r) => r.lastInsertRowid, () => run(
         `INSERT INTO clips (app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [app_id, vod_id || null, stream_id || null, user_id || null, channel_user_id || null, title || 'Untitled Clip', description || '',
          file_path || '', thumbnail_url || null, start_time || 0, end_time || 0, duration_seconds || 0,
-         pub, pub ? 'public' : 'unlisted', auto_generated ? 1 : 0, status || 'ready']
-    );
-    _syncObject('clip', r.lastInsertRowid);
-    return r;
+         vis === 'public' ? 1 : 0, vis, auto_generated ? 1 : 0, status || 'ready']
+    ));
 }
 
 function getClipById(id, appId = null) {
@@ -580,9 +583,7 @@ function countClips(appId, filters = {}) {
 
 function setClipVisibility(clipId, visibility) {
     const vis = _normVisibility(visibility);
-    const r = run('UPDATE clips SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, clipId]);
-    _syncObject('clip', clipId);
-    return r;
+    return withObject('clip', clipId, () => run('UPDATE clips SET visibility = ?, is_public = ? WHERE id = ?', [vis, vis === 'public' ? 1 : 0, clipId]));
 }
 
 function findDuplicateClip({ appId, streamId = null, vodId = null, startTime = 0, endTime = 0, startWindow = 8, endWindow = 10, createdSinceMinutes = 10 }) {
@@ -722,14 +723,13 @@ function getRecentPasteCommentsByIp(ip, seconds = 10) {
 
 // ── File helpers ─────────────────────────────────────────────
 
+// The row and its media_object in one transaction (the file is already on disk, sha256 computed by the route).
 function createFile({ key, app_id, user_id, original_name, size, mime, sha256 }) {
-    const r = run(
+    return withObject('file', key, () => run(
         `INSERT INTO files (key, app_id, user_id, original_name, size, mime, sha256)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [key, app_id, user_id || null, original_name || null, size || 0, mime || 'application/octet-stream', sha256 || null]
-    );
-    _syncObject('file', key);
-    return r;
+    ));
 }
 
 function getFileByKey(key, appId = null) {
@@ -770,6 +770,7 @@ function listFiles(appId, { limit = 100, offset = 0 } = {}) {
     return all('SELECT * FROM files WHERE app_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?', [appId, limit, offset]);
 }
 
+// The object is marked deleted by trg_files_object_deleted in the same statement.
 function deleteFileRow(key) {
     return run('DELETE FROM files WHERE key = ?', [key]);
 }
@@ -784,7 +785,8 @@ function appFilesBytes(appId) {
  * Bulk-insert rows exported from the predecessor DB. Only columns present in
  * the destination table are used; missing ones take schema defaults; app_id is
  * backfilled. Row ids are preserved (INSERT OR IGNORE keeps re-runs idempotent).
- * Returns { inserted, skipped }.
+ * Returns { inserted, skipped }. The one write path that is not object-first (the cutover
+ * import): the boot backfill (objects/backfill.js, rows with no object_id) projects what it inserts.
  */
 function importLegacyRows(table, rows, appId = 'live') {
     const allowed = new Set(['vods', 'clips', 'pastes', 'paste_likes', 'paste_comments', 'content_views', 'files']);
@@ -812,7 +814,7 @@ function importLegacyRows(table, rows, appId = 'live') {
 }
 
 module.exports = {
-    getDb, run, get, all, close, syncObject: _syncObject, heldSql,
+    getDb, run, get, all, close, withObject, heldSql,
     getSetting, setSetting,
     // apps
     hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins, projectTenantId, ensureProjectTenant, isSandboxTenant,

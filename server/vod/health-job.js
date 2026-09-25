@@ -62,7 +62,7 @@ async function _scanOne(vod, { deep }) {
             if (master && fs.existsSync(master)) {
                 const freedMb = (fs.statSync(master).size / 1024 / 1024).toFixed(0);
                 fs.unlinkSync(master);
-                if (vod.master_file_path) { try { db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vod.id]); } catch { /* */ } }
+                if (vod.master_file_path) { try { db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vod.id]); } catch { /* */ } }   // not projected
                 console.log(`[VOD-Health] Reclaimed orphaned master for vod ${vod.id} (${freedMb}MB)`);
             }
         } catch { /* */ }
@@ -134,7 +134,7 @@ function _hardDeleteVod(vod) {
                 try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* */ }
             }
         }
-        db.run('DELETE FROM vods WHERE id = ?', [vod.id]);
+        db.run('DELETE FROM vods WHERE id = ?', [vod.id]);   // its object is marked deleted by the row-delete trigger
         return true;
     } catch (e) {
         console.warn(`[VOD-Health] cleanup delete failed for vod ${vod.id}:`, e.message);
@@ -155,8 +155,11 @@ async function _cleanupPass(deep) {
                     const fresh = db.getVodById(vod.id) || vod;
                     const rescan = await scanner.scanVod(fresh, { decode: true, repairDuration: true, quarantineBad: false });
                     if (!['corrupt', 'zero_byte', 'missing_file'].includes(rescan.status)) {
-                        db.run("UPDATE vods SET quarantined_at = NULL, health_status = 'ok' WHERE id = ?", [vod.id]);
-                        console.log(`[VOD-Health] Cleanup recovered vod ${vod.id} from master — un-quarantined`);
+                        // Row and object together; a failed write keeps the recovered VOD (never falls through to the delete).
+                        try {
+                            require('../objects/model').withObject('vod', vod.id, () => db.run("UPDATE vods SET quarantined_at = NULL, health_status = 'ok' WHERE id = ?", [vod.id]));
+                            console.log(`[VOD-Health] Cleanup recovered vod ${vod.id} from master — un-quarantined`);
+                        } catch (e) { console.warn(`[VOD-Health] vod ${vod.id} recovered from master but not un-quarantined (next pass retries):`, e.message); }
                         continue;
                     }
                 }
@@ -254,8 +257,8 @@ function sweepJunkVods() {
                 db.run('DELETE FROM vods WHERE id = ?', [v.id]);
                 deleted++;
             } else {
-                db.run(`UPDATE vods SET health_status = 'needs_review', health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
-                    [JSON.stringify(['short_duration']), v.id]);
+                objects.withObject('vod', v.id, () => db.run(`UPDATE vods SET health_status = 'needs_review', health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+                    [JSON.stringify(['short_duration']), v.id]));
                 quarantined++;
             }
         }

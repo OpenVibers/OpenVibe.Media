@@ -194,10 +194,10 @@ async function generateVodThumbnail(vodId, filePath, opts = {}) {
     const thumbUrl = await generateFromVideo(filePath, 'vod', vodId,
         isRecording ? { liveEdge: true } : { seekPercent: 10 });
     if (thumbUrl) {
-        // Clean up the previous thumbnail for this VOD
-        _removeOldThumb(db.get('SELECT thumbnail_url FROM vods WHERE id = ?', [vodId])?.thumbnail_url, thumbUrl);
-        db.run('UPDATE vods SET thumbnail_url = ? WHERE id = ?', [thumbUrl, vodId]);
-        require('../objects/model').safeSync('vod', vodId);   // the thumbnail object follows the picture
+        const old = db.get('SELECT thumbnail_url FROM vods WHERE id = ?', [vodId])?.thumbnail_url;
+        // The row and its objects (the VOD's, and the thumbnail object that follows the picture) together.
+        db.withObject('vod', vodId, () => db.run('UPDATE vods SET thumbnail_url = ? WHERE id = ?', [thumbUrl, vodId]));
+        _removeOldThumb(old, thumbUrl);   // the previous picture goes once nothing names it
     }
     return thumbUrl;
 }
@@ -206,9 +206,9 @@ async function generateVodThumbnail(vodId, filePath, opts = {}) {
 async function generateClipThumbnail(clipId, filePath) {
     const thumbUrl = await generateFromVideo(filePath, 'clip', clipId, { seekSeconds: 0.5 });
     if (thumbUrl) {
-        _removeOldThumb(db.get('SELECT thumbnail_url FROM clips WHERE id = ?', [clipId])?.thumbnail_url, thumbUrl);
-        db.run('UPDATE clips SET thumbnail_url = ? WHERE id = ?', [thumbUrl, clipId]);
-        require('../objects/model').safeSync('clip', clipId);
+        const old = db.get('SELECT thumbnail_url FROM clips WHERE id = ?', [clipId])?.thumbnail_url;
+        db.withObject('clip', clipId, () => db.run('UPDATE clips SET thumbnail_url = ? WHERE id = ?', [thumbUrl, clipId]));
+        _removeOldThumb(old, thumbUrl);
     }
     return thumbUrl;
 }

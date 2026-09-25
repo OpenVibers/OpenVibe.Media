@@ -120,11 +120,10 @@ function writeReport(report, file = null) {
 
 /** Write one repair (only if the row still has the value we read). Returns true when it changed. */
 function applyRepair(row) {
-    const changed = db.run(`UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ?
+    // The row and its object in one transaction (the object only when the row changed).
+    return db.withObject('vod', (r) => (r.changes > 0 ? row.vod_id : null), () => db.run(`UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ?
                             WHERE id = ? AND COALESCE(duration_seconds, 0) = ? AND COALESCE(duration_source, '') = ? AND COALESCE(is_recording, 0) = 0`,
-    [Math.round(row.measured), row.measured, row.measured_source, row.vod_id, row.stored, row.stored_source || '']).changes > 0;
-    if (changed) require('../objects/model').safeSync('vod', row.vod_id);
-    return changed;
+    [Math.round(row.measured), row.measured, row.measured_source, row.vod_id, row.stored, row.stored_source || ''])).changes > 0;
 }
 
 /** Undo repairs listed in a report (only rows that still hold what the repair wrote). */
@@ -135,9 +134,8 @@ function rollback(rows, { apply = false } = {}) {
         const cur = db.get('SELECT duration_seconds, duration_source FROM vods WHERE id = ?', [r.vod_id]);
         if (!cur || Number(cur.duration_seconds) !== Math.round(r.measured) || (cur.duration_source || '') !== (r.measured_source || '')) { out.changed_since++; continue; }
         if (!apply) { out.would_restore++; continue; }
-        db.run('UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ? WHERE id = ?',
-            [r.stored, r.stored_probe ?? r.stored, r.stored_source || null, r.vod_id]);
-        require('../objects/model').safeSync('vod', r.vod_id);
+        db.withObject('vod', r.vod_id, () => db.run('UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ? WHERE id = ?',
+            [r.stored, r.stored_probe ?? r.stored, r.stored_source || null, r.vod_id]));
         out.restored++;
     }
     return out;

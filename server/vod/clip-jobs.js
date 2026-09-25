@@ -20,6 +20,7 @@ const config = require('../config');
 const cutter = require('./clip-cutter');
 const vodStorage = require('./vod-storage');
 const { announce } = require('../webhooks');
+const objects = () => require('../objects/model');
 
 const MAX_ATTEMPTS = 4;
 const BACKOFF_MIN = [2, 10, 30, 90];           // minutes before attempt 2, 3, 4, …
@@ -52,9 +53,13 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
     if (!clip) return { ok: false, error: 'Clip not found' };
     if (!clip.vod_id) return { ok: false, error: 'Clip has no source VOD' };
     const vod = db.get('SELECT * FROM vods WHERE id = ?', [clip.vod_id]);
-    if (!vod) { db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = NULL WHERE id = ?", ['Source VOD no longer exists', clipId]); return { ok: false, error: 'Source VOD no longer exists' }; }
+    if (!vod) {
+        objects().withObject('clip', clipId, () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = NULL WHERE id = ?", ['Source VOD no longer exists', clipId]));
+        return { ok: false, error: 'Source VOD no longer exists' };
+    }
     const attempt = (Number(clip.cut_attempts) || 0) + 1;
-    db.run("UPDATE clips SET status = 'processing', cut_attempts = ?, cut_next_at = NULL WHERE id = ?", [attempt, clipId]);
+    // Row and object (back to uploading) together.
+    objects().withObject('clip', clipId, () => db.run("UPDATE clips SET status = 'processing', cut_attempts = ?, cut_next_at = NULL WHERE id = ?", [attempt, clipId]));
 
     // Attempt 2+: bring a cloud-stored VOD home first when the disk can take it.
     let source = await vodStorage.resolveMediaSource(vod);
@@ -75,15 +80,14 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
     const duration = Math.max(1, (Number(clip.end_time) || 0) - startTime);
     const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
     if (!cut.ok) return fail(clipId, clip, attempt, cut.error);
-    // Thumbnail first (the clip.ready payload carries it), then the ready transition and its event
-    // in one transaction (webhooks.announce), then the webhook.
+    // Thumbnail first (the clip.ready payload carries it), then the ready transition, the clip's
+    // object and its event in one transaction (webhooks.announce), then the webhook.
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
     announce(clip.app_id, 'clip.ready', {
-        change: () => db.run("UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?",
-            [cut.filePath, cut.duration, startTime + cut.duration, clipId]),
+        change: () => objects().withObject('clip', clipId, () => db.run("UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?",
+            [cut.filePath, cut.duration, startTime + cut.duration, clipId])),
         payload: () => _clipPublic(db.getClipById(clipId)),
     });
-    require('../objects/model').safeSync('clip', clipId);
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
     return { ok: true };
 }
@@ -97,10 +101,9 @@ function fail(clipId, clip, attempt, error) {
     const mins = BACKOFF_MIN[Math.min(attempt - 1, BACKOFF_MIN.length - 1)];
     const nextAt = more ? new Date(Date.now() + mins * 60000).toISOString().replace('T', ' ').slice(0, 19) : null;
     announce(clip.app_id, 'clip.failed', {
-        change: () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId]),
+        change: () => objects().withObject('clip', clipId, () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId])),
         payload: () => _clipPublic(db.getClipById(clipId)),
     });
-    require('../objects/model').safeSync('clip', clipId);
     console.warn(`[Clips] Clip ${clipId} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}${more ? ` — retry in ${mins} min` : ' — giving up'}`);
     return { ok: false, error: msg, retry_at: nextAt };
 }
@@ -119,8 +122,15 @@ async function sweep() {
 function start() {
     if (_timer) return;
     try { vodStorage.cleanupStaleDownloads(); } catch { /* */ }
-    // Anything left 'processing' by a crash/restart is really failed — queue it for a retry.
-    try { db.run("UPDATE clips SET status = 'failed', cut_error = COALESCE(cut_error, 'interrupted by a restart') WHERE status = 'processing'"); } catch { /* */ }
+    // Anything left 'processing' by a crash/restart is really failed — queue it for a retry. The rows
+    // and their objects (uploading -> failed) in one transaction.
+    try {
+        objects().withObject('clip', (ids) => ids, () => {
+            const ids = db.all("SELECT id FROM clips WHERE status = 'processing'").map(r => r.id);
+            if (ids.length) db.run(`UPDATE clips SET status = 'failed', cut_error = COALESCE(cut_error, 'interrupted by a restart') WHERE id IN (${ids.map(() => '?').join(',')})`, ids);
+            return ids;
+        });
+    } catch (err) { console.warn('[Clips] marking interrupted cuts failed:', err.message); }
     setTimeout(() => sweep().catch(() => {}), 40 * 1000);
     _timer = setInterval(() => sweep().catch(e => console.warn('[Clips] retry sweep:', e.message)), SWEEP_MS);
     if (_timer.unref) _timer.unref();

@@ -20,6 +20,7 @@ const db = require('../db/database');
 const config = require('../config');
 const tools = require('./media-tools');
 const { announce } = require('../webhooks');
+const objects = () => require('../objects/model');
 
 /** Absolute-ize a stored Media-relative URL (/t/…, /api/thumbnails/…). */
 function _absUrl(u) {
@@ -35,8 +36,8 @@ function isFinalizing(vodId) {
 }
 
 // Public shape of a vod row for API responses + webhooks. { readiness: true } (API responses) adds the
-// object's readiness levels (server/objects/readiness.js); webhook payloads leave them out, because a
-// finalize announces before it re-projects the object.
+// object's readiness levels (server/objects/readiness.js); webhook payloads leave them out (their shape
+// predates the object model and stays as it is).
 function vodPublic(vod, { readiness = false } = {}) {
     if (!vod) return null;
     const out = {
@@ -110,13 +111,14 @@ function rebuildWebmFromMaster(masterPath, webmPath) {
 }
 
 /**
- * The state change for a VOD outcome and its event/webhook, committed together (webhooks.announce).
- * `row()` gives the row the payload describes (read inside the transaction). Returns the payload,
- * or null when the transaction failed (then nothing changed and nothing was announced).
+ * The state change for a VOD outcome, the VOD's object and the event/webhook, committed together
+ * (webhooks.announce around objects.withObject). `row()` gives the row the payload describes (read
+ * inside the transaction). Returns the payload, or null when the transaction failed (then nothing
+ * changed and nothing was announced). A deleted row's object is marked deleted by its trigger.
  */
 function _commitVodOutcome(vod, event, change, row = () => db.getVodById(vod.id)) {
     try {
-        return announce(vod.app_id, event, { change, payload: () => vodPublic(row()) }).data;
+        return announce(vod.app_id, event, { change: () => objects().withObject('vod', vod.id, change), payload: () => vodPublic(row()) }).data;
     } catch (err) {
         console.error(`[VOD] vod ${vod.id}: ${event} not committed:`, err.message);
         return null;
@@ -156,8 +158,11 @@ async function finalizeVod(vodId, opts = {}) {
         throw err;
     } finally {
         _finalizing.delete(vodId);
-        // Every outcome (ready, quarantined, failed) re-projects the object; a deleted row was already marked by trigger.
-        require('../objects/model').safeSync('vod', vodId);
+        // Every outcome (ready, quarantined, failed) now commits with its object (withObject); a deleted
+        // row's object is marked by its trigger. This follow-up only re-reads the disk after a finalize
+        // that threw part-way (a merge or remux rewrote the file, no row write followed). C-75 leftover:
+        // it goes with the boot backfill (server/index.js) once the drift report shows zero drift.
+        objects().safeSync('vod', vodId);
     }
 }
 
@@ -213,7 +218,7 @@ async function _doFinalize(vodId, opts) {
         [status, JSON.stringify([status, 'retention_hold']), vodId]));
         return null;
     };
-    const held = require('../objects/model').isHeldRow(vod);
+    const held = objects().isHeldRow(vod);
 
     if (!filePath || !fs.existsSync(filePath)) {
         if (held) return keepHeld('missing_file');
@@ -334,8 +339,8 @@ async function _doFinalize(vodId, opts) {
         // The file vanished between the probe and here. Record it (no wall-clock duration left
         // behind by the live updates) and leave it for review.
         console.error(`[VOD] Failed to stat finalized VOD ${vodId}:`, err.message);
-        db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
-                health_issues_json = ?, last_health_scan_at = datetime('now') WHERE id = ?`, [JSON.stringify(['stat_failed', ...issues]), vodId]);
+        objects().withObject('vod', vodId, () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
+                health_issues_json = ?, last_health_scan_at = datetime('now') WHERE id = ?`, [JSON.stringify(['stat_failed', ...issues]), vodId]));
         _queueRetry(vodId, 'stat_failed', opts);
         return null;
     }
@@ -348,7 +353,7 @@ async function _doFinalize(vodId, opts) {
                 if (webmComplete) {
                     fs.unlinkSync(masterPath);
                     console.log(`[VOD] Removed master archive for vod ${vodId} (${path.basename(masterPath)})`);
-                    db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vodId]);
+                    db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vodId]);   // not projected: no object change
                 } else {
                     console.warn(`[VOD] vod ${vodId}: KEEPING master (webm ${durationSeconds}s still < master ${masterDur}s)`);
                 }
@@ -373,11 +378,11 @@ async function _doFinalize(vodId, opts) {
     // recording is back to the visibility its owner chose.
     const lift = _finalizeQuarantined(db.getVodById(vodId) || vod);
 
-    // The ready transition and the vod.ready event commit together (then the webhook goes out).
-    // A failed commit throws, as the plain UPDATE did before.
+    // The ready transition, the VOD's object and the vod.ready event commit together (then the
+    // webhook goes out). A failed commit throws, as the plain UPDATE did before.
     announce(vod.app_id, 'vod.ready', {
-        change: () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
-            [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId]),
+        change: () => objects().withObject('vod', vodId, () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
+            [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId])),
         payload: () => vodPublic(db.getVodById(vodId)),
     });
     console.log(`[VOD] Finalized: vod ${vodId}, ${stored}s (${durationSource}), ${(stat.size / 1024 / 1024).toFixed(1)}MB`);

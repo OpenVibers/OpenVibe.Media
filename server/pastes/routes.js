@@ -372,7 +372,7 @@ router.delete('/admin/forks', tenantAuth(), (req, res) => {
     try {
         const forks = db.all('SELECT id, screenshot_path FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);
         for (const f of forks) removePasteScreenshot(f);   // unlink screenshots so they don't leak on disk
-        db.run('DELETE FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);
+        db.run('DELETE FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);   // objects: the row-delete trigger
         res.json({ success: true, deleted: forks.length });
     } catch (err) {
         console.error('[Pastes] Delete forks error:', err.message);
@@ -394,9 +394,9 @@ router.post('/bulk', tenantAuth(), (req, res) => {
                 // A held screenshot is skipped (its row and bytes stay), not failed halfway.
                 if (require('../objects/model').isHeldRow(paste)) { skipped++; continue; }
                 removePasteScreenshot(paste);
-                db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
+                db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);   // its object: the row-delete trigger
             } else {
-                db.run('UPDATE pastes SET visibility = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [action, paste.id]);
+                db.withObject('paste', paste.id, () => db.run('UPDATE pastes SET visibility = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [action, paste.id]));
             }
             done++;
         }
@@ -436,9 +436,8 @@ router.post('/:slug/censor', tenantAuth(), (req, res) => {
         try {
             // Delete the old screenshot file, then swap in the censored one.
             try { fs.unlinkSync(paste.screenshot_path); } catch { /* */ }
-            db.run('UPDATE pastes SET screenshot_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-                [req.file.path, paste.id]);
-            require('../objects/model').safeSync('paste', paste.id);
+            db.withObject('paste', paste.id, () => db.run('UPDATE pastes SET screenshot_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                [req.file.path, paste.id]));
             res.json({ paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
         } catch (err2) {
             console.error('[Pastes] Censor error:', err2.message);
@@ -525,15 +524,15 @@ router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('scree
                 mime_type: req.file.mimetype,
             });
 
-            db.run(
+            // The row and the screenshot's object in one transaction.
+            db.withObject('paste', (r) => r.lastInsertRowid, () => db.run(
                 `INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, stream_id, screenshot_path, metadata, burn_after_read, is_nsfw, ip_address)
                  VALUES (?, ?, ?, 'screenshot', ?, ?, 'text', ?, ?, ?, ?, ?, ?, ?)`,
                 [req.appId, slug, userId, sanitizeTitle(body.title || 'Screenshot'),
                  body.description || body.content || '', vis, body.stream_id || null, req.file.path, metadata, burn, nsfw, actor.ip]
-            );
+            ));
 
             const paste = db.getPasteBySlug(slug, req.appId);
-            require('../objects/model').safeSync('paste', paste.id);
             return res.status(201).json({ id: paste.id, slug, url: `/p/${slug}`, paste: pastePublic(paste) });
         }
 
@@ -621,7 +620,8 @@ router.put('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
 
         updates.push('updated_at = CURRENT_TIMESTAMP');
         params.push(paste.id);
-        db.run(`UPDATE pastes SET ${updates.join(', ')} WHERE id = ?`, params);
+        // A screenshot's title/visibility are its object's too: row and object in one transaction (text pastes have none).
+        db.withObject('paste', paste.id, () => db.run(`UPDATE pastes SET ${updates.join(', ')} WHERE id = ?`, params));
         res.json({ paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
     } catch (err) {
         console.error('[Pastes] Update error:', err.message);
@@ -640,7 +640,7 @@ router.delete('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
         if (require('../objects/model').isHeldRow(paste)) return res.status(409).json({ error: 'Screenshot is under a retention hold', code: 'media.object.held' });
 
         removePasteScreenshot(paste);
-        db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
+        db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);   // its object: the row-delete trigger
         res.json({ success: true });
     } catch (err) {
         console.error('[Pastes] Delete error:', err.message);

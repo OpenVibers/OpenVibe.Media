@@ -71,8 +71,7 @@ router.post('/:kind/:id', tenantAuth({ allowUser: true }), upload.single('thumbn
             fs.writeFileSync(path.join(thumbService.THUMB_DIR, filename), buffer);
             const url = `/t/${filename}`;
             const table = kind === 'vod' ? 'vods' : 'clips';
-            db.run(`UPDATE ${table} SET thumbnail_url = ? WHERE id = ?`, [url, numId]);
-            require('../objects/model').safeSync(kind, numId);
+            db.withObject(kind, numId, () => db.run(`UPDATE ${table} SET thumbnail_url = ? WHERE id = ?`, [url, numId]));   // row + objects together
             return res.json({ url });
         }
 
