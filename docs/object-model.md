@@ -20,7 +20,7 @@ Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`,
 | `media_locations` | one row per provider copy (`UNIQUE(object_id, provider)`): `provider` (`local` `b2` `r2`), `bucket`, `key` (absolute path for local, object key for B2/R2), `storage_class` (`hot` local, `cold` B2, `cache` R2), `state`, `checksum`, `size_bytes`, `verified_at` |
 | `media_relationships` | `from_object_id`, `relation`, `to_object_id`, `metadata`. In use: `clip_of` (clip to vod, with start/end), `thumbnail_of` (thumbnail to vod/clip). Reserved: `derived_from`, `screenshot_of` |
 | `media_variants` | `object_id`, `variant_name`, `derived_object_id`, `recipe`. In use: `thumbnail` |
-| `media_jobs` | derivative/maintenance jobs: `id` (mjob_…), `app_id`, `object_id`, `job_type`, `status`, `idempotency_key`, `params`, `result`, `attempts`/`max_attempts`, `run_after`, `lease_until`, `checkpoint`, `error`/`error_code`, `cancel_requested`, `created_by`, `decided_by`. See [Jobs](#jobs) |
+| `media_jobs` | derivative/maintenance jobs: `id` (mjob_…), `app_id`, `object_id`, `job_type`, `status`, `idempotency_key`, `params`, `result`, `attempts`/`max_attempts`, `run_after`, `lease_until`, `lease_token`, `checkpoint`, `error`/`error_code`, `cancel_requested`, `created_by`, `decided_by`. See [Jobs](#jobs) |
 | `media_uploads`, `media_upload_parts` | multipart upload sessions and the parts received (size, sha256). See [Multipart uploads](#multipart-uploads) |
 | `media_holds` | retention holds (with a staff `note`), see [Holds](#retention-holds) |
 | `media_invariant_violations` | public playback objects over the size policy, see [Invariant](#public-object-size-invariant) |
@@ -590,6 +590,13 @@ recording runs unless `MEDIA_JOBS_HEAVY_WHILE_RECORDING=1`) and `finalize`
 (`MEDIA_JOBS_FINALIZE_CONCURRENCY`, 1; runs while recording, as the recorder's own finalize does). A running job holds a lease
 (`MEDIA_JOBS_LEASE_S`) renewed by a heartbeat; at start, jobs the previous process left `running` are
 requeued (or failed when out of attempts). Handlers checkpoint progress and resume from it.
+**Fencing:** a claim writes a fresh random `lease_token` on the row and hands it to its holder; renewing
+the lease, saving a checkpoint and every way out of `running` (succeed, fail, cancel) match the job id
+**and** that token. A holder that lost the job (its lease ran out, recovery requeued it, maybe another
+claim took it) is refused instead of overwriting: its heartbeat aborts the handler, and its checkpoint
+(with whatever it wrote in the same transaction) and its completion are refused, logged as
+`[Jobs] refused a stale …` and counted in `media_job_stale_completions_total{action}`. Recovery takes a
+job over only with the token it read and, past boot, only while the lease is still expired.
 `MEDIA_JOBS_ENABLED=0` stops the worker. Finished thumbnail and `object.hash` jobs are pruned after
 `MEDIA_JOBS_RETENTION_DAYS`; other jobs are kept.
 

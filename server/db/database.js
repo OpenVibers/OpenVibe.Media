@@ -66,6 +66,8 @@ function migrateColumns() {
         // Developer-project tenants (ADR-014): project_id prj_<ULID>, env sandbox|production. NULL on first-party tenants.
         apps: [['project_id', 'TEXT'], ['env', 'TEXT']],
         media_holds: [['note', 'TEXT']],
+        // Job fencing (server/jobs/queue.js): a claim's token; NULL on rows claimed before it existed.
+        media_jobs: [['lease_token', 'TEXT']],
     };
     for (const [table, cols] of Object.entries(wanted)) {
         const existing = database.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);

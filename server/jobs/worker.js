@@ -11,7 +11,9 @@
  *                                                     clip live streams and wait for the result)
  *
  * A running job holds a lease (MEDIA_JOBS_LEASE_S) that a heartbeat renews; the heartbeat also notices
- * an owner's cancel request. At start every job left `running` by the previous process is retried (or
+ * an owner's cancel request. Every write about the job carries the claim's lease_token (queue.js,
+ * Fencing): a heartbeat that finds the job taken from it aborts the handler, and whatever it reports
+ * then is refused as stale. At start every job left `running` by the previous process is retried (or
  * failed when out of attempts). A failed attempt is retried with backoff unless the handler says the
  * failure is permanent. Handlers get { signal, checkpoint, saveCheckpoint(cp, alsoInTx) } and resume
  * from the checkpoint on a retry.
@@ -68,10 +70,12 @@ async function execute(row, laneName) {
     const ac = new AbortController();
     running.set(row.id, { ac, lane: laneName });
     const leaseS = cfg().leaseS;
+    const token = row.lease_token;
     let cancelRequested = !!row.cancel_requested;
     const beat = setInterval(() => {
         try {
-            const r = queue.renew(row.id, { leaseS });
+            const r = queue.renew(row.id, { leaseS, token });
+            if (!r.held) { clearInterval(beat); ac.abort(new queue.JobError('media.job.lease_lost', 'this worker no longer holds the job', { permanent: true })); return; }
             if (r.cancelRequested && !cancelRequested) { cancelRequested = true; ac.abort(new Error('cancelled by its owner')); }
         } catch { /* next beat */ }
     }, Math.max(1000, Math.floor(leaseS * 1000 / 3)));
@@ -85,24 +89,24 @@ async function execute(row, laneName) {
         signal: ac.signal,
         checkpoint: queue.parseJson(row.checkpoint, null),
         attempt: row.attempts,
-        saveCheckpoint: (cp, alsoInTx) => { ctx.checkpoint = cp; queue.saveCheckpoint(row.id, cp, alsoInTx); },
+        saveCheckpoint: (cp, alsoInTx) => { queue.saveCheckpoint(row.id, cp, alsoInTx, { token }); ctx.checkpoint = cp; },
         cancelled: () => cancelRequested,
     };
     try {
         if (!spec) throw new queue.JobError('media.job.unknown_type', `No handler for ${row.job_type}`, { permanent: true });
         const result = await spec.run(queue.jobPublic(row), ctx);
-        queue.succeed(row.id, result);
+        queue.succeed(row.id, result, { token });
     } catch (err) {
         const fresh = queue.get(row.id);
         if (cancelRequested || (fresh && fresh.cancel_requested)) {
-            queue.markCancelled(row.id, { result: ctx.checkpoint ? { checkpoint: ctx.checkpoint } : null });
+            queue.markCancelled(row.id, { result: ctx.checkpoint ? { checkpoint: ctx.checkpoint } : null, token });
         } else {
             const permanent = !!(err && err.permanent);
             const attempts = fresh ? fresh.attempts : row.attempts;
             const more = !permanent && attempts < (fresh ? fresh.max_attempts : row.max_attempts);
             const retryIn = err && err.retryAfterS != null ? err.retryAfterS : backoffS(spec || {}, attempts);
-            queue.fail(row.id, { message: (err && err.message) || String(err), code: (err && err.code) || null, retryInS: more ? retryIn : null });
-            if (!more) console.warn(`[Jobs] ${row.job_type} ${row.id} failed: ${(err && err.message) || err}`);
+            const failed = queue.fail(row.id, { message: (err && err.message) || String(err), code: (err && err.code) || null, retryInS: more ? retryIn : null, token });
+            if (failed && !more) console.warn(`[Jobs] ${row.job_type} ${row.id} failed: ${(err && err.message) || err}`);
         }
     } finally {
         clearInterval(beat);
@@ -211,7 +215,7 @@ function stop() {
 }
 
 function status() {
-    return { enabled: cfg().enabled, started, running: [...running.entries()].map(([id, r]) => ({ id, lane: r.lane })), counts: queue.counts() };
+    return { enabled: cfg().enabled, started, running: [...running.entries()].map(([id, r]) => ({ id, lane: r.lane })), counts: queue.counts(), stale_refused: queue.staleStats() };
 }
 
 module.exports = { start, stop, kick, tick, abort, runNow, execute, status, scheduleInvariantScans, isStarted: () => started, _running: running };

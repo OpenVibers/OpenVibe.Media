@@ -5,12 +5,20 @@
  *   proposed   waiting for its owner to decide (approve -> queued, cancel -> cancelled). The worker never
  *              picks it up: the size-invariant validator proposes split/remux jobs this way.
  *   queued     due when run_after has passed
- *   running    held by the worker (lease_until renewed while it runs)
+ *   running    held by the worker (lease_until renewed while it runs; lease_token names the claim)
  *   succeeded | failed | cancelled   finished
  *
  * Every state change and its media.job.<transition> event commit in ONE SQLite transaction (the same
  * rule as webhooks.announce(), see events.js): an event exists if and only if its change committed.
  * The relay is woken after the commit. Job events go to OpenVibe.Events only (no app webhook).
+ *
+ * Fencing: a claim writes a fresh random lease_token on the row and hands it to its holder. Renewing
+ * the lease, saving a checkpoint and every way out of 'running' (succeed, fail, markCancelled) match
+ * the job id AND that token, so a holder that lost the job (its lease ran out and recovery requeued
+ * it, and maybe another claim took it) can no longer write it: its completion is refused, logged and
+ * counted (staleStats(), the bus event 'stale', media_job_stale_completions_total) instead of
+ * overwriting what the current holder does. Rows claimed before the column existed have a NULL token,
+ * which only a NULL token matches (boot recovery reads the row's token and passes it back).
  *
  * Idempotency: a key is unique per tenant. A repeat with the same key and the same request (type,
  * object, params) answers with the job it made; a different request under a used key is a conflict.
@@ -182,10 +190,42 @@ function commit(id, transition, change) {
     return row;
 }
 
-function update(id, fromStatuses, sets, params = []) {
+/**
+ * `fence`: { token } adds AND lease_token IS <token> (a NULL token matches only an unleased row);
+ * { expired: true } also requires the lease to have run out (recovery taking a job over).
+ */
+function update(id, fromStatuses, sets, params = [], fence = null) {
     const from = Array.isArray(fromStatuses) ? fromStatuses : [fromStatuses];
-    return db.run(`UPDATE media_jobs SET ${sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN (${from.map(() => '?').join(', ')})`,
-        [...params, id, ...from]).changes > 0;
+    let where = `id = ? AND status IN (${from.map(() => '?').join(', ')})`;
+    const args = [...params, id, ...from];
+    if (fence) {
+        where += ' AND lease_token IS ?';
+        args.push(fence.token == null ? null : String(fence.token));
+        if (fence.expired) where += " AND (lease_until IS NULL OR lease_until < datetime('now'))";
+    }
+    return db.run(`UPDATE media_jobs SET ${sets}, updated_at = CURRENT_TIMESTAMP WHERE ${where}`, args).changes > 0;
+}
+
+// ── Fencing ──────────────────────────────────────────────────
+
+const stale = { succeed: 0, fail: 0, cancel: 0, renew: 0, checkpoint: 0 };
+function newLeaseToken() { return crypto.randomBytes(16).toString('hex'); }
+
+/** A holder's write was refused because its claim no longer holds the job: log, count, tell listeners. */
+function refuseStale(action, id) {
+    stale[action] = (stale[action] || 0) + 1;
+    const now = get(id);
+    const where = !now ? 'it no longer exists' : now.status === 'running' ? 'another claim holds it' : `it is ${now.status} now`;
+    console.warn(`[Jobs] refused a stale ${action} of ${id} from a holder that lost it (${where})`);
+    bus.emit('stale', { action, id, status: now ? now.status : null });
+}
+/** Stale writes refused since boot, by action. */
+function staleStats() { return { ...stale }; }
+
+/** The fence a worker-side call passes: its claim's token (required: undefined is refused as stale). */
+function holder(opts, action, id) {
+    if (!opts || !Object.prototype.hasOwnProperty.call(opts, 'token')) throw new Error(`queue.${action}(${id}) needs the claim's { token }`);
+    return { token: opts.token, expired: !!opts.expired, takeover: !!opts.takeover };
 }
 
 // ── Enqueue ──────────────────────────────────────────────────
@@ -272,8 +312,8 @@ function cancel(id, { by = null, reason = null } = {}) {
 // ── Worker side ──────────────────────────────────────────────
 
 /**
- * Take the oldest due queued job of these types (or exactly `id`): running, attempts + 1, leased.
- * Returns the row or null.
+ * Take the oldest due queued job of these types (or exactly `id`): running, attempts + 1, leased, with
+ * a fresh lease_token. Returns the row (its lease_token is the holder's fence) or null.
  */
 function claim(types, { leaseS = 120, id = null } = {}) {
     if (!id && !types.length) return null;
@@ -285,7 +325,7 @@ function claim(types, { leaseS = 120, id = null } = {}) {
                         AND (run_after IS NULL OR run_after <= datetime('now')) ORDER BY id LIMIT 1`, types);
         if (!next) return;
         if (!update(next.id, 'queued', `status = 'running', attempts = attempts + 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-                                          lease_until = datetime('now', '+${Math.round(leaseS)} seconds'), run_after = NULL`)) return;
+                                          lease_until = datetime('now', '+${Math.round(leaseS)} seconds'), run_after = NULL, lease_token = ?`, [newLeaseToken()])) return;
         row = get(next.id);
         events.recordJob('started', jobEvent(row));
     })();
@@ -293,45 +333,83 @@ function claim(types, { leaseS = 120, id = null } = {}) {
     return row;
 }
 
-/** Extend a running job's lease. Returns { cancelRequested } (false when it is no longer running). */
-function renew(id, { leaseS = 120 } = {}) {
-    db.run(`UPDATE media_jobs SET lease_until = datetime('now', '+${Math.round(leaseS)} seconds') WHERE id = ? AND status = 'running'`, [id]);
+/**
+ * Extend a running job's lease, for the holder of `token` only. Returns { running, held, cancelRequested }:
+ * held false = this claim lost the job (refused as stale; the worker aborts its handler).
+ */
+function renew(id, opts = {}) {
+    const fence = holder(opts, 'renew', id);
+    const leaseS = opts.leaseS == null ? 120 : opts.leaseS;
+    const held = db.run(`UPDATE media_jobs SET lease_until = datetime('now', '+${Math.round(leaseS)} seconds')
+                         WHERE id = ? AND status = 'running' AND lease_token IS ?`, [id, fence.token == null ? null : String(fence.token)]).changes > 0;
+    if (!held) refuseStale('renew', id);
     const row = get(id);
-    return { running: !!row && row.status === 'running', cancelRequested: !!(row && row.cancel_requested) };
+    return { running: !!row && row.status === 'running', held, cancelRequested: !!(row && row.cancel_requested) };
 }
 
-/** Save handler progress; `alsoInTx()` (optional) runs in the same transaction (e.g. the object a part became). */
-function saveCheckpoint(id, checkpoint, alsoInTx = null) {
-    db.getDb().transaction(() => {
-        if (alsoInTx) alsoInTx();
-        db.run('UPDATE media_jobs SET checkpoint = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [JSON.stringify(checkpoint), id]);
-    })();
-}
-
-function succeed(id, result) {
-    return commit(id, 'succeeded', () => update(id, 'running',
-        "status = 'succeeded', result = ?, error = NULL, error_code = NULL, lease_until = NULL, finished_at = CURRENT_TIMESTAMP",
-        [JSON.stringify(result ?? null)]));
-}
-
-/** A failed attempt: queued again after `retryInS` (media.job.retrying), or failed for good. */
-function fail(id, { message, code = null, retryInS = null, result = null }) {
-    const msg = String(message || 'failed').slice(0, 1000);
-    if (retryInS != null) {
-        return commit(id, 'retrying', () => update(id, 'running',
-            `status = 'queued', error = ?, error_code = ?, lease_until = NULL, run_after = datetime('now', '+${Math.max(0, Math.round(retryInS))} seconds')`,
-            [msg, code]));
+/**
+ * Save handler progress; `alsoInTx()` (optional) runs in the same transaction (e.g. the object a part
+ * became). With `{ token }` (the worker) only the job's holder may: a stale holder's checkpoint and
+ * everything alsoInTx did roll back, and it throws media.job.lease_lost.
+ */
+function saveCheckpoint(id, checkpoint, alsoInTx = null, opts = null) {
+    const fenced = !!(opts && Object.prototype.hasOwnProperty.call(opts, 'token'));
+    let lost = false;
+    try {
+        db.getDb().transaction(() => {
+            if (alsoInTx) alsoInTx();
+            const changes = fenced
+                ? db.run("UPDATE media_jobs SET checkpoint = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running' AND lease_token IS ?",
+                    [JSON.stringify(checkpoint), id, opts.token == null ? null : String(opts.token)]).changes
+                : db.run('UPDATE media_jobs SET checkpoint = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [JSON.stringify(checkpoint), id]).changes;
+            if (fenced && !changes) { lost = true; throw new JobError('media.job.lease_lost', 'This worker no longer holds the job', { permanent: true, status: 409 }); }
+        })();
+    } catch (err) {
+        if (lost) refuseStale('checkpoint', id);
+        throw err;
     }
-    return commit(id, 'failed', () => update(id, 'running',
-        "status = 'failed', error = ?, error_code = ?, result = COALESCE(?, result), lease_until = NULL, finished_at = CURRENT_TIMESTAMP",
-        [msg, code, result == null ? null : JSON.stringify(result)]));
 }
 
-/** A running job that stopped because its owner cancelled it. */
-function markCancelled(id, { result = null } = {}) {
-    return commit(id, 'cancelled', () => update(id, 'running',
-        "status = 'cancelled', error = 'cancelled by its owner', error_code = 'cancelled', result = COALESCE(?, result), lease_until = NULL, finished_at = CURRENT_TIMESTAMP",
-        [result == null ? null : JSON.stringify(result)]));
+/** The holder's result: running → succeeded. { token } is the claim's; a stale holder is refused (null). */
+function succeed(id, result, opts) {
+    const fence = holder(opts, 'succeed', id);
+    const row = commit(id, 'succeeded', () => update(id, 'running',
+        "status = 'succeeded', result = ?, error = NULL, error_code = NULL, lease_until = NULL, lease_token = NULL, finished_at = CURRENT_TIMESTAMP",
+        [JSON.stringify(result ?? null)], fence));
+    if (!row && !fence.takeover) refuseStale('succeed', id);
+    return row;
+}
+
+/**
+ * A failed attempt: queued again after `retryInS` (media.job.retrying), or failed for good. { token } is
+ * the claim's; a stale holder is refused (null). Recovery passes the token it read with { takeover: true }
+ * (and { expired: true } past boot: only while the lease is still run out).
+ */
+function fail(id, { message, code = null, retryInS = null, result = null, ...opts }) {
+    const fence = holder(opts, 'fail', id);
+    const msg = String(message || 'failed').slice(0, 1000);
+    let row;
+    if (retryInS != null) {
+        row = commit(id, 'retrying', () => update(id, 'running',
+            `status = 'queued', error = ?, error_code = ?, lease_until = NULL, lease_token = NULL, run_after = datetime('now', '+${Math.max(0, Math.round(retryInS))} seconds')`,
+            [msg, code], fence));
+    } else {
+        row = commit(id, 'failed', () => update(id, 'running',
+            "status = 'failed', error = ?, error_code = ?, result = COALESCE(?, result), lease_until = NULL, lease_token = NULL, finished_at = CURRENT_TIMESTAMP",
+            [msg, code, result == null ? null : JSON.stringify(result)], fence));
+    }
+    if (!row && !fence.takeover) refuseStale('fail', id);
+    return row;
+}
+
+/** A running job that stopped because its owner cancelled it. { token } as for fail(). */
+function markCancelled(id, { result = null, ...opts } = {}) {
+    const fence = holder(opts, 'cancel', id);
+    const row = commit(id, 'cancelled', () => update(id, 'running',
+        "status = 'cancelled', error = 'cancelled by its owner', error_code = 'cancelled', result = COALESCE(?, result), lease_until = NULL, lease_token = NULL, finished_at = CURRENT_TIMESTAMP",
+        [result == null ? null : JSON.stringify(result)], fence));
+    if (!row && !fence.takeover) refuseStale('cancel', id);
+    return row;
 }
 
 /**
@@ -344,10 +422,14 @@ function recoverInterrupted({ all = false, except = new Set(), retryInS = 30 } =
     for (const row of rows) {
         if (except.has(row.id)) continue;
         const why = all ? 'interrupted by a restart' : 'the worker stopped renewing its lease';
-        if (row.cancel_requested) markCancelled(row.id);
-        else if (row.attempts < row.max_attempts) fail(row.id, { message: why, code: 'interrupted', retryInS });
-        else fail(row.id, { message: why, code: 'interrupted' });
-        n++;
+        // A takeover, fenced on the token it read (and, past boot, on the lease still being expired):
+        // a holder that renewed or finished meanwhile keeps its job.
+        const fence = { token: row.lease_token, takeover: true, expired: !all };
+        let done;
+        if (row.cancel_requested) done = markCancelled(row.id, fence);
+        else if (row.attempts < row.max_attempts) done = fail(row.id, { message: why, code: 'interrupted', retryInS, ...fence });
+        else done = fail(row.id, { message: why, code: 'interrupted', ...fence });
+        if (done) n++;
     }
     return n;
 }
@@ -401,5 +483,5 @@ module.exports = {
     register, typeSpec, typeNames, requestHash, parseJson,
     get, getForApp, jobPublic, jobEvent, list, counts,
     enqueue, approve, cancel,
-    claim, renew, saveCheckpoint, succeed, fail, markCancelled, recoverInterrupted, waitFor, prune,
+    claim, renew, saveCheckpoint, succeed, fail, markCancelled, recoverInterrupted, waitFor, prune, staleStats,
 };

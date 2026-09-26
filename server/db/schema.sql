@@ -293,6 +293,7 @@ CREATE TABLE IF NOT EXISTS media_jobs (
     max_attempts INTEGER NOT NULL DEFAULT 3,
     run_after DATETIME,                   -- queued: not before (retry backoff)
     lease_until DATETIME,                 -- running: renewed while the worker holds the job
+    lease_token TEXT,                     -- running: the claim's random fencing token; renew/checkpoint/succeed/fail must match it
     checkpoint TEXT,                      -- handler progress (JSON); a retry resumes from it
     error TEXT,
     error_code TEXT,                      -- stable code of the last failure (media_unavailable, quota_exceeded, …)

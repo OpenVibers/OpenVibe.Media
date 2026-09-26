@@ -85,6 +85,11 @@ function domainMetrics(registry, { db, recorder, events }) {
         name: 'media_jobs', help: 'Media jobs by type and status (proposed = waiting for the owner; see scripts/media-jobs.js)', labelNames: ['type', 'status'],
         collect: () => db.all('SELECT job_type, status, COUNT(*) AS n FROM media_jobs GROUP BY job_type, status').map((r) => ({ labels: { type: r.job_type, status: r.status }, value: r.n })),
     });
+    // Job writes the lease-token fence refused (server/jobs/queue.js): a holder that lost its job tried to
+    // renew, checkpoint or finish it. Anything above zero means two claimants overlapped.
+    const stale = registry.counter({ name: 'media_job_stale_completions_total', help: 'Media job writes refused because the writer no longer held the job (lease-token fencing), by action', labelNames: ['action'] });
+    for (const action of ['succeed', 'fail', 'cancel', 'renew', 'checkpoint']) stale.inc({ action }, 0);
+    require('./jobs/queue').bus.on('stale', (e) => stale.inc({ action: e.action }));
     registry.gauge({
         name: 'media_uploads_open', help: 'Multipart upload sessions still open (active or completing)',
         collect: () => db.get("SELECT COUNT(*) AS n FROM media_uploads WHERE status IN ('active', 'completing')").n,
