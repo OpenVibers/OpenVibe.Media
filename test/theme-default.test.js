@@ -12,4 +12,7 @@ for (const k of ['--accent', '--bg-primary', '--text-primary']) {
     assert.ok(css.includes(`${k}:${DEFAULT_VARS[k]}`), `the page defines ${k} as the default theme does`);
 }
 assert.ok(!/url\(|;\s*}/.test(css.split('\n').find((l) => l.includes('--accent:')) || ''), 'only plain token values');
+// The index page (browse.js) writes its own <style>: it carries the same tokens.
+const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server', 'public', 'browse.js'), 'utf8');
+assert.ok(/<style>\n\$\{DEFAULT_THEME_CSS \?/.test(src), 'browse.js puts the default tokens first in its style');
 console.log('theme default: all checks passed');

@@ -213,5 +213,5 @@ ${frameScripts({ history, footer })}
 module.exports = {
     NETWORK_URL, SITE_NAME, DEFAULT_OG_IMAGE, APP_PUBLIC_URLS, appUrl,
     esc, abs, snip, isoDate, isoDuration, fmtDuration, fmtDate, jsonForScript,
-    headTags, baseCss, frameScripts, defaultFooterLinks, page,
+    headTags, baseCss, frameScripts, defaultFooterLinks, page, DEFAULT_THEME_CSS,
 };

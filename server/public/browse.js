@@ -18,7 +18,7 @@ const PAGE_SIZE = 48;
 const THUMB_DIR = path.resolve(config.thumbnails.path);
 
 // Public base URL per app for "source" links — shared with the watch/paste pages.
-const { appUrl } = require('./page-frame');
+const { appUrl, DEFAULT_THEME_CSS } = require('./page-frame');
 const frame = require('openvibe-shared/frame');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -242,6 +242,7 @@ function renderPage(tab, page, data, counts) {
 <!-- The shared theme-loader applies the user's theme to <html> before anything paints. -->
 <script src="https://openvibe.network/shared/theme-loader.js" defer></script>
 <style>
+${DEFAULT_THEME_CSS ? `:root{${DEFAULT_THEME_CSS}}` : ''}
 :root{--bg:var(--bg-primary,#0a0f1c);--panel:var(--bg-card,#131c2e);--border:#1f2d47;--text:var(--text-primary,#e6edf7);--muted:var(--text-secondary,#96a7c2);--accent-page:var(--accent,#3b82f6)}
 *{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,'Segoe UI',Arial,sans-serif;padding-bottom:3rem}
 header.intro{display:flex;align-items:baseline;gap:.2rem .8rem;flex-wrap:wrap;padding:1rem 1.4rem .4rem}
