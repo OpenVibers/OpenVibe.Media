@@ -7,6 +7,8 @@
  *                                                     recording runs unless MEDIA_JOBS_HEAVY_WHILE_RECORDING=1
  *   finalize  vod.finalize                            MEDIA_JOBS_FINALIZE_CONCURRENCY (1); runs while recording
  *                                                     (it is the work the recorder does when a stream ends)
+ *   clips  clip.cut                                   MEDIA_JOBS_CLIPS_CONCURRENCY (2); runs while recording (people
+ *                                                     clip live streams and wait for the result)
  *
  * A running job holds a lease (MEDIA_JOBS_LEASE_S) that a heartbeat renews; the heartbeat also notices
  * an owner's cancel request. At start every job left `running` by the previous process is retried (or
@@ -41,6 +43,7 @@ function lanes() {
         { name: 'light', types: by('light'), max: cfg().lightConcurrency },
         { name: 'heavy', types: by('heavy'), max: cfg().heavyConcurrency },
         { name: 'finalize', types: by('finalize'), max: cfg().finalizeConcurrency },
+        { name: 'clips', types: by('clips'), max: cfg().clipsConcurrency || 2 },
     ];
 }
 

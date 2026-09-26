@@ -20,9 +20,7 @@ const multer = require('multer');
 const config = require('../config');
 const db = require('../db/database');
 const tools = require('./media-tools');
-const cutter = require('./clip-cutter');
 const { tenantAuth, tenantCors } = require('../auth');
-const { announce } = require('../webhooks');
 const objects = require('../objects/model');
 
 const router = express.Router({ mergeParams: true });
@@ -157,10 +155,6 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
             return res.status(200).json({ id: duplicate.id, status: duplicate.status, deduplicated: true });
         }
 
-        if (cutter.isBusy()) {
-            return res.status(503).json({ error: 'Server is busy processing other clips. Please try again in a few seconds.' });
-        }
-
         // Resolve a source ffmpeg can read: local file, or presigned B2/R2 URL.
         const vodStorage = require('./vod-storage');
         const source = await vodStorage.resolveMediaSource(vod);
@@ -213,34 +207,14 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
         const clipId = result.lastInsertRowid;
         const appId = req.appId;
 
-        // Cut in the background; webhook on completion.
-        (async () => {
-            const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
-            if (cut.ok) {
-                // Thumbnail first so the clip.ready payload carries it; then the ready transition,
-                // the clip's object and its event commit together (webhooks.announce) and the webhook goes out.
-                try {
-                    await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath);
-                } catch { /* */ }
-                announce(appId, 'clip.ready', {
-                    change: () => objects.withObject('clip', clipId, () => db.run('UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = ? WHERE id = ?',
-                        [cut.filePath, cut.duration, startTime + cut.duration, 'ready', clipId])),
-                    payload: () => clipPublic(db.getClipById(clipId)),
-                });
-                console.log(`[Clips] Clip ${clipId} cut from vod ${vodId} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s)`);
-            } else {
-                // First attempt failed: record why and let the retry sweeper take it from here
-                // (attempt 2 pulls a cloud-stored VOD back to local disk first).
-                const nextAt = new Date(Date.now() + 2 * 60000).toISOString().replace('T', ' ').slice(0, 19);
-                announce(appId, 'clip.failed', {
-                    change: () => objects.withObject('clip', clipId, () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_attempts = 1, cut_next_at = ? WHERE id = ?", [String(cut.error || 'cut failed').slice(0, 500), nextAt, clipId])),
-                    payload: () => clipPublic(db.getClipById(clipId)),
-                });
-                console.warn(`[Clips] Clip ${clipId} failed: ${cut.error} — auto-retry in 2 min`);
-            }
-        })().catch(err => console.error('[Clips] Background cut error:', err.message));
+        // The cut is a media job (clip.cut, WS-G task 3): media.job.* events, retries with backoff, and a
+        // job id the caller's UI follows (GET /api/v2/:app/jobs/:id) and reattaches to after a reload.
+        // clip.ready / clip.failed and the webhook come from the cut itself, as before.
+        const { job } = require('./clip-jobs').enqueueCut(appId, clipId, {
+            reason: 'cut', createdBy: req.authType === 'user' ? `app:${appId}:user:${req.userId}` : `app:${appId}`, ownerUserId: userId ?? null,
+        });
 
-        res.status(202).json({ id: clipId, status: 'processing' });
+        res.status(202).json({ id: clipId, status: 'processing', job_id: job.id });
     } catch (err) {
         console.error('[Clips] Create error:', err.message);
         if (req.file) tools.cleanupTempFile(req.file.path);
@@ -372,8 +346,8 @@ router.post('/:id/recut', tenantAuth(), async (req, res) => {
         if (!clip.vod_id) return res.status(422).json({ error: 'Clip has no source VOD to re-cut from' });
         // A manual retry resets the attempt counter so it gets the full ladder again (not projected: no object change).
         db.run("UPDATE clips SET cut_attempts = 0 WHERE id = ?", [clipId]);
-        require('./clip-jobs').recutClip(clipId, { reason: 're-cut' }).catch(err => console.error('[Clips] Background re-cut error:', err.message));
-        res.status(202).json({ id: clipId, status: 'processing' });
+        const { job } = require('./clip-jobs').enqueueCut(req.appId, clipId, { reason: 're-cut', createdBy: `app:${req.appId}` });
+        res.status(202).json({ id: clipId, status: 'processing', job_id: job.id });
     } catch (err) {
         console.error('[Clips] Re-cut error:', err.message);
         res.status(500).json({ error: 'Failed to re-cut clip' });

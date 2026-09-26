@@ -71,6 +71,7 @@ const config = {
         lightConcurrency: Math.max(1, intEnv('MEDIA_JOBS_LIGHT_CONCURRENCY', 2)),   // thumbnails, scans
         heavyConcurrency: Math.max(1, intEnv('MEDIA_JOBS_HEAVY_CONCURRENCY', 1)),   // split, remux
         finalizeConcurrency: Math.max(1, intEnv('MEDIA_JOBS_FINALIZE_CONCURRENCY', 1)),   // vod.finalize retries
+        clipsConcurrency: Math.max(1, intEnv('MEDIA_JOBS_CLIPS_CONCURRENCY', 2)),   // clip.cut (runs while recording)
         // Heavy jobs wait while a recording is running (as the health job does), unless this is on.
         heavyWhileRecording: ['1', 'true', 'on'].includes(String(process.env.MEDIA_JOBS_HEAVY_WHILE_RECORDING || '').toLowerCase()),
         leaseS: Math.max(30, intEnv('MEDIA_JOBS_LEASE_S', 120)),

@@ -5,6 +5,10 @@
  *                                   resolves the source, cuts, updates the row, thumbnails,
  *                                   commits the outcome with its event, fires the webhook. Records cut_error / cut_attempts and
  *                                   schedules an automatic retry on failure.
+ *   spec                            the media job clip.cut (lane clips; roadmap WS-G task 3): a new clip's
+ *                                   cut and every re-cut run as a job, so they carry media.job.* events and a
+ *                                   job id the UI can reattach to (GET /api/v2/:app/jobs/:id). The queue
+ *                                   owns the retries (backoff 2, 10, 30 min; a hopeless source fails at once).
  *   start()                         sweeper: every 3 min, failed clips that still have
  *                                   attempts left are re-cut. From the second attempt on, a
  *                                   VOD that lives in cloud storage is first pulled back to
@@ -48,7 +52,7 @@ async function recutClip(clipId, opts = {}) {
     return result;
 }
 
-async function _recutClip(clipId, { reason = 'recut' } = {}) {
+async function _recutClip(clipId, { reason = 'recut', viaJob = false } = {}) {
     const clip = db.getClipById(clipId);
     if (!clip) return { ok: false, error: 'Clip not found' };
     if (!clip.vod_id) return { ok: false, error: 'Clip has no source VOD' };
@@ -74,12 +78,12 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
             console.log(`[Clips] clip ${clipId}: not enough free disk to pull vod ${vod.id} home — cutting from the cloud copy`);
         }
     }
-    if (!source) return fail(clipId, clip, attempt, 'VOD media unavailable (not on disk and no cloud copy)');
+    if (!source) return fail(clipId, clip, attempt, 'VOD media unavailable (not on disk and no cloud copy)', { viaJob });
 
     const startTime = Number(clip.start_time) || 0;
     const duration = Math.max(1, (Number(clip.end_time) || 0) - startTime);
     const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
-    if (!cut.ok) return fail(clipId, clip, attempt, cut.error);
+    if (!cut.ok) return fail(clipId, clip, attempt, cut.error, { viaJob });
     // Thumbnail first (the clip.ready payload carries it), then the ready transition, the clip's
     // object and its event in one transaction (webhooks.announce), then the webhook.
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
@@ -89,23 +93,24 @@ async function _recutClip(clipId, { reason = 'recut' } = {}) {
         payload: () => _clipPublic(db.getClipById(clipId)),
     });
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
-    return { ok: true };
+    return { ok: true, duration_seconds: cut.duration };
 }
 
-function fail(clipId, clip, attempt, error) {
+/** A failed attempt. Under a job the queue schedules the retry, so nothing is left for the sweeper. */
+function fail(clipId, clip, attempt, error, { viaJob = false } = {}) {
     const msg = String(error || 'cut failed').slice(0, 500);
     // Nothing to retry when the source itself has no footage there (empty recording, window
     // past the end of what was captured): give up now instead of burning the whole ladder.
     const hopeless = /No decodable footage|Error opening input: End of file|Source VOD no longer exists|Invalid data found when processing input/i.test(msg);
-    const more = attempt < MAX_ATTEMPTS && !hopeless;
+    const more = !viaJob && attempt < MAX_ATTEMPTS && !hopeless;
     const mins = BACKOFF_MIN[Math.min(attempt - 1, BACKOFF_MIN.length - 1)];
     const nextAt = more ? new Date(Date.now() + mins * 60000).toISOString().replace('T', ' ').slice(0, 19) : null;
     announce(clip.app_id, 'clip.failed', {
         change: () => objects().withObject('clip', clipId, () => db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId])),
         payload: () => _clipPublic(db.getClipById(clipId)),
     });
-    console.warn(`[Clips] Clip ${clipId} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}${more ? ` — retry in ${mins} min` : ' — giving up'}`);
-    return { ok: false, error: msg, retry_at: nextAt };
+    console.warn(`[Clips] Clip ${clipId} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}${viaJob ? (hopeless ? ' — giving up' : ' — the job retries') : more ? ` — retry in ${mins} min` : ' — giving up'}`);
+    return { ok: false, error: msg, retry_at: nextAt, hopeless };
 }
 
 async function sweep() {
@@ -114,7 +119,9 @@ async function sweep() {
     try {
         const due = db.all(`SELECT id FROM clips WHERE status = 'failed' AND vod_id IS NOT NULL
             AND COALESCE(cut_attempts, 0) < ? AND (cut_next_at IS NULL OR cut_next_at <= CURRENT_TIMESTAMP)
-            AND created_at >= datetime('now', '-30 days') ORDER BY created_at DESC LIMIT 4`, [MAX_ATTEMPTS]) || [];
+            AND created_at >= datetime('now', '-30 days')
+            AND NOT EXISTS (SELECT 1 FROM media_jobs j WHERE j.job_type = 'clip.cut' AND j.app_id = clips.app_id AND CAST(json_extract(j.params, '$.clip_id') AS INTEGER) = clips.id)
+            ORDER BY created_at DESC LIMIT 4`, [MAX_ATTEMPTS]) || [];
         for (const row of due) { try { await recutClip(row.id, { reason: 'auto-retry' }); } catch (e) { console.warn(`[Clips] auto-retry ${row.id}:`, e.message); } }
     } finally { _busy = false; }
 }
@@ -137,4 +144,41 @@ function start() {
     console.log('[Clips] cut retry sweeper started (every 3 min, up to 4 attempts, hot-fetch from attempt 2)');
 }
 
-module.exports = { recutClip, sweep, start, MAX_ATTEMPTS };
+// ── clip.cut as a media job ──────────────────────────────────
+
+/** The clip's media object (legacy:<app>:clip:<id>), the job's object. */
+function clipObjectId(appId, clipId) {
+    const row = db.get('SELECT id FROM media_objects WHERE legacy_ref = ?', [`legacy:${appId}:clip:${clipId}`]);
+    return row ? row.id : null;
+}
+
+/** Queue the cut of a clip row → { job, created }. A repeated request for the same clip reuses its active job. */
+function enqueueCut(appId, clipId, { reason = 'cut', createdBy = null, ownerUserId = null } = {}) {
+    const queue = require('../jobs/queue');
+    const out = queue.enqueue({ appId, type: 'clip.cut', objectId: clipObjectId(appId, clipId), params: { clip_id: Number(clipId), reason }, dedupeActive: true, createdBy, ownerUserId });
+    try { require('../jobs/worker').kick(); } catch { /* the poll picks it up */ }
+    return out;
+}
+
+const spec = {
+    lane: 'clips',
+    maxAttempts: MAX_ATTEMPTS,
+    timeoutMs: RECUT_CAP_MS + 5 * 60 * 1000,
+    needsObject: false,
+    backoffS: (attempt) => BACKOFF_MIN[Math.min(Math.max(0, attempt - 1), BACKOFF_MIN.length - 1)] * 60,   // after attempt 1: 2 min, then 10, 30
+    validate({ params }) {
+        const id = Number(params && params.clip_id);
+        if (!Number.isInteger(id) || id < 1) throw new (require('../jobs/queue').JobError)('media.job.invalid', 'clip.cut needs params.clip_id', { permanent: true });
+        return { clip_id: id, reason: String((params && params.reason) || 'cut').slice(0, 40) };
+    },
+    async run(job) {
+        const { JobError } = require('../jobs/queue');
+        const clip = db.getClipById(job.params.clip_id);
+        if (!clip || clip.app_id !== job.app_id) throw new JobError('not_found', 'The clip no longer exists', { permanent: true });
+        const r = await recutClip(clip.id, { reason: job.params.reason || 'cut', viaJob: true });
+        if (!r.ok) throw new JobError('clip_cut_failed', r.error || 'cut failed', { permanent: !!r.hopeless });
+        return { clip_id: clip.id, status: 'ready', duration_seconds: r.duration_seconds ?? null };
+    },
+};
+
+module.exports = { recutClip, sweep, start, enqueueCut, clipObjectId, spec, MAX_ATTEMPTS };
