@@ -68,8 +68,9 @@ function sitemapEntries() {
 function robotsTxt() {
     return seo.robotsTxt({
         sitemaps: [`${config.publicUrl}/sitemap.xml`],
-        // APIs, sign-in, signed object bytes, operator and dev-data endpoints are not pages.
-        disallow: ['/api/', '/auth/', '/internal/', '/o/', '/metrics', '/release-metrics', '/live/'],
+        // APIs, sign-in, signed object bytes, operator and dev-data endpoints are not pages; /me is a
+        // signed-in person's own media (noindex as well).
+        disallow: ['/api/', '/auth/', '/internal/', '/o/', '/metrics', '/release-metrics', '/live/', '/me'],
     });
 }
 

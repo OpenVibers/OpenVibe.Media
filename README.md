@@ -41,6 +41,8 @@ server/
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
   public/routes.js       public /v /c /p /t /f
+  me/                    the object explorer: /me and /api/v2/me (a signed-in person's own objects, uploads,
+                         derivatives and usage) and the operator views /me/ops — see docs/object-model.md#object-explorer
   objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
                          backfill, reconcile, invariant, signing (presigned URLs), multipart,
                          content-type, verify-job (scheduled copy verification), copy-report,
@@ -73,6 +75,13 @@ client `media` (`server/user-auth.js`, routes under `/auth`, host-only cookies);
 `OV_OAUTH_CLIENT_SECRET` in the unit's environment. `/terms`, `/privacy` and `/dmca` come from
 `openvibe-shared/legal` (profile `hosting`). This is separate from tenant auth below, which is how
 other OpenVibe services call the API.
+
+**Your media (`/me`).** A signed-in person sees the objects whose `owner_subject` is their Network
+subject, in every tenant: uploads in progress, copies, derivatives, visibility, lifecycle and their own
+usage per tenant and namespace (`GET /api/v2/me/objects`, `/objects/:id`, `/usage`). Read-only: changes
+stay with the apps. Network staff with `staff.site.view` get the operator views at `/me/ops` (failed
+jobs, missing media, backfill, tiering, usage recompute with `staff.site.configure`). Details in
+[docs/object-model.md](docs/object-model.md#object-explorer).
 
 ## Tenancy & auth
 
@@ -285,6 +294,8 @@ directories are shared across apps) and responses carry a `note` saying so.
 | POST | `/admin/storage/holds` | `{ object_id \| vod_id \| clip_id, reason, kind?, note?, placed_by? }` → 201: the object is kept (no delete, no tier move) and so are the clips cut from a held VOD. Not for calls acting for a user (403) |
 | POST | `/admin/storage/holds/:holdId/release` | `{ released_by }` (also `DELETE /admin/storage/holds/:holdId`); 409 when already released. Holds stay on record |
 | GET | `/admin/storage/buckets` | sanitized bucket status per provider: `{ configured, endpoint, bucket, region, healthy, reachable }` via a live HeadBucket probe — **credentials are never returned** |
+| GET | `/admin/storage/ops` | this app's operator report (as `/me/ops` shows it to Network staff): failed jobs, missing media, backfill, tiering, the namespaces' usage snapshot. Not for calls acting for a user (403) |
+| POST | `/admin/storage/ops/recompute` | refresh this app's namespaces' usage snapshot from the rows |
 
 ### Webhooks (outbound)
 
@@ -368,7 +379,7 @@ never the headers (`test/trust-proxy.test.js`).
 | `GET /live/:sel/transcript.json` | **transcript + AI timeline API** — full audio-transcription log and AI overview timeline. `:sel` = slot id / slot slug → slot-scoped sessions; **`@username`** → user-scoped (all their slots, works while offline). Returns `{ live, current, sessions[] (each: ai_overview, transcript, duration…), streamer (overview + stream memories), user }`. `?limit=1..50` sessions (default 10), `?app=`. Cached **30s** (that's the rate limit), CORS-open. |
 | `GET /live/:sel/chat-insight.json` | **chat insight API** — a user's chat-related AI insight/timeline (`:sel` = `@username` or numeric user id): today-vs-alltime chat overviews, condensed memory, event timeline, plus their streamer overview + stream memories when they stream. Proxied from the app's public chat-AI API over loopback; cached **30s**, CORS-open. |
 | `GET /v/:id/transcript.json` | **VOD transcript API** — transcript + AI overview for one existing VOD id (`{ vod_id, title, duration_seconds, ai_overview, transcript, ai_analyzed_at }`). Private VODs → 404. Cached 30s, CORS-open. |
-| `GET /robots.txt` | crawler policy (`openvibe-shared/seo.robotsTxt`: AI and search crawlers named, `/api/`, `/auth/`, `/internal/`, `/o/`, `/metrics`, `/live/` disallowed) and the sitemap |
+| `GET /robots.txt` | crawler policy (`openvibe-shared/seo.robotsTxt`: AI and search crawlers named, `/api/`, `/auth/`, `/internal/`, `/o/`, `/metrics`, `/live/`, `/me` disallowed) and the sitemap |
 | `GET /sitemap.xml` | the media index and the watch pages Media is the canonical home of: public, playable VODs and clips of apps other than Live (Live lists its own `/vod` and `/clip` pages), never AI clips, private, unlisted, sandbox, recording or failed items; thumbnails as image entries. Every listed page renders `index, follow` |
 | `GET /llms.txt` | a map of the site for language-model crawlers |
 | `GET /live/:sel/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot, extracted from its in-progress recording. `:sel` = slot id (`1`), slot **slug** (`whip`), or **`@username`** (that streamer's top-viewed live slot; slug/username resolve via the app's `/api/streams` listing, cached 5s). Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`; internal base URLs from `APP_INTERNAL_URLS` JSON env or `LIVE_APP_INTERNAL_URL`). Cached **5s per slot** (that cache is the rate limit), CORS-open for external APIs/bots/dashboards. Not live → **404 with a styled OFFLINE card** (real JPEG bytes — dev pipelines decode the body as image/jpeg) so `<img>` embeds degrade nicely (`?format=json` for JSON errors); `503` + card when live but a frame can't be cut. |

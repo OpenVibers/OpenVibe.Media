@@ -28,6 +28,9 @@
  *                           cut from it. The hold row (placed_by/at, released_by/at, note) is the record,
  *                           and each change is logged as an [Admin] line
  * POST   /holds/:holdId/release   { released_by } (also DELETE /holds/:holdId); 409 when already released
+ * GET    /ops              this app's operator report (server/me/ops.js, as openvibe.media/me/ops shows
+ *                           it to Network staff): failed jobs, missing media, backfill, tiering, namespaces
+ * POST   /ops/recompute    refresh this app's namespaces' usage snapshot from the rows
  */
 'use strict';
 
@@ -593,6 +596,42 @@ function _releaseHold(req, res) {
 }
 router.post('/holds/:holdId/release', _releaseHold);
 router.delete('/holds/:holdId', _releaseHold);
+
+// ═══════════════════════════════════════════════════════════════
+// Operator report (WS-G task 12) — the same report as openvibe.media/me/ops, scoped to this app
+// ═══════════════════════════════════════════════════════════════
+
+/** The operator views are the app's own (its server fronts its admins), never a call acting for one of its users. */
+function _opsStaffOnly(req, res) {
+    if (req.authType === 'app') return true;
+    res.status(403).json({ error: 'The operator report is for the app itself: call with the app key, not on behalf of a user', code: 'media.ops.forbidden' });
+    return false;
+}
+
+// GET /ops?limit — failed jobs, missing media, backfill status, tiering diagnostics and the namespaces'
+// usage snapshot of this app (server/me/ops.js; the sweep and the provider switches are service-wide).
+router.get('/ops', (req, res) => {
+    try {
+        if (!_opsStaffOnly(req, res)) return;
+        res.json(require('../me/ops').report({ appId: req.appId, limit: req.query.limit }));
+    } catch (err) {
+        console.error('[Admin] Ops report error:', err.message);
+        res.status(500).json({ error: 'Failed to build the operator report' });
+    }
+});
+
+// POST /ops/recompute — refresh this app's namespaces' usage snapshot from the rows.
+router.post('/ops/recompute', (req, res) => {
+    try {
+        if (!_opsStaffOnly(req, res)) return;
+        const out = require('../me/ops').recompute({ appId: req.appId });
+        console.log(`[Admin] Namespace usage recomputed (${req.appId}): ${out.namespaces} namespace(s)`);
+        res.json(out);
+    } catch (err) {
+        console.error('[Admin] Usage recompute error:', err.message);
+        res.status(500).json({ error: 'Failed to recompute usage' });
+    }
+});
 
 // ── GET /buckets — bucket usage scan + cost estimate + reachability ──
 // Full ListObjectsV2 walk per provider (10-min server cache; ?force=1 rescans).

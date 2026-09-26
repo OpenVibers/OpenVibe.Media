@@ -398,6 +398,65 @@ every tenant gets its root row and every namespace an object names gets a row. O
 (`media_settings` `namespaces.reservations_seeded`), uploads already in progress get a reservation of
 their declared size for the full window from that open.
 
+## Object explorer
+
+Roadmap WS-G task 12. Code: `server/me/` (`routes.js`, `explorer.js`, `ops.js`, `pages.js`, and `client.js`,
+served as `/me/app.js`). Test: `test/me-explorer.test.js`.
+
+**Who.** The person signed in to openvibe.media (the Network access token in the `ov_token` cookie, or
+a bearer token), identified by its `subject_id` (`usr_…`). The token must name `openvibe.media` in its
+audience and be a person's: service and app principals and FedCM assertions are refused. A token
+without a subject answers 401 `auth.no_subject` (signing in again issues one).
+
+**What.** The objects whose `owner_subject` is that subject, in every tenant, and nothing else: another
+person's object is a 404 like a missing one, and no tenant's quota or namespace policy is shown (a person
+owns no tenant). Keys, paths, metadata beyond the file name and title, job error text and a hold's kind,
+reason, note and author are left out; a hold shows only as `held`.
+
+| method | path | notes |
+|---|---|---|
+| GET | `/api/v2/me/objects` | `?cursor&limit (≤100, 25)&status (a lifecycle, or all; default all but deleted)&kind&q (file name, title, type or id)&app` → `{ objects, next_cursor, limit }`, newest first. Each: `id`, `app_id`, `tenant { name, sandbox, project_id }`, `namespace`, `kind`, `filename`, `title`, `mime_type`, `size_bytes`, `visibility`, `lifecycle_status`, `readiness { metadata, bytes_verified, playable, reason }`, `held`, `derivatives` (live objects made from it: its variants and `derived_from` / `thumbnail_of` sources, not clips), `upload` (below), `failure`, `deleted { deleted_at, retention_until, purged }`, `public_url`, `created_at`, `updated_at` |
+| GET | `/api/v2/me/objects/:id` | one of them, plus `content_hash`, `locations` (provider, class, state, checked), `derivative_list`, `source` (when that is the person's too) and the last 10 `jobs` (type, status, error code) |
+| GET | `/api/v2/me/usage` | objects and bytes per tenant and namespace, by lifecycle: `objects` (not deleted), `stored_bytes` (ready and archived), `by_status` (uploading counts declared sizes; deleted are kept until the purge); `quotas: null` |
+
+`upload` (native objects still `uploading`): `method` (`multipart` or `single`), `waiting_for` (`parts`,
+`assembly`, `bytes`, or `complete` when the bytes are stored and the app has not completed it),
+`received_bytes` (parts received, the stored PUT, or a PUT still streaming into `OBJECTS_PATH/.tmp`),
+`declared_bytes`, `percent`, `parts_received` / `parts_expected`, and `expires_at` (the quota
+reservation: unfinished by then, the hourly sweep fails the upload).
+
+**Read-only.** Visibility, delete and restore stay with the apps: the object API takes them from a
+tenant credential (app key or Network token) and answers a user JWT 403, so the explorer does not act
+for a person.
+
+**Pages.** `GET /me` (and `/me/`) renders the usage table and the first page of objects in the OpenVibe
+Frame, with filters as a GET form and "Next page" as a link, so it is complete without JavaScript;
+`/me/app.js` (same-origin, no inline code) adds filtering and "Load more" without a reload and polls
+uploads in progress every 4 s while the tab is visible. `GET /me/objects/:id` is one object. Signed
+out, each is a sign-in prompt (`/auth/login?next=/me`). Every answer is `private, no-store`, `noindex`;
+`/me` is disallowed in `robots.txt` and never in the sitemap. `/api/v2/me/…` is mounted ahead of the
+tenant routes, so `me` cannot be a tenant id there. A restore drill signs nobody in (503).
+
+### Operator views
+
+For Network staff by the contracts staff map (ADR-022): `staff.site.view` reads, `staff.site.configure`
+recomputes. The same report is in the admin routes for an app's own server (app key, scoped to it).
+
+| method | path | notes |
+|---|---|---|
+| GET | `/api/v2/me/ops`, `/me/ops` | `?app` narrows it to one tenant; `?limit` (≤200, 50) per list |
+| POST | `/api/v2/me/ops/recompute`, `/me/ops/recompute` | refresh every namespace's usage snapshot (or one tenant's) from the rows. With the cookie only from this site's own pages (`Sec-Fetch-Site: same-origin`, else `Origin`); the page form redirects back (303) |
+| GET / POST | `/api/v1/:app/admin/storage/ops`, `/ops/recompute` | the app key, not acting for a user |
+
+The report (`server/me/ops.js`) reads the database only: no provider, file or directory, so it stays
+cheap and renders in a drill.
+
+- `jobs`: counts by status; failed jobs of the last 7 days by type and error code; the most recent failures with their error text.
+- `missing`: ready objects with no good copy; copies recorded missing or corrupt; copies by provider and state; quarantined VODs; the last verification run.
+- `backfill`: the last object backfill that changed something; rows with no object yet; objects whose owner subject is unresolved; whether upload reservations were seeded.
+- `tiering`: providers and policy; VODs and clips per provider; objects per canonical copy (native or projected); VODs eligible to offload; R2 decisions of the last 24 h and recent refusals and failures; the sweep's state in this process.
+- `namespaces`: every namespace with quota and usage snapshot.
+
 ## Readiness
 
 Code: `server/objects/readiness.js`. Test: `test/readiness.test.js`.

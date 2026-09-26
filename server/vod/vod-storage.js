@@ -1333,6 +1333,23 @@ async function probeProvider(name) {
     }
 }
 
+/**
+ * The sweep's state alone, without the local directory walk getStatus() makes (the operator views,
+ * server/me/ops.js, read it on every page load).
+ */
+function sweepInfo() {
+    const iso = (ms) => (ms ? new Date(ms).toISOString() : null);
+    return {
+        running: sweepRunning,
+        startedAt: iso(sweepState.startedAt),
+        lastRunAt: iso(sweepState.lastRunAt),
+        nextRunAt: iso(sweepState.nextRunAt),
+        lastResult: sweepState.lastResult,
+        stalled: sweepState.stalled,
+        stalledPasses: sweepState.stalledPasses,
+    };
+}
+
 function getStatus() {
     const settings = getSettings();
     const localDisk = diskUsage(config.vod.path);
@@ -1432,6 +1449,7 @@ module.exports = {
     start,
     stop,
     getStatus,
+    sweepInfo,
     bucketStatus,
     probeProvider,
     getBucketUsage,

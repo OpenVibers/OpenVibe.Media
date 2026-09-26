@@ -280,6 +280,12 @@ const safe = { DB_PATH, HOST: '127.0.0.1', PORT: '14100' };
         }
         const login = await request('GET', '/auth/login');
         assert.strictEqual(login.status, 503);
+        // The object explorer signs nobody in either, and verifies no token (that would ask Network for its key).
+        const mine = await request('GET', '/api/v2/me/objects', { headers: { Cookie: 'ov_token=a.b.c' } });
+        assert.deepStrictEqual([mine.status, mine.json && mine.json.code], [503, 'media.drill_no_sign_in']);
+        const mePage = await request('GET', '/me', { headers: { Cookie: 'ov_token=a.b.c' } });
+        assert.ok(mePage.status === 503 && mePage.text.includes('restore-drill'), `/me: ${mePage.status}`);
+        assert.deepStrictEqual(drill.blocked, [], 'nothing tried to leave');
         assert.deepStrictEqual(counts(), countsBefore);
     });
     await check('webhooks and the Events relay stay off even when called', async () => {

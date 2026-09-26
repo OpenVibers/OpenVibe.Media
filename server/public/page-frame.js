@@ -138,6 +138,8 @@ function baseCss() {
 function frameScripts({ history, footer } = {}) {
     const navOpts = { service: 'media', apiBase: NETWORK_URL, silentLogin: `${config.publicUrl}/auth/login?silent=1&next={url}`, fedcmLogin: `${config.publicUrl}/auth/fedcm`, loginUrl: `${config.publicUrl}/auth/login?next={url}`, logoutUrl: '/auth/logout?next={path}', sessionUrl: '/auth/me' };
     if (history) navOpts.history = history;
+    // The account menu's section for this site: the signed-in person's own media (server/me/, WS-G task 12).
+    navOpts.menu = { before: [{ id: 'media-mine', label: 'Your media', href: '/me', icon: 'fa-photo-film' }] };
     const footOpts = {
         service: 'media',
         variant: (footer && footer.variant) || 'compact',

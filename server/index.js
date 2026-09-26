@@ -104,7 +104,8 @@ const userAuthConfig = {
 };
 // A restore drill signs nobody in: that would redeem codes at Network.
 if (drill.enabled) app.use('/auth', (req, res) => res.status(503).json({ error: 'This is a restore-drill instance (MEDIA_DRILL): no sign-in', code: 'media.drill_no_sign_in' }));
-app.use('/auth', userAuth.createAuthRoutes(userAuthConfig, userAuth.createAuthClient(userAuthConfig)));
+const userAuthClient = userAuth.createAuthClient(userAuthConfig);
+app.use('/auth', userAuth.createAuthRoutes(userAuthConfig, userAuthClient));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // CORS preflight for tenant API routes (per-app allow-list; auth-less OPTIONS).
@@ -175,6 +176,11 @@ app.get('/api/v1/:app/stats/series/:metric', auth.tenantAuth(), (req, res) => {
 
 try { require('./views/service').ensureSchema(); } catch (e) { console.warn('[Views] schema:', e.message); }
 if (!drill.enabled) setInterval(() => { try { const n = require('./views/service').prune(30); if (n) console.log(`[Views] pruned ${n} stale visit row(s)`); } catch { /* */ } }, 12 * 3600 * 1000);
+// The object explorer (WS-G task 12): a signed-in person's own objects and usage, and the operator views
+// (server/me/routes.js). /api/v2/me sits ahead of /api/v2/:app/…, so "me" is never a tenant there.
+const me = require('./me/routes').createMeRoutes({ auth: userAuthClient });
+app.use('/api/v2/me', me.api);
+app.use('/me', me.pages);
 app.use('/api/v1/:app/views', require('./views/routes'));
 app.use('/api/v1/:app/vods', require('./vod/routes'));
 app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
