@@ -185,6 +185,7 @@ app.use('/api/v2/:app/objects', require('./objects/routes'));   // canonical obj
 app.use('/api/v2/:app/jobs', require('./jobs/routes'));         // media jobs: thumbnails, split/remux, invariant scans
 app.use('/o', require('./objects/routes').publicRouter);        // object bytes (public, or signed)
 app.use('/', require('./public/routes'));   // /v /c /p /t /f
+app.use(require('./not-found').notFound);   // nothing matched: 404 with Media's CSP (Cloudflare's beacon allowed)
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {

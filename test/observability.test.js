@@ -146,6 +146,12 @@ const listen = (app) => new Promise((resolve) => { const s = app.listen(0, '127.
         assert.ok(m.body.includes('http_requests_total{method="GET",route="/api/ready",status_class="2xx"} 1\n'), m.body.slice(0, 400));
         const h = await request(b2, '/healthz');
         assert.strictEqual(h.status, 200, '/healthz still answers');
+        // An unknown path is index.js's last handler (server/not-found.js): a 404 whose CSP lets Cloudflare's beacon run.
+        const nf = await new Promise((resolve, reject) => http.get(`${b2}/__ovcheck-404`, { headers: { accept: 'text/html' } }, (res) => {
+            let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => resolve({ status: res.statusCode, csp: res.headers['content-security-policy'], body: b }));
+        }).on('error', reject));
+        assert.deepStrictEqual([nf.status, nf.csp], [404, require('../server/not-found').CSP]);
+        assert.ok(nf.body.includes('<pre>Cannot GET /__ovcheck-404</pre>'));
         // The release manifest (registry.release-manifest@1) names where open tabs report updates,
         // and those reports land in /metrics.
         const rel = await request(b2, '/release.json');
