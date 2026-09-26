@@ -102,13 +102,29 @@ const C_WHERE = "COALESCE(is_public,1) = 1";
 const F_WHERE = "app_id NOT IN (SELECT app_id FROM apps WHERE project_id IS NOT NULL)";
 const P_WHERE = "visibility = 'public'";
 
+// A VOD's or clip's thumbnail is listed only while the recording itself is public. The exact file name
+// is what /t/<name> serves, so listing a private or unlisted recording's thumbnail would publish a frame
+// of it (and its id) to anyone reading the index.
+const THUMB_PUBLIC = {
+    vod: "is_public = 1 AND COALESCE(visibility, 'public') = 'public' AND COALESCE(clips_only, 0) = 0",
+    clip: "COALESCE(is_public, 1) = 1 AND COALESCE(visibility, 'public') = 'public'",
+};
+function thumbListable(name, publicIds) {
+    const m = /^(vod|clip)-(\d+)-/i.exec(name);
+    return !m || publicIds[m[1].toLowerCase()].has(Number(m[2]));
+}
+
 let _thumbListCache = { at: 0, list: [] };
 function thumbList() {
     if (Date.now() - _thumbListCache.at < 60_000) return _thumbListCache.list;
     let list = [];
     try {
+        const publicIds = {
+            vod: new Set(db.all(`SELECT id FROM vods WHERE ${THUMB_PUBLIC.vod}`).map(r => r.id)),
+            clip: new Set(db.all(`SELECT id FROM clips WHERE ${THUMB_PUBLIC.clip}`).map(r => r.id)),
+        };
         list = fs.readdirSync(THUMB_DIR)
-            .filter(f => /\.(jpe?g|png|webp)$/i.test(f))
+            .filter(f => /\.(jpe?g|png|webp)$/i.test(f) && thumbListable(f, publicIds))
             .map(f => { try { return [f, fs.statSync(path.join(THUMB_DIR, f)).mtimeMs]; } catch { return null; } })
             .filter(Boolean)
             .sort((a, b) => b[1] - a[1]);
