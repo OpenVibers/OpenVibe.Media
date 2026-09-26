@@ -160,6 +160,24 @@ function recordIndexDocument(eventType, subject, payload) {
 }
 
 /**
+ * Queue a staff action on someone else's media (media.moderation.action, common.moderation-action@1) for
+ * Network's moderation audit. Same rule as record(): inside the transaction that performs the action.
+ * Sandbox tenants announce nothing.
+ */
+function recordModeration(appId, payload) {
+    if (!outbox) return null;
+    if (appId && db.isSandboxTenant(appId)) return null;
+    const env = outbox.enqueue({
+        event_type: 'media.moderation.action',
+        actor: payload.actor_subject ? { type: 'user', id: payload.actor_subject } : { type: 'service', id: 'media' },
+        subject: { type: 'moderation_action', id: `${payload.target.type}:${payload.target.id}` },
+        visibility: 'internal', priority: 'important', payload,
+    });
+    stats.queued++;
+    return env;
+}
+
+/**
  * Operator scripts (scripts/media-jobs.js) change job state in the same database as the running
  * service. When the service's outbox table exists (the outbox is on there), the script writes its
  * events into it too, and the service's relay publishes them. No relay runs in the script.
@@ -251,4 +269,4 @@ function _reset() {
     stats.queued = 0; stats.lastError = null;
 }
 
-module.exports = { init, initWriter, record, recordIndexDocument, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, JOB_TRANSITIONS, _reset };
+module.exports = { init, initWriter, record, recordIndexDocument, recordModeration, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, JOB_TRANSITIONS, _reset };

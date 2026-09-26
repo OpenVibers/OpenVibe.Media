@@ -572,12 +572,34 @@ function afterTierMove(vodId, verifiedProviders = [], write = null) {
 
 // ── Holds ────────────────────────────────────────────────────
 
+/**
+ * A staff hold placed or released is a moderation action (media.moderation.action, ADR-022): announced in
+ * the transaction that records it, for Network's moderation audit. A creator's own pin is not moderation.
+ */
+function announceHold(action, hold, by) {
+    if (!hold || hold.kind === 'creator_pin') return;
+    const obj = getObject(hold.object_id);
+    if (!obj) return;
+    const who = String(by || '');
+    require('../events').recordModeration(obj.app_id, {
+        action,
+        target: { type: obj.kind, id: obj.id, ...(obj.owner_subject ? { owner_subject: obj.owner_subject } : {}) },
+        actor_subject: /^usr_[0-9A-HJKMNP-TV-Z]{26}$/.test(who) ? who : null,
+        ...(hold.reason ? { reason: String(hold.reason).slice(0, 500) } : {}),
+        details: { hold_id: hold.id, kind: hold.kind, app: obj.app_id, ...(who && !who.startsWith('usr_') ? { by: who.slice(0, 200) } : {}) },
+    });
+}
+
 /** Place a hold. created_by (or placed_by) is who placed it; note is free text for staff (≤ 2000). */
 function placeHold({ object_id, kind, reason = '', created_by = null, placed_by = null, note = null }) {
     if (!HOLD_KINDS.includes(kind)) throw new Error(`hold kind must be one of ${HOLD_KINDS.join(', ')}`);
-    const r = db.run('INSERT INTO media_holds (object_id, kind, reason, created_by, note) VALUES (?, ?, ?, ?, ?)',
-        [object_id, kind, String(reason || '').slice(0, 1000), placed_by ?? created_by, note == null || note === '' ? null : String(note).slice(0, 2000)]);
-    return db.get('SELECT * FROM media_holds WHERE id = ?', [r.lastInsertRowid]);
+    return db.getDb().transaction(() => {
+        const r = db.run('INSERT INTO media_holds (object_id, kind, reason, created_by, note) VALUES (?, ?, ?, ?, ?)',
+            [object_id, kind, String(reason || '').slice(0, 1000), placed_by ?? created_by, note == null || note === '' ? null : String(note).slice(0, 2000)]);
+        const hold = db.get('SELECT * FROM media_holds WHERE id = ?', [r.lastInsertRowid]);
+        announceHold('hold.placed', hold, placed_by ?? created_by);
+        return hold;
+    })();
 }
 
 /** A hold as the APIs answer it: the row, plus placed_by / placed_at (the names staff tools use for created_by / created_at). */
@@ -587,8 +609,12 @@ function holdPublic(h) {
 }
 
 function releaseHold(holdId, releasedBy = null) {
-    db.run('UPDATE media_holds SET released_at = CURRENT_TIMESTAMP, released_by = ? WHERE id = ? AND released_at IS NULL', [releasedBy, holdId]);
-    return db.get('SELECT * FROM media_holds WHERE id = ?', [holdId]);
+    return db.getDb().transaction(() => {
+        const r = db.run('UPDATE media_holds SET released_at = CURRENT_TIMESTAMP, released_by = ? WHERE id = ? AND released_at IS NULL', [releasedBy, holdId]);
+        const hold = db.get('SELECT * FROM media_holds WHERE id = ?', [holdId]);
+        if (r.changes) announceHold('hold.released', hold, releasedBy);
+        return hold;
+    })();
 }
 
 // ── Native objects: soft delete, restore, purge, quota ───────
