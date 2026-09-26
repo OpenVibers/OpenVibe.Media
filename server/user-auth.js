@@ -21,7 +21,7 @@
 //                          swap the assertion for tokens (jwt-bearer grant), set the
 //                          same cookies as the callback
 //   GET  /auth/logout    → clear cookies (+ best-effort refresh revoke), hint=guest
-//   GET  /auth/me        → offline-verify ov_token, return profile
+//   GET  /auth/me        → offline-verify ov_token, return profile ({ user: null } for a guest)
 //   POST /auth/refresh   → rotate tokens via refresh_token grant
 //
 // Cookies (all host-only — openvibe.media has no subdomains):
@@ -382,7 +382,10 @@ function createAuthRoutes(config, auth) {
     // ── GET /auth/me ─────────────────────────────────────────
     router.get('/me', async (req, res) => {
         const token = extractToken(req);
-        if (!token) return res.status(401).json({ error: 'Not authenticated' });
+        // No credential at all (a guest) is signed out, not an error: the shared navbar asks this on every
+        // page view, and a 401 logged a console error on each (browser check, OpenVibe.Host). A credential
+        // that is present but invalid or expired still answers 401.
+        if (!token) return res.set('Cache-Control', 'private, no-store').json({ user: null });
         const claims = await auth.verify(token);
         if (!claims) return res.status(401).json({ error: 'Invalid or expired token' });
         res.json({ user: claimsToUser(claims), expires_at: claims.exp ? claims.exp * 1000 : null });
