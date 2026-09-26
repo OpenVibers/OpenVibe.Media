@@ -7,7 +7,8 @@ projection over an object through its `object_id` column. Every existing URL and
 unchanged. New code talks to objects through the [v2 API](#object-api-v2).
 
 Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`, `invariant.js`,
-`signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`, `readiness.js`) and the job system in
+`signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`, `readiness.js`, `namespaces.js`,
+`namespace-routes.js`) and the job system in
 `server/jobs/` (`queue.js`, `worker.js`, `routes.js`, `types.js`, `thumbnail.js`, `invariant-scan.js`,
 `derive.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`, `test/jobs*.test.js`,
 `test/r2-eviction-drill.test.js`.
@@ -16,13 +17,15 @@ Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`,
 
 | table | what it holds |
 |---|---|
-| `media_objects` | `id` (med_…), `app_id` (tenant), `namespace` (capability namespace; = app today), `kind` (`vod` `clip` `file` `thumbnail` `screenshot` `avatar` `asset`), `owner_subject` (usr_… when known), `owner_app` + `owner_user_id` (legacy owner in the app's own user-id space), `visibility` (`public` `unlisted` `private`), `lifecycle_status` (`uploading` `ready` `failed` `archived` `deleted`), `mime_type`, `size_bytes`, `content_hash` (sha256), `canonical_provider` + `canonical_key`, `legacy_ref`, `metadata` (JSON), `created_at` / `updated_at` / `deleted_at` |
+| `media_objects` | `id` (med_…), `app_id` (tenant), `namespace` (a [`media_namespaces`](#namespaces-grants-and-quotas) row: the tenant's root or a child of it), `kind` (`vod` `clip` `file` `thumbnail` `screenshot` `avatar` `asset`), `owner_subject` (usr_… when known), `owner_app` + `owner_user_id` (legacy owner in the app's own user-id space), `visibility` (`public` `unlisted` `private`), `lifecycle_status` (`uploading` `ready` `failed` `archived` `deleted`), `mime_type`, `size_bytes`, `content_hash` (sha256), `canonical_provider` + `canonical_key`, `legacy_ref`, `metadata` (JSON), `created_at` / `updated_at` / `deleted_at` |
 | `media_locations` | one row per provider copy (`UNIQUE(object_id, provider)`): `provider` (`local` `b2` `r2`), `bucket`, `key` (absolute path for local, object key for B2/R2), `storage_class` (`hot` local, `cold` B2, `cache` R2), `state`, `checksum`, `size_bytes`, `verified_at` |
 | `media_relationships` | `from_object_id`, `relation`, `to_object_id`, `metadata`. In use: `clip_of` (clip to vod, with start/end), `thumbnail_of` (thumbnail to vod/clip). Reserved: `derived_from`, `screenshot_of` |
 | `media_variants` | `object_id`, `variant_name`, `derived_object_id`, `recipe`. In use: `thumbnail` |
 | `media_jobs` | derivative/maintenance jobs: `id` (mjob_…), `app_id`, `object_id`, `job_type`, `status`, `idempotency_key`, `params`, `result`, `attempts`/`max_attempts`, `run_after`, `lease_until`, `lease_token`, `checkpoint`, `error`/`error_code`, `cancel_requested`, `created_by`, `decided_by`. See [Jobs](#jobs) |
 | `media_uploads`, `media_upload_parts` | multipart upload sessions and the parts received (size, sha256). See [Multipart uploads](#multipart-uploads) |
 | `media_holds` | retention holds (with a staff `note`), see [Holds](#retention-holds) |
+| `media_namespaces` | every namespace: `namespace`, `app_id` (tenant), `parent`, `owner` (`service:<app>` or `project:<prj_…>`), `policy` (JSON), `quota_bytes`, `quota_objects`, and the usage snapshot `used_bytes`, `used_objects`, `reserved_bytes`, `reserved_objects`, `reconciled_at`. See [Namespaces](#namespaces-grants-and-quotas) |
+| `media_quota_reservations` | quota held by an upload in progress: `object_id`, `app_id`, `namespace`, `bytes`, `expires_at` |
 | `media_invariant_violations` | public playback objects over the size policy, see [Invariant](#public-object-size-invariant) |
 
 Location `state`:
@@ -206,7 +209,7 @@ All routes live under `/api/v2/:app/objects`.
 **Auth.** One of:
 
 - the app's API key;
-- a Network service token that grants `media.object.upload` (writes) or `media.object.read` (reads) for the namespace `:app`. `tenantAuth({ capability })` enforces this, as it does on v1.
+- a Network service token that holds the route's [verb](#namespaces-grants-and-quotas) for the object's namespace: write `media.object.upload`, read `media.object.read`, list `media.object.list`, delete (and restore) `media.object.delete`. The older ids still grant the newer verbs (read lists, upload deletes), unless the namespace's policy is `strict_verbs`. The tenant's root namespace is `:app`.
 - for `:app = prj_<ULID>` (a developer-project tenant, ADR-014): only that project's app tokens, production or sandbox. The token's `env` selects the tenant (`prj_<ULID>` or `prj_<ULID>-sandbox`), and upload URLs always name the project. Sandbox objects never get a `public_url`; `/download` signs them and `/o/:id` needs the signature, whatever their visibility. Retention holds are not available to app tokens. See the README's "Developer-project tenants".
 
 **Owner.**
@@ -218,7 +221,7 @@ All routes live under `/api/v2/:app/objects`.
 
 | method | path | notes |
 |---|---|---|
-| POST | `/` | init. `{ kind, visibility (default private), mime_type, size_bytes, filename, content_hash (expected sha256), metadata (≤ 16 KB), user_id, upload_ttl (60-86400 s), multipart, part_size }` returns 201 `{ id, object, upload: { method: 'PUT', url, token, expires_at, max_bytes, content_type, complete_url, multipart_url } }`. `url` is a [presigned PUT URL](#presigned-uploads). With `multipart: true` (required above `MEDIA_OBJECT_MAX_MB`): `method: 'multipart'`, `url: null`, and `upload.multipart` is the new [session](#multipart-uploads). Checks at init: `size_bytes` against `MEDIA_OBJECT_MAX_MB` (single part) or `MEDIA_MULTIPART_MAX_MB` (413), the quota including reservations (413 `media.quota.exceeded`), the public-size invariant (422) and the [content type](#content-types) for the kind (415 `media.object.unsupported_type`) |
+| POST | `/` | init. `{ namespace (default the tenant's root; a name below it, full or relative), kind, visibility (default private), mime_type, size_bytes, filename, content_hash (expected sha256), metadata (≤ 16 KB), user_id, upload_ttl (60-86400 s), multipart, part_size }` returns 201 `{ id, object, upload: { method: 'PUT', url, token, expires_at, max_bytes, content_type, complete_url, multipart_url } }`. `url` is a [presigned PUT URL](#presigned-uploads). With `multipart: true` (required above `MEDIA_OBJECT_MAX_MB`): `method: 'multipart'`, `url: null`, and `upload.multipart` is the new [session](#multipart-uploads). Checks at init: `size_bytes` against `MEDIA_OBJECT_MAX_MB` (single part) or `MEDIA_MULTIPART_MAX_MB` (413), the namespace's policy (422 `media.namespace.policy_denied`, 413 `media.object.too_large`), every quota from the namespace up to the tenant including reservations (413 `media.quota.exceeded` / `media.quota.objects_exceeded`; the declared size is then reserved), the public-size invariant (422) and the [content type](#content-types) for the kind (415 `media.object.unsupported_type`) |
 | POST | `/:id/upload-url` | a fresh presigned single-PUT URL for an uploading object (`{ ttl }` 60-86400 s) |
 | PUT | `/:id/content` | the bytes, single part. Auth is the upload token (`?token=` from init, or `X-Upload-Token`) or the usual credential. Streams to disk computing sha256. Refuses more than the declared size or the limit (413; an object declared above `MEDIA_OBJECT_MAX_MB` goes multipart), a size mismatch (400), quota overrun (413), a type that does not suit the kind (415) and a PUT while a multipart session is open (409). Stored at `OBJECTS_PATH/<app>/<id>` with a verified local location. Mounted ahead of the JSON body parser, so any Content-Type is taken as raw bytes; the Content-Type becomes `mime_type` when init set none. Can be repeated while the object is `uploading` |
 | POST | `/:id/complete` | checks the expected hash (422 `media.object.hash_mismatch`), the invariant, the quota and the bytes against the type (415 `media.object.content_mismatch`). Sets `ready` and sends the `media.object.uploaded` webhook. Also accepts the upload token |
@@ -226,9 +229,9 @@ All routes live under `/api/v2/:app/objects`.
 | GET | `/:id/multipart/:uploadId` | the session: `parts` received (number, size, sha256), `missing`, `received_bytes`, `expires_at` |
 | PUT | `/:id/multipart/:uploadId/parts/:n` | one part, raw bytes of exactly its size; optional `X-Content-SHA256` |
 | POST | `/:id/multipart/:uploadId/complete` | `{ content_hash, parts: [{ part_number, sha256 }] }` (both optional): assembles, then the checks of `/complete` |
-| DELETE | `/:id/multipart/:uploadId` | abort: parts deleted, the object stays `uploading` |
+| DELETE | `/:id/multipart/:uploadId` | abort: parts deleted and the quota reservation released, the object stays `uploading` (a new session or upload URL reserves again) |
 | GET | `/:id` | metadata: providers and states of each copy, never paths or keys, and its [readiness](#readiness) |
-| GET | `/` | cursor list, newest first. `?limit (≤200)&cursor&kind&visibility&status&owner (usr_…)&user_id&include_deleted` returns `{ objects, next_cursor }` |
+| GET | `/` | cursor list, newest first. `?limit (≤200)&cursor&namespace (and below)&kind&visibility&status&owner (usr_…)&user_id&include_deleted` returns `{ objects, next_cursor }`. A Network token sees only the namespaces it may list |
 | DELETE | `/:id` | soft delete: `lifecycle_status = deleted`, and the bytes are kept for `MEDIA_DELETE_RETENTION_DAYS` (default 30). 409 `media.object.held` under a hold. 409 `media.object.legacy_managed` for projected objects, which are deleted through their v1 route |
 | POST | `/:id/restore` | undo a soft delete within the retention period (410 once purged) |
 | GET | `/:id/download` | public or unlisted: 302 to the public location (the inherited URL for projected objects such as `/v/:id`, `/c/:id`, `/f/:key`, `/t/:name`, `/p/:slug/screenshot`; otherwise `/o/:id`). Private: `{ url, expires_at }` signed for `?ttl` seconds (30 to 3600, default `MEDIA_SIGNED_URL_TTL_S` = 300), or a 302 with `?redirect=1`. `?format=json` always answers JSON. 410 when deleted |
@@ -311,13 +314,89 @@ Code: `server/objects/content-type.js`.
 - Everything else is served as an attachment with `nosniff`, so its declared type is taken as given.
   The declared type wins over the PUT's `Content-Type` (declared at init: the PUT header is ignored).
 
-**Quota.** `apps.quota_bytes` is compared against v1 file bytes plus native objects that are
-`uploading` (their declared size counts as a reservation) or `ready`. Soft-deleted objects do not
-count, except in developer-project tenants, where they count until their bytes are purged. The v1 files route still counts only v1 files, so its response is unchanged.
+**Quota.** Per namespace, up to the tenant: see [Namespaces, grants and quotas](#namespaces-grants-and-quotas).
 
 **Purge.** Every hour, the service removes the bytes of native objects whose retention period has
 passed and that have no active hold. The object row stays `deleted` with `metadata.purged_at`.
 Projected objects are never purged by this job.
+
+## Namespaces, grants and quotas
+
+Roadmap WS-G task 2. Code: `server/objects/namespaces.js` (rows, policy, quotas, reservations),
+`server/auth.js` (`VERBS`, `tenantAuth({ verb, namespaced })`, `namespaceGrant`),
+`server/objects/namespace-routes.js`, `scripts/namespaces.js`. Test: `test/namespaces.test.js`.
+
+**Namespaces are rows.** Every object's `namespace` is a `media_namespaces` row. A tenant has one root:
+
+| tenant | root namespace |
+|---|---|
+| first-party (`live`, `community`, `tools`, …) | its app id |
+| developer project, production (`prj_<ULID>`) | `app.<project_id>` |
+| developer project, sandbox (`prj_<ULID>-sandbox`) | `app.<project_id>.sandbox` |
+
+Children sit below a root (`<root>.<segment>`, up to three segments of `a-z 0-9 _ -`). Init creates one
+the first time it is named (`{ namespace: "avatars" }` or the full name), at most
+`MEDIA_NAMESPACE_MAX_CHILDREN` per tenant (413 `media.quota.namespaces_exceeded`). `owner` is
+`service:<app_id>` or `project:<prj_…>`. v1 files, projected rows and job outputs live in the root
+(outputs in their source's namespace).
+
+**Grants: five verbs, one capability each, per namespace.** Network issues them (service principals'
+`principal_grants`, developer apps' grants) and the token's `ns` names the namespaces.
+
+| verb | capability | also granted by (tokens issued before the split) | routes |
+|---|---|---|---|
+| read | `media.object.read` | | object metadata, download, holds, a multipart session, a job, one namespace, v1 file meta |
+| list | `media.object.list` | `media.object.read` | object list, job list, namespace list, v1 file list |
+| write | `media.object.upload` | | init, upload URL, content, complete, multipart, v1 file upload |
+| delete | `media.object.delete` | `media.object.upload` | object delete and restore, v1 file delete |
+| transform | `media.derivative.create` | `media.object.upload` | job create, approve, cancel (the job's object's namespace; the root for a tenant-wide job) |
+
+A namespace whose policy sets `strict_verbs: true` accepts only the verb's own capability. A grant
+of `ns: ["community"]` is the root alone; `community.*` covers its children; a token for one child
+(`community.avatars`) reaches the tenant but only that namespace. A developer app token's `ns` entry
+equal to its `project_id` (what Network issued before) means `app.<project_id>.*`; Network now issues
+both. The app key and upload/session tokens are unrestricted within their tenant or object.
+
+**Policy** (JSON, set by the operator; children inherit it key by key): `kinds`, `visibilities`
+(422 `media.namespace.policy_denied` at init), `max_object_bytes` (413 `media.object.too_large`),
+`strict_verbs`.
+
+**Quotas.** `quota_bytes` and `quota_objects` limit a namespace's subtree. `quota_bytes` NULL
+inherits: the root takes its tenant's `apps.quota_bytes`, a child has no limit of its own; 0 is no
+limit. Usage counts ready native objects (in a developer project also soft-deleted ones until their
+bytes are purged), the tenant's v1 files (at the root) and reservations:
+
+1. **Init** checks every limit from the namespace up to the root with the declared size and one more
+   object, and reserves the declared size (`media_quota_reservations`), in one transaction with the
+   object row.
+2. **The bytes** (PUT, or a new multipart session or upload URL) are checked again and replace the
+   reservation's size.
+3. **Complete** checks the real size against everything else and settles the reservation: the ready
+   object counts from then on. The snapshot is reconciled.
+4. **Abort** of a multipart session (or its expiry) releases the reservation down to bytes still stored.
+   Deleting an upload settles it.
+5. **Expiry.** A reservation lasts `MEDIA_UPLOAD_RESERVATION_HOURS` (72) after the upload's last step.
+   The hourly sweep then marks the upload `failed` (`metadata.failure: upload_expired`), deletes its
+   stored bytes and drops the reservation, unless a multipart session is still open.
+
+Refusals are 413 problems: `media.quota.exceeded` (`namespace`, `quota_bytes`, `used_bytes`,
+`reserved_bytes`) or `media.quota.objects_exceeded` (`namespace`, `quota_objects`, `used_objects`,
+`reserved_objects`). The v1 file upload keeps its JSON shape and adds `code`. Split and remux check
+the source namespace's quotas. The `used_*`/`reserved_*` columns are a snapshot: checks always count
+from the rows. It is refreshed at complete, delete and restore, when read, and hourly.
+
+**Reads.** `GET /api/v2/:app/namespaces` lists the tenant's namespaces the caller may list, and
+`GET /api/v2/:app/namespaces/:namespace` reads one (full or relative name): owner, own and
+effective policy, quota (`bytes`, `objects`, `bytes_from: tenant|namespace`) and usage, counted when
+read. The operator lists every tenant's namespaces and sets quotas and policy with
+`node scripts/namespaces.js [--app <tenant>] [--json]` and
+`--set <namespace> [--quota-bytes <n>|inherit] [--quota-objects <n>|none] [--policy '<json>'] [--dry-run]`.
+
+**Backfill** (every open, idempotent; `server/db/database.js` `migrateNamespaces`): a developer
+project's objects move from the tenant id (`prj_…`, `prj_…-sandbox`) to `app.<project_id>[.sandbox]`;
+every tenant gets its root row and every namespace an object names gets a row. Once
+(`media_settings` `namespaces.reservations_seeded`), uploads already in progress get a reservation of
+their declared size for the full window from that open.
 
 ## Readiness
 
@@ -580,8 +659,8 @@ may be queued or running (429 `media.job.too_many`).
 
 **Cancellation, by the owner.** A proposed or queued job is cancelled at once. A running job gets
 `cancel_requested`; the worker aborts it (its ffmpeg is killed) and it ends `cancelled`. Finished
-jobs answer 409. The owner is the tenant (app key, service token for the namespace, or the project's
-app token); a caller acting for one of the app's users (`X-OV-User-Id`) sees and decides only the jobs
+jobs answer 409. The owner is the tenant (app key, a service token or the project's app token holding
+the `transform` [verb](#namespaces-grants-and-quotas) for the job's object's namespace); a caller acting for one of the app's users (`X-OV-User-Id`) sees and decides only the jobs
 it created and the jobs on objects it owns.
 
 **Worker.** In-process, polling every `MEDIA_JOBS_POLL_MS`, in three lanes: `light`
@@ -731,6 +810,8 @@ Not run against production yet: it needs the owner's go-ahead.
 | `MEDIA_MULTIPART_MIN_PART_MB` / `_MAX_PART_MB` / `_PART_MB` | 5 / 256 / 64 | part size bounds and default |
 | `MEDIA_MULTIPART_TTL_HOURS` | 24 | an unfinished multipart session is purged after this |
 | `MEDIA_UPLOAD_MIN_FREE_MB` | 10240 | free disk kept in reserve by multipart uploads and split/remux jobs |
+| `MEDIA_UPLOAD_RESERVATION_HOURS` | 72 | an upload's quota reservation lasts this long after its last step; then the hourly sweep fails it and frees its bytes |
+| `MEDIA_NAMESPACE_MAX_CHILDREN` | 100 | namespaces a tenant may have below its root |
 | `MEDIA_JOBS_ENABLED` | on | `0` stops the job worker |
 | `MEDIA_JOBS_POLL_MS` | 5000 | worker poll interval |
 | `MEDIA_JOBS_LIGHT_CONCURRENCY` / `_HEAVY_CONCURRENCY` / `_FINALIZE_CONCURRENCY` | 2 / 1 / 1 | jobs per lane |

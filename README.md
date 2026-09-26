@@ -100,15 +100,18 @@ Credential types on `/api/v1/:app/...`:
    `allowed_origins` (CORS is reflected for allow-listed origins only).
 
 3. **Network principal token** (`sub svc:…`, `app:…`, `mod:…`; RS256, audience `openvibe.media`) —
-   accepted only on routes that name a capability: files upload/delete and every objects v2 write
-   (`media.object.upload`), files list/meta and objects v2 reads (`media.object.read`), and only for
-   the `:app` namespaces in the token's `ns`.
+   accepted only on routes that name a verb, each checked for the namespace it works in against the
+   token's `ns`: read (`media.object.read`), list (`media.object.list`, or read), write
+   (`media.object.upload`), delete (`media.object.delete`, or upload) and transform
+   (`media.derivative.create`, or upload). The tenant's root namespace is `:app`; children, quotas
+   and policy are in [docs/object-model.md](docs/object-model.md#namespaces-grants-and-quotas).
 
 ### Developer-project tenants (ADR-014)
 
 A developer app from OpenVibe.Network (token `sub app:app_<ULID>`, `project_id prj_<ULID>`,
-`env sandbox|production`, `ns [project_id]`) holding `media.object.upload` / `media.object.read`
-gets a tenant keyed by its project id, **created on first use**. The URL always names the project
+`env sandbox|production`, `ns [project_id, app.<project_id>.*]`; an older `ns [project_id]` means the
+same) holding media verbs gets a tenant keyed by its project id, **created on first use**. Its
+namespaces are `app.<project_id>` (production) and `app.<project_id>.sandbox`, with children below. The URL always names the project
 (`/api/v1/prj_<ULID>/files`, `/api/v2/prj_<ULID>/objects`, so openvibe-sdk's
 `createMediaClient({ app: projectId })` works); the token's `env` picks one of two separate tenants:
 

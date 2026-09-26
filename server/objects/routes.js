@@ -12,7 +12,7 @@
  * POST   /:id/multipart/:uploadId/complete      assemble + the same checks as complete → ready
  * DELETE /:id/multipart/:uploadId               abort (parts deleted; the object stays uploading)
  * GET    /:id                 metadata (id = med_… or legacy:<app>:<kind>:<id>)
- * GET    /                    cursor list (?kind&visibility&status&owner&user_id&include_deleted&limit&cursor)
+ * GET    /                    cursor list (?namespace&kind&visibility&status&owner&user_id&include_deleted&limit&cursor)
  * DELETE /:id                 soft delete (bytes kept MEDIA_DELETE_RETENTION_DAYS); 409 when held
  * POST   /:id/restore         undo a soft delete inside the retention period
  * GET    /:id/download        302 to the public location, or a signed short-lived URL for private objects
@@ -21,8 +21,13 @@
  * DELETE /:id/holds/:holdId   release it                                                      (app key only)
  *                              Staff place and release holds by vod/clip id at /api/v1/:app/admin/storage/holds.
  *
- * Auth: the app's API key, or a Network service token granting media.object.upload
- * (writes) / media.object.read (reads) for namespace = :app. Developer-project tenants
+ * Auth: the app's API key, or a Network token holding the route's verb for the object's namespace
+ * (server/auth.js VERBS): write (init, content, complete, multipart) media.object.upload; read
+ * (metadata, download, holds) media.object.read; list media.object.list; delete and restore
+ * media.object.delete. The older ids keep granting the newer verbs (read lists, upload deletes).
+ * Init takes `namespace` (the tenant's root by default, or a name below it; objects/namespaces.js),
+ * reserves its declared size against every quota from there up to the tenant, and complete settles
+ * the reservation against the bytes received. Developer-project tenants
  * (:app = prj_<ULID>) take their project's app tokens only (server/auth.js); their sandbox
  * objects are served only through signed URLs, whatever their visibility. X-OV-Subject names the
  * owner (usr_…); X-OV-User-Id (app key only) acts as one of the app's users. The
@@ -46,12 +51,16 @@ const invariant = require('./invariant');
 const signing = require('./signing');
 const ctypes = require('./content-type');
 const multipart = require('./multipart');
-const { tenantAuth, tenantCors, tenantPath } = require('../auth');
+const namespaces = require('./namespaces');
+const { tenantAuth, tenantCors, tenantPath, namespaceGrant } = require('../auth');
 const { announce } = require('../webhooks');
 
 const MB = 1024 * 1024;
-const upload = tenantAuth({ capability: 'media.object.upload' });
-const read = tenantAuth({ capability: 'media.object.read' });
+// Each route checks its verb for the namespace it works in (the object's, or the one init names).
+const upload = tenantAuth({ verb: 'write', namespaced: true });
+const read = tenantAuth({ verb: 'read', namespaced: true });
+const list = tenantAuth({ verb: 'list', namespaced: true });
+const remove = tenantAuth({ verb: 'delete', namespaced: true });
 const appOnly = tenantAuth();
 
 function problem(res, status, code, detail, extra) {
@@ -77,9 +86,12 @@ function canWrite(req, obj) {
     return req.authType !== 'user' || (obj.owner_user_id != null && obj.owner_user_id === req.userId);
 }
 
-function load(req, res) {
+/** The object named in the URL, in this tenant and visible to the caller, if the caller may `verb` in its namespace (else answered). */
+function load(req, res, verb = 'read') {
     const obj = model.resolveObject(String(req.params.id || ''), req.appId);
     if (!obj || !canSee(req, obj)) { problem(res, 404, 'media.object.not_found', 'No such object in this namespace'); return null; }
+    const g = namespaceGrant(req, verb, obj.namespace);
+    if (!g.allowed) { problem(res, 403, g.code, g.reason); return null; }
     return obj;
 }
 
@@ -107,9 +119,9 @@ function contentAuth(req, res, next) {
     if (tokenTenant(req, res, obj)) next();
 }
 
-/** Multipart session token (from POST /:id/multipart) or the usual tenant credential with `capability`. */
-function multipartAuth(capability) {
-    const fallback = tenantAuth({ capability });
+/** Multipart session token (from POST /:id/multipart) or the usual tenant credential with `verb`. */
+function multipartAuth(verb) {
+    const fallback = tenantAuth({ verb, namespaced: true });
     return (req, res, next) => {
         const token = req.query.token || req.headers['x-upload-token'];
         if (!token) return fallback(req, res, next);
@@ -161,13 +173,23 @@ function sanitizeFilename(name) {
     return path.basename(String(name)).replace(/[^\w.\- ]/g, '_').slice(0, 200) || null;
 }
 
-function quotaCheck(req, res, addBytes, excludeId = null) {
-    const quota = Number(req.appRow.quota_bytes) || 0;
-    if (!quota) return true;
-    const used = model.usedBytes(req.appId, excludeId);
-    if (used + addBytes <= quota) return true;
-    problem(res, 413, 'media.quota.exceeded', 'App storage quota exceeded', { quota_bytes: quota, used_bytes: used });
+/**
+ * Room for `bytes` (and `objects` new objects) in `namespace`: every quota from there up to the
+ * tenant, and the policy's max_object_bytes (objects/namespaces.checkQuota). Answers 413 when not.
+ */
+function quotaCheck(req, res, namespace, { bytes = 0, objects = 0, excludeId = null } = {}) {
+    const q = namespaces.checkQuota(req.appRow, namespace, { bytes, objects, excludeId });
+    if (!q) return true;
+    problem(res, q.status, q.code, q.detail, q.extra);
     return false;
+}
+
+/** An upload step that has no reservation (it was released at abort) takes one again, checked like init. */
+function reserveAgain(req, res, obj, bytes) {
+    const held = namespaces.reservation(obj.id);
+    if (!quotaCheck(req, res, obj.namespace, { bytes, objects: held ? 0 : 1, excludeId: obj.id })) return false;
+    namespaces.reserve(obj, bytes);
+    return true;
 }
 
 // ── Content upload (mounted ahead of the JSON body parser — see index.js) ──
@@ -196,7 +218,7 @@ function receive(req, tmp, cap) {
 }
 
 async function putContent(req, res) {
-    const obj = load(req, res);
+    const obj = load(req, res, 'write');
     if (!obj) { req.resume(); return; }
     if (!canWrite(req, obj)) { req.resume(); return problem(res, 403, 'media.object.forbidden', 'Not your object'); }
     if (obj.legacy_ref) { req.resume(); return problem(res, 409, 'media.object.legacy_managed', 'This object is written through the v1 API'); }
@@ -224,6 +246,7 @@ async function putContent(req, res) {
     const tmpDir = path.join(config.objects.path, '.tmp');
     fs.mkdirSync(tmpDir, { recursive: true });
     const tmp = path.join(tmpDir, `${obj.id}-${crypto.randomBytes(4).toString('hex')}`);
+    namespaces.touch(obj.id);   // the upload is active: its reservation does not expire under it
     const got = await receive(req, tmp, cap);
     const drop = () => { try { fs.unlinkSync(tmp); } catch { /* not written */ } };
     if (got.error) {
@@ -233,7 +256,12 @@ async function putContent(req, res) {
     }
     if (declared && got.bytes !== declared) { drop(); return problem(res, 400, 'media.object.size_mismatch', `Declared ${declared} bytes, received ${got.bytes}`); }
     if (!got.bytes) { drop(); return problem(res, 400, 'media.object.empty', 'No bytes received'); }
-    if (!quotaCheck(req, res, got.bytes, obj.id)) { drop(); return; }
+    // The object may have been completed, deleted or expired while the bytes streamed in.
+    const current = model.getObject(obj.id);
+    if (!current || current.lifecycle_status !== 'uploading') { drop(); return problem(res, 409, 'media.object.not_uploading', `Object is ${current ? current.lifecycle_status : 'gone'}`); }
+    // The real size replaces the declared one in this upload's reservation.
+    const held = namespaces.reservation(obj.id);
+    if (!quotaCheck(req, res, obj.namespace, { bytes: got.bytes, objects: held ? 0 : 1, excludeId: obj.id })) { drop(); return; }
 
     try {
         const dest = model.objectFilePath(obj);
@@ -245,6 +273,7 @@ async function putContent(req, res) {
                 canonical_provider: 'local', canonical_key: dest,
             });
             model.upsertLocation(obj.id, { provider: 'local', key: dest, state: 'present', size_bytes: got.bytes, checksum: got.sha256, verified: true });
+            namespaces.reserve(current, got.bytes);
         })();
         res.json({ id: obj.id, size_bytes: got.bytes, content_hash: got.sha256 });
     } catch (err) {
@@ -266,6 +295,15 @@ router.post('/', upload, (req, res) => {
         if (!model.KINDS.includes(kind)) return problem(res, 400, 'media.object.invalid', `kind must be one of ${model.KINDS.join(', ')}`);
         const visibility = String(b.visibility || 'private');
         if (!model.VISIBILITIES.includes(visibility)) return problem(res, 400, 'media.object.invalid', 'visibility must be public, unlisted or private');
+        // The namespace: the tenant's root unless the body names one below it; the caller must hold write there.
+        const named = namespaces.resolveName(req.appRow, b.namespace);
+        if (named.error) return problem(res, 400, 'media.namespace.invalid', named.error);
+        const namespace = named.namespace;
+        const g = namespaceGrant(req, 'write', namespace);
+        if (!g.allowed) return problem(res, 403, g.code, g.reason);
+        const policy = namespaces.effectivePolicy(req.appId, namespace);
+        if (Array.isArray(policy.kinds) && !policy.kinds.includes(kind)) return problem(res, 422, 'media.namespace.policy_denied', `${namespace} takes kinds ${policy.kinds.join(', ') || '(none)'}`);
+        if (Array.isArray(policy.visibilities) && !policy.visibilities.includes(visibility)) return problem(res, 422, 'media.namespace.policy_denied', `${namespace} takes visibilities ${policy.visibilities.join(', ') || '(none)'}`);
         let size = 0;
         if (b.size_bytes != null) {
             size = Number(b.size_bytes);
@@ -285,7 +323,6 @@ router.post('/', upload, (req, res) => {
         }
         const subject = subjectFrom(req);
         if (subject === undefined) return problem(res, 400, 'media.object.invalid', 'X-OV-Subject must be a user subject (usr_…)');
-        if (!quotaCheck(req, res, size)) return;
 
         const mime = b.mime_type && /^[\w.+-]+\/[\w.+-]+$/.test(String(b.mime_type)) ? String(b.mime_type).toLowerCase() : null;
         if (mime) {
@@ -300,15 +337,28 @@ router.post('/', upload, (req, res) => {
         if (b.content_hash) metadata.expected_sha256 = String(b.content_hash).toLowerCase();
         if (req.principal) metadata.created_by = req.principal.sub;
 
-        const id = model.createObject({
-            app_id: req.appId, namespace: req.appId, kind, owner_subject: subject, owner_app: req.appId, owner_user_id: userId,
-            visibility, lifecycle_status: 'uploading', mime_type: mime, size_bytes: size, metadata,
-        });
+        // The namespace row, the quota check, the object and its reservation commit together, so two
+        // inits racing for the last of a quota cannot both get it.
+        const made = db.getDb().transaction(() => {
+            const row = namespaces.ensure(req.appRow, namespace);
+            if (row.error) return { problem: { status: row.status, code: row.code, detail: row.error } };
+            const q = namespaces.checkQuota(req.appRow, namespace, { bytes: size, objects: 1 });
+            if (q) return { problem: q };
+            const newId = model.createObject({
+                app_id: req.appId, namespace, kind, owner_subject: subject, owner_app: req.appId, owner_user_id: userId,
+                visibility, lifecycle_status: 'uploading', mime_type: mime, size_bytes: size, metadata,
+            });
+            namespaces.reserve(model.getObject(newId), size);
+            return { id: newId };
+        })();
+        if (made.problem) return problem(res, made.problem.status, made.problem.code, made.problem.detail, made.problem.extra);
+        const id = made.id;
         const obj = model.getObject(id);
         let session = null;
         if (wantParts) {
             session = multipart.initiate(obj, { partSize: b.part_size });
             if (session.error) {
+                namespaces.settle(id);
                 db.run('DELETE FROM media_objects WHERE id = ?', [id]);         // nothing was stored for it
                 return problem(res, session.status, session.code, session.error);
             }
@@ -346,22 +396,25 @@ function completeUpload(req, res, obj, { expectedHash = null } = {}) {
     if (invariant.wouldViolate(obj)) {
         return problem(res, 422, 'media.invariant.public_object_too_large', `Public playback objects are limited to ${config.objects.publicMaxMb} MB`);
     }
-    if (!quotaCheck(req, res, Number(obj.size_bytes) || 0, obj.id)) return;
+    // Reconciled against the bytes actually stored: the object's real size, everything else as it is now.
+    if (!quotaCheck(req, res, obj.namespace, { bytes: Number(obj.size_bytes) || 0, objects: namespaces.reservation(obj.id) ? 0 : 1, excludeId: obj.id })) return;
     const typeWhy = ctypes.kindProblem(obj.kind, obj.mime_type) || ctypes.contentProblem(obj.kind, obj.mime_type, ctypes.readHead(loc.key));
     if (typeWhy) return problem(res, 415, 'media.object.content_mismatch', typeWhy);
     const { data: body } = announce(req.appId, 'media.object.uploaded', {
         change: () => {
             model.updateObject(obj.id, { lifecycle_status: 'ready' });
+            namespaces.settle(obj.id);          // the ready object counts from now on
             invariant.record(model.getObject(obj.id));
         },
         payload: () => model.objectPublic(model.getObject(obj.id)),
     });
+    namespaces.reconcileChain(req.appRow, obj.namespace);
     return res.json(body);
 }
 
 /** The object named in the URL, writable by this caller, native and still uploading (else answered). */
 function loadUploading(req, res) {
-    const obj = load(req, res);
+    const obj = load(req, res, 'write');
     if (!obj) return null;
     if (!canWrite(req, obj)) { problem(res, 403, 'media.object.forbidden', 'Not your object'); return null; }
     if (obj.legacy_ref) { problem(res, 409, 'media.object.legacy_managed', 'This object is written through the v1 API'); return null; }
@@ -371,7 +424,7 @@ function loadUploading(req, res) {
 
 router.post('/:id/complete', contentAuth, tenantCors, (req, res) => {
     try {
-        const obj = load(req, res);
+        const obj = load(req, res, 'write');
         if (!obj) return;
         if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
         if (obj.lifecycle_status === 'ready' && !obj.legacy_ref) return res.json(model.objectPublic(obj));
@@ -391,19 +444,22 @@ router.post('/:id/upload-url', upload, (req, res) => {
     const ttl = req.body && req.body.ttl != null ? Number(req.body.ttl) : (req.query.ttl != null ? Number(req.query.ttl) : undefined);
     if (ttl !== undefined && !(ttl >= 60 && ttl <= 86400)) return problem(res, 400, 'media.object.invalid', 'ttl must be 60-86400 seconds');
     if (Number(obj.size_bytes) > config.objects.maxUploadMb * MB) return problem(res, 413, 'media.object.too_large', 'This object is uploaded in parts: POST /multipart');
+    // A fresh URL is a fresh attempt: the upload holds its declared size again (after an abort released it).
+    const stored = Number((db.get("SELECT size_bytes FROM media_locations WHERE object_id = ? AND provider = 'local' AND state = 'present'", [obj.id]) || {}).size_bytes) || 0;
+    if (!reserveAgain(req, res, obj, Math.max(Number(obj.size_bytes) || 0, stored))) return;
     res.json(presignedPut(req, obj, ttl));
 });
 
 // ── Multipart uploads ────────────────────────────────────────
 
-const mpRead = multipartAuth('media.object.read');
-const mpWrite = multipartAuth('media.object.upload');
+const mpRead = multipartAuth('read');
+const mpWrite = multipartAuth('write');
 
 /** The session named in the URL, belonging to the object, still open (else answered). */
 function loadSession(req, res, obj, { open = true } = {}) {
     const session = multipart.getSession(String(req.params.uploadId || ''));
     if (!session || session.object_id !== obj.id) { problem(res, 404, 'media.upload.not_found', 'No such upload for this object'); return null; }
-    if (open && session.status === 'active' && multipart.isExpired(session)) multipart.abort(session.id, 'expired');
+    if (open && session.status === 'active' && multipart.isExpired(session)) multipart.abort(session.id, 'expired');   // releases its reservation
     const now = multipart.getSession(session.id);
     if (open && now.status !== 'active') { problem(res, 409, 'media.upload.not_active', `The upload is ${now.status}`); return null; }
     return now;
@@ -423,11 +479,13 @@ router.post('/:id/multipart', upload, (req, res) => {
             if (invariant.wouldViolate({ kind: obj.kind, visibility: obj.visibility, size_bytes: size })) {
                 return problem(res, 422, 'media.invariant.public_object_too_large', `Public playback objects are limited to ${config.objects.publicMaxMb} MB`);
             }
-            if (!quotaCheck(req, res, size, obj.id)) return;
+            if (!reserveAgain(req, res, obj, size)) return;
             model.updateObject(obj.id, { size_bytes: size });
             current = model.getObject(obj.id);
         } else if (b.size_bytes != null && Number(b.size_bytes) !== Number(obj.size_bytes)) {
             return problem(res, 400, 'media.object.size_mismatch', `The object declares ${obj.size_bytes} bytes`);
+        } else if (!reserveAgain(req, res, obj, Number(obj.size_bytes))) {
+            return;       // a session after an abort holds the declared size again
         }
         const session = multipart.initiate(current, { partSize: b.part_size });
         if (session.error) return problem(res, session.status, session.code, session.error);
@@ -439,7 +497,7 @@ router.post('/:id/multipart', upload, (req, res) => {
 });
 
 router.get('/:id/multipart/:uploadId', mpRead, (req, res) => {
-    const obj = load(req, res);
+    const obj = load(req, res, 'read');
     if (!obj) return;
     const session = loadSession(req, res, obj, { open: false });
     if (!session) return;
@@ -485,21 +543,44 @@ router.post('/:id/multipart/:uploadId/complete', mpWrite, tenantCors, async (req
 });
 
 router.delete('/:id/multipart/:uploadId', mpWrite, (req, res) => {
-    const obj = load(req, res);
+    const obj = load(req, res, 'write');
     if (!obj) return;
     if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
     const session = loadSession(req, res, obj, { open: false });
     if (!session) return;
     if (session.status === 'completed') return problem(res, 409, 'media.upload.not_active', 'The upload is completed');
-    multipart.abort(session.id);
+    multipart.abort(session.id);          // parts deleted; the quota it held is released
     res.json(multipart.sessionPublic(multipart.getSession(session.id), { parts: false }));
 });
 
-router.get('/', read, (req, res) => {
+router.get('/', list, (req, res) => {
     try {
         const q = req.query;
         const limit = Math.min(Math.max(parseInt(q.limit || '50', 10) || 50, 1), 200);
         const conds = ['app_id = ?'], params = [req.appId];
+        // ?namespace= narrows the list to one namespace and those below it.
+        if (q.namespace != null && q.namespace !== '') {
+            const named = namespaces.resolveName(req.appRow, q.namespace);
+            if (named.error) return problem(res, 400, 'media.namespace.invalid', named.error);
+            const g = namespaceGrant(req, 'list', named.namespace);
+            if (!g.allowed) return problem(res, 403, g.code, g.reason);
+            conds.push('(namespace = ? OR substr(namespace, 1, ?) = ?)');
+            params.push(named.namespace, named.namespace.length + 1, `${named.namespace}.`);
+        }
+        // A Network token lists only the namespaces it may list here.
+        if (req.grant) {
+            const rows = namespaces.listForTenant(req.appId);
+            const listable = rows.filter(r => namespaceGrant(req, 'list', r.namespace).allowed).map(r => r.namespace);
+            if (!listable.length) {
+                // Nothing listable: refused when the verb itself is (a strict namespace), else an empty page.
+                const g = namespaceGrant(req, 'list', db.rootNamespace(req.appRow));
+                if (!g.allowed && g.code === 'capability.denied') return problem(res, 403, g.code, g.reason);
+                conds.push('0');
+            } else if (listable.length < rows.length) {
+                conds.push(`namespace IN (${listable.map(() => '?').join(', ')})`);
+                params.push(...listable);
+            }
+        }
         if (q.cursor) {
             if (!/^med_[0-9A-HJKMNP-TV-Z]{26}$/.test(String(q.cursor))) return problem(res, 400, 'media.object.invalid', 'Bad cursor');
             conds.push('id < ?'); params.push(String(q.cursor));
@@ -521,19 +602,21 @@ router.get('/', read, (req, res) => {
 });
 
 router.get('/:id', read, (req, res) => {
-    const obj = load(req, res);
+    const obj = load(req, res, 'read');
     if (obj) res.json(model.objectPublic(obj));
 });
 
-router.delete('/:id', upload, (req, res) => {
+router.delete('/:id', remove, (req, res) => {
     try {
-        const obj = load(req, res);
+        const obj = load(req, res, 'delete');
         if (!obj) return;
         if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
         if (obj.legacy_ref) return problem(res, 409, 'media.object.legacy_managed', 'Delete this object through its v1 route (vods, clips, files, pastes)');
         if (model.isHeld(obj.id)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
         if (obj.lifecycle_status === 'deleted') return res.json(model.objectPublic(obj));
-        res.json(model.objectPublic(model.softDelete(obj, { by: req.principal ? req.principal.sub : `app:${req.appId}` })));
+        const gone = model.softDelete(obj, { by: req.principal ? req.principal.sub : `app:${req.appId}` });
+        namespaces.reconcileChain(req.appRow, obj.namespace);
+        res.json(model.objectPublic(gone));
     } catch (err) {
         if (err.code === 'media.object.held' || /retention hold/.test(err.message)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
         console.error('[Objects] delete error:', err.message);
@@ -541,18 +624,22 @@ router.delete('/:id', upload, (req, res) => {
     }
 });
 
-router.post('/:id/restore', upload, (req, res) => {
-    const obj = load(req, res);
+router.post('/:id/restore', remove, (req, res) => {
+    const obj = load(req, res, 'delete');
     if (!obj) return;
     if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
     if (obj.lifecycle_status !== 'deleted' || obj.legacy_ref) return problem(res, 409, 'media.object.not_deleted', 'Only soft-deleted native objects can be restored');
+    // A restored object counts again: it needs the room (in a developer project it never stopped counting).
+    const md = model.parseJson(obj.metadata, {});
+    if (md.pre_delete_status !== 'uploading' && !md.purged_at && !quotaCheck(req, res, obj.namespace, { bytes: Number(obj.size_bytes) || 0, objects: 1, excludeId: obj.id })) return;
     const back = model.restore(obj);
     if (!back) return problem(res, 410, 'media.object.purged', 'The retention period has passed and the bytes are gone');
+    namespaces.reconcileChain(req.appRow, obj.namespace);
     res.json(model.objectPublic(back));
 });
 
 router.get('/:id/download', read, (req, res) => {
-    const obj = load(req, res);
+    const obj = load(req, res, 'read');
     if (!obj) return;
     if (obj.lifecycle_status === 'deleted') return problem(res, 410, 'media.object.deleted', 'Object was deleted');
     if (obj.lifecycle_status !== 'ready') return problem(res, 409, 'media.object.not_ready', `Object is ${obj.lifecycle_status}`);
@@ -571,7 +658,7 @@ router.get('/:id/download', read, (req, res) => {
 // ── Retention holds ──────────────────────────────────────────
 
 router.get('/:id/holds', read, (req, res) => {
-    const obj = load(req, res);
+    const obj = load(req, res, 'read');
     if (!obj) return;
     res.json({
         object_id: obj.id,
@@ -654,7 +741,7 @@ publicRouter.get('/:id', async (req, res) => {
 
 /** PUT /:id/multipart/:uploadId/parts/:n (raw body; mounted ahead of the JSON body parser). */
 async function putPart(req, res) {
-    const obj = load(req, res);
+    const obj = load(req, res, 'write');
     if (!obj) { req.resume(); return; }
     if (!canWrite(req, obj)) { req.resume(); return problem(res, 403, 'media.object.forbidden', 'Not your object'); }
     if (obj.lifecycle_status !== 'uploading') { req.resume(); return problem(res, 409, 'media.object.not_uploading', `Object is ${obj.lifecycle_status}`); }

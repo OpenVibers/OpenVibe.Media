@@ -146,11 +146,10 @@ function checkRoom(obj, needBytes) {
     if (free < needBytes + reserve) {
         throw new JobError('insufficient_disk', `Not enough free disk: need ${Math.ceil((needBytes + reserve) / MB)} MB, ${Math.floor(free / MB)} MB free`, { retryAfterS: 1800 });
     }
+    // Outputs go to the source's namespace: every quota from there up to the tenant must have the room.
     const app = db.getApp(obj.app_id);
-    const quota = Number(app && app.quota_bytes) || 0;
-    if (quota && model.usedBytes(obj.app_id) + needBytes > quota) {
-        throw new JobError('quota_exceeded', 'The tenant storage quota would be exceeded', { permanent: true });
-    }
+    const q = app ? require('../objects/namespaces').checkQuota(app, obj.namespace || db.rootNamespace(app), { bytes: needBytes, objects: 1 }) : null;
+    if (q) throw new JobError('quota_exceeded', `The storage quota would be exceeded (${q.detail})`, { permanent: true });
 }
 
 function workDir(jobId) {
@@ -182,7 +181,7 @@ async function adopt({ src, file, ext, job, relation, metadata, variant, saveChe
             db.run(`INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, owner_app, owner_user_id, visibility, lifecycle_status,
                         mime_type, size_bytes, content_hash, canonical_provider, canonical_key, legacy_ref, metadata)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'private', 'ready', ?, ?, ?, 'local', ?, NULL, ?)`,
-            [id, src.app_id, src.namespace || src.app_id, kind || src.kind, src.owner_subject || null, src.owner_app || src.app_id, src.owner_user_id ?? null,
+            [id, src.app_id, src.namespace || db.rootNamespace(db.getApp(src.app_id) || { app_id: src.app_id }), kind || src.kind, src.owner_subject || null, src.owner_app || src.app_id, src.owner_user_id ?? null,
                 mimeFor(ext, src), size, hash, dest,
                 JSON.stringify({ title: md.title || null, derived_from: src.id, job_id: job.id, filename: `${src.id}${suffix ? `-${suffix}` : metadata.part ? `-part${metadata.part}` : '-remux'}${ext}`, ...metadata })]);
             model.upsertLocation(id, { provider: 'local', key: dest, state: 'present', size_bytes: size, checksum: hash, verified: true });

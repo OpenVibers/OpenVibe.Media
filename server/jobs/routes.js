@@ -9,11 +9,13 @@
  * POST   /:jobId/cancel       cancel (also DELETE /:jobId): proposed/queued at once -> 200;
  *                              running -> 202 { job } with cancel_requested until it stops; finished -> 409
  *
- * Auth as the objects API: the app key or a Network service token granting media.object.read (reads)
- * or media.object.upload (create, approve, cancel) for namespace :app; a developer project's app
- * tokens on its own tenant. With X-OV-User-Id (app key) the caller acts for one of the app's users:
- * it sees and decides only jobs it created or jobs on objects it owns, and creates jobs on its own
- * objects only. Errors are RFC 9457 problems.
+ * Auth as the objects API: the app key, or a Network token holding the verb (server/auth.js VERBS):
+ * list (GET /) and read (GET /:jobId) for the tenant's root namespace; transform (create, approve,
+ * cancel: media.derivative.create, or media.object.upload as before) for the namespace of the job's
+ * object (the root for a job with none); a developer project's app tokens on its own tenant. With
+ * X-OV-User-Id (app key) the caller acts for one of the app's users: it sees and decides only jobs
+ * it created or jobs on objects it owns, and creates jobs on its own objects only. Errors are RFC
+ * 9457 problems.
  */
 'use strict';
 
@@ -21,10 +23,12 @@ const express = require('express');
 const { http } = require('openvibe-contracts');
 const model = require('../objects/model');
 const queue = require('./queue');
-const { tenantAuth, tenantCors } = require('../auth');
+const db = require('../db/database');
+const { tenantAuth, tenantCors, namespaceGrant } = require('../auth');
 
-const write = tenantAuth({ capability: 'media.object.upload' });
-const read = tenantAuth({ capability: 'media.object.read' });
+const transform = tenantAuth({ verb: 'transform', namespaced: true });
+const read = tenantAuth({ verb: 'read' });
+const list = tenantAuth({ verb: 'list' });
 
 function problem(res, status, code, detail, extra) {
     return http.sendProblem(res, status, code, { detail, extra });
@@ -48,6 +52,13 @@ function load(req, res) {
     return job;
 }
 
+/** Transform is granted per namespace: the job's object's, or the tenant's root for a job with none (else answered). */
+function mayTransform(req, res, obj) {
+    const g = namespaceGrant(req, 'transform', obj ? obj.namespace : db.rootNamespace(req.appRow));
+    if (!g.allowed) { problem(res, 403, g.code, g.reason); return false; }
+    return true;
+}
+
 function sendJobError(res, err) {
     if (err instanceof queue.JobError) {
         if (err.retryAfterS) res.set('Retry-After', String(err.retryAfterS));
@@ -60,7 +71,7 @@ function sendJobError(res, err) {
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
-router.get('/', read, (req, res) => {
+router.get('/', list, (req, res) => {
     try {
         const q = req.query;
         if (q.cursor && !/^mjob_[0-9A-Za-z_]{1,40}$/.test(String(q.cursor))) return problem(res, 400, 'media.job.invalid', 'Bad cursor');
@@ -73,7 +84,7 @@ router.get('/', read, (req, res) => {
     } catch (err) { sendJobError(res, err); }
 });
 
-router.post('/', write, (req, res) => {
+router.post('/', transform, (req, res) => {
     try {
         const b = req.body || {};
         const type = String(b.type || '');
@@ -89,6 +100,7 @@ router.post('/', write, (req, res) => {
         } else if (spec.needsObject) {
             return problem(res, 400, 'media.job.invalid', `${type} needs object_id`);
         }
+        if (!mayTransform(req, res, obj)) return;
         if (b.params != null && (typeof b.params !== 'object' || Array.isArray(b.params) || JSON.stringify(b.params).length > 16384)) {
             return problem(res, 400, 'media.job.invalid', 'params must be an object of at most 16 KB');
         }
@@ -110,10 +122,10 @@ router.get('/:jobId', read, (req, res) => {
     if (job) res.json({ job: queue.jobPublic(job) });
 });
 
-router.post('/:jobId/approve', write, (req, res) => {
+router.post('/:jobId/approve', transform, (req, res) => {
     try {
         const job = load(req, res);
-        if (!job) return;
+        if (!job || !mayTransform(req, res, job.object_id ? model.getObject(job.object_id) : null)) return;
         if (job.status !== 'proposed') return problem(res, 409, 'media.job.not_proposed', `The job is ${job.status}; only proposals are approved`);
         const out = queue.approve(job.id, { by: who(req) });
         if (!out) return problem(res, 409, 'media.job.not_proposed', 'The job was decided meanwhile');
@@ -125,13 +137,13 @@ router.post('/:jobId/approve', write, (req, res) => {
 function cancelHandler(req, res) {
     try {
         const job = load(req, res);
-        if (!job) return;
+        if (!job || !mayTransform(req, res, job.object_id ? model.getObject(job.object_id) : null)) return;
         const out = queue.cancel(job.id, { by: who(req) });
         if (out.finished) return problem(res, 409, 'media.job.finished', `The job already ${out.job.status}`);
         res.status(out.pending ? 202 : 200).json({ job: queue.jobPublic(out.job) });
     } catch (err) { sendJobError(res, err); }
 }
-router.post('/:jobId/cancel', write, cancelHandler);
-router.delete('/:jobId', write, cancelHandler);
+router.post('/:jobId/cancel', transform, cancelHandler);
+router.delete('/:jobId', transform, cancelHandler);
 
 module.exports = router;

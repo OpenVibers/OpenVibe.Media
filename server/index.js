@@ -183,6 +183,7 @@ app.use('/api/v1/:app/assets', require('./assets/routes'));
 app.use('/api/v1/:app/admin/storage', require('./admin/routes'));
 app.use('/api/v2/:app/objects', require('./objects/routes'));   // canonical object API (docs/object-model.md)
 app.use('/api/v2/:app/jobs', require('./jobs/routes'));         // media jobs: thumbnails, split/remux, invariant scans
+app.use('/api/v2/:app/namespaces', require('./objects/namespace-routes'));   // a tenant's namespaces: policy, quotas, usage
 app.use('/o', require('./objects/routes').publicRouter);        // object bytes (public, or signed)
 app.use('/', require('./public/routes'));   // /v /c /p /t /f
 app.use(require('./not-found').notFound);   // nothing matched: 404 with Media's CSP (Cloudflare's beacon allowed)
@@ -233,6 +234,14 @@ if (!drill.enabled) {
         try { const n = require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
         // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
         try { const r = require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
+        // Namespaces: uploads whose quota reservation expired are failed and their bytes freed; then every
+        // namespace's usage snapshot is refreshed (v1 files, deletes and purges included).
+        try {
+            const ns = require('./objects/namespaces');
+            const r = ns.expireReservations();
+            if (r.expired || r.dropped) console.log(`[Namespaces] ${r.expired} abandoned upload(s) expired, ${r.dropped} stale reservation(s) dropped`);
+            ns.reconcileAll();
+        } catch (err) { console.warn('[Namespaces] sweep:', err.message); }
     });
     // Project rows that have no media_object yet (first boot after the upgrade: all of them).
     // C-75 catch-up: every write now makes its object in the same transaction (objects/model.js
@@ -245,6 +254,8 @@ if (!drill.enabled) {
             const r = bf.backfill({ onlyMissing: true });
             if (r.totals.created || r.totals.updated || r.errors.length) console.log(`[Objects] Backfill: ${bf.summarize(r)}`);
         } catch (err) { console.warn('[Objects] Backfill failed:', err.message); }
+        // The namespaces' usage snapshot, first taken here (then hourly, and after each write).
+        try { require('./objects/namespaces').reconcileAll(); } catch (err) { console.warn('[Namespaces] reconcile:', err.message); }
     }, 15 * 1000).unref?.();
 
     // Recover from an unclean shutdown: rows stuck in is_recording with no live ffmpeg are finalized

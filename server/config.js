@@ -62,6 +62,10 @@ const config = {
         multipartDefaultPartMb: intEnv('MEDIA_MULTIPART_PART_MB', 64),
         multipartTtlHours: intEnv('MEDIA_MULTIPART_TTL_HOURS', 24),      // an unfinished session's parts are purged after this
         uploadMinFreeMb: intEnv('MEDIA_UPLOAD_MIN_FREE_MB', 10240),      // multipart needs 2x its size free plus this
+        // Namespaces and quotas (server/objects/namespaces.js): an upload holds its quota reservation this long
+        // after its last step (init, a fresh URL, the bytes); then the hourly sweep fails it and frees its bytes.
+        reservationHours: Math.max(1, intEnv('MEDIA_UPLOAD_RESERVATION_HOURS', 72)),
+        maxChildNamespaces: Math.max(0, intEnv('MEDIA_NAMESPACE_MAX_CHILDREN', 100)),   // children per tenant
     },
 
     // Job system (server/jobs/; docs/object-model.md#jobs).

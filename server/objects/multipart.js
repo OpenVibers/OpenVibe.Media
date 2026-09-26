@@ -11,7 +11,8 @@
  * Complete checks that every part is there (and matches the client's per-part sha256 when given),
  * concatenates them into OBJECTS_PATH/<app>/<id> while hashing the whole object, and then the route
  * runs the same checks as a single-part complete. Abort (or expiry after MEDIA_MULTIPART_TTL_HOURS)
- * deletes the parts; the object stays `uploading` so it can be sent again.
+ * deletes the parts and releases the session's quota reservation; the object stays `uploading` so it
+ * can be sent again (a new session or upload URL reserves again).
  */
 'use strict';
 
@@ -83,7 +84,7 @@ function initiate(obj, { partSize: requested } = {}) {
     const free = freeBytes();
     if (free < need) return { status: 507, code: 'media.storage.insufficient', error: `Not enough free space for this upload (${Math.floor(free / MB)} MB free)` };
     const prior = activeFor(obj.id);
-    if (prior) abort(prior.id);
+    if (prior) abort(prior.id, 'aborted', { release: false });   // replaced: the object's reservation carries over
     const id = `mup_${ids.ulid()}`;
     const parts = Math.max(1, Math.ceil(total / chosen.size));
     db.run(`INSERT INTO media_uploads (id, object_id, app_id, part_size, total_size, parts_expected, expires_at)
@@ -227,10 +228,15 @@ function removeParts(uploadId) {
     db.run('DELETE FROM media_upload_parts WHERE upload_id = ?', [uploadId]);
 }
 
-/** Delete a session's parts; the object stays uploading. */
-function abort(uploadId, status = 'aborted') {
+/**
+ * Delete a session's parts; the object stays uploading. Its quota reservation is released down to
+ * what is still stored for it (objects/namespaces.release), unless a new session replaces this one.
+ */
+function abort(uploadId, status = 'aborted', { release = true } = {}) {
+    const session = getSession(uploadId);
     db.run("UPDATE media_uploads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('active', 'completing')", [status, uploadId]);
     removeParts(uploadId);
+    if (release && session) require('./namespaces').release(session.object_id);
 }
 
 /**

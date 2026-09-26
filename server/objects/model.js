@@ -136,13 +136,18 @@ function isHeldRow(row) {
 const OBJECT_COLUMNS = ['app_id', 'namespace', 'kind', 'owner_subject', 'owner_app', 'owner_user_id', 'visibility',
     'lifecycle_status', 'mime_type', 'size_bytes', 'content_hash', 'canonical_provider', 'canonical_key', 'legacy_ref', 'metadata', 'deleted_at'];
 
+/** The root namespace of tenant `appId`: its app id, or app.<project_id>[.sandbox] for a developer project. */
+function tenantRoot(appId) {
+    return db.rootNamespace(db.getApp(appId) || { app_id: appId });
+}
+
 function createObject(o) {
     if (!KINDS.includes(o.kind)) throw new Error(`unknown kind ${o.kind}`);
     const id = ids.newId('media', o.createdMs);
     db.run(`INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, owner_app, owner_user_id, visibility,
                 lifecycle_status, mime_type, size_bytes, content_hash, canonical_provider, canonical_key, legacy_ref, metadata, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
-    [id, o.app_id, o.namespace || o.app_id, o.kind, o.owner_subject || null, o.owner_app || null, o.owner_user_id ?? null,
+    [id, o.app_id, o.namespace || tenantRoot(o.app_id), o.kind, o.owner_subject || null, o.owner_app || null, o.owner_user_id ?? null,
         VISIBILITIES.includes(o.visibility) ? o.visibility : 'private', LIFECYCLES.includes(o.lifecycle_status) ? o.lifecycle_status : 'uploading',
         o.mime_type || null, Number(o.size_bytes) || 0, o.content_hash || null, o.canonical_provider || null, o.canonical_key || null,
         o.legacy_ref || null, JSON.stringify(o.metadata || {}), o.created_at || null]);
@@ -219,7 +224,7 @@ function project(p) {
     const found = getObjectByLegacyRef(p.legacy_ref) || (p.existingId ? getObject(p.existingId) : null);
     const canon = p.locations.find(l => l.provider === p.canonical) || p.locations[0] || null;
     const fields = {
-        app_id: p.app_id, namespace: p.app_id, kind: p.kind,
+        app_id: p.app_id, namespace: tenantRoot(p.app_id), kind: p.kind,
         owner_app: p.owner_app || p.app_id, owner_user_id: p.owner_user_id ?? null,
         visibility: p.visibility, lifecycle_status: p.lifecycle_status,
         mime_type: p.mime_type || null, size_bytes: Number(p.size_bytes) || 0, content_hash: p.content_hash || null,
@@ -633,6 +638,7 @@ function softDelete(obj, { by = null } = {}) {
     db.getDb().transaction(() => {
         db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = CURRENT_TIMESTAMP, metadata = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?`, [JSON.stringify(md), obj.id]);
+        require('./namespaces').settle(obj.id);   // an upload deleted before it completed holds no quota
         events.recordObjectChanges();       // media.object.deleted commits with the delete
     })();
     events.kick();
@@ -673,17 +679,15 @@ function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
     return purged;
 }
 
-/** Bytes counted against apps.quota_bytes: v1 files + live native objects (reservations included). */
+/**
+ * Bytes counted against the tenant's quota: v1 files, ready native objects (in a developer project
+ * also soft-deleted ones until purged) and the reservations of uploads in progress
+ * (objects/namespaces.usage of the tenant's root, which is the whole tenant).
+ */
 function usedBytes(appId, excludeId = null) {
-    // Developer-project tenants (third-party uploaders) also pay for soft-deleted bytes until they are
-    // purged: those stay on disk for the retention period, and upload -> delete -> upload would
-    // otherwise grow the disk without bound.
-    const app = db.getApp(appId);
-    const retained = app && app.project_id ? " OR (lifecycle_status = 'deleted' AND json_extract(metadata, '$.purged_at') IS NULL)" : '';
-    const native = db.get(`SELECT COALESCE(SUM(size_bytes), 0) AS b FROM media_objects
-                           WHERE app_id = ? AND legacy_ref IS NULL AND (lifecycle_status IN ('uploading', 'ready')${retained}) AND id != ?`,
-    [appId, excludeId || '']).b;
-    return db.appFilesBytes(appId) + native;
+    const app = db.getApp(appId) || { app_id: appId };
+    const u = require('./namespaces').usage(app, db.rootNamespace(app), { excludeId });
+    return u.used_bytes + u.reserved_bytes;
 }
 
 // ── Public shape ─────────────────────────────────────────────

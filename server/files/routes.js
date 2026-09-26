@@ -10,11 +10,14 @@
  *
  * Files live at FILES_PATH/<app>/<key> with key = <sha256-prefix>-<name>.
  * Public serving (Content-Type + Range) is at GET /f/:key.
- * Per-app quota: apps.quota_bytes (0 = unlimited) checked against the tenant's
- * stored bytes (v1 files + native v2 objects, objects/model.usedBytes).
+ * Files live in the tenant's root namespace. Its quotas (bytes: apps.quota_bytes unless the root
+ * sets its own, 0 = unlimited; objects: the root's quota_objects) count v1 files, native v2 objects
+ * and uploads in progress (objects/namespaces.js).
  *
- * Network principal tokens: upload + delete need media.object.upload, list + meta
- * need media.object.read, for namespace = :app. Developer-project tenants
+ * Network principal tokens, for the tenant's root namespace (server/auth.js VERBS): upload needs
+ * write (media.object.upload), delete needs delete (media.object.delete, or media.object.upload),
+ * list needs list (media.object.list, or media.object.read), meta needs read (media.object.read).
+ * Developer-project tenants
  * (:app = prj_<ULID>, app tokens only, ADR-014): sandbox files are never served
  * publicly — their `url` is a short-lived signed /f/:key URL.
  */
@@ -27,6 +30,7 @@ const fs = require('fs');
 const multer = require('multer');
 const db = require('../db/database');
 const config = require('../config');
+const namespaces = require('../objects/namespaces');
 const { tenantAuth, tenantCors } = require('../auth');
 
 const router = express.Router({ mergeParams: true });
@@ -81,7 +85,7 @@ function sha256File(filePath) {
 }
 
 // ── Upload ───────────────────────────────────────────────────
-router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload' }), upload.single('file'), async (req, res) => {
+router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), upload.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded (multipart field: file)' });
 
@@ -104,20 +108,14 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
             return res.status(200).json({ ...filePublic(existing), deduplicated: true });
         }
 
-        // Per-app quota check against quota_bytes (0 = unlimited): files + native objects. Checked
-        // after the last await, so nothing else is stored between this check and the row below
+        // The root namespace's quotas (bytes and objects: files + native objects + uploads in progress).
+        // Checked after the last await, so nothing else is stored between this check and the row below
         // (concurrent uploads each saw the same usage when it ran before hashing).
-        const quota = Number(req.appRow.quota_bytes) || 0;
-        if (quota > 0) {
-            const used = require('../objects/model').usedBytes(req.appId);
-            if (used + req.file.size > quota) {
-                try { fs.unlinkSync(req.file.path); } catch { /* */ }
-                return res.status(413).json({
-                    error: 'App file quota exceeded',
-                    quota_bytes: quota,
-                    used_bytes: used,
-                });
-            }
+        const root = db.rootNamespace(req.appRow);
+        const q = namespaces.checkQuota(req.appRow, root, { bytes: req.file.size, objects: 1 });
+        if (q) {
+            try { fs.unlinkSync(req.file.path); } catch { /* */ }
+            return res.status(413).json({ error: q.code === 'media.quota.objects_exceeded' ? 'App object quota exceeded' : 'App file quota exceeded', code: q.code, ...q.extra });
         }
 
         const dest = path.join(appDir(req.appId), key);
@@ -140,6 +138,7 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
         });
 
         const row = db.getFileByKey(key, req.appId);
+        namespaces.reconcileChain(req.appRow, root);
         console.log(`[Files] Stored ${key} for app ${req.appId} (${(req.file.size / 1024).toFixed(1)} KB)`);
         res.status(201).json(filePublic(row));
     } catch (err) {
@@ -150,7 +149,7 @@ router.post('/', tenantAuth({ allowUser: true, capability: 'media.object.upload'
 });
 
 // ── List ─────────────────────────────────────────────────────
-router.get('/', tenantAuth({ allowUser: true, capability: 'media.object.read' }), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -167,7 +166,7 @@ router.get('/', tenantAuth({ allowUser: true, capability: 'media.object.read' })
 });
 
 // ── Meta ─────────────────────────────────────────────────────
-router.get('/:key', tenantAuth({ allowUser: true, capability: 'media.object.read' }), (req, res) => {
+router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), (req, res) => {
     try {
         const row = db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });
@@ -178,7 +177,7 @@ router.get('/:key', tenantAuth({ allowUser: true, capability: 'media.object.read
 });
 
 // ── Delete ───────────────────────────────────────────────────
-router.delete('/:key', tenantAuth({ allowUser: true, capability: 'media.object.upload' }), (req, res) => {
+router.delete('/:key', tenantAuth({ allowUser: true, verb: 'delete' }), (req, res) => {
     try {
         const row = db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });
@@ -190,6 +189,7 @@ router.delete('/:key', tenantAuth({ allowUser: true, capability: 'media.object.u
         const filePath = filePathForKey(row);
         try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* */ }
         db.deleteFileRow(row.key);
+        namespaces.reconcileChain(req.appRow, db.rootNamespace(req.appRow));
         res.json({ message: 'File deleted' });
     } catch (err) {
         res.status(500).json({ error: 'Failed to delete file' });

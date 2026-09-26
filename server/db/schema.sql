@@ -215,7 +215,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_identity ON assets(app_id, kind, na
 CREATE TABLE IF NOT EXISTS media_objects (
     id TEXT PRIMARY KEY,                  -- med_<ULID> (time-sortable)
     app_id TEXT NOT NULL,                 -- tenant
-    namespace TEXT NOT NULL,              -- capability namespace (= app_id today; projects later)
+    namespace TEXT NOT NULL,              -- a media_namespaces row: the tenant's root (app id, or app.<project_id>[.sandbox]) or a child of it
     kind TEXT NOT NULL CHECK(kind IN ('vod', 'clip', 'file', 'thumbnail', 'screenshot', 'avatar', 'asset')),
     owner_subject TEXT,                   -- canonical subject (usr_<ULID>) when known
     owner_app TEXT,                       -- legacy owner: the app whose user-id space owner_user_id is in
@@ -237,6 +237,47 @@ CREATE INDEX IF NOT EXISTS idx_media_objects_app ON media_objects(app_id, id);
 CREATE INDEX IF NOT EXISTS idx_media_objects_kind ON media_objects(app_id, kind);
 CREATE INDEX IF NOT EXISTS idx_media_objects_owner ON media_objects(owner_subject);
 CREATE INDEX IF NOT EXISTS idx_media_objects_lifecycle ON media_objects(lifecycle_status);
+CREATE INDEX IF NOT EXISTS idx_media_objects_namespace ON media_objects(app_id, namespace, lifecycle_status);
+
+-- Namespaces (roadmap WS-G task 2; server/objects/namespaces.js, docs/object-model.md#namespaces-grants-and-quotas).
+-- Every namespace an object names is a row. A tenant (apps row) has one root: its app id, or
+-- app.<project_id> (app.<project_id>.sandbox) for a developer project, and children below it
+-- (<root>.<segment>…) made by the first upload that names one. Quotas: NULL inherits (a root takes its
+-- tenant's apps.quota_bytes; a child has no limit of its own), 0 is no limit. The used_* and reserved_*
+-- columns are a snapshot of the subtree (the namespace and its children) taken by reconcile(); quota
+-- checks count from the object and reservation rows themselves.
+CREATE TABLE IF NOT EXISTS media_namespaces (
+    namespace TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL,                 -- the tenant it belongs to (and whose quota it counts against)
+    parent TEXT,                          -- NULL for a root
+    owner TEXT NOT NULL,                  -- service:<app_id> (a first-party tenant) | project:<prj_…> (a developer project)
+    policy TEXT NOT NULL DEFAULT '{}',    -- JSON: kinds, visibilities, max_object_bytes, strict_verbs (children inherit)
+    quota_bytes INTEGER,
+    quota_objects INTEGER,
+    used_bytes INTEGER NOT NULL DEFAULT 0,
+    used_objects INTEGER NOT NULL DEFAULT 0,
+    reserved_bytes INTEGER NOT NULL DEFAULT 0,
+    reserved_objects INTEGER NOT NULL DEFAULT 0,
+    reconciled_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_media_namespaces_app ON media_namespaces(app_id, namespace);
+
+-- Quota held by an upload in progress (a native object still `uploading`): its declared size from
+-- init, the bytes received once they are stored. Settled at complete (the object's own size counts
+-- from then on), released at abort (down to the bytes still stored, if any) and swept at expiry.
+CREATE TABLE IF NOT EXISTS media_quota_reservations (
+    object_id TEXT PRIMARY KEY,
+    app_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    expires_at DATETIME NOT NULL,         -- the expiry sweep fails the upload after this (unless a multipart session is open)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_media_quota_reservations_ns ON media_quota_reservations(app_id, namespace);
+CREATE INDEX IF NOT EXISTS idx_media_quota_reservations_expiry ON media_quota_reservations(expires_at);
 
 -- Where the bytes are. One row per provider copy; the canonical one is named on the object.
 CREATE TABLE IF NOT EXISTS media_locations (

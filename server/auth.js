@@ -12,6 +12,9 @@
  *
  * App seeding: MEDIA_APPS_SEED (JSON array) and/or MEDIA_APP_KEYS ("id:key,…")
  * are upserted on boot; keys are stored as sha256 hashes.
+ *
+ * Network principal tokens (service and developer app tokens) are checked per namespace for one of
+ * five verbs: read, list, write, delete, transform (VERBS below; objects/namespaces.js has the rows).
  */
 'use strict';
 
@@ -116,23 +119,96 @@ function problem(res, status, code, detail) {
     return http.sendProblem(res, status, code, { detail });
 }
 
+// ── Namespace grants: five verbs (roadmap WS-G task 2; docs/object-model.md#namespaces-grants-and-quotas) ──
+
+/**
+ * Each verb is one capability, checked for one namespace against the token's `ns`. The first id is
+ * the verb's own; the broader ids after it grant it too, so the tokens Network issued before the
+ * verbs were split keep working (upload also deletes and transforms, read also lists). A namespace
+ * whose policy sets strict_verbs accepts only the verb's own id.
+ */
+const VERBS = Object.freeze({
+    read: ['media.object.read'],
+    list: ['media.object.list', 'media.object.read'],
+    write: ['media.object.upload'],
+    delete: ['media.object.delete', 'media.object.upload'],
+    transform: ['media.derivative.create', 'media.object.upload'],
+});
+
+/**
+ * The namespaces a token was granted. A developer app token's own project id (the `ns` Network
+ * issued before namespaces were rows) means the whole project, app.<project_id>.* (both its tenants).
+ */
+function grantedNamespaces(claims) {
+    const ns = claims && Array.isArray(claims.ns) ? claims.ns.map(String) : [];
+    if (!claims || !isAppPrincipal(claims) || !claims.project_id) return ns;
+    return [...new Set(ns.map(n => (n === claims.project_id ? `app.${claims.project_id}.*` : n)))];
+}
+
+/** Does the grant list cover `root` or anything below it (a token for one child reaches its tenant)? */
+function touchesTenant(nsList, root) {
+    if (capabilities.namespaceAllowed(nsList, root)) return true;
+    return nsList.some(n => (n.endsWith('.*') ? n.slice(0, -2) : n).startsWith(`${root}.`));
+}
+
+/**
+ * May a token with `claims` do `verb` in `namespace`? { allowed, code, reason }; namespace undefined
+ * checks the capability only. The ids are Media's own, so this does not need the installed contracts
+ * catalog to know the newer ones (media.object.list, media.object.delete).
+ */
+function verbAllowed(claims, verb, namespace, { strict = false } = {}) {
+    const ids = VERBS[verb];
+    if (!ids) return { allowed: false, code: 'capability.unknown', reason: `no verb ${verb}` };
+    const held = (strict ? ids.slice(0, 1) : ids).some(id => capabilities.grants(claims && claims.cap, id));
+    if (!held) return { allowed: false, code: 'capability.denied', reason: `${ids[0]} not granted${strict ? ` (${namespace} accepts only it)` : ''}` };
+    if (namespace !== undefined && !capabilities.namespaceAllowed(grantedNamespaces(claims), namespace)) {
+        return { allowed: false, code: 'capability.namespace_denied', reason: `namespace ${namespace} not granted` };
+    }
+    return { allowed: true, code: null, reason: null };
+}
+
+/**
+ * The tenant-level decision in tenantAuth. A `verb` route that is not `namespaced` works in the
+ * tenant's root and is decided here in full. A `namespaced` route (objects v2, the job actions, the
+ * namespace reads) checks each namespace it touches with namespaceGrant(); here the token must hold
+ * the verb and some namespace of this tenant. A `capability` route checks it for the root, as before.
+ */
+function tenantGrant(claims, { capability, verb, namespaced }, appId, root) {
+    if (!verb) return capabilities.check({ ...claims, ns: grantedNamespaces(claims) }, capability, { namespace: root });
+    if (!namespaced) return verbAllowed(claims, verb, root, { strict: require('./objects/namespaces').isStrict(appId, root) });
+    const c = verbAllowed(claims, verb, undefined);
+    if (!c.allowed) return c;
+    return touchesTenant(grantedNamespaces(claims), root) ? c : { allowed: false, code: 'capability.namespace_denied', reason: `namespace ${root} not granted` };
+}
+
+/**
+ * May this request do `verb` in `namespace` of its tenant? The app key (and an upload or session
+ * token, scoped to its object already) may do anything; a Network token as its grant says.
+ */
+function namespaceGrant(req, verb, namespace) {
+    if (!req.grant) return { allowed: true, code: null, reason: null };
+    return verbAllowed(req.grant, verb, namespace, { strict: require('./objects/namespaces').isStrict(req.appId, namespace) });
+}
+
 // ── Developer-project tenants (roadmap Wave 20, ADR-014) ─────
 
 const PROJECT_ID_RE = /^prj_[0-9A-HJKMNP-TV-Z]{26}$/;
 const isAppPrincipal = (claims) => !!claims && (claims.actor_type === 'app' || /^app:/.test(String(claims.sub || '')));
 
 /**
- * An app token on /api/v1/<project_id>/files or /api/v2/<project_id>/objects. The path names the
- * project; the token's env picks the tenant row (production prj_<ULID>, sandbox prj_<ULID>-sandbox),
- * which is created on first use with the default quota. Nothing is created unless the token's
- * project_id is the path's project and the token holds this route's capability for it.
+ * An app token on /api/v1/<project_id>/files or /api/v2/<project_id>/(objects|jobs|namespaces). The
+ * path names the project; the token's env picks the tenant row (production prj_<ULID>, sandbox
+ * prj_<ULID>-sandbox), which is created on first use with the default quota. Its namespaces are
+ * app.<project_id> and app.<project_id>.sandbox with their children. Nothing is created unless the
+ * token's project_id is the path's project and the token holds this route's verb there.
  */
-function projectTenant(req, res, next, projectId, claims, capability) {
+function projectTenant(req, res, next, projectId, claims, grant) {
     if (claims.project_id !== projectId) {
         return problem(res, 403, 'capability.namespace_denied', `this app token belongs to ${claims.project_id || 'no project'}, not ${projectId}`);
     }
     const env = claims.env === 'sandbox' ? 'sandbox' : 'production';
-    const c = capabilities.check(claims, capability, { namespace: projectId });
+    const tenantId = db.projectTenantId(projectId, env);
+    const c = tenantGrant(claims, grant, tenantId, db.rootNamespace({ app_id: tenantId, project_id: projectId, env }));
     if (!c.allowed) return problem(res, 403, c.code, c.reason);
     let tenant;
     try {
@@ -147,6 +223,7 @@ function projectTenant(req, res, next, projectId, claims, capability) {
     req.authType = 'app';
     req.tenantEnv = env;
     req.principal = { sub: claims.sub, cap: claims.cap, jti: claims.jti, project_id: projectId, env };
+    req.grant = claims;
     return next();
 }
 
@@ -169,6 +246,7 @@ function ensureTokenOnlyApps() {
         ['blog', 'OpenVibe.Blog', 10],         // Wave 16 post attachments
     ]) {
         if (!db.getApp(appId)) db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, quotaGb * 1024 ** 3]);
+        db.ensureRootNamespace(db.getApp(appId));
     }
 }
 
@@ -217,16 +295,24 @@ function actingUserId(req) {
  * @param {object} opts
  * @param {boolean} [opts.allowUser=false]  also accept a Network user JWT
  *        (browser endpoints); Origin, when present, must be allow-listed.
+ * @param {string} [opts.verb]  read | list | write | delete | transform: the route accepts Network
+ *        tokens that hold the verb (VERBS) for the tenant's root namespace
+ * @param {boolean} [opts.namespaced=false]  with `verb`: the route checks each namespace it touches
+ *        (namespaceGrant); a token holding the verb for any namespace of the tenant gets through
+ * @param {string} [opts.capability]  instead of a verb: one capability, for the root namespace
  */
-function tenantAuth({ allowUser = false, capability = null } = {}) {
+function tenantAuth({ allowUser = false, capability = null, verb = null, namespaced = false } = {}) {
+    if (verb && !VERBS[verb]) throw new Error(`tenantAuth: unknown verb ${verb}`);
+    const named = verb ? VERBS[verb][0] : capability;
+    const grant = { capability, verb, namespaced };
     return (req, res, next) => {
         const appId = String(req.params.app || '').trim();
         const token = bearerToken(req);
 
         // 0) Principal tokens first, so a sandbox token is refused as such (never a 404 that hints
         //    at which tenants exist). Only developer-project tenant routes (a route that names its
-        //    capability, under /<project_id>/) opt in to sandbox tokens.
-        const appRoute = !!capability && PROJECT_ID_RE.test(appId);
+        //    verb or capability, under /<project_id>/) opt in to sandbox tokens.
+        const appRoute = !!named && PROJECT_ID_RE.test(appId);
         let svc = null;
         if (token && token.split('.').length === 3) {
             const r = verifyServiceTokenResult(token, { acceptSandbox: appRoute });
@@ -238,10 +324,10 @@ function tenantAuth({ allowUser = false, capability = null } = {}) {
         if (svc && isAppPrincipal(svc)) {
             // Developer apps reach only their own project's tenant, and only on routes that name a capability.
             if (!appRoute) {
-                return problem(res, 403, capability ? 'capability.namespace_denied' : 'capability.denied',
-                    capability ? 'app tokens reach only /<project_id>/ tenants' : 'app tokens are not accepted on this route');
+                return problem(res, 403, named ? 'capability.namespace_denied' : 'capability.denied',
+                    named ? 'app tokens reach only /<project_id>/ tenants' : 'app tokens are not accepted on this route');
             }
-            return projectTenant(req, res, next, appId, svc, capability);
+            return projectTenant(req, res, next, appId, svc, grant);
         }
         if (svc && svc.env === 'sandbox') return problem(res, 401, 'token.sandbox_refused', 'only developer-app sandbox tokens are accepted, on their own project tenant');
 
@@ -270,14 +356,16 @@ function tenantAuth({ allowUser = false, capability = null } = {}) {
         }
 
         // 1b) A service-principal token from OpenVibe.Network (roadmap Wave 1, ADR-003). Accepted only on
-        //     routes that name the capability they perform, and only for the :app namespaces the token was
-        //     granted. It carries the app's authority for that one action — no acting user.
+        //     routes that name the verb (or capability) they perform, and only for the namespaces of this
+        //     tenant the token was granted (the root is the :app id). It carries the app's authority for
+        //     that one action — no acting user.
         if (svc) {
-            if (!capability) return problem(res, 403, 'capability.denied', 'service tokens are not accepted on this route');
-            const c = capabilities.check(svc, capability, { namespace: appId });
+            if (!named) return problem(res, 403, 'capability.denied', 'service tokens are not accepted on this route');
+            const c = tenantGrant(svc, grant, appId, db.rootNamespace(app));
             if (!c.allowed) return problem(res, 403, c.code, c.reason);
             req.authType = 'app';
             req.principal = { sub: svc.sub, cap: svc.cap, jti: svc.jti };
+            req.grant = svc;
             return next();
         }
 
@@ -398,6 +486,10 @@ function seedApps() {
 module.exports = {
     tenantAuth,
     tenantPath,
+    VERBS,
+    verbAllowed,
+    namespaceGrant,
+    grantedNamespaces,
     ensureTokenOnlyApps,
     verifyServiceToken,
     verifyServiceTokenResult,

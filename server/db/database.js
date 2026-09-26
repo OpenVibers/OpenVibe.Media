@@ -29,6 +29,7 @@ function getDb() {
     database.exec(schema);
     migrateColumns();
     migrateJobsTable(schema);
+    migrateNamespaces();
     ensureObjectTriggers();
     normalizeThumbnailUrls();
     seedSettings();
@@ -265,7 +266,9 @@ function upsertApp({ app_id, name, api_key, webhook_url, webhook_secret, allowed
              allowed_origins = excluded.allowed_origins,
              quota_bytes = excluded.quota_bytes`,
         [app_id, name || app_id, hashApiKey(api_key), webhook_url || null, webhook_secret || null, origins, quota_bytes || 0]);
-    return getApp(app_id);
+    const row = getApp(app_id);
+    ensureRootNamespace(row);
+    return row;
 }
 
 /**
@@ -289,6 +292,7 @@ function ensureProjectTenant(projectId, env, quotaBytes) {
         err.code = 'media.tenant.conflict';
         throw err;
     }
+    ensureRootNamespace(row);
     return row;
 }
 
@@ -301,6 +305,78 @@ function isSandboxTenant(appId) {
 
 function appAllowedOrigins(app) {
     try { return JSON.parse(app.allowed_origins || '[]'); } catch { return []; }
+}
+
+// ── Namespaces (roadmap WS-G task 2; objects/namespaces.js) ──
+
+/**
+ * A tenant's root namespace: its app id for a first-party tenant; app.<project_id> for a developer
+ * project's production tenant and app.<project_id>.sandbox for its sandbox tenant (so a grant of
+ * app.<project_id>.* covers both, and the token's env still picks the tenant).
+ */
+function rootNamespace(app) {
+    if (!app || !app.app_id) return null;
+    if (app.project_id) return app.env === 'sandbox' ? `app.${app.project_id}.sandbox` : `app.${app.project_id}`;
+    return app.app_id;
+}
+
+/** Who owns a tenant's namespaces: service:<app_id> (a first-party tenant) or project:<prj_…>. */
+function namespaceOwner(app) {
+    return app.project_id ? `project:${app.project_id}` : `service:${app.app_id}`;
+}
+
+/** The tenant's root namespace row, created when missing. Returns its name. */
+function ensureRootNamespace(app) {
+    const ns = rootNamespace(app);
+    if (!ns) return null;
+    run('INSERT OR IGNORE INTO media_namespaces (namespace, app_id, parent, owner) VALUES (?, ?, NULL, ?)', [ns, app.app_id, namespaceOwner(app)]);
+    return ns;
+}
+
+/**
+ * Namespaces as rows (WS-G task 2). Idempotent, on every open:
+ *   1. a developer project's objects move from the tenant id (prj_<ULID>, prj_<ULID>-sandbox), which
+ *      was their namespace before namespaces were rows, to app.<project_id>[.sandbox];
+ *   2. every tenant has its root row, and every namespace an object names has a row (a child with the
+ *      chain up to its root);
+ *   3. once (setting namespaces.reservations_seeded): every native upload still in progress holds a
+ *      quota reservation of its declared size, expiring MEDIA_UPLOAD_RESERVATION_HOURS after that
+ *      first open, so an upload that began before reservations existed is not cut short.
+ */
+function migrateNamespaces() {
+    const insert = database.prepare('INSERT OR IGNORE INTO media_namespaces (namespace, app_id, parent, owner) VALUES (?, ?, ?, ?)');
+    database.transaction(() => {
+        const apps = new Map(database.prepare('SELECT * FROM apps').all().map(a => [a.app_id, a]));
+        const move = database.prepare('UPDATE media_objects SET namespace = ? WHERE app_id = ? AND namespace = ?');
+        let moved = 0;
+        for (const app of apps.values()) {
+            if (app.project_id) moved += move.run(rootNamespace(app), app.app_id, app.app_id).changes;
+            insert.run(rootNamespace(app), app.app_id, null, namespaceOwner(app));
+        }
+        if (moved) console.warn(`[DB] Moved ${moved} developer-project object(s) to their app.<project_id> namespace`);
+        const missing = database.prepare(`SELECT DISTINCT o.app_id, o.namespace FROM media_objects o
+            LEFT JOIN media_namespaces n ON n.namespace = o.namespace WHERE n.namespace IS NULL`).all();
+        for (const m of missing) {
+            const app = apps.get(m.app_id) || { app_id: m.app_id };
+            const root = rootNamespace(app);
+            insert.run(root, app.app_id, null, namespaceOwner(app));
+            if (m.namespace === root) continue;
+            if (!m.namespace.startsWith(`${root}.`)) { insert.run(m.namespace, app.app_id, null, namespaceOwner(app)); continue; }
+            let parent = root;
+            for (const seg of m.namespace.slice(root.length + 1).split('.')) {
+                insert.run(`${parent}.${seg}`, app.app_id, parent, namespaceOwner(app));
+                parent = `${parent}.${seg}`;
+            }
+        }
+        const seeded = database.prepare("SELECT value FROM media_settings WHERE key = 'namespaces.reservations_seeded'").get();
+        if (!seeded) {
+            const n = database.prepare(`INSERT OR IGNORE INTO media_quota_reservations (object_id, app_id, namespace, bytes, expires_at)
+                SELECT id, app_id, namespace, size_bytes, datetime('now', ?) FROM media_objects WHERE lifecycle_status = 'uploading' AND legacy_ref IS NULL`)
+                .run(`+${Math.max(1, config.objects.reservationHours)} hours`).changes;
+            database.prepare("INSERT OR REPLACE INTO media_settings (key, value, type) VALUES ('namespaces.reservations_seeded', ?, 'string')").run(new Date().toISOString());
+            if (n) console.warn(`[DB] ${n} upload(s) in progress now hold a quota reservation`);
+        }
+    })();
 }
 
 // ── VOD helpers ──────────────────────────────────────────────
@@ -820,6 +896,8 @@ module.exports = {
     getSetting, setSetting,
     // apps
     hashApiKey, getApp, listApps, upsertApp, appAllowedOrigins, projectTenantId, ensureProjectTenant, isSandboxTenant,
+    // namespaces
+    rootNamespace, namespaceOwner, ensureRootNamespace,
     // vods
     createVod, getVodById, getVodByFileBasename, listVods, countVods, setVodVisibility, vodStatus,
     latestVodThumbsByManagedStreams, getAppStats, getAppStatSeries,
