@@ -126,6 +126,8 @@ app.options(['/api/v1/:app/*', '/api/v2/:app/*'], (req, res) => {
 // takes open tabs' update reports into /metrics (release_client_updates_total). A restore drill
 // answers that POST with the readOnly 403 above, like every other write.
 release.mount(app, { registry: instrumented.registry });
+// GET /limits.json: the developer limits enforced here, from config (WS-N task 7; Codes renders them).
+require('./limits').mountLimits(app, config);
 
 app.get('/healthz', (req, res) => {
     res.json({
