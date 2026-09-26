@@ -105,8 +105,19 @@ function headTags(seo) {
 }
 
 /** Page palette on the shared theme tokens (fallback: the default Vibe theme). */
+// The default theme's tokens (openvibe-shared DEFAULT_VARS), so a page paints with them when openvibe.network,
+// where the theme loader lives, cannot be reached (ADR-024). The loader's per-person values, set on <html>,
+// override them.
+const DEFAULT_THEME_CSS = (() => {
+    try {
+        const vars = require('openvibe-shared/builtin-themes').DEFAULT_VARS || {};
+        return Object.entries(vars).filter(([k, v]) => /^--[a-z0-9-]+$/.test(k) && /^[#a-z0-9%.,()\s/+-]+$/i.test(String(v))).map(([k, v]) => `${k}:${v}`).join(';');
+    } catch { return ''; }
+})();
+
 function baseCss() {
     return `
+  ${DEFAULT_THEME_CSS ? `:root { ${DEFAULT_THEME_CSS} }` : ''}
   :root { --bg: var(--bg-primary, #0a0f1c); --panel: var(--bg-card, #131c2e); --line: var(--border, #1f2d47);
           --text: var(--text-primary, #e6edf7); --muted: var(--text-secondary, #96a7c2);
           --link: var(--accent-light, #60a5fa); --acc: var(--accent, #3b82f6); --on-acc: var(--on-accent, #fff); }
