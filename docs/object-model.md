@@ -756,3 +756,12 @@ Not run against production yet: it needs the owner's go-ahead.
   operation moved onto the job system).
 - The segment-native timeline.
 - App assets (emotes and sounds, the `assets` table) are not projected yet. The `asset` kind exists for v2 uploads.
+
+## Storage-tier policy as configuration
+
+The tiering thresholds (`DEFAULTS` in `server/vod/vod-storage.js`) are the namespace `media.storage_tier` of `openvibe-shared/config` (`server/vod/tier-config.js`, WS-C task 7).
+- **Revisions:** every change is a revision, recording who made it and why. `PUT /api/v1/:app/admin/storage/tiers/settings` merges its keys into one. The whole policy is validated first: types, percentages 1–100, interval floors, and the order the thresholds need (`localLowWaterPct` < `hotDiskPressurePct` ≤ `criticalDiskPct`, `minFreeGb` ≤ `targetFreeGb`). A refused change changes nothing and answers 422 `config.invalid` with the rules broken.
+- **Admin routes:** `…/admin/storage/config` lists the namespace, `…/config/media.storage_tier/history` shows the history, and `…/config/media.storage_tier/rollback` rolls back as a new revision.
+- **Revision 1** is what `media_settings` held.
+- **Mirror:** every activation writes the active revision's explicit keys through to `media_settings` (`storage_tier.*`) and removes the rest, so a release that reads those rows sees the same policy. The rows go in the ADR-028 contract step.
+- **Sweep:** a running sweep restarts with the new policy.

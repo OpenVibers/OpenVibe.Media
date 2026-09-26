@@ -116,11 +116,11 @@ let sweepRunning = false;
 const clients = {};          // providerName → S3Client
 const providerHealthy = {};  // providerName → bool
 
+// The policy is revisioned configuration (server/vod/tier-config.js, openvibe-shared/config): read from
+// memory, changed only through a validated revision (setSettings, the admin config routes).
+const tierConfig = require('./tier-config');
 function getSetting(key) {
-    try {
-        const row = db.get('SELECT value FROM media_settings WHERE key = ?', [`storage_tier.${key}`]);
-        if (row) return JSON.parse(row.value);
-    } catch { /* use default */ }
+    try { const v = tierConfig.get(DEFAULTS).get(key); if (v !== undefined) return v; } catch (err) { console.warn('[Tiers] config unavailable:', err.message); }
     return DEFAULTS[key];
 }
 
@@ -130,17 +130,14 @@ function getSettings() {
     return s;
 }
 
-function setSetting(key, value) {
-    if (!(key in DEFAULTS)) return;
-    const dbKey = `storage_tier.${key}`;
-    const existing = db.get('SELECT key FROM media_settings WHERE key = ?', [dbKey]);
-    if (existing) db.run('UPDATE media_settings SET value = ? WHERE key = ?', [JSON.stringify(value), dbKey]);
-    else db.run('INSERT INTO media_settings (key, value) VALUES (?, ?)', [dbKey, JSON.stringify(value)]);
+/** Change some settings: one validated revision merged over the active one. → the new snapshot (throws ConfigError 422/409) */
+function setSettings(updates, { actor = null, reason = null } = {}) {
+    return tierConfig.get(DEFAULTS).apply(updates, { merge: true, actor, reason });
 }
 
-/** Is this storage_tier.* setting overridden in media_settings? ('setting') or the built-in default ('default'). */
+/** Does the active revision set this key explicitly ('setting'), or is it the built-in default ('default')? */
 function settingSource(key) {
-    try { return db.get('SELECT 1 AS x FROM media_settings WHERE key = ?', [`storage_tier.${key}`]) ? 'setting' : 'default'; } catch { return 'default'; }
+    try { tierConfig.get(DEFAULTS); return tierConfig.explicitKeys().has(key) ? 'setting' : 'default'; } catch { return 'default'; }
 }
 
 // r2Enabled, r2MinViews, r2RecentAccessDays, r2MaxIdleDays, r2MaxPerSweep
@@ -1195,6 +1192,9 @@ function scheduleNext(delayMs) {
     if (sweepTimer.unref) sweepTimer.unref();
 }
 
+// A new policy revision restarts a running sweep with it (as PUT /tiers/settings always did).
+tierConfig.setOnApplied(() => { if (sweepTimer) { stop(); start(); } });
+
 function start() {
     stop();
     const settings = getSettings();
@@ -1437,7 +1437,8 @@ module.exports = {
     getBucketUsage,
     estimateCloudCosts,
     getSettings,
-    setSetting,
+    setSettings,
+    tierConfig,
     diskUsage,
     dirStats,
 };

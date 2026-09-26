@@ -78,9 +78,8 @@ const s3 = http.createServer((req, res) => {
     assert.deepStrictEqual([storage.DEFAULTS.r2Enabled, storage.DEFAULTS.r2MinViews, storage.DEFAULTS.r2RecentAccessDays, storage.DEFAULTS.r2MaxIdleDays, storage.DEFAULTS.r2MaxPerSweep],
         [true, 20, 3, 14, 5]);
     // Keep the sweep's disk-pressure drain out of this test (whatever this machine's disk looks like).
-    storage.setSetting('hotDiskPressurePct', 101);
-    storage.setSetting('criticalDiskPct', 101);
-    storage.setSetting('minFreeGb', 0);
+    // One validated revision of media.storage_tier (percentages are 1–100: at 100 the drain never starts).
+    await storage.setSettings({ hotDiskPressurePct: 100, criticalDiskPct: 100, minFreeGb: 0 }, { reason: 'test: no pressure drain' });
 
     const bytes = crypto.randomBytes(200000);
     const addVod = (id, { app = 'live', provider = 'local', views = 0, accessed = null } = {}) => {

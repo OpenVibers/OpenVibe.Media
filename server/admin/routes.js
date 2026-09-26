@@ -315,29 +315,40 @@ router.get('/tiers', (req, res) => {
 });
 
 // ── PUT /tiers/settings — update tier settings ───────────────
-router.put('/tiers/settings', (req, res) => {
+// One revision of the media.storage_tier configuration (server/vod/tier-config.js): validated as a whole
+// (422 with the rules broken), recorded with the app that asked and the reason; the sweep restarts with it.
+router.put('/tiers/settings', async (req, res) => {
     try {
-        const allowed = Object.keys(vodStorage.DEFAULTS);
         const updates = {};
-        for (const key of allowed) {
-            if (req.body?.[key] !== undefined) {
-                let val = req.body[key];
-                // Coerce types to match defaults
-                if (typeof vodStorage.DEFAULTS[key] === 'number') val = Number(val);
-                if (typeof vodStorage.DEFAULTS[key] === 'boolean') val = !!val;
-                vodStorage.setSetting(key, val);
-                updates[key] = val;
-            }
+        for (const key of Object.keys(vodStorage.DEFAULTS)) {
+            if (req.body?.[key] === undefined) continue;
+            let val = req.body[key];
+            if (typeof vodStorage.DEFAULTS[key] === 'number') val = Number(val);
+            if (typeof vodStorage.DEFAULTS[key] === 'boolean') val = val === true || val === 'true' || val === 1 || val === '1';
+            updates[key] = val;
         }
-        // Restart sweep timer with new settings
-        vodStorage.stop();
-        vodStorage.start();
-        console.log(`[Admin] Storage tier settings updated (${req.appId}):`, updates);
-        res.json({ ok: true, settings: vodStorage.getSettings() });
+        if (!Object.keys(updates).length) return res.status(400).json({ error: `Nothing to change; known settings: ${Object.keys(vodStorage.DEFAULTS).join(', ')}` });
+        const snap = await vodStorage.setSettings(updates, { actor: { type: 'service', id: req.appId }, reason: String(req.body?.reason || 'PUT /tiers/settings').slice(0, 300) });
+        console.log(`[Admin] Storage tier settings: revision ${snap.revision} (${req.appId}):`, updates);
+        res.json({ ok: true, revision: snap.revision, settings: vodStorage.getSettings() });
     } catch (err) {
+        if (err && err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code, errors: err.errors || undefined });
         console.error('[Admin] Storage tier settings error:', err.message);
         res.status(500).json({ error: 'Failed to update settings' });
     }
+});
+
+// The configuration model's own routes for this namespace (openvibe-shared/config): current values,
+// history, apply a whole revision, roll back. /api/v1/:app/admin/storage/config…
+// Built on first use (the store reads the database), behind this router's app-key authentication.
+let configRoutes = null;
+router.use('/config', (req, res, next) => {
+    if (!configRoutes) {
+        configRoutes = require('openvibe-shared/config').adminRoutes([vodStorage.tierConfig.get(vodStorage.DEFAULTS)], {
+            basePath: '/', requireAdmin: (_rq, _rs, nx) => nx(), actor: (rq) => ({ type: 'service', id: rq.appId }),
+        });
+    }
+    configRoutes.handle(req, res, next);
 });
 
 // ── R2 policy and decision log (read-only) ──────────────────
