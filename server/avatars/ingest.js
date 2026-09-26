@@ -27,31 +27,17 @@ const sharp = require('sharp');
 
 const MAX_BYTES = 8 * 1024 * 1024, DEADLINE_MS = 10_000, MAX_REDIRECTS = 3, SIZE = 512;
 
-function isPublicAddress(ip) {
-    if (net.isIPv4(ip)) {
-        const [a, b] = ip.split('.').map(Number);
-        if (a === 0 || a === 10 || a === 127 || a >= 224) return false;
-        if (a === 100 && b >= 64 && b <= 127) return false;            // CGNAT
-        if (a === 169 && b === 254) return false;                       // link-local / cloud metadata
-        if (a === 172 && b >= 16 && b <= 31) return false;
-        if (a === 192 && (b === 168 || b === 0)) return false;
-        if (a === 198 && (b === 18 || b === 19)) return false;
-        return true;
-    }
-    if (net.isIPv6(ip)) {
-        const x = ip.toLowerCase();
-        if (x === '::' || x === '::1') return false;
-        if (x.startsWith('::ffff:')) return isPublicAddress(x.slice(7));
-        if (/^f[cd]/.test(x) || /^fe[89ab]/.test(x) || x.startsWith('ff')) return false;   // unique-local, link-local, multicast
-        if (x.startsWith('64:ff9b:') || x.startsWith('2001:db8:')) return false;
-        return true;
-    }
-    return false;
-}
+// The address rule is openvibe-shared/egress's (the strictest union the network's copies drifted from):
+// it also refuses the IPv6 forms that wrap a private IPv4 address (v4-compatible, 6to4, Teredo, NAT64),
+// site-local and documentation ranges. IPv6 literals ([::1]) are judged as addresses, not sent to DNS.
+const egress = require('openvibe-shared/egress');
+const isPublicAddress = (ip) => egress.isPublicAddress(ip);
 
 async function resolvePublic(hostname) {
-    if (net.isIP(hostname)) { if (!isPublicAddress(hostname)) throw new Error('That address is not on the public internet'); return { address: hostname, family: net.isIPv6(hostname) ? 6 : 4 }; }
-    const all = await dns.lookup(hostname, { all: true, verbatim: true });
+    const host = egress.normalizeHost(hostname);
+    if (net.isIP(host)) { if (!isPublicAddress(host)) throw new Error('That address is not on the public internet'); return { address: host, family: net.isIPv6(host) ? 6 : 4 }; }
+    if (egress.isInternalName(host)) throw new Error('That address is not on the public internet');
+    const all = await dns.lookup(host, { all: true, verbatim: true });
     if (!all.length) throw new Error('That host could not be found');
     if (!all.every(a => isPublicAddress(a.address))) throw new Error('That address is not on the public internet');
     return all.find(a => a.family === 4) || all[0];
