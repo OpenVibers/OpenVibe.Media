@@ -80,15 +80,18 @@ function _getVodScoped(req, res) {
 }
 
 /**
- * Ownership gate for user-JWT callers on write endpoints (chunks/complete):
- * the vod's user_id must be THEIR network id. App-key callers are trusted —
- * they proxy server-side and own their app-local user-id space (Live does).
+ * The VOD a write names (ingest, chunks, finalize, update, delete). The app key alone is trusted: it
+ * proxies server-side and owns its app-local user-id space (Live does). A call acting for one of its
+ * users (X-OV-User-Id) writes only that user's own VODs: someone else's private one answers exactly
+ * as a missing one would, anything else 403.
  */
-function _userOwnsVod(req, res, vod) {
-    if (req.authType !== 'user') return true;
-    if (vod.user_id != null && String(vod.user_id) === String(req.userId)) return true;
-    res.status(403).json({ error: 'Not your VOD' });
-    return false;
+function _getVodForWrite(req, res) {
+    const vod = _getVodScoped(req, res);
+    if (!vod || req.authType !== 'user') return vod;
+    if (vod.user_id != null && String(vod.user_id) === String(req.userId)) return vod;
+    if (_isPrivate(vod)) res.status(404).json({ error: 'VOD not found' });
+    else res.status(403).json({ error: 'Not your VOD' });
+    return null;
 }
 
 // ── Create VOD ───────────────────────────────────────────────
@@ -117,7 +120,7 @@ router.post('/', tenantAuth(), (req, res) => {
 // ── RTMP ingest ──────────────────────────────────────────────
 router.post('/:id/ingest/rtmp', tenantAuth(), (req, res) => {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = _getVodForWrite(req, res);
         if (!vod) return;
         const result = recorder.startRtmp(vod, req.body?.rtmp_url);
         if (!result.ok) return res.status(result.status || 409).json({ error: result.error });
@@ -131,7 +134,7 @@ router.post('/:id/ingest/rtmp', tenantAuth(), (req, res) => {
 // ── RTP ingest ───────────────────────────────────────────────
 router.post('/:id/ingest/rtp/start', tenantAuth(), (req, res) => {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = _getVodForWrite(req, res);
         if (!vod) return;
         const { video, audio } = req.body || {};
         const result = recorder.startRtp(vod, video, audio);
@@ -145,7 +148,7 @@ router.post('/:id/ingest/rtp/start', tenantAuth(), (req, res) => {
 
 router.post('/:id/ingest/rtp/stop', tenantAuth(), (req, res) => {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = _getVodForWrite(req, res);
         if (!vod) return;
         const stopped = recorder.stopRecording(vod.id);
         if (!stopped && !vod.is_recording) return res.status(409).json({ error: 'VOD is not recording' });
@@ -160,9 +163,8 @@ router.post('/:id/ingest/rtp/stop', tenantAuth(), (req, res) => {
 // ── Chunked upload (browser MediaRecorder; user JWT ok) ──────
 router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('chunk'), async (req, res) => {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = _getVodForWrite(req, res);
         if (!vod) { if (req.file) tools.cleanupTempFile(req.file.path); return; }
-        if (!_userOwnsVod(req, res, vod)) { if (req.file) tools.cleanupTempFile(req.file.path); return; }
         if (!req.file) return res.status(400).json({ error: 'No chunk data' });
         const segmentId = Math.max(1, parseInt(req.body?.segmentId || req.query.segmentId || '1', 10) || 1);
 
@@ -238,9 +240,8 @@ router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('
 
 async function _finalizeHandler(req, res) {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = _getVodForWrite(req, res);
         if (!vod) return;
-        if (!_userOwnsVod(req, res, vod)) return;
 
         // Live ffmpeg recording → stop gracefully; its exit handler finalizes.
         if (recorder.isRecording(vod.id)) {
@@ -344,7 +345,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
 // ── Update ───────────────────────────────────────────────────
 router.put('/:id', tenantAuth(), (req, res) => {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = _getVodForWrite(req, res);
         if (!vod) return;
         const { title, description, visibility } = req.body || {};
         const updates = [];
@@ -369,7 +370,7 @@ router.put('/:id', tenantAuth(), (req, res) => {
 // ── Delete ───────────────────────────────────────────────────
 router.delete('/:id', tenantAuth(), (req, res) => {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = _getVodForWrite(req, res);
         if (!vod) return;
         if (objects.isHeldRow(vod)) return res.status(409).json({ error: 'VOD is under a retention hold', code: 'media.object.held' });
 

@@ -113,6 +113,20 @@ function _getClipScoped(req, res) {
     return clip;
 }
 
+/**
+ * The clip a write names (update, delete, re-cut). The app key alone is trusted; a call acting for one
+ * of its users (X-OV-User-Id) writes only that user's own clips: someone else's private one answers
+ * exactly as a missing one would, anything else 403.
+ */
+function _getClipForWrite(req, res) {
+    const clip = _getClipScoped(req, res);
+    if (!clip || req.authType !== 'user') return clip;
+    if (clip.user_id != null && String(clip.user_id) === String(req.userId)) return clip;
+    if (_isPrivate(clip)) res.status(404).json({ error: 'Clip not found' });
+    else res.status(403).json({ error: 'Not your clip' });
+    return null;
+}
+
 const VALID_VIS = new Set(['public', 'unlisted', 'private']);
 /** A boolean query/body field: 1, 0, or null when absent or unreadable. */
 const flag = (v) => (['1', 'true'].includes(String(v)) ? 1 : ['0', 'false'].includes(String(v)) ? 0 : null);
@@ -339,9 +353,9 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
  */
 router.post('/:id/recut', tenantAuth(), async (req, res) => {
     try {
-        const clipId = parseInt(req.params.id, 10);
-        const clip = db.getClipById(clipId);
-        if (!clip || clip.app_id !== req.appId) return res.status(404).json({ error: 'Clip not found' });
+        const clip = _getClipForWrite(req, res);
+        if (!clip) return;
+        const clipId = clip.id;
         if (clip.status === 'processing') return res.status(409).json({ error: 'Clip is already being cut' });
         if (!clip.vod_id) return res.status(422).json({ error: 'Clip has no source VOD to re-cut from' });
         // A manual retry resets the attempt counter so it gets the full ladder again (not projected: no object change).
@@ -356,7 +370,7 @@ router.post('/:id/recut', tenantAuth(), async (req, res) => {
 
 router.put('/:id', tenantAuth(), (req, res) => {
     try {
-        const clip = _getClipScoped(req, res);
+        const clip = _getClipForWrite(req, res);
         if (!clip) return;
         const { title, visibility, auto_generated: autoGen } = req.body || {};
         if (title !== undefined) {
@@ -379,7 +393,7 @@ router.put('/:id', tenantAuth(), (req, res) => {
 // ── Delete ───────────────────────────────────────────────────
 router.delete('/:id', tenantAuth(), (req, res) => {
     try {
-        const clip = _getClipScoped(req, res);
+        const clip = _getClipForWrite(req, res);
         if (!clip) return;
         if (objects.isHeldRow(clip)) return res.status(409).json({ error: 'Clip is under a retention hold', code: 'media.object.held' });
 

@@ -54,6 +54,15 @@ const { tenantAuth, tenantCors } = require('../auth');
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 router.use(tenantAuth());   // app API key only — no user-JWT access to admin storage
+// Nor a call acting for one of the app's users (X-OV-User-Id), reads included: bulk deletes, tier moves,
+// the settings and the holds (staff notes) reach every user's media. Holds and the operator report
+// answer with their own codes.
+router.use((req, res, next) => {
+    if (req.authType === 'app') return next();
+    if (/^\/holds(\/|$)/.test(req.path)) return _staffOnly(req, res);
+    if (/^\/ops(\/|$)/.test(req.path)) return _opsStaffOnly(req, res);
+    res.status(403).json({ error: 'Admin storage is for the app itself: call with the app key, not on behalf of a user', code: 'media.admin.forbidden' });
+});
 
 const SHARED_DIRS_NOTE = 'Disk totals and directory sizes are host-wide (data directories are shared across apps); DB-derived stats are scoped to this app.';
 

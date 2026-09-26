@@ -411,7 +411,10 @@ exactly like a missing id — the same 404 and body — unless the request bears
 owning app's API key, optionally acting for the owner via `X-OV-User-Id`. That holds
 for the watch page, the bytes, `transcript.json`, the legacy `/api/thumbnails` redirect
 and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`, `/pastes/:slug`)
-apply it to an app acting for someone other than the owner.
+apply it to an app acting for someone other than the owner. A call acting for a user writes
+only that user's VODs and clips (update, delete, ingest, chunks, finalize, re-cut, thumbnail):
+someone else's private one is the missing answer, anything else 403. The media index lists a
+thumbnail only while its VOD or clip is public. Tests: `test/security-*.test.js`.
 
 `GET /o/:id` serves object bytes by canonical id (`med_…`): public/unlisted
 objects openly, private ones only with a valid signature from

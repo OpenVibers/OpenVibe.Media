@@ -669,7 +669,15 @@ router.get('/:id/holds', read, (req, res) => {
     });
 });
 
+/** Placing and releasing holds is the app's own staff action (docs: app key only), never a call acting for one of its users. */
+function holdsByApp(req, res) {
+    if (req.authType === 'app') return true;
+    problem(res, 403, 'media.hold.forbidden', 'Retention holds are staff actions: call with the app key, not on behalf of a user');
+    return false;
+}
+
 router.post('/:id/holds', appOnly, (req, res) => {
+    if (!holdsByApp(req, res)) return;
     const obj = load(req, res);
     if (!obj) return;
     const b = req.body || {};
@@ -682,6 +690,7 @@ router.post('/:id/holds', appOnly, (req, res) => {
 });
 
 router.delete('/:id/holds/:holdId', appOnly, (req, res) => {
+    if (!holdsByApp(req, res)) return;
     const obj = load(req, res);
     if (!obj) return;
     const hold = db.get('SELECT * FROM media_holds WHERE id = ? AND object_id = ?', [parseInt(req.params.holdId, 10), obj.id]);

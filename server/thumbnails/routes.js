@@ -60,6 +60,12 @@ router.post('/:kind/:id', tenantAuth({ allowUser: true }), upload.single('thumbn
         const numId = parseInt(id, 10);
         const row = kind === 'vod' ? db.getVodById(numId, req.appId) : db.getClipById(numId, req.appId);
         if (!row) return res.status(404).json({ error: `${kind} not found` });
+        // Acting for one of the app's users (X-OV-User-Id): only that user's own VOD or clip. Someone
+        // else's private one answers as a missing one would; anything else 403.
+        if (req.authType === 'user' && !(row.user_id != null && String(row.user_id) === String(req.userId))) {
+            if ((row.visibility || (row.is_public ? 'public' : 'private')) === 'private') return res.status(404).json({ error: `${kind} not found` });
+            return res.status(403).json({ error: `Not your ${kind}` });
+        }
 
         // Custom upload → save as the entity's thumbnail.
         if (imageData) {
