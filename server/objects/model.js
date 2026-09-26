@@ -658,7 +658,9 @@ function restore(obj) {
 /**
  * Remove the bytes of native (v2) objects deleted longer ago than the retention
  * period. Projected objects are never purged here — their bytes belong to the
- * inherited pipelines. Held objects are skipped.
+ * inherited pipelines. Held objects are skipped, and so is an object that still
+ * has a copy in the R2 popularity cache: the object tiering removes that first
+ * (./tiering.js demotes deleted objects), so a purge never leaves it behind.
  */
 function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
     const rows = db.all(`SELECT * FROM media_objects WHERE lifecycle_status = 'deleted' AND legacy_ref IS NULL
@@ -668,6 +670,7 @@ function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
     for (const obj of rows) {
         const md = parseJson(obj.metadata, {});
         if (md.purged_at || isHeld(obj.id)) continue;
+        if (listLocations(obj.id).some(l => l.provider === 'r2')) continue;
         for (const l of listLocations(obj.id)) {
             if (l.provider === 'local' && path.resolve(l.key).startsWith(root)) { try { fs.unlinkSync(l.key); } catch { /* already gone */ } }
             if (l.provider === 'local') db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);

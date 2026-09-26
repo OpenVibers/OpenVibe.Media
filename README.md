@@ -46,7 +46,8 @@ server/
   objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
                          backfill, reconcile, invariant, signing (presigned URLs), multipart,
                          content-type, verify-job (scheduled copy verification), copy-report,
-                         readiness (metadata / bytes_verified / playable) —
+                         readiness (metadata / bytes_verified / playable), popularity (unique viewers
+                         per day, no identifiers), tier-policy + tiering (native objects in the R2 cache) —
                          see docs/object-model.md
   jobs/                  media_jobs: queue (states, idempotency, media.job.* events in the state
                          change's transaction; payload queue.jobEvent: ids, state, ISO times,
@@ -290,6 +291,9 @@ directories are shared across apps) and responses carry a `note` saying so.
 | POST | `/admin/storage/tiers/bulk-move` | `{ ids: [...], target }` (max 50) → `{ moved, bytes, errors? }` |
 | GET | `/admin/storage/tiers/policy` | **read-only R2 policy**: each threshold (`r2Enabled`, `r2MinViews`, `r2RecentAccessDays`, `r2MaxIdleDays`, `r2MaxPerSweep`) as `{ value, default, source: default\|setting }`, the promote and demote rules in words, the R2/B2 provider status, and this app's decisions: `last_24h` counts per action and outcome and the 20 most recent |
 | GET | `/admin/storage/tiers/decisions?vod_id&action&outcome&limit&before_id` | this app's R2 promote/demote decisions, newest first: `{ id, decided_at, vod_id, object_id, action, from_provider, to_provider, outcome: done\|already\|refused\|failed, trigger: sweep\|admin\|clip\|drill\|manual, reason, inputs, thresholds, error }` → `{ decisions, next_before_id }` |
+| GET | `/admin/storage/tiers/objects/policy` | native v2 objects' R2 tiering (below): the activation gate, each `media.object_tier` threshold as `{ value, default, source }`, the rules, this app's promotion candidates (with what would refuse each) and its decisions (24-hour counts and the 20 most recent) |
+| GET | `/admin/storage/tiers/objects/decisions?object_id&action&outcome&limit&before_id` | this app's native object decisions, newest first (`outcome`: done\|already\|refused\|failed\|dry_run) → `{ decisions, next_before_id }` |
+| GET / POST | `/admin/storage/config[/media.storage_tier\|/media.object_tier[/history\|/rollback]]` | the revisioned tier policies (openvibe-shared/config): read, apply `{ values, merge, reason }`, history, roll back |
 | GET | `/admin/storage/holds?all&object_id&vod_id&clip_id&limit&before_id` | this app's retention holds, newest first (active only unless `all=1`) |
 | POST | `/admin/storage/holds` | `{ object_id \| vod_id \| clip_id, reason, kind?, note?, placed_by? }` → 201: the object is kept (no delete, no tier move) and so are the clips cut from a held VOD. Not for calls acting for a user (403) |
 | POST | `/admin/storage/holds/:holdId/release` | `{ released_by }` (also `DELETE /admin/storage/holds/:holdId`); 409 when already released. Holds stay on record |
@@ -412,7 +416,9 @@ apply it to an app acting for someone other than the owner.
 `GET /o/:id` serves object bytes by canonical id (`med_…`): public/unlisted
 objects openly, private ones only with a valid signature from
 `/api/v2/:app/objects/:id/download`, deleted ones 410 (a deleted private object
-without a signature is a 404 like any other private one).
+without a signature is a 404 like any other private one). A native object in the
+R2 popularity cache redirects to its verified R2 copy; a GET of a native object
+counts its viewer for the day, identifying no one (see Storage tiering).
 
 ## Object model and API v2
 
@@ -463,7 +469,22 @@ promote/demote); presigned-302 playback. Knobs live in `media_settings` under
 clip cut fetching an R2 VOD home, the eviction drill) is logged in `media_tier_decisions` with the
 inputs it saw (views, last access, provider, recording, hold, size), the thresholds in force and their
 source, the reason and the outcome; `/admin/storage/tiers/policy` shows the policy and the log, and
-`media_tier_decisions_24h{action,outcome}` counts them on `/metrics` (`test/tier-decisions.test.js`). CLI:
+`media_tier_decisions_24h{target="vod",action,outcome}` counts them on `/metrics` (`test/tier-decisions.test.js`).
+
+**Native v2 objects** (roadmap WS-G task 11; [docs](docs/object-model.md#tiering-of-native-objects)) keep
+their canonical copy and, when popular, get a verified copy in R2 that `/o/:id` plays from. Popularity is
+unique viewers per object per UTC day, counted on `/o/:id` without storing an IP address or subject id
+(a daily-salted hash, deleted with its salt when the day ends; only the counts stay, 30 days), summed over
+7 days. The policy is the revisioned namespace `media.object_tier`: promote at `promoteMinUniqueViewers7d`
+(500) unique viewers, viewed within 3 days, 16 MB to 4 GB, at most 3 per sweep; demote after 14 idle days
+or when the object is no longer ready. Its **activation gate `active` is off by default**: the sweep (step 4
+of this one) then moves nothing and records what it would do as `dry_run` decisions. Holds block every
+move, only a verified canonical copy is promoted (re-hashed; the R2 copy's size and sha256 are checked
+before it is used), and a demotion never removes the last good copy. Decisions:
+`media_object_tier_decisions`, `/admin/storage/tiers/objects/*`, `/me/ops`, and
+`media_tier_decisions_24h{target="object"}` (`test/object-tiering.test.js`).
+
+The storage engine's CLI:
 
 ```
 node server/vod/vod-storage.js check|migrate-legacy|drain [targetPct]

@@ -21,6 +21,12 @@
  *                           decisions (media_tier_decisions) with 24-hour counts
  * GET    /tiers/decisions  this app's R2 promote/demote decisions, newest first
  *                           (?vod_id&action=promote|demote&outcome&limit≤200&before_id)
+ * GET    /tiers/objects/policy     native v2 objects (server/objects/tiering.js): the activation gate, each
+ *                           threshold with its source, the rules, this app's promotion candidates (and what
+ *                           would refuse each), and its decisions (media_object_tier_decisions) with 24-hour counts
+ * GET    /tiers/objects/decisions  this app's native object decisions, newest first
+ *                           (?object_id&action&outcome=done|already|refused|failed|dry_run&limit≤200&before_id)
+ * GET    /config…          the revisioned policies media.storage_tier and media.object_tier (openvibe-shared/config)
  * GET    /holds            this app's retention holds, newest first (?all=1 includes released;
  *                           ?object_id|vod_id|clip_id; ?limit≤200&before_id)
  * POST   /holds            place one: { object_id (med_… or legacy ref) | vod_id | clip_id, reason, kind
@@ -347,7 +353,8 @@ router.put('/tiers/settings', async (req, res) => {
 let configRoutes = null;
 router.use('/config', (req, res, next) => {
     if (!configRoutes) {
-        configRoutes = require('openvibe-shared/config').adminRoutes([vodStorage.tierConfig.get(vodStorage.DEFAULTS)], {
+        // media.storage_tier (VODs) and media.object_tier (native v2 objects: thresholds and the activation gate).
+        configRoutes = require('openvibe-shared/config').adminRoutes([vodStorage.tierConfig.get(vodStorage.DEFAULTS), require('../objects/tier-policy').get()], {
             basePath: '/', requireAdmin: (_rq, _rs, nx) => nx(), actor: (rq) => ({ type: 'service', id: rq.appId }),
         });
     }
@@ -412,6 +419,43 @@ router.get('/tiers/decisions', (req, res) => {
     } catch (err) {
         console.error('[Admin] Tier decisions error:', err.message);
         res.status(500).json({ error: 'Failed to list tier decisions' });
+    }
+});
+
+// ── Native v2 objects: policy, candidates and decision log (read-only) ──
+// The policy changes through the config routes (…/config/media.object_tier); the sweep moves nothing while
+// its activation gate (`active`) is off, and logs what it would do as dry_run decisions.
+const objectTiers = () => require('../objects/tiering');
+
+router.get('/tiers/objects/policy', (req, res) => {
+    try {
+        const policy = require('../objects/tier-policy');
+        const settings = policy.settings();
+        res.json({
+            gate: { active: !!settings.active, ...policy.thresholds(settings).active },
+            thresholds: policy.thresholds(settings),
+            rules: policy.describe(settings),
+            provider: { r2: { configured: vodStorage.providerConfigured('r2'), available: vodStorage.providerAvailable('r2') } },
+            candidates: objectTiers().candidates({ appId: req.appId, limit: req.query.limit, settings }),
+            decisions: { last_24h: objectTiers().counts24h(req.appId), recent: objectTiers().listDecisions({ appId: req.appId, limit: 20 }).decisions },
+            note: 'Read-only. The policy (media.object_tier) changes through /config/media.object_tier; candidates and decisions are this app\'s only.',
+        });
+    } catch (err) {
+        console.error('[Admin] Object tier policy error:', err.message);
+        res.status(500).json({ error: 'Failed to read the object tier policy' });
+    }
+});
+
+router.get('/tiers/objects/decisions', (req, res) => {
+    try {
+        const q = req.query;
+        if (q.action && !['promote', 'demote'].includes(String(q.action))) return res.status(400).json({ error: 'action must be promote or demote' });
+        if (q.outcome && !objectTiers().OUTCOMES.includes(String(q.outcome))) return res.status(400).json({ error: `outcome must be one of ${objectTiers().OUTCOMES.join(', ')}` });
+        res.json(objectTiers().listDecisions({ appId: req.appId, objectId: q.object_id ? String(q.object_id) : null, action: q.action ? String(q.action) : null,
+            outcome: q.outcome ? String(q.outcome) : null, beforeId: q.before_id != null ? parseInt(q.before_id, 10) || 0 : null, limit: q.limit }));
+    } catch (err) {
+        console.error('[Admin] Object tier decisions error:', err.message);
+        res.status(500).json({ error: 'Failed to list object tier decisions' });
     }
 });
 

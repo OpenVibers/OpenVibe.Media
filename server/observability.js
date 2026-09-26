@@ -56,10 +56,13 @@ function storageDirs(config) {
 
 function domainMetrics(registry, { db, recorder, events }) {
     registry.gauge({ name: 'media_recordings_in_progress', help: 'Recordings ffmpeg is writing right now', collect: () => recorder.activeCount() });
+    // target vod: media_tier_decisions (VODs); object: media_object_tier_decisions (native v2 objects), whose
+    // outcome dry_run is what the object sweep would have done while its activation gate is off.
     registry.gauge({
-        name: 'media_tier_decisions_24h', help: 'R2 promotions and demotions decided in the last 24 hours, by action and outcome (media_tier_decisions)', labelNames: ['action', 'outcome'],
-        collect: () => db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_tier_decisions WHERE decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')
-                               GROUP BY action, outcome`).map((r) => ({ labels: { action: r.action, outcome: r.outcome }, value: r.n })),
+        name: 'media_tier_decisions_24h', help: 'R2 promotions and demotions decided in the last 24 hours, by target (vod, object), action and outcome', labelNames: ['target', 'action', 'outcome'],
+        collect: () => [['vod', 'media_tier_decisions'], ['object', 'media_object_tier_decisions']].flatMap(([target, table]) => db.all(`SELECT action, outcome, COUNT(*) AS n
+                FROM ${table} WHERE decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') GROUP BY action, outcome`)
+            .map((r) => ({ labels: { target, action: r.action, outcome: r.outcome }, value: r.n }))),
     });
     registry.gauge({
         name: 'media_object_locations', help: 'Stored copies of media objects by provider and verification state', labelNames: ['provider', 'state'],

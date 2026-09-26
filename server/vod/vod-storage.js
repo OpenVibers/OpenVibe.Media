@@ -25,6 +25,7 @@
  *      low-water mark regardless of the popularity thresholds
  *   2. promotes popular VODs to R2
  *   3. demotes stale R2 VODs back to B2-only
+ *   4. tiers native v2 objects (server/objects/tiering.js: its own policy and activation gate)
  */
 'use strict';
 
@@ -219,6 +220,11 @@ function clientFor(name) {
     return clients[name];
 }
 
+/** Configured, and not known to be down (the last HeadBucket or readiness probe did not fail). */
+function providerAvailable(name) {
+    return providerConfigured(name) && providerHealthy[name] !== false;
+}
+
 function bucketFor(name) {
     return (PROVIDER_ENV[name] && PROVIDER_ENV[name].bucket) || null;
 }
@@ -345,6 +351,27 @@ async function copyBetweenProviders(srcProvider, dstProvider, key) {
     return { size: head.size };
 }
 
+/**
+ * Read one stored object through and hash it: { sha256, size }, or null when it is not there. Used to check a
+ * copy byte for byte after it was written (R2 egress is free; the object tiering bounds the size it reads).
+ */
+async function sha256Object(provider, key) {
+    const client = clientFor(provider);
+    if (!client) throw new Error(`Provider ${provider} not configured`);
+    loadSdk();
+    let obj;
+    try {
+        obj = await client.send(new S3.GetObjectCommand({ Bucket: PROVIDER_ENV[provider].bucket, Key: key }));
+    } catch (err) {
+        if (err?.$metadata?.httpStatusCode === 404 || err?.name === 'NoSuchKey' || err?.name === 'NotFound') return null;
+        throw err;
+    }
+    const hash = require('crypto').createHash('sha256');
+    let size = 0;
+    for await (const chunk of obj.Body) { hash.update(chunk); size += chunk.length; }
+    return { sha256: hash.digest('hex'), size };
+}
+
 async function deleteObject(provider, key) {
     const client = clientFor(provider);
     if (!client) return;
@@ -417,18 +444,23 @@ async function listMultipartUploads(provider, prefix = '') {
     return out;
 }
 
-async function presignGet(provider, key, expiresInSeconds = 900) {
+/**
+ * A presigned GET URL. `overrides` { contentType, contentDisposition } become the response headers the store
+ * answers with (the object tiering passes what /o/:id would have sent, so an attachment stays one).
+ */
+async function presignGet(provider, key, expiresInSeconds = 900, overrides = {}) {
     const client = clientFor(provider);
     if (!client) return null;
     loadSdk();
     // Force the response MIME so the browser plays the media even when the stored
     // object metadata is generic (legacy clips were uploaded as octet-stream).
     const ext = path.extname(key || '').toLowerCase();
-    const mime = { '.webm': 'video/webm', '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[ext];
+    const mime = overrides.contentType || { '.webm': 'video/webm', '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[ext];
     return Presigner.getSignedUrl(client, new S3.GetObjectCommand({
         Bucket: PROVIDER_ENV[provider].bucket,
         Key: key,
         ...(mime ? { ResponseContentType: mime } : {}),
+        ...(overrides.contentDisposition ? { ResponseContentDisposition: overrides.contentDisposition } : {}),
     }), { expiresIn: expiresInSeconds });
 }
 
@@ -1067,6 +1099,11 @@ async function runSweep() {
             }
         }
 
+        // 4) Native v2 objects (server/objects/tiering.js): their own policy (media.object_tier) and activation
+        // gate, after the VODs; not while the disk still needs a drain (a promotion frees no local space).
+        const objectsResult = stillNeedsDrain ? { skipped: true, reason: 'disk pressure: the drain goes first' }
+            : await require('../objects/tiering').runSweep({ trigger: 'sweep' }).catch((err) => ({ error: err.message }));
+
         const summary = {
             checked: candidates.length,
             migrated,
@@ -1082,6 +1119,7 @@ async function runSweep() {
             diskPct: diskAfter.usePct,
             freeGb: Number((diskAfter.available / GB).toFixed(1)),
             errors: errors.length ? errors : undefined,
+            objects: objectsResult,
             timestamp: new Date().toISOString(),
         };
         sweepState.lastRunAt = Date.now();
@@ -1422,9 +1460,13 @@ module.exports = {
     providerOf,
     isRemote,
     providerConfigured,
+    providerAvailable,
     bucketFor,
     endpointFor,
     headObject,
+    uploadFile,
+    copyBetweenProviders,
+    sha256Object,
     listObjects,
     listMultipartUploads,
     keyForVod,

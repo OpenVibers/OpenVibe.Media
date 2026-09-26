@@ -331,6 +331,7 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
     const card = (value, label) => `<div class="card"><b>${value}</b><span>${esc(label)}</span></div>`;
     const kv = (obj) => Object.entries(obj || {}).map(([k, v]) => `${esc(k.replace(/_/g, ' '))} ${num(v)}`).join(' · ') || 'none';
     const t = r.tiering;
+    const no = t.native_objects || null;
     const bf = r.backfill;
     const m = r.missing;
     const body = `
@@ -418,6 +419,16 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
     ${table('Recent refused or failed tier moves', ['When', 'Tenant', 'VOD', 'Move', 'Outcome', 'Why'], t.recent_problems.map(d => [
         esc(fmtWhen(d.decided_at)), esc(d.app_id || ''), esc(d.vod_id), `${esc(d.action)} ${esc(d.from_provider || '')} → ${esc(d.to_provider || '')}`, esc(d.outcome), esc(d.error || d.reason || ''),
     ])) || '<p class="empty">None.</p>'}
+    ${no ? `<h3>Native objects</h3>
+    <dl class="facts">
+      <dt>Activation gate</dt><dd>${no.gate.active ? '<strong>on</strong>: the sweep moves objects' : 'off: dry runs only'} (${esc(no.gate.source)})</dd>
+      <dt>Policy</dt><dd>promote at ${num(no.policy.promoteMinUniqueViewers7d)} unique viewers in 7 days, viewed within ${esc(no.policy.promoteRecentAccessDays)} d, ${esc(no.policy.promoteMinSizeMb)} to ${esc(no.policy.promoteMaxSizeMb)} MB · demote after ${esc(no.policy.demoteIdleDays)} idle days</dd>
+      <dt>In R2</dt><dd>${num(no.r2_copies.count)} objects, ${esc(fmtBytes(no.r2_copies.bytes))} · eligible to promote now: ${num(no.eligible_to_promote)}</dd>
+      <dt>Decisions, 24 h</dt><dd>promote: ${kv(no.decisions_24h.promote)} · demote: ${kv(no.decisions_24h.demote)}</dd>
+    </dl>
+    ${table('Recent native object tier decisions', ['When', 'Tenant', 'Object', 'Action', 'Outcome', 'Why'], no.recent.map(d => [
+        esc(fmtWhen(d.decided_at)), esc(d.app_id || ''), `<code class="id">${esc(d.object_id)}</code>`, esc(d.action), esc(d.outcome.replace('_', ' ')), esc(d.error || d.reason || ''),
+    ])) || '<p class="empty">None.</p>'}` : ''}
   </section>
   <p class="hint">JSON: <a href="/api/v2/me/ops${scopeQs}">/api/v2/me/ops</a>.</p>`;
     return doc({ title: 'Media operations', description: 'Operator views of OpenVibe.Media: failed jobs, usage, missing media, backfill and tiering.', body });

@@ -722,10 +722,20 @@ publicRouter.get('/:id', async (req, res) => {
             'Cache-Control': obj.visibility === 'private' || sandbox ? 'private, no-store' : 'public, max-age=3600',
             'Content-Disposition': `${INLINE.test(mime) ? 'inline' : 'attachment'}; filename="${name}"`,
         };
+        // A viewer of a native object, counted once a day without being identified (objects/popularity.js); the
+        // object tiering reads these counts. Sandbox objects are never tiered, so they are not counted.
+        if (!obj.legacy_ref && !sandbox) require('./popularity').record(obj, req);
         const locs = model.listLocations(obj.id);
+        const vodStorage = require('../vod/vod-storage');
+        // A native object promoted to the R2 popularity cache (objects/tiering.js) plays from its verified R2 copy
+        // while R2 is available, with the headers this route would send; the canonical copy is the fallback.
+        const cached = !obj.legacy_ref && locs.find(l => l.provider === 'r2' && l.state === 'present' && l.verified_at);
+        if (cached && vodStorage.providerAvailable('r2')) {
+            const url = await vodStorage.presignGet('r2', cached.key, 300, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
+            if (url) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, url); }
+        }
         const local = locs.find(l => l.provider === 'local' && l.state !== 'missing' && fs.existsSync(l.key));
         if (local) return require('../public/routes').streamFileWithRange(req, res, local.key, headers);
-        const vodStorage = require('../vod/vod-storage');
         for (const p of ['r2', 'b2']) {
             const l = locs.find(x => x.provider === p && x.state !== 'missing' && x.state !== 'corrupt');
             if (!l || !vodStorage.providerConfigured(p)) continue;

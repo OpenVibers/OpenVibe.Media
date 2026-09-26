@@ -429,6 +429,50 @@ CREATE TABLE IF NOT EXISTS media_tier_decisions (
 CREATE INDEX IF NOT EXISTS idx_media_tier_decisions_vod ON media_tier_decisions(vod_id, id);
 CREATE INDEX IF NOT EXISTS idx_media_tier_decisions_app ON media_tier_decisions(app_id, id);
 
+-- Popularity of native v2 objects (server/objects/popularity.js; ADR-021): unique viewers per object per UTC
+-- day, never an IP address or subject id. A viewer is HMAC-SHA256(the day's random salt, client network), and
+-- the hashes and the salt of a day are deleted once it is over; only the daily counts stay (30 days).
+CREATE TABLE IF NOT EXISTS media_object_view_salts (
+    day TEXT PRIMARY KEY,                 -- YYYY-MM-DD (UTC)
+    salt TEXT NOT NULL,                   -- 32 random bytes, hex; deleted with the day's hashes
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS media_object_viewer_days (
+    day TEXT NOT NULL,
+    object_id TEXT NOT NULL,
+    viewer TEXT NOT NULL,                 -- 16 hex chars of HMAC-SHA256(salt of the day, client network)
+    PRIMARY KEY (day, object_id, viewer)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS media_object_views_daily (
+    object_id TEXT NOT NULL,
+    day TEXT NOT NULL,                    -- YYYY-MM-DD (UTC)
+    unique_viewers INTEGER NOT NULL DEFAULT 0,
+    last_viewed_at TEXT,                  -- ISO 8601: the day's last new viewer
+    PRIMARY KEY (object_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_media_object_views_daily_day ON media_object_views_daily(day, object_id);
+
+-- Tier decisions for native v2 objects (server/objects/tiering.js): every promotion to and demotion from the
+-- R2 popularity cache the object sweep decided, including what it would have done while the activation gate
+-- (media.object_tier `active`) is off (dry_run), with the inputs it saw and the policy in force.
+CREATE TABLE IF NOT EXISTS media_object_tier_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    decided_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    object_id TEXT NOT NULL,
+    app_id TEXT,
+    action TEXT NOT NULL CHECK(action IN ('promote', 'demote')),
+    from_provider TEXT,
+    to_provider TEXT,
+    outcome TEXT NOT NULL CHECK(outcome IN ('done', 'already', 'refused', 'failed', 'dry_run')),
+    trigger TEXT NOT NULL,                -- sweep | manual
+    reason TEXT NOT NULL,
+    inputs TEXT NOT NULL DEFAULT '{}',    -- JSON: unique_viewers_7d, last_viewed_day, size, kind, lifecycle, canonical copy, held, R2 copy, gate
+    thresholds TEXT NOT NULL DEFAULT '{}',-- JSON: the media.object_tier policy in force, each value with its source (default | setting)
+    error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_media_object_tier_decisions_object ON media_object_tier_decisions(object_id, id);
+CREATE INDEX IF NOT EXISTS idx_media_object_tier_decisions_app ON media_object_tier_decisions(app_id, id);
+
 -- Object changes waiting to become events (server/events.js recordObjectChanges): media_objects
 -- triggers (database.js ensureObjectTriggers) write one row per visibility change and per deletion,
 -- in the transaction that makes the change, whatever path made it; the rows become

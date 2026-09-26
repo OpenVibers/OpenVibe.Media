@@ -8,10 +8,10 @@ unchanged. New code talks to objects through the [v2 API](#object-api-v2).
 
 Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`, `invariant.js`,
 `signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`, `readiness.js`, `namespaces.js`,
-`namespace-routes.js`) and the job system in
+`namespace-routes.js`, `popularity.js`, `tier-policy.js`, `tiering.js`) and the job system in
 `server/jobs/` (`queue.js`, `worker.js`, `routes.js`, `types.js`, `thumbnail.js`, `invariant-scan.js`,
 `derive.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`, `test/jobs*.test.js`,
-`test/r2-eviction-drill.test.js`.
+`test/r2-eviction-drill.test.js`, `test/object-tiering.test.js`.
 
 ## Tables
 
@@ -244,7 +244,9 @@ All routes live under `/api/v2/:app/objects`.
 - Public and unlisted `ready` objects are served openly.
 - Private objects need a valid `?exp=&sig=` from `/download`. Without one the answer is 404, so a private object cannot be told apart from a missing one.
 - A deleted object answers 410 — after the check above, so a deleted private object is a 404 without a signature.
-- A local copy streams with Range support. Otherwise the route redirects 302 to a presigned R2 URL, then a presigned B2 URL.
+- A native object [promoted to the R2 cache](#tiering-of-native-objects) redirects 302 to its verified R2 copy (a presigned URL that answers with the type and `Content-Disposition` this route would send) while R2 is available.
+- Otherwise a local copy streams with Range support, or the route redirects 302 to a presigned R2 URL, then a presigned B2 URL.
+- A GET of a native object counts its viewer for the day, without identifying anyone ([popularity](#popularity)).
 - Headers: `X-Content-Type-Options: nosniff` and `X-Robots-Tag: noindex`. Content is `inline` only for images (not SVG), video, audio, PDF and plain text, and `attachment` for everything else.
 
 **Signing.** HMAC-SHA256 keyed with `MEDIA_SIGNING_SECRET` over a purpose and what the link may do:
@@ -318,7 +320,9 @@ Code: `server/objects/content-type.js`.
 
 **Purge.** Every hour, the service removes the bytes of native objects whose retention period has
 passed and that have no active hold. The object row stays `deleted` with `metadata.purged_at`.
-Projected objects are never purged by this job.
+Projected objects are never purged by this job. An object that still has a copy in the R2 cache waits
+until the [object tiering](#tiering-of-native-objects) has removed it (it demotes deleted objects), so a
+purge never leaves the R2 copy behind.
 
 ## Namespaces, grants and quotas
 
@@ -454,7 +458,7 @@ cheap and renders in a drill.
 - `jobs`: counts by status; failed jobs of the last 7 days by type and error code; the most recent failures with their error text.
 - `missing`: ready objects with no good copy; copies recorded missing or corrupt; copies by provider and state; quarantined VODs; the last verification run.
 - `backfill`: the last object backfill that changed something; rows with no object yet; objects whose owner subject is unresolved; whether upload reservations were seeded.
-- `tiering`: providers and policy; VODs and clips per provider; objects per canonical copy (native or projected); VODs eligible to offload; R2 decisions of the last 24 h and recent refusals and failures; the sweep's state in this process.
+- `tiering`: providers and policy; VODs and clips per provider; objects per canonical copy (native or projected); VODs eligible to offload; R2 decisions of the last 24 h and recent refusals and failures; the sweep's state in this process; and `native_objects`: the [object tiering](#tiering-of-native-objects)'s activation gate and policy, native objects in R2, how many are eligible to promote now, its decisions of the last 24 h (dry runs included) and the most recent ones, and its last sweep.
 - `namespaces`: every namespace with quota and usage snapshot.
 
 ## Readiness
@@ -518,7 +522,7 @@ While any hold applies:
   - `deleteVodObjects` keeps the bytes.
   - Paste screenshot removal keeps the file, and censor answers 409.
   - A `BEFORE DELETE` trigger on each projected table, plus a trigger on `media_objects.lifecycle_status`, refuses the change, so paths nobody has hooked are still covered. The triggers are the `_v2` ones (clip-aware); an older database has its first-version guards replaced at start.
-- **No tier move.** `moveToCold`, `moveToHot`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }` (the admin moves answer it, R2 moves are logged as `refused`), and the sweep counts these as `skippedHeld` instead of errors. A hold freezes an object's placement: `moveToHot` is refused too, because restoring flips the row to local and drops an R2 copy. A clip cut from a held VOD in B2/R2 is cut from the cloud copy instead of fetching the VOD home. Row updates that only record where the bytes already are (the sweep finding a local file gone while B2 has the copy, the legacy-tier migration) still happen: they move nothing.
+- **No tier move.** `moveToCold`, `moveToHot`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }` (the admin moves answer it, R2 moves are logged as `refused`), and the sweep counts these as `skippedHeld` instead of errors. A held native object is never promoted to or demoted from the R2 cache either (logged as `refused`; a hold placed while its bytes were being copied wins, and the unrecorded copy is removed). A hold freezes an object's placement: `moveToHot` is refused too, because restoring flips the row to local and drops an R2 copy. A clip cut from a held VOD in B2/R2 is cut from the cloud copy instead of fetching the VOD home. Row updates that only record where the bytes already are (the sweep finding a local file gone while B2 has the copy, the legacy-tier migration) still happen: they move nothing.
 
 **Staff routes** (`/api/v1/:app/admin/storage/holds`, the app key like every admin route; a call acting
 for one of the app's users, `X-OV-User-Id`, gets 403):
@@ -855,6 +859,105 @@ node scripts/r2-eviction-drill.js (--vod <id> | --pick) [--execute] [--base-url 
 
 Not run against production yet: it needs the owner's go-ahead.
 
+## Tiering of native objects
+
+Roadmap WS-G task 11. Code: `server/objects/popularity.js`, `server/objects/tier-policy.js`,
+`server/objects/tiering.js`. Test: `test/object-tiering.test.js` (a fake S3 through the real SDK).
+
+A native object (uploaded through `/api/v2`, `legacy_ref` NULL) keeps its canonical copy where the upload
+put it: local disk (`OBJECTS_PATH`), or B2 for a B2 canonical copy. When it is popular it also gets a copy
+in the Cloudflare R2 popularity cache (`storage_class` `cache`, key `objects/<app>/<id>`, or the B2 key),
+and that copy becomes its playback source: `GET /o/:id` redirects to it while R2 is available, and the
+canonical copy is the fallback. When the object goes idle, or is no longer `ready` (deleted), the R2 copy
+is removed again. Projected objects (VODs, clips) keep tiering through `vod-storage.js` as before.
+
+### Popularity
+
+Unique viewers per object per UTC day, with no IP address or subject id stored (ADR-021):
+
+- **Who is a viewer.** The client's network: `req.ip` (see [Client addresses](../README.md#client-addresses)),
+  an IPv6 address reduced to its /64. One network is one viewer, whatever its user agent: people behind
+  one NAT count once, which errs on the conservative side, and a client cannot inflate a count.
+- **What is stored.** `media_object_viewer_days` holds `HMAC-SHA256(salt of the day, network)`, 16 hex
+  characters, per object and day; the salt is 32 random bytes per UTC day (`media_object_view_salts`).
+  `media_object_views_daily` holds the count (`unique_viewers`, `last_viewed_at`) per object and day.
+- **Rotation.** Once a UTC day is over, its hashes and its salt are deleted: by the first view of the next
+  day, by the hourly maintenance and at the start of every tiering sweep. After that nothing links a count
+  to an address, even with the database and every secret. The daily counts are kept 30 days.
+- **The 7-day figure** is the sum of the last seven daily counts (today included): viewer-days. The same
+  network on three days counts three times, as in the shared analytics' multi-day uniques.
+- **Counted** on `GET /o/:id` of a ready, native object of a non-sandbox tenant, public or signed. **Not
+  counted:** `HEAD`, range requests that do not start at byte 0 (a player's seeks), `Sec-GPC: 1` or
+  `DNT: 1` (no hash is made at all), crawlers and clients without a user agent
+  (`openvibe-shared/analytics` `privacy.optedOut` / `classifyRequest`). A response that Cloudflare serves
+  from its cache never reaches Media and is not counted.
+
+### Policy
+
+The namespace `media.object_tier` of `openvibe-shared/config`, beside `media.storage_tier`: revisions with
+who and why, validated as a whole, history and rollback through `…/admin/storage/config/media.object_tier`.
+Revision 1 sets nothing, so every key is its built-in default until a revision sets it.
+
+| key | default | meaning |
+|---|---|---|
+| `active` | `false` | **the site-level activation gate.** Off: nothing moves (not through the sweep, not through a direct `promote()`/`demote()`); the sweep records what it would do as `dry_run` decisions |
+| `promoteMinUniqueViewers7d` | 500 | unique viewers over the last 7 UTC days to promote (1 to 10⁹) |
+| `promoteRecentAccessDays` | 3 | …and viewed within this many days, today included (1-30) |
+| `promoteMinSizeMb` / `promoteMaxSizeMb` | 16 / 4096 | size bounds: a small object is cheap to serve locally; the upper bound caps the bytes one promotion hashes and reads back |
+| `maxPromotionsPerSweep` | 3 | promotions (and dry runs) per sweep (0-100) |
+| `demoteIdleDays` | 14 | no viewer for this many days, and in R2 at least that long: demote (1-30) |
+| `maxDemotionsPerSweep` | 10 | demotions per sweep (0-500) |
+
+Refused (422 `config.invalid`, nothing changes): a wrong type, an unknown key, a value out of range,
+`promoteMinSizeMb` not below `promoteMaxSizeMb`, and `demoteIdleDays` not above `promoteRecentAccessDays`
+(an object viewed recently enough to promote would also be idle enough to demote).
+
+### Sweep and moves
+
+The sweep is step 4 of the storage sweep (`vod-storage.js runSweep`, every `sweepIntervalMs`, and
+`POST /admin/storage/tiers/sweep`); its result is the storage sweep's `objects`. It is skipped while the
+local disk still needs a drain, never starts in a restore drill (and refuses under `MEDIA_DRILL` anyway).
+Each pass rotates the popularity counts, then:
+
+1. **Demotes** first (at most `maxDemotionsPerSweep`): R2 copies of native objects that are no longer
+   `ready`, or idle for `demoteIdleDays` and in R2 at least that long.
+2. **Promotes** (at most `maxPromotionsPerSweep`), most viewed first: ready native objects of non-sandbox
+   tenants within the thresholds and without a present R2 copy.
+
+**Promotion** (`tiering.promote`): refused when the object is held, not ready, a sandbox object, or its
+canonical copy is not verified on record (present, checked, not contradicted, and the object has a
+sha256: the `object.hash` job supplies it for older objects); then the gate (`dry_run`); then R2 must be
+available. The canonical copy is checked again (a local file is hashed and must match the sha256; a B2
+copy must answer a HEAD with the right size), uploaded (or copied from B2), and the R2 copy is HEADed and
+read back: its size and sha256 must match. Only then is the R2 location recorded `present` (with the
+checksum), which makes it the playback source. A copy that does not verify is deleted and never recorded
+(`failed`); a hold or a delete that arrived during the copy wins (`refused`, the copy removed).
+
+**Demotion** (`tiering.demote`): refused under a hold; then the gate (`dry_run`); then the canonical copy
+must check out now (hashed again, or HEAD for B2). A copy that does not (missing, changed) keeps the R2
+copy, which may be the last good one (`refused`). The R2 object is deleted, a HEAD must confirm it is gone
+(`failed` otherwise, and the location stays), and the location row is removed.
+
+**Decisions.** Every outcome goes to `media_object_tier_decisions` (`done`, `already`, `refused`,
+`failed`, `dry_run`) with the inputs it saw (`unique_viewers_7d`, `last_viewed_day`, size, kind,
+visibility, lifecycle, the canonical copy's state, `held`, the R2 copy, `gate_active`, `r2_available`),
+the policy in force (each value with its source) and the reason. A refusal or dry run the sweep repeats is
+logged once a day per object, and a repeated dry run does not use up the sweep's budget, so over a day the
+log shows what successive sweeps would move. An object whose move failed waits 6 hours. They are counted
+in `media_tier_decisions_24h{target="object",action,outcome}` on `/metrics` (VOD decisions are
+`target="vod"`) and shown in the [operator views](#operator-views).
+
+**Admin API** (`/api/v1/:app/admin/storage`, the app key, this app's objects only):
+
+| method | path | notes |
+|---|---|---|
+| GET | `/tiers/objects/policy` | `gate`, each threshold as `{ value, default, source }`, the rules in words, R2's status, `candidates` (what would be promoted now: `object_id`, `unique_viewers_7d`, `last_viewed_day`, `blocked_by` when something on record would refuse it; `?limit`), `decisions.last_24h` per action and outcome and the 20 most recent |
+| GET | `/tiers/objects/decisions` | `?object_id&action=promote\|demote&outcome=done\|already\|refused\|failed\|dry_run&limit (≤200)&before_id` → `{ decisions, next_before_id }`, newest first |
+| GET / POST | `/config/media.object_tier`, `…/history`, `…/rollback` | the policy's revisions (`POST …/media.object_tier` `{ values: { active: true }, merge: true, reason }` turns the gate on) |
+
+**With the gate on and then off again,** placement freezes: promoted objects keep playing from R2, and a
+deleted object's R2 copy stays (so its purge waits) until the gate is on again.
+
 ## Configuration
 
 | env | default | meaning |
@@ -897,7 +1000,8 @@ Not run against production yet: it needs the owner's go-ahead.
 ## Not in this pass
 
 - Presigned direct-to-bucket uploads. Presigned URLs are Media-signed and native bytes are stored locally.
-- Tiering of native objects to B2/R2.
+- Offloading native objects' canonical copy to B2. Popular native objects are cached in R2
+  ([Tiering of native objects](#tiering-of-native-objects)); their canonical copy stays local.
 - Copy/move aliases, lifecycle rules and an S3-compatible façade.
 - Clip cutting and the finalize remux still run inline, not as jobs (thumbnail regeneration was the first
   operation moved onto the job system).
@@ -912,3 +1016,5 @@ The tiering thresholds (`DEFAULTS` in `server/vod/vod-storage.js`) are the names
 - **Revision 1** is what `media_settings` held.
 - **Mirror:** every activation writes the active revision's explicit keys through to `media_settings` (`storage_tier.*`) and removes the rest, so a release that reads those rows sees the same policy. The rows go in the ADR-028 contract step.
 - **Sweep:** a running sweep restarts with the new policy.
+- **Native objects** have their own namespace, `media.object_tier` (`server/objects/tier-policy.js`): the
+  same revisions and routes, nothing mirrored to `media_settings`. See [Tiering of native objects](#tiering-of-native-objects).

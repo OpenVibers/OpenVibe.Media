@@ -156,6 +156,9 @@ function tiering(appId, limit) {
                              FROM media_tier_decisions WHERE outcome IN ('refused', 'failed')${s.sql} ORDER BY id DESC LIMIT ?`, [...s.params, Math.min(limit, 20)])
         .map(r => ({ ...r, reason: clip(r.reason, 300), error: clip(r.error, 300) }));
     const sweep = vodStorage.sweepInfo();
+    // Native v2 objects (objects/tiering.js): the activation gate, the policy, R2 copies, what would be promoted
+    // now, and the decisions (dry runs included), from the database like everything here.
+    const nativeObjects = require('../objects/tiering').report({ appId, limit: Math.min(limit, 20) });
     return {
         providers: { b2: vodStorage.providerConfigured('b2'), r2: vodStorage.providerConfigured('r2') },
         policy: { enabled: !!settings.enabled, r2_enabled: !!settings.r2Enabled, min_age_days: settings.minAgeDays, max_views_for_cold: settings.maxViewsForCold, min_last_access_days: settings.minLastAccessDays },
@@ -175,7 +178,8 @@ function tiering(appId, limit) {
                 timestamp: sweep.lastResult.timestamp || null,
             } : null,
         },
-        note: 'Native v2 objects stay on local storage until roadmap WS-G task 11 (tiering for native objects). The sweep and the provider switches are service-wide; counts follow the scope.',
+        native_objects: nativeObjects,
+        note: 'VODs tier by the media.storage_tier policy; native v2 objects keep their canonical copy and are cached in R2 by the media.object_tier policy, only while its activation gate is on (dry runs otherwise). The sweep, the gate and the provider switches are service-wide; counts follow the scope.',
     };
 }
 

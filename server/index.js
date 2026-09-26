@@ -242,6 +242,8 @@ if (!drill.enabled) {
         try { const n = require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
         // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
         try { const r = require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
+        // Native objects' popularity (ADR-021): a finished UTC day's viewer hashes and salt are deleted, only its counts stay (30 days).
+        try { const r = require('./objects/popularity').rotate(); if (r.hashes || r.salts || r.counts) console.log(`[Popularity] ${r.hashes} viewer hash(es) and ${r.salts} salt(s) of finished days deleted, ${r.counts} old daily count(s) pruned`); } catch (err) { console.warn('[Popularity] rotate:', err.message); }
         // Namespaces: uploads whose quota reservation expired are failed and their bytes freed; then every
         // namespace's usage snapshot is refreshed (v1 files, deletes and purges included).
         try {
