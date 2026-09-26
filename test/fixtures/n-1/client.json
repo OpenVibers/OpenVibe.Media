@@ -1,0 +1,836 @@
+{
+ "service": "media",
+ "release": "b7fbe65029f38fd3ec6b10919eab9b8ba13df9d4",
+ "recorded_at": "2026-09-26T14:14:01.055Z",
+ "note": "N-1 fixture: written by `npm run n-1:record`, replayed by test/n-1.test.js",
+ "manifest": {
+  "service": "media",
+  "release": "b7fbe65029f3",
+  "released_at": "2026-09-26T13:16:26.000Z",
+  "booted_at": "2026-09-26T14:14:00.188Z",
+  "contracts_version": "0.54.0",
+  "packages": {
+   "openvibe-shared": "1.22.0",
+   "openvibe-sdk": "0.11.0"
+  },
+  "min_client_release": null,
+  "mixed_version_window_hours": 24,
+  "components": {
+   "shell": {
+    "kind": "script",
+    "version": "b7fbe65029f3"
+   },
+   "server": {
+    "kind": "server",
+    "version": "b7fbe65029f3"
+   }
+  },
+  "assets": {},
+  "schema_generation": null,
+  "schema_compatible_from": null,
+  "contract_ranges": {},
+  "metrics_url": "/release-metrics"
+ },
+ "dynamic_calls": 3,
+ "calls": [
+  {
+   "method": "GET",
+   "path": "/api/v1/live/files",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/media.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/live/files",
+   "auth": "user",
+   "status": 200,
+   "kind": "json",
+   "reads": {
+    "files": "array",
+    "files[]": "object",
+    "files[].key": "string",
+    "files[].app_id": "string",
+    "files[].user_id": "null",
+    "files[].original_name": "string",
+    "files[].size": "number",
+    "files[].mime": "string",
+    "files[].sha256": "null",
+    "files[].url": "string",
+    "files[].created_at": "string",
+    "used_bytes": "number",
+    "limit": "number",
+    "offset": "number"
+   },
+   "from": [
+    "node_modules/openvibe-sdk/src/media.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/live/files/n1file.txt",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/media.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v1/live/files/n1file.txt",
+   "auth": "user",
+   "status": 200,
+   "kind": "json",
+   "reads": {
+    "key": "string",
+    "app_id": "string",
+    "user_id": "null",
+    "original_name": "string",
+    "size": "number",
+    "mime": "string",
+    "sha256": "null",
+    "url": "string",
+    "created_at": "string"
+   },
+   "from": [
+    "node_modules/openvibe-sdk/src/media.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/me/objects/1",
+   "auth": "anon",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "server/me/client.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/me/objects/1",
+   "auth": "user",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "server/me/client.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/me/objects?status=uploading&limit=100",
+   "auth": "anon",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "server/me/client.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/me/objects?status=uploading&limit=100",
+   "auth": "user",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "server/me/client.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/me/objects",
+   "auth": "anon",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "server/me/client.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/me/objects",
+   "auth": "user",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "server/me/client.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/jobs",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/jobs",
+   "auth": "user",
+   "status": 200,
+   "kind": "json",
+   "reads": {
+    "jobs": "array",
+    "next_cursor": "null",
+    "limit": "number"
+   },
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/jobs/{@object}",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/jobs/{@object}",
+   "auth": "user",
+   "status": 404,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects",
+   "auth": "user",
+   "status": 200,
+   "kind": "json",
+   "reads": {
+    "objects": "array",
+    "objects[]": "object",
+    "objects[].id": "string",
+    "objects[].legacy_ref": "string",
+    "objects[].app_id": "string",
+    "objects[].namespace": "string",
+    "objects[].kind": "string",
+    "objects[].owner": "object",
+    "objects[].owner.subject": "null",
+    "objects[].owner.app": "string",
+    "objects[].owner.user_id": "number",
+    "objects[].visibility": "string",
+    "objects[].lifecycle_status": "string",
+    "objects[].mime_type": "string",
+    "objects[].size_bytes": "number",
+    "objects[].content_hash": "null",
+    "objects[].metadata": "object",
+    "objects[].metadata.title": "string",
+    "objects[].metadata.duration_seconds": "number",
+    "objects[].metadata.health_status": "string",
+    "objects[].metadata.managed_stream_id": "null",
+    "objects[].metadata.recording": "boolean",
+    "objects[].held": "boolean",
+    "objects[].readiness": "object",
+    "objects[].readiness.metadata": "boolean",
+    "objects[].readiness.bytes_verified": "boolean",
+    "objects[].readiness.playable": "boolean",
+    "objects[].readiness.reason": "string",
+    "objects[].public_url": "string",
+    "objects[].created_at": "string",
+    "objects[].updated_at": "string",
+    "objects[].deleted_at": "null",
+    "objects[].metadata.auto_generated": "boolean",
+    "objects[].metadata.filename": "string",
+    "next_cursor": "null",
+    "limit": "number"
+   },
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects/{@object}",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects/{@object}",
+   "auth": "user",
+   "status": 200,
+   "kind": "json",
+   "reads": {
+    "id": "string",
+    "legacy_ref": "string",
+    "app_id": "string",
+    "namespace": "string",
+    "kind": "string",
+    "owner": "object",
+    "owner.subject": "null",
+    "owner.app": "string",
+    "owner.user_id": "number",
+    "visibility": "string",
+    "lifecycle_status": "string",
+    "mime_type": "string",
+    "size_bytes": "number",
+    "content_hash": "null",
+    "metadata": "object",
+    "metadata.title": "string",
+    "metadata.duration_seconds": "number",
+    "metadata.health_status": "string",
+    "metadata.managed_stream_id": "null",
+    "metadata.recording": "boolean",
+    "held": "boolean",
+    "readiness": "object",
+    "readiness.metadata": "boolean",
+    "readiness.bytes_verified": "boolean",
+    "readiness.playable": "boolean",
+    "readiness.reason": "null",
+    "public_url": "string",
+    "created_at": "string",
+    "updated_at": "string",
+    "deleted_at": "null",
+    "locations": "array",
+    "locations[]": "object",
+    "locations[].provider": "string",
+    "locations[].storage_class": "string",
+    "locations[].state": "string",
+    "locations[].size_bytes": "number",
+    "locations[].verified_at": "string",
+    "locations[].canonical": "boolean"
+   },
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects/{@object}/download",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects/{@object}/download",
+   "auth": "user",
+   "status": 302,
+   "kind": "empty",
+   "location": "/v/1",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects/{@object}/multipart/n1-upload",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/api/v2/live/objects/{@object}/multipart/n1-upload",
+   "auth": "user",
+   "status": 404,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/me",
+   "auth": "anon",
+   "status": 503,
+   "kind": "html",
+   "from": [
+    "server/me/pages.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/me",
+   "auth": "user",
+   "status": 503,
+   "kind": "html",
+   "from": [
+    "server/me/pages.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/me/ops",
+   "auth": "anon",
+   "status": 503,
+   "kind": "html",
+   "from": [
+    "server/me/pages.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/me/ops",
+   "auth": "user",
+   "status": 503,
+   "kind": "html",
+   "from": [
+    "server/me/pages.js"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/assets/logo-192.png",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "other",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/manifest.webmanifest",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "json",
+   "reads": {
+    "name": "string",
+    "description": "string",
+    "scope": "string"
+   },
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=all",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=videos",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=clips",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=images",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=text",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=emotes",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=sounds",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=thumbnails",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/?tab=files",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v/1",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/t/vod-1-1.jpg",
+   "auth": "anon",
+   "accept": "html",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/c/1",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/p/n1paste",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/updates",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/sitemap.xml",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "other",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/shared/navbar.js?v=b50d9f47fc34",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "other",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/shared/footer.js?v=b99e512398d5",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "other",
+   "from": [
+    "page /"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/browse",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "html",
+   "from": [
+    "page"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/shared/theme-loader.js?v=d9b9af081efe",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "other",
+   "from": [
+    "page /v/1"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v/1?raw=1",
+   "auth": "anon",
+   "accept": "html",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "page /v/1"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/v/1/transcript.json",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "json",
+   "reads": {
+    "vod_id": "number",
+    "title": "string",
+    "created_at": "string",
+    "duration_seconds": "number",
+    "visibility": "string",
+    "is_recording": "boolean",
+    "managed_stream_id": "null",
+    "ai_overview": "null",
+    "ai_analyzed_at": "null",
+    "transcript": "null",
+    "segments": "array",
+    "sound_events": "array",
+    "app_id": "string",
+    "generated_at": "string"
+   },
+   "from": [
+    "page /v/1"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/c/1?raw=1",
+   "auth": "anon",
+   "accept": "html",
+   "status": 503,
+   "kind": "json",
+   "from": [
+    "page /c/1"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/p/n1paste/raw",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "text",
+   "from": [
+    "page /p/n1paste"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/shared/shipped.js?v=18e4e7ae4ec3",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "other",
+   "from": [
+    "page /updates"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/api/v1/live/files",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/media.js"
+   ]
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/v1/live/files/n1file.txt",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/media.js"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/api/v2/live/jobs",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/api/v2/live/jobs/{@object}/approve",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/api/v2/live/jobs/{@object}/cancel",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/api/v2/live/objects",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/api/v2/live/objects/{@object}/complete",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "DELETE",
+   "path": "/api/v2/live/objects/{@object}",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/api/v2/live/objects/{@object}/multipart/n1-upload/complete",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "PUT",
+   "path": "/api/v2/live/objects/{@object}/multipart/n1-upload/parts/1",
+   "auth": "anon",
+   "status": 401,
+   "kind": "json",
+   "from": [
+    "node_modules/openvibe-sdk/src/objects.js"
+   ]
+  },
+  {
+   "method": "POST",
+   "path": "/me/ops/recompute",
+   "auth": "anon",
+   "status": 503,
+   "kind": "html",
+   "from": [
+    "server/me/pages.js"
+   ]
+  }
+ ]
+}

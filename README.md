@@ -346,6 +346,17 @@ backup and starts a second Media from this checkout on 127.0.0.1:14100 with `MED
 `test/drill-mode.test.js` boots the real server that way against a copy whose app has a webhook URL
 and checks each point.
 
+## N-1: the previous release against this one
+
+`test/n-1.test.js` (roadmap WS-P task 11, in `npm test`) boots this checkout in the drill sandbox
+(with writes let through) on a database the previous release created, so this release's migrations
+run over it, and replays `test/fixtures/n-1/`: every call the previous release's clients make (the
+openvibe-sdk media and objects clients with an app key, the object explorer, and every player URL,
+link, script and form of the `/`, `/browse`, `/v`, `/c`, `/p`, `/me` and `/updates` pages it served),
+each answered compatibly (status, JSON, the response fields the client reads). Then every SQL statement
+the previous release runs must still prepare on the migrated schema. After each deploy, record the
+release now in production as the next N-1 (`npm run n-1:record [ref]`) and commit the fixtures.
+
 ## Client addresses
 
 Express `trust proxy` is `loopback` (`server/client-ip.js`): `req.ip` is the `X-Forwarded-For` that the
