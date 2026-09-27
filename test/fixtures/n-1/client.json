@@ -1,14 +1,14 @@
 {
  "service": "media",
- "release": "be0facd28e64c0b8e7f7322b69e65a1953103070",
- "recorded_at": "2026-09-27T22:05:42.752Z",
+ "release": "a207b1d28b12d333484d087ee37c2c2e3edeee5e",
+ "recorded_at": "2026-09-27T23:24:22.333Z",
  "note": "N-1 fixture: written by `npm run n-1:record`, replayed by test/n-1.test.js",
  "manifest": {
   "service": "media",
-  "release": "be0facd28e64",
-  "released_at": "2026-09-27T21:43:34.000Z",
-  "booted_at": "2026-09-27T22:05:41.881Z",
-  "contracts_version": "0.54.0",
+  "release": "a207b1d28b12",
+  "released_at": "2026-09-27T22:52:43.000Z",
+  "booted_at": "2026-09-27T23:24:21.509Z",
+  "contracts_version": "0.71.0",
   "packages": {
    "openvibe-shared": "1.22.0",
    "openvibe-sdk": "0.11.0"
@@ -18,17 +18,20 @@
   "components": {
    "shell": {
     "kind": "script",
-    "version": "be0facd28e64"
+    "version": "a207b1d28b12"
    },
    "server": {
     "kind": "server",
-    "version": "be0facd28e64"
+    "version": "a207b1d28b12"
    }
   },
   "assets": {},
   "schema_generation": null,
   "schema_compatible_from": null,
   "contract_ranges": {},
+  "client_generation": null,
+  "min_client_generation": null,
+  "shell": null,
   "metrics_url": "/release-metrics"
  },
  "dynamic_calls": 3,
@@ -239,6 +242,11 @@
     "objects[].size_bytes": "number",
     "objects[].content_hash": "null",
     "objects[].metadata": "object",
+    "objects[].metadata.title": "string",
+    "objects[].metadata.duration_seconds": "number",
+    "objects[].metadata.health_status": "string",
+    "objects[].metadata.managed_stream_id": "null",
+    "objects[].metadata.recording": "boolean",
     "objects[].held": "boolean",
     "objects[].readiness": "object",
     "objects[].readiness.metadata": "boolean",
@@ -249,12 +257,7 @@
     "objects[].created_at": "string",
     "objects[].updated_at": "string",
     "objects[].deleted_at": "null",
-    "objects[].metadata.title": "string",
-    "objects[].metadata.duration_seconds": "number",
     "objects[].metadata.auto_generated": "boolean",
-    "objects[].metadata.health_status": "string",
-    "objects[].metadata.managed_stream_id": "null",
-    "objects[].metadata.recording": "boolean",
     "objects[].metadata.filename": "string",
     "next_cursor": "null",
     "limit": "number"
