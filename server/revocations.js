@@ -8,13 +8,14 @@
  * delivery moves the person's cutoff (openvibe-sdk createRevocationStore: only ever forward, source
  * network only); user-auth.js then refuses their older tokens, so openvibe.media's navbar shows them
  * signed out at once. The same endpoint takes network.subject.merged (ADR-029): a folded-in account's media objects
- * move to the survivor (server/subject-merge.js). The subscriptions (one per topic) are created at boot when
+ * move to the survivor (server/subject-merge.js), and network.account.export_requested / network.account.deleted (ADR-033):
+ * Media's export part, or the erasure of what the account owns (server/account-data.js). The subscriptions (one per topic) are created at boot when
  * EVENTS_URL, the service secret and MEDIA_INBOUND_EVENTS_SECRET are set (grant media events.subscription.manage).
  */
 const express = require('express');
 
 const TOPIC = 'network.user.token_valid_after';
-const TOPICS = [TOPIC, 'network.subject.merged'];
+const TOPICS = [TOPIC, 'network.subject.merged', 'network.account.export_requested', 'network.account.deleted'];
 let store = null;
 function cutoffs() {
     if (!store) store = require('openvibe-sdk/auth').createRevocationStore(require('./db/database').getDb(), { table: 'token_revocations' });
@@ -36,6 +37,11 @@ function handler() {
         for (const k of keys) { d = parseDelivery(raw, req.headers, k, { requireV2: true }); if (d) break; }
         if (!d || !d.event) { stats.refused++; return res.status(401).json({ error: 'bad signature' }); }
         stats.received++;
+        // Account export and deletion (ADR-033) answer after Network took Media's part or confirmation: a failure is redelivered.
+        if (require('./account-data').TOPICS.includes(d.event.event_type)) {
+            return require('./account-data').apply(d.event).then((outcome) => res.json({ event_id: d.event.event_id || null, outcome }),
+                (e) => { console.error(`[AccountData] ${d.event.event_type} failed:`, e.message); res.status(500).json({ error: 'not applied' }); });
+        }
         const outcome = d.event.event_type === 'network.subject.merged' ? require('./subject-merge').apply(d.event) : cutoffs().apply(d.event);
         if (outcome === 'revoked') stats.revoked++;
         res.json({ event_id: d.event.event_id || null, outcome });

@@ -70,7 +70,7 @@ const ev = (over = {}) => ({ event_id: 'evt_01J8Z3Q4R5S6T7V8W9X0Y1Z2A3', event_t
         };
         assert.strictEqual(await revocations.ensureSubscription({ fetchImpl: fake, log: { log() {} } }), 'created');
         assert.strictEqual(await revocations.ensureSubscription({ fetchImpl: fake, log: { log() {} } }), 'exists');
-        assert.deepStrictEqual(subs.map((s) => s.topic_pattern), [revocations.TOPIC, 'network.subject.merged'], 'one subscription per topic, created once');
+        assert.deepStrictEqual(subs.map((s) => s.topic_pattern), [revocations.TOPIC, 'network.subject.merged', 'network.account.export_requested', 'network.account.deleted'], 'one subscription per topic, created once');
     } finally {
         srv.close();
         fs.rmSync(tmp, { recursive: true, force: true });
