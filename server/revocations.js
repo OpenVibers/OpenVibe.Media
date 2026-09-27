@@ -7,12 +7,14 @@
  * MEDIA_INBOUND_EVENTS_SECRET (signature v2 only) and refused when it came through the proxy. A
  * delivery moves the person's cutoff (openvibe-sdk createRevocationStore: only ever forward, source
  * network only); user-auth.js then refuses their older tokens, so openvibe.media's navbar shows them
- * signed out at once. The subscription is created at boot when EVENTS_URL, the service secret and
- * MEDIA_INBOUND_EVENTS_SECRET are set (grant media events.subscription.manage).
+ * signed out at once. The same endpoint takes network.subject.merged (ADR-029): a folded-in account's media objects
+ * move to the survivor (server/subject-merge.js). The subscriptions (one per topic) are created at boot when
+ * EVENTS_URL, the service secret and MEDIA_INBOUND_EVENTS_SECRET are set (grant media events.subscription.manage).
  */
 const express = require('express');
 
 const TOPIC = 'network.user.token_valid_after';
+const TOPICS = [TOPIC, 'network.subject.merged'];
 let store = null;
 function cutoffs() {
     if (!store) store = require('openvibe-sdk/auth').createRevocationStore(require('./db/database').getDb(), { table: 'token_revocations' });
@@ -34,13 +36,13 @@ function handler() {
         for (const k of keys) { d = parseDelivery(raw, req.headers, k, { requireV2: true }); if (d) break; }
         if (!d || !d.event) { stats.refused++; return res.status(401).json({ error: 'bad signature' }); }
         stats.received++;
-        const outcome = cutoffs().apply(d.event);
+        const outcome = d.event.event_type === 'network.subject.merged' ? require('./subject-merge').apply(d.event) : cutoffs().apply(d.event);
         if (outcome === 'revoked') stats.revoked++;
         res.json({ event_id: d.event.event_id || null, outcome });
     }];
 }
 
-/** Create Media's subscription to TOPIC if missing (idempotent; an operator-disabled one is left alone). */
+/** Create Media's subscriptions to TOPICS where missing (idempotent; an operator-disabled one is left alone). */
 async function ensureSubscription({ fetchImpl = globalThis.fetch, log = console } = {}) {
     const eventsUrl = String(process.env.EVENTS_URL || '').replace(/\/+$/, '');
     const secret = secrets()[0];
@@ -57,12 +59,16 @@ async function ensureSubscription({ fetchImpl = globalThis.fetch, log = console 
     const list = await fetchImpl(`${eventsUrl}/api/v1/subscriptions`, { headers });
     if (!list.ok) throw new Error(`Events answered ${list.status} listing subscriptions`);
     const subs = ((await list.json()).subscriptions || []);
-    if (subs.some((s) => s.topic_pattern === TOPIC && s.endpoint === endpoint)) return 'exists';
-    const r = await fetchImpl(`${eventsUrl}/api/v1/subscriptions`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ topic_pattern: TOPIC, endpoint, secret }) });
-    if (r.status === 409) return 'exists';
-    if (!r.ok) throw new Error(`Events answered ${r.status} creating the ${TOPIC} subscription`);
-    log.log && log.log(`[Events] subscription created: ${TOPIC} → ${endpoint}`);
-    return 'created';
+    let created = 0;
+    for (const topic of TOPICS) {
+        if (subs.some((s) => s.topic_pattern === topic && s.endpoint === endpoint)) continue;
+        const r = await fetchImpl(`${eventsUrl}/api/v1/subscriptions`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ topic_pattern: topic, endpoint, secret }) });
+        if (r.status === 409) continue;
+        if (!r.ok) throw new Error(`Events answered ${r.status} creating the ${topic} subscription`);
+        log.log && log.log(`[Events] subscription created: ${topic} → ${endpoint}`);
+        created++;
+    }
+    return created ? 'created' : 'exists';
 }
 
-module.exports = { handler, ensureSubscription, isRevoked, stats, TOPIC, _cutoffs: cutoffs };
+module.exports = { handler, ensureSubscription, isRevoked, stats, TOPIC, TOPICS, _cutoffs: cutoffs };
