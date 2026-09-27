@@ -15,8 +15,10 @@ const BUDGETS = {
     htmlRawKB: 25,   // measured 19.8 (fresh database)
     htmlBrotliKB: 6.5,   // 5.0
     jsFiles: 4,   // 3
-    jsRawKB: 180,   // 153.4
-    jsBrotliKB: 43,   // 37.3
+    // 2026-09-27: theme-loader (44.3 KB, 8.3 brotli) now comes from Media's own /shared (D42) instead of
+    // openvibe.network, so it is counted here; the page itself did not grow.
+    jsRawKB: 215,   // 197.7
+    jsBrotliKB: 50,   // 45.6
     cssFiles: 2,   // 1 (Font Awesome, cross-origin)
     cssRawKB: 10,   // 0 same-origin
     externalFiles: 3,   // 2

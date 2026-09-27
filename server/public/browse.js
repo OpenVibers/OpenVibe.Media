@@ -256,7 +256,7 @@ function renderPage(tab, page, data, counts) {
 <meta name="twitter:title" content="OpenVibe.Media — Media Index">
 <meta name="twitter:image" content="${config.publicUrl}/og-image.png">
 <!-- The shared theme-loader applies the user's theme to <html> before anything paints. -->
-<script src="https://openvibe.network/shared/theme-loader.js" defer></script>
+<script src="${require('openvibe-shared/serve').url('theme-loader.js')}" defer></script>
 <style>
 ${DEFAULT_THEME_CSS ? `:root{${DEFAULT_THEME_CSS}}` : ''}
 :root{--bg:var(--bg-primary,#0a0f1c);--panel:var(--bg-card,#131c2e);--border:#1f2d47;--text:var(--text-primary,#e6edf7);--muted:var(--text-secondary,#96a7c2);--accent-page:var(--accent,#3b82f6)}
