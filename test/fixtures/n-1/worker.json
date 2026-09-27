@@ -1,7 +1,7 @@
 {
  "service": "media",
- "release": "1157a5459a908ba5601a6321761e2954bdf94ff5",
- "recorded_at": "2026-09-27T19:08:02.347Z",
+ "release": "be0facd28e64c0b8e7f7322b69e65a1953103070",
+ "recorded_at": "2026-09-27T22:05:42.752Z",
  "note": "N-1 fixture: written by `npm run n-1:record`, replayed by test/n-1.test.js",
  "user_version": 0,
  "schema": [
@@ -92,7 +92,8 @@
  ],
  "ledger": {},
  "lazy": [
-  "CREATE TABLE IF NOT EXISTS search_doc_pushes ( kind TEXT NOT NULL, media_id INTEGER NOT NULL, hash TEXT NOT NULL, revision INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, pushed_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (kind, media_id) )"
+  "CREATE TABLE IF NOT EXISTS search_doc_pushes ( kind TEXT NOT NULL, media_id INTEGER NOT NULL, hash TEXT NOT NULL, revision INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0, pushed_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (kind, media_id) )",
+  "CREATE TABLE IF NOT EXISTS subject_merges ( merge_id TEXT PRIMARY KEY, from_subject TEXT NOT NULL, into_subject TEXT NOT NULL, objects INTEGER NOT NULL DEFAULT 0, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) )"
  ],
  "statements": [
   "DELETE FROM assets WHERE id = ?",
@@ -140,6 +141,7 @@
   "INSERT INTO paste_comments (paste_id, user_id, parent_id, anon_name, message, ip_address) VALUES (?, ?, ?, ?, ?, ?)",
   "INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, screenshot_path, metadata, ip_address) VALUES ('network', ?, ?, 'screenshot', ?, '', 'text', 'unlisted', ?, ?, NULL)",
   "INSERT INTO search_doc_pushes (kind, media_id, hash, revision, deleted, pushed_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) ON CONFLICT(kind, media_id) DO UPDATE SET hash = excluded.hash, revision = excluded.revision, deleted = excluded.deleted, pushed_at = excluded.pushed_at",
+  "INSERT INTO subject_merges (merge_id, from_subject, into_subject, objects) VALUES (?, ?, ?, ?)",
   "INSERT INTO vods (app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, master_file_path, file_size, duration_seconds, thumbnail_url, meta_json, is_public, visibility, clips_only) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
   "INSERT OR IGNORE INTO apps (app_id, name, api_key_hash, quota_bytes, project_id, env) VALUES (?, ?, '', ?, ?, ?)",
   "INSERT OR IGNORE INTO content_visits (content_type, content_id, visitor) VALUES (?, ?, ?)",
@@ -215,6 +217,7 @@
   "SELECT 1 FROM paste_likes WHERE paste_id = ? AND user_id = ?",
   "SELECT 1 FROM pastes WHERE slug = ?",
   "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event_outbox'",
+  "SELECT 1 FROM subject_merges WHERE merge_id = ?",
   "SELECT COALESCE(SUM(size), 0) AS bytes FROM files WHERE app_id = ?",
   "SELECT COALESCE(owner_app, app_id) AS owner_app, owner_user_id, count(*) AS objects FROM media_objects WHERE owner_subject IS NULL AND owner_user_id IS NOT NULL GROUP BY COALESCE(owner_app, app_id), owner_user_id ORDER BY 1, 2",
   "SELECT COALESCE(views,0) AS view_count, COALESCE(unique_views,0) AS unique_views FROM pastes WHERE id = ?",
@@ -393,6 +396,7 @@
   "UPDATE media_objects SET lifecycle_status = ?, deleted_at = NULL, metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
   "UPDATE media_objects SET metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
   "UPDATE media_objects SET namespace = ? WHERE app_id = ? AND namespace = ?",
+  "UPDATE media_objects SET owner_subject = ? WHERE owner_subject = ?",
   "UPDATE media_objects SET owner_subject = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_subject IS NULL AND COALESCE(owner_app, app_id) = ? AND owner_user_id = ?",
   "UPDATE media_objects SET owner_subject = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND owner_subject = ? AND COALESCE(owner_app, app_id) = ? AND owner_user_id = ?",
   "UPDATE media_objects SET size_bytes = ?, content_hash = ? WHERE id = ? AND size_bytes IS ? AND content_hash IS ?",

@@ -1,13 +1,13 @@
 {
  "service": "media",
- "release": "1157a5459a908ba5601a6321761e2954bdf94ff5",
- "recorded_at": "2026-09-27T19:08:02.347Z",
+ "release": "be0facd28e64c0b8e7f7322b69e65a1953103070",
+ "recorded_at": "2026-09-27T22:05:42.752Z",
  "note": "N-1 fixture: written by `npm run n-1:record`, replayed by test/n-1.test.js",
  "manifest": {
   "service": "media",
-  "release": "1157a5459a90",
-  "released_at": "2026-09-26T16:56:08.000Z",
-  "booted_at": "2026-09-27T19:08:01.448Z",
+  "release": "be0facd28e64",
+  "released_at": "2026-09-27T21:43:34.000Z",
+  "booted_at": "2026-09-27T22:05:41.881Z",
   "contracts_version": "0.54.0",
   "packages": {
    "openvibe-shared": "1.22.0",
@@ -18,11 +18,11 @@
   "components": {
    "shell": {
     "kind": "script",
-    "version": "1157a5459a90"
+    "version": "be0facd28e64"
    },
    "server": {
     "kind": "server",
-    "version": "1157a5459a90"
+    "version": "be0facd28e64"
    }
   },
   "assets": {},
@@ -239,9 +239,6 @@
     "objects[].size_bytes": "number",
     "objects[].content_hash": "null",
     "objects[].metadata": "object",
-    "objects[].metadata.title": "string",
-    "objects[].metadata.duration_seconds": "number",
-    "objects[].metadata.auto_generated": "boolean",
     "objects[].held": "boolean",
     "objects[].readiness": "object",
     "objects[].readiness.metadata": "boolean",
@@ -252,10 +249,13 @@
     "objects[].created_at": "string",
     "objects[].updated_at": "string",
     "objects[].deleted_at": "null",
-    "objects[].metadata.filename": "string",
+    "objects[].metadata.title": "string",
+    "objects[].metadata.duration_seconds": "number",
+    "objects[].metadata.auto_generated": "boolean",
     "objects[].metadata.health_status": "string",
     "objects[].metadata.managed_stream_id": "null",
     "objects[].metadata.recording": "boolean",
+    "objects[].metadata.filename": "string",
     "next_cursor": "null",
     "limit": "number"
    },
@@ -413,6 +413,17 @@
    "kind": "html",
    "from": [
     "page"
+   ]
+  },
+  {
+   "method": "GET",
+   "path": "/shared/theme-loader.js?v=d9b9af081efe",
+   "auth": "anon",
+   "accept": "html",
+   "status": 200,
+   "kind": "other",
+   "from": [
+    "page /"
    ]
   },
   {
@@ -638,17 +649,6 @@
    "kind": "html",
    "from": [
     "page"
-   ]
-  },
-  {
-   "method": "GET",
-   "path": "/shared/theme-loader.js?v=d9b9af081efe",
-   "auth": "anon",
-   "accept": "html",
-   "status": 200,
-   "kind": "other",
-   "from": [
-    "page /v/1"
    ]
   },
   {
