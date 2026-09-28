@@ -10,9 +10,12 @@
  *       probes and decodes it with ffprobe/ffmpeg, extracts each missing AI-moment frame again from
  *       its VOD's copy, and writes the plan: rebaseline, failed_recording, regenerate or lost, with the
  *       reason. Changes nothing. The report is for the owner (default <data>/reports/h15-repair-….json).
+ *       A copy whose bytes hash to the object's own content_hash plans resize: only the recorded size was
+ *       wrong (a projection from the legacy vods row put a stale size back after a rebaseline).
  *   node scripts/h15-repair.js --apply --backup <file.json>
  *       First an online backup of the database to <file>.media.db (checked with integrity_check), then
- *       the plan: re-records size and sha256 from a good remote copy, marks a failed recording
+ *       the plan: re-records size and sha256 from a good remote copy (and the size on the legacy vods
+ *       row, so its projection agrees), marks a failed recording
  *       lifecycle_status 'failed' (not playable, hidden from public players), writes a regenerated
  *       frame back to its location. <file.json> lists every change with its old values (the rollback
  *       file). Nothing is deleted, locally or remotely. Refuses to overwrite either file.
@@ -121,8 +124,8 @@ async function main() {
                     probes[l.provider] = await probe(file);
                 } catch (err) { probes[l.provider] = { error: err.message }; }
             }
-            const step = h15.plan(item, probes);
-            if (step.action === 'rebaseline') Object.assign(step, { facts: facts[step.provider], probe: { duration: probes[step.provider].duration, streams: probes[step.provider].streams } });
+            const step = h15.plan(item, probes, facts);
+            if (step.action === 'rebaseline' || step.action === 'resize') Object.assign(step, { facts: facts[step.provider], probe: { duration: probes[step.provider].duration, streams: probes[step.provider].streams } });
             if (step.action === 'failed_recording') step.probe = probes[step.provider];
             if (step.action === 'regenerate') {
                 const loc = item.locations.find((l) => l.provider === 'local');

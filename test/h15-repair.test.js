@@ -50,4 +50,30 @@ assert.strictEqual(h.prepare("SELECT state FROM media_locations WHERE object_id 
 assert.strictEqual(h.prepare("SELECT lifecycle_status FROM media_objects WHERE id = 'med_3'").get().lifecycle_status, 'ready');
 assert.strictEqual(rollback(h, c1).skipped, 'the row changed since', 'rolling back twice changes nothing');
 
+// ── resize: the copy is the object (same hash), only the recorded size went stale again ──
+// (2026-09-26: a projection from the legacy vods row put the mid-upload size back after the rebaseline.)
+const HASH = 'b'.repeat(64);
+const reverted = vod({ object_id: 'med_4', content_hash: HASH, legacy_ref: 'legacy:live:vod:939', size_bytes: 63708377, locations: [{ provider: 'b2', key: 'vods/c.webm', state: 'corrupt', size_bytes: 63803675 }] });
+const r4 = plan(reverted, { b2: good }, { b2: { size: 63803675, sha256: HASH } });
+assert.strictEqual(r4.action, 'resize');
+assert.match(r4.reason, /hashes to the object's content_hash/);
+assert.strictEqual(plan(reverted, { b2: good }, { b2: { size: 63803675, sha256: 'c'.repeat(64) } }).action, 'lost', 'other bytes than the hash: real corruption, never resized');
+assert.strictEqual(plan(reverted, { b2: good }).action, 'lost', 'no download, no resize');
+h.exec('CREATE TABLE vods (id INTEGER PRIMARY KEY, file_size INTEGER)');
+h.prepare("INSERT INTO vods VALUES (939, 63708377), (1277, 13631488)").run();
+h.prepare("INSERT INTO media_objects VALUES ('med_4', 63708377, ?, 'ready', NULL)").run(HASH);
+h.prepare("INSERT INTO media_locations (object_id, provider, key, state, size_bytes) VALUES ('med_4', 'b2', 'vods/c.webm', 'corrupt', 63803675)").run();
+assert.match(apply(h, r4, { size: 63803675, sha256: 'c'.repeat(64) }).skipped, /does not hash/, 'resize writes only bytes that match the hash');
+const c4 = apply(h, r4, { size: 63803675, sha256: HASH });
+assert.deepStrictEqual(h.prepare("SELECT size_bytes, content_hash FROM media_objects WHERE id = 'med_4'").get(), { size_bytes: 63803675, content_hash: HASH });
+assert.strictEqual(h.prepare("SELECT state FROM media_locations WHERE object_id = 'med_4'").get().state, 'present');
+assert.strictEqual(h.prepare('SELECT file_size FROM vods WHERE id = 939').get().file_size, 63803675, 'the legacy row agrees, so its projection cannot undo the repair');
+assert.deepStrictEqual([c4.old.legacy_file_size, c4.new.legacy_file_size], [63708377, 63803675]);
+// A rebaseline writes the legacy row too.
+const c5 = apply(h, plan(vod(), { b2: good }), { size: 14609471, sha256: 'f'.repeat(64) });
+assert.strictEqual(h.prepare('SELECT file_size FROM vods WHERE id = 1277').get().file_size, 14609471);
+for (const c of [c4, c5]) assert.strictEqual(rollback(h, c).restored, true);
+assert.deepStrictEqual(h.prepare('SELECT id, file_size FROM vods ORDER BY id').all(), [{ id: 939, file_size: 63708377 }, { id: 1277, file_size: 13631488 }], 'rollback restores the legacy rows');
+assert.deepStrictEqual(h.prepare("SELECT size_bytes, content_hash FROM media_objects WHERE id = 'med_4'").get(), { size_bytes: 63708377, content_hash: HASH });
+
 console.log('h15 repair: all checks passed');
