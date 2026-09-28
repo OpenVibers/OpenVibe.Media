@@ -62,8 +62,13 @@ const listen = (app) => new Promise((resolve) => { const s = app.listen(0, '127.
     assert.strictEqual(body.service, 'media');
     assert.strictEqual(body.recordings_in_progress, 1);
     const names = Object.keys(body.checks).sort();
-    assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'object_copies', 'remote_b2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods'], 'r2 is not configured, so it has no check');
+    assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'object_copies', 'remote_b2', 'remote_r2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods']);
+    // r2 is not configured: listed as skipped with the reason, never a pretend pass (WS-Q task 7), and an optional
+    // skip leaves the verified service ready.
+    assert.deepStrictEqual([body.checks.remote_r2.status, body.checks.remote_r2.reason], ['skipped', 'not configured']);
+    assert.deepStrictEqual(body.skipped, ['remote_r2']);
     for (const [n, c] of Object.entries(body.checks)) {
+        if (n === 'remote_r2') continue;
         assert.strictEqual(c.status, 'ok', n);
         assert.strictEqual(typeof c.latency_ms, 'number');
         assert.ok(Date.parse(c.checked_at));
@@ -89,6 +94,8 @@ const listen = (app) => new Promise((resolve) => { const s = app.listen(0, '127.
     assert.deepStrictEqual(body.degraded, ['remote_b2', 'remote_r2']);
     assert.strictEqual(body.checks.remote_r2.error, 'r2 HeadBucket failed: AccessDenied');
     assert.deepStrictEqual(body.checks.events_outbox.detail, { enabled: false });
+    assert.strictEqual(body.checks.events_outbox.status, 'skipped', 'a relay that is off verified nothing: skipped, never ok');
+    assert.match(body.checks.events_outbox.reason, /relay off/);
 
     // A storage directory that cannot be written: not ready, 503, named.
     jwks = true; outbox = { enabled: false };
@@ -140,7 +147,7 @@ const listen = (app) => new Promise((resolve) => { const s = app.listen(0, '127.
         assert.strictEqual(up.status, 200, up.body);
         assert.strictEqual(body.release, 'abcdef123456');
         assert.ok(body.checks.db && body.checks.storage_objects);
-        assert.ok(!body.checks.remote_b2, 'unconfigured tiers are not checked');
+        assert.strictEqual(body.checks.remote_b2.status, 'skipped', 'an unconfigured tier is not probed: skipped, never ok');
         const m = await request(b2, '/metrics');
         assert.strictEqual(m.status, 200);
         assert.ok(m.body.includes('http_requests_total{method="GET",route="/api/ready",status_class="2xx"} 1\n'), m.body.slice(0, 400));
