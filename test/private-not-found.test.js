@@ -110,6 +110,22 @@ const server = http.createServer(app);
     assert.strictEqual((await get('/c/11', { ...video, ...asUser(5) })).status, 200, 'the owner gets their private clip');
     console.log('✅ /v /c: private looks missing');
 
+    // ── Signed playback URLs (a reader with no key, e.g. OpenVibe.AI transcribing): only the owning app signs ──
+    const signedVia = async (p, headers) => { const x = await get(p, headers); return x.status === 200 ? JSON.parse(x.text) : { status: x.status }; };
+    const sv = await signedVia('/api/v1/live/vods/2/signed-url?ttl=600', { authorization: 'Bearer live-key' });
+    assert.ok(/^https:\/\/media\.test\/v\/2\?exp=\d+&sig=/.test(sv.url), sv.url);
+    assert.strictEqual((await get(sv.url.replace('https://media.test', ''), video)).status, 200, 'a signed URL reads the private VOD');
+    const sc = await signedVia('/api/v1/live/clips/11/signed-url', { authorization: 'Bearer live-key' });
+    assert.strictEqual((await get(sc.url.replace('https://media.test', ''), video)).status, 200, 'a signed URL reads the private clip');
+    await same([sv.url.replace('https://media.test', '').replace('/v/2?', '/v/3?'), video], ['/v/999', video], 'a VOD signature is not valid for another VOD');
+    await same([sc.url.replace('https://media.test', '').replace('/c/11?', '/v/11?'), video], ['/v/999', video], 'a clip signature is not a VOD signature');
+    await same([sv.url.replace('https://media.test', '').replace(/sig=[^&]+/, 'sig=AAAA'), video], ['/v/999', video], 'a forged signature is nobody');
+    assert.strictEqual((await signedVia('/api/v1/live/vods/2/signed-url', asUser(5))).status, 403, 'a call acting for a user does not sign');
+    assert.strictEqual((await signedVia('/api/v1/live/vods/2/signed-url', {})).status, 401, 'no key, no URL');
+    const late = signing.signedMediaUrl('vod', 2, 10 * 24 * 3600);
+    assert.ok(Date.parse(late.expires_at) - Date.now() <= 6 * 3600 * 1000 + 5000, 'at most 6 hours');
+    console.log('✅ /v /c: signed URLs for the owning app only');
+
     // ── Transcript companion ──
     r = await same(['/v/2/transcript.json'], ['/v/999/transcript.json'], 'private VOD transcript looks missing');
     assert.strictEqual(r.status, 404);

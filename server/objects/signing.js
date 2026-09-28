@@ -74,6 +74,27 @@ function verifyFile(key, exp, sig) {
     return safeEqual(sig, mac('getf', `file:${key}`, e));
 }
 
+/**
+ * Short-lived GET URL for a private VOD or clip's bytes (/v/:id, /c/:id), for a reader that holds no key: OpenVibe.AI
+ * transcribing a recording its owner's app asked for (roadmap WS-O task 2). Its own purpose per kind ('getv', 'getc')
+ * and id space (vod:<id>, clip:<id>). Up to 6 hours: a transcript pass over a long recording reads it window by window.
+ */
+function signedMediaUrl(kind, id, ttlS = 3600) {
+    const exp = nowS() + Math.min(6 * 3600, Math.max(30, Number(ttlS) || 3600));
+    const purpose = kind === 'clip' ? 'getc' : 'getv';
+    const route = kind === 'clip' ? 'c' : 'v';
+    return {
+        url: `${config.publicUrl}/${route}/${encodeURIComponent(id)}?exp=${exp}&sig=${mac(purpose, `${kind}:${id}`, exp)}`,
+        expires_at: new Date(exp * 1000).toISOString(),
+    };
+}
+
+function verifyMedia(kind, id, exp, sig) {
+    const e = Number(exp);
+    if (!Number.isInteger(e) || e < nowS() || e > nowS() + 6 * 3600 + 60) return false;
+    return safeEqual(sig, mac(kind === 'clip' ? 'getc' : 'getv', `${kind}:${id}`, e));
+}
+
 function macOf(parts) {
     return crypto.createHmac('sha256', secret()).update(parts.map(String).join('\n')).digest('base64url');
 }
@@ -138,6 +159,6 @@ function verifyMultipartToken(token, { tenant, objectId, uploadId, totalSize }) 
 }
 
 module.exports = {
-    signedDownloadUrl, verifyDownload, signedFileUrl, verifyFile,
+    signedDownloadUrl, verifyDownload, signedFileUrl, verifyFile, signedMediaUrl, verifyMedia,
     uploadToken, uploadTtl, checkUploadToken, verifyUploadToken, multipartToken, verifyMultipartToken,
 };

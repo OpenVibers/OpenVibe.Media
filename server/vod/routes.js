@@ -310,6 +310,18 @@ router.get('/latest-thumbs', tenantAuth({ allowUser: true }), (req, res) => {
     }
 });
 
+// ── A signed playback URL for a reader with no key ───────────
+// The owning app (its key alone, not a call acting for one of its users) asks for a short-lived URL of a VOD's bytes
+// to hand to a reader that holds no key: OpenVibe.AI transcribing it (roadmap WS-O task 2). ttl in seconds, 30 s to
+// 6 h (default 1 h). Public VODs get the same kind of URL; it works for any visibility.
+router.get('/:id/signed-url', tenantAuth(), (req, res) => {
+    if (req.authType !== 'app') return res.status(403).json({ error: 'only the owning app signs a playback URL' });
+    const vod = _getVodScoped(req, res);
+    if (!vod) return;
+    res.set('Cache-Control', 'private, no-store');
+    res.json(require('../objects/signing').signedMediaUrl('vod', vod.id, req.query.ttl));
+});
+
 // ── Get VOD meta ─────────────────────────────────────────────
 router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
     try {

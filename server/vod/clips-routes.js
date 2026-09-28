@@ -328,6 +328,15 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Get clip ─────────────────────────────────────────────────
+// A short-lived URL of a clip's bytes for a reader with no key (OpenVibe.AI transcribing it); the owning app only.
+router.get('/:id/signed-url', tenantAuth(), (req, res) => {
+    if (req.authType !== 'app') return res.status(403).json({ error: 'only the owning app signs a playback URL' });
+    const clip = _getClipScoped(req, res);
+    if (!clip) return;
+    res.set('Cache-Control', 'private, no-store');
+    res.json(require('../objects/signing').signedMediaUrl('clip', clip.id, req.query.ttl));
+});
+
 router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
     try {
         const clip = _getClipScoped(req, res);

@@ -61,10 +61,14 @@ function notFound(res) {
     return res.status(404).json({ error: 'Not found' });
 }
 
-function canAccessPrivate(record, req) {
+function canAccessPrivate(record, req, kind = null) {
     // Private items: the owning app (its API key) or the owning user's JWT.
     if (req.authType === 'app' && req.appId === record.app_id) return true;
     if (req.authType === 'user' && req.userId != null && record.user_id === req.userId) return true;
+    // …or a short-lived URL the owning app signed for a reader that holds no key (GET /api/vods/:id/signed-url).
+    if (kind && req.query && req.query.exp && req.query.sig) {
+        return require('../objects/signing').verifyMedia(kind, record.id, req.query.exp, String(req.query.sig));
+    }
     return false;
 }
 
@@ -130,7 +134,7 @@ async function serveMediaRecord(kind, record, req, res) {
     const visibility = recordVisibility(record);
     // Exactly the answer a missing id gets: a 403 here told anyone probing ids which private
     // recordings exist (and, through the basename form of /v, which file names are real).
-    if (visibility === 'private' && !canAccessPrivate(record, req)) return notFound(res);
+    if (visibility === 'private' && !canAccessPrivate(record, req, kind)) return notFound(res);
 
     // A person (or a link-preview crawler) landing on the URL gets the watch
     // page; its <video> comes back here with ?raw=1 for the bytes. The page offers a player only when
