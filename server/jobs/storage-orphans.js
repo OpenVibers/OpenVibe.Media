@@ -53,12 +53,12 @@ async function run(job) {
 }
 
 /** Queue one scan every MEDIA_ORPHAN_SCAN_DAYS (0 = never). Returns how many were queued (0 or 1). */
-function schedule(nowMs = Date.now()) {
+async function schedule(nowMs = Date.now()) {
     const days = envInt('MEDIA_ORPHAN_SCAN_DAYS', 30);
     if (!(days > 0)) return 0;
     const period = Math.floor(nowMs / (days * 86400 * 1000));
     try {
-        const r = queue.enqueue({ appId: queue.SYSTEM_APP, type: TYPE, params: {}, idempotencyKey: `${TYPE}:${days}d:${period}`, createdBy: 'system:schedule' });
+        const r = await queue.enqueue({ appId: queue.SYSTEM_APP, type: TYPE, params: {}, idempotencyKey: `${TYPE}:${days}d:${period}`, createdBy: 'system:schedule' });
         return r.created ? 1 : 0;
     } catch (err) {
         console.warn(`[Jobs] could not schedule ${TYPE}: ${err.message}`);

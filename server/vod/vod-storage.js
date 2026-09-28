@@ -166,11 +166,11 @@ function _thresholdSnapshot(settings = getSettings()) {
     return out;
 }
 
-function _tierInputs(vod) {
+async function _tierInputs(vod) {
     if (!vod) return {};
     return {
         view_count: Number(vod.view_count) || 0, last_accessed_at: vod.last_accessed_at || null, storage_provider: providerOf(vod),
-        is_recording: !!vod.is_recording, held: _held(vod), file_size: Number(vod.file_size) || 0, created_at: vod.created_at || null,
+        is_recording: !!vod.is_recording, held: await _held(vod), file_size: Number(vod.file_size) || 0, created_at: vod.created_at || null,
     };
 }
 
@@ -186,12 +186,12 @@ function _outcomeOf(result, action, from) {
  * Log one R2 promotion or demotion (media_tier_decisions): what the VOD looked like, the thresholds
  * in force, why, and how it ended. Never throws: the move already happened (or did not).
  */
-function recordTierDecision({ vod, vodId, action, from, to, result, trigger = 'manual', reason = 'requested' }) {
+async function recordTierDecision({ vod, vodId, action, from, to, result, trigger = 'manual', reason = 'requested' }) {
     try {
-        db.run(`INSERT INTO media_tier_decisions (vod_id, app_id, object_id, action, from_provider, to_provider, outcome, trigger, reason, inputs, thresholds, error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        await db.run(`INSERT INTO media_tier_decisions (vod_id, app_id, object_id, action, from_provider, to_provider, outcome, trigger, reason, inputs, thresholds, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         [Number(vodId), vod ? vod.app_id : null, vod ? vod.object_id || null : null, action, from || null, to || null, _outcomeOf(result, action, from),
-            String(trigger).slice(0, 40), String(reason).slice(0, 500), JSON.stringify(_tierInputs(vod)), JSON.stringify(_thresholdSnapshot()),
+            String(trigger).slice(0, 40), String(reason).slice(0, 500), JSON.stringify(await _tierInputs(vod)), JSON.stringify(_thresholdSnapshot()),
             result && !result.ok ? String(result.error || 'failed').slice(0, 500) : null]);
     } catch (err) {
         console.warn(`[VodStorage] tier decision for VOD ${vodId} not logged: ${err.message}`);
@@ -239,11 +239,11 @@ function endpointFor(name) {
 // placement (`write`) and re-projects the VOD's media_locations in one transaction (WS-G task 1;
 // afterTierMove). Lazy — the model requires this module.
 const objects = () => require('../objects/model');
-function _held(vod) { return objects().isHeldRow(vod); }
-function _moved(vodId, verified, write = null) { return objects().afterTierMove(vodId, verified, write); }
+async function _held(vod) { return await objects().isHeldRow(vod); }
+async function _moved(vodId, verified, write = null) { return await objects().afterTierMove(vodId, verified, write); }
 // After a move removed the local copy (the row already names the remote one): the object's locations
 // follow the disk. File I/O after the commit, so a follow-up rather than part of the write.
-function _localRemoved(vodId) { objects().safeSync('vod', vodId); }
+async function _localRemoved(vodId) { await objects().safeSync('vod', vodId); }
 
 function keyForVod(vod) {
     if (vod.storage_key) return vod.storage_key;
@@ -518,10 +518,10 @@ function cleanupSidecar(localPath) {
 
 /** Offload a local VOD to B2 (cold). */
 async function moveToCold(vodId) {
-    const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const vod = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
     if (vod.is_recording) return { ok: false, error: 'VOD is currently recording' };
-    if (_held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
+    if (await _held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
     if (!providerConfigured('b2')) return { ok: false, error: 'B2 not configured' };
 
     const key = keyForVod(vod);
@@ -531,12 +531,12 @@ async function moveToCold(vodId) {
         if (!fs.existsSync(local)) {
             // Not local — maybe already offloaded
             if (await headObject('b2', key)) {
-                _moved(vodId, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));
+                await _moved(vodId, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));
                 return { ok: true, already: true };
             }
             // Neither here nor in B2: nothing to offload, ever. Quarantine the row so the
             // sweep stops re-selecting it (see runSweep) and listings stop showing it.
-            quarantineMissing(vodId, 'local file missing and no B2 object');
+            await quarantineMissing(vodId, 'local file missing and no B2 object');
             return { ok: false, error: 'Source file missing' };
         }
 
@@ -546,12 +546,12 @@ async function moveToCold(vodId) {
             await uploadFile('b2', key, local);
         }
 
-        _moved(vodId, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));
+        await _moved(vodId, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));
         try { fs.unlinkSync(local); } catch (err) {
             console.error(`[VodStorage] Uploaded but failed to remove local file for VOD ${vodId}:`, err.message);
         }
         cleanupSidecar(local);
-        _localRemoved(vodId);
+        await _localRemoved(vodId);
 
         console.log(`[VodStorage] VOD ${vodId} offloaded to B2: ${key} (${(localSize / 1048576).toFixed(1)} MB)`);
         return { ok: true, bytes: localSize };
@@ -576,25 +576,25 @@ function cleanupStaleDownloads() {
 
 /** Restore an offloaded VOD to local disk. Restoring one served from R2 drops its R2 copy: logged as a demotion. */
 async function moveToHot(vodId, ctx = {}) {
-    const before = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const before = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     const result = await _moveToHot(vodId);
     if (before && providerOf(before) === 'r2') {
-        recordTierDecision({ vod: before, vodId, action: 'demote', from: 'r2', to: 'local', result, trigger: ctx.trigger || 'manual', reason: ctx.reason || 'restored to local disk' });
+        await recordTierDecision({ vod: before, vodId, action: 'demote', from: 'r2', to: 'local', result, trigger: ctx.trigger || 'manual', reason: ctx.reason || 'restored to local disk' });
     }
     return result;
 }
 
 async function _moveToHot(vodId) {
-    const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const vod = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
     // A hold freezes placement: restoring would flip the row to local and drop an R2 copy.
-    if (_held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
+    if (await _held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
 
     const key = keyForVod(vod);
     const local = localPathForVod(vod);
 
     if (fs.existsSync(local)) {
-        _moved(vodId, [], () => db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]));
+        await _moved(vodId, [], async () => await db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]));
         return { ok: true, already: true };
     }
 
@@ -643,7 +643,7 @@ async function _moveToHot(vodId) {
 
         // Restoring to local keeps the B2 canonical copy; drop any R2 copy.
         if (providerOf(vod) === 'r2' && providerConfigured('r2')) await deleteObject('r2', key);
-        _moved(vodId, [], () => db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]));
+        await _moved(vodId, [], async () => await db.run("UPDATE vods SET storage_provider = 'local' WHERE id = ?", [vodId]));
         console.log(`[VodStorage] VOD ${vodId} restored to local (${(head.size / 1048576).toFixed(1)} MB)`);
         return { ok: true, bytes: head.size };
     } catch (err) {
@@ -657,17 +657,17 @@ async function _moveToHot(vodId) {
  * ctx { trigger: sweep | admin | drill | manual, reason } says who asked and why.
  */
 async function promoteToR2(vodId, ctx = {}) {
-    const before = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const before = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     const result = await _promoteToR2(vodId);
-    recordTierDecision({ vod: before, vodId, action: 'promote', from: before ? providerOf(before) : null, to: 'r2', result, ...ctx });
+    await recordTierDecision({ vod: before, vodId, action: 'promote', from: before ? providerOf(before) : null, to: 'r2', result, ...ctx });
     return result;
 }
 
 async function _promoteToR2(vodId) {
-    const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const vod = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
     if (vod.is_recording) return { ok: false, error: 'VOD is currently recording' };
-    if (_held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
+    if (await _held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
     if (!providerConfigured('r2') || providerHealthy.r2 === false) return { ok: false, error: 'R2 not available' };
     if (!providerConfigured('b2')) return { ok: false, error: 'B2 not configured' };
 
@@ -690,14 +690,14 @@ async function _promoteToR2(vodId) {
             else await copyBetweenProviders('b2', 'r2', key);
         }
 
-        _moved(vodId, ['b2', 'r2'], () => db.run("UPDATE vods SET storage_provider = 'r2', storage_key = ? WHERE id = ?", [key, vodId]));
+        await _moved(vodId, ['b2', 'r2'], async () => await db.run("UPDATE vods SET storage_provider = 'r2', storage_key = ? WHERE id = ?", [key, vodId]));
 
         // Popular VODs live in R2+B2; free the local copy
         let freed = 0;
         if (fs.existsSync(local)) {
             freed = fs.statSync(local).size;
             try { fs.unlinkSync(local); cleanupSidecar(local); } catch { freed = 0; }
-            if (freed) _localRemoved(vodId);
+            if (freed) await _localRemoved(vodId);
         }
 
         console.log(`[VodStorage] VOD ${vodId} promoted to R2: ${key}`);
@@ -710,17 +710,17 @@ async function _promoteToR2(vodId) {
 
 /** Demote an R2 VOD back to B2-only, and log the decision (ctx as for promoteToR2). */
 async function demoteFromR2(vodId, ctx = {}) {
-    const before = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const before = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     const result = await _demoteFromR2(vodId);
-    recordTierDecision({ vod: before, vodId, action: 'demote', from: before ? providerOf(before) : null, to: 'b2', result, ...ctx });
+    await recordTierDecision({ vod: before, vodId, action: 'demote', from: before ? providerOf(before) : null, to: 'b2', result, ...ctx });
     return result;
 }
 
 async function _demoteFromR2(vodId) {
-    const vod = db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    const vod = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
     if (!vod) return { ok: false, error: 'VOD not found' };
     if (providerOf(vod) !== 'r2') return { ok: true, already: true };
-    if (_held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
+    if (await _held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
 
     const key = keyForVod(vod);
     try {
@@ -731,7 +731,7 @@ async function _demoteFromR2(vodId) {
             if (!copied) return { ok: false, error: 'No B2 canonical and copy-back failed' };
         }
         await deleteObject('r2', key);
-        _moved(vodId, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2' WHERE id = ?", [vodId]));
+        await _moved(vodId, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2' WHERE id = ?", [vodId]));
         console.log(`[VodStorage] VOD ${vodId} demoted from R2 to B2`);
         return { ok: true };
     } catch (err) {
@@ -743,7 +743,7 @@ async function _demoteFromR2(vodId) {
 async function deleteVodObjects(vod) {
     if (!vod?.file_path) return;
     // Last line of defence for every delete path: a held object keeps its bytes.
-    if (_held(vod)) { console.warn(`[VodStorage] Not deleting media of ${vod.object_id}: under a retention hold`); return; }
+    if (await _held(vod)) { console.warn(`[VodStorage] Not deleting media of ${vod.object_id}: under a retention hold`); return; }
     const local = localPathForVod(vod);
     if (fs.existsSync(local)) {
         try { fs.unlinkSync(local); } catch { /* ignore */ }
@@ -810,9 +810,9 @@ const OFFLOADABLE_WHERE = `
     AND file_path IS NOT NULL
     AND COALESCE(health_status, 'ok') NOT IN ('missing_file', 'zero_byte')`;
 
-function quarantineMissing(vodId, reason) {
+async function quarantineMissing(vodId, reason) {
     try {
-        objects().withObject('vod', vodId, () => db.run(`UPDATE vods
+        await objects().withObject('vod', vodId, async () => await db.run(`UPDATE vods
                 SET health_status = 'missing_file',
                     health_issues_json = ?,
                     last_health_scan_at = datetime('now'),
@@ -829,18 +829,18 @@ function quarantineMissing(vodId, reason) {
  * an hour old — by then the recorder would have opened the file if it ever was going
  * to. Returns how many rows were newly quarantined.
  */
-function reconcileGhosts() {
+async function reconcileGhosts() {
     try {
         // The rows and their objects (-> failed) in one transaction.
-        const ids = objects().withObject('vod', (found) => found, () => {
-            const found = db.all(`SELECT id FROM vods
+        const ids = await objects().withObject('vod', (found) => found, async () => {
+            const found = (await db.all(`SELECT id FROM vods
                 WHERE COALESCE(storage_provider, 'local') = 'local'
                   AND COALESCE(is_recording, 0) = 0
                   AND file_path IS NULL
                   AND created_at <= datetime('now', '-1 hour')
-                  AND COALESCE(health_status, 'ok') NOT IN ('missing_file', 'zero_byte')`).map(r => r.id);
+                  AND COALESCE(health_status, 'ok') NOT IN ('missing_file', 'zero_byte')`)).map(r => r.id);
             if (found.length) {
-                db.run(`UPDATE vods
+                await db.run(`UPDATE vods
                     SET health_status = 'missing_file',
                         health_issues_json = ?,
                         last_health_scan_at = datetime('now'),
@@ -926,12 +926,12 @@ async function emitStorageEvent(event, kind, data, settings = getSettings()) {
     let eventId = null;
     try {
         const events = require('../events');
-        const env = db.getDb().transaction(() => events.record(event, null, payload))();
+        const env = await db.getDb().tx(async () => await events.record(event, null, payload));
         eventId = env ? env.event_id : null;
         events.kick();
     } catch (err) { console.warn(`[VodStorage] ${event} not queued for Events:`, err.message); }
     let apps = [];
-    try { apps = db.listApps().filter(a => a.webhook_url); } catch { apps = []; }
+    try { apps = (await db.listApps()).filter(a => a.webhook_url); } catch { apps = []; }
     let webhooks;
     try { webhooks = require('../webhooks'); } catch { return false; }
     await Promise.all(apps.map(app => webhooks.sendWebhook(app.app_id, event, payload, { eventId }).catch(() => false)));
@@ -955,7 +955,7 @@ async function runSweep() {
         const disk = diskUsage(config.vod.path);
         const underPressure = needsDrain(disk, settings);
         const critical = isCritical(disk, settings);
-        const ghosts = reconcileGhosts();
+        const ghosts = await reconcileGhosts();
 
         // 1) Cold offload to B2
         let candidates;
@@ -963,7 +963,7 @@ async function runSweep() {
             const minAge = critical ? `-${settings.criticalMinAgeHours} hours` : '-1 day';
             console.log(`[VodStorage] Disk at ${disk.usePct}%, ${(disk.available / GB).toFixed(1)} GB free (${critical ? 'CRITICAL' : 'pressure'}) — draining to ≤${settings.localLowWaterPct}% / ≥${settings.targetFreeGb} GB free`
                 + (ghosts ? `; quarantined ${ghosts} file-less VOD row(s)` : ''));
-            candidates = db.all(`
+            candidates = await db.all(`
                 SELECT id, file_path, file_size FROM vods
                 WHERE ${OFFLOADABLE_WHERE}
                   AND created_at <= datetime('now', ?)
@@ -972,7 +972,7 @@ async function runSweep() {
             `, [minAge]);
         } else {
             if (ghosts) console.log(`[VodStorage] Quarantined ${ghosts} file-less VOD row(s)`);
-            candidates = db.all(`
+            candidates = await db.all(`
                 SELECT id, file_path, file_size FROM vods
                 WHERE ${OFFLOADABLE_WHERE}
                   AND created_at <= datetime('now', ?)
@@ -993,9 +993,9 @@ async function runSweep() {
             if (!fs.existsSync(localPathForVod(vod))) {
                 const key = keyForVod(vod);
                 if (await headObject('b2', key).catch(() => null)) {
-                    _moved(vod.id, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]));
+                    await _moved(vod.id, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]));
                 } else {
-                    quarantineMissing(vod.id, `file not found at ${localPathForVod(vod)}`);
+                    await quarantineMissing(vod.id, `file not found at ${localPathForVod(vod)}`);
                     quarantined++;
                 }
                 continue;
@@ -1068,7 +1068,7 @@ async function runSweep() {
 
         // 2) R2 promotion for popular VODs
         if (settings.r2Enabled && providerConfigured('r2') && providerHealthy.r2 !== false) {
-            const popular = db.all(`
+            const popular = await db.all(`
                 SELECT id, view_count, last_accessed_at FROM vods
                 WHERE COALESCE(storage_provider, 'local') IN ('local', 'b2')
                   AND COALESCE(is_recording, 0) = 0
@@ -1086,7 +1086,7 @@ async function runSweep() {
             }
 
             // 3) R2 demotion for stale VODs
-            const stale = db.all(`
+            const stale = await db.all(`
                 SELECT id, last_accessed_at FROM vods
                 WHERE storage_provider = 'r2'
                   AND (last_accessed_at IS NULL OR last_accessed_at <= datetime('now', ?))
@@ -1179,7 +1179,7 @@ async function checkProviders() {
  */
 async function migrateLegacy() {
     if (!providerConfigured('b2')) return;
-    const legacy = db.all(`
+    const legacy = await db.all(`
         SELECT id, file_path FROM vods
         WHERE storage_tier = 'cold' AND COALESCE(storage_provider, 'local') = 'local'
     `);
@@ -1190,7 +1190,7 @@ async function migrateLegacy() {
         try {
             const head = await headObject('b2', key);
             if (head) {
-                _moved(vod.id, ['b2'], () => db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]));
+                await _moved(vod.id, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]));
                 flipped++;
             } else if (fs.existsSync(localPathForVod(vod))) {
                 restoredLocal++; // still local, sweep will re-offload
@@ -1388,27 +1388,27 @@ function sweepInfo() {
     };
 }
 
-function getStatus() {
+async function getStatus() {
     const settings = getSettings();
     const localDisk = diskUsage(config.vod.path);
     const localStats = dirStats(config.vod.path);
 
-    const counts = db.get(`
+    const counts = await db.get(`
         SELECT
-            SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN 1 ELSE 0 END) as localCount,
+            SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN 1 ELSE 0 END) as "localCount",
             SUM(CASE WHEN storage_provider = 'b2' THEN 1 ELSE 0 END) as b2Count,
             SUM(CASE WHEN storage_provider = 'r2' THEN 1 ELSE 0 END) as r2Count,
-            SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN file_size ELSE 0 END) as localBytes,
-            SUM(CASE WHEN storage_provider = 'b2' THEN file_size ELSE 0 END) as b2Bytes,
-            SUM(CASE WHEN storage_provider = 'r2' THEN file_size ELSE 0 END) as r2Bytes
+            SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN file_size ELSE 0 END)::bigint as "localBytes",
+            SUM(CASE WHEN storage_provider = 'b2' THEN file_size ELSE 0 END)::bigint as b2Bytes,
+            SUM(CASE WHEN storage_provider = 'r2' THEN file_size ELSE 0 END)::bigint as r2Bytes
     FROM vods
     `) || {};
 
     let clipCounts = {};
     try {
-        clipCounts = db.get(`
+        clipCounts = await db.get(`
             SELECT
-                SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN 1 ELSE 0 END) as localCount,
+                SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN 1 ELSE 0 END) as "localCount",
                 SUM(CASE WHEN storage_provider = 'b2' THEN 1 ELSE 0 END) as b2Count,
                 SUM(CASE WHEN storage_provider = 'r2' THEN 1 ELSE 0 END) as r2Count
             FROM clips
@@ -1509,7 +1509,7 @@ if (require.main === module) {
         const cmd = process.argv[2];
         if (cmd === 'check') {
             await checkProviders();
-            console.log(JSON.stringify(getStatus().tiers, null, 2));
+            console.log(JSON.stringify((await getStatus()).tiers, null, 2));
             process.exit(0);
         }
         if (cmd === 'migrate-legacy') {
@@ -1525,7 +1525,7 @@ if (require.main === module) {
                 const disk = diskUsage(config.vod.path);
                 console.log(`[VodStorage] Disk at ${disk.usePct}%`);
                 if (disk.usePct <= target) break;
-                const eligible = db.all(`
+                const eligible = await db.all(`
                     SELECT id FROM vods
                     WHERE COALESCE(storage_provider, 'local') = 'local'
                       AND COALESCE(is_recording, 0) = 0

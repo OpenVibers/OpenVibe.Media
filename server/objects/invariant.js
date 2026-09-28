@@ -47,22 +47,22 @@ function validate(obj, t = thresholds()) {
 }
 
 /** Upsert (warn/violation) or resolve this object's violation row. Returns the level recorded, or null. */
-function record(obj, t = thresholds()) {
+async function record(obj, t = thresholds()) {
     if (!obj) return null;
     const v = validate(obj, t);
-    const open = db.get('SELECT * FROM media_invariant_violations WHERE object_id = ?', [obj.id]);
+    const open = await db.get('SELECT * FROM media_invariant_violations WHERE object_id = ?', [obj.id]);
     if (v.public_playback && (v.level === 'warn' || v.level === 'violation')) {
         if (open) {
-            db.run(`UPDATE media_invariant_violations SET level = ?, size_bytes = ?, threshold_bytes = ?, last_seen_at = CURRENT_TIMESTAMP,
-                           resolved_at = NULL, detected_at = CASE WHEN resolved_at IS NULL THEN detected_at ELSE CURRENT_TIMESTAMP END
+            await db.run(`UPDATE media_invariant_violations SET level = ?, size_bytes = ?, threshold_bytes = ?, last_seen_at = ov_now(),
+                           resolved_at = NULL, detected_at = CASE WHEN resolved_at IS NULL THEN detected_at ELSE ov_now() END
                     WHERE id = ?`, [v.level, v.size_bytes, v.threshold_bytes, open.id]);
         } else {
-            db.run('INSERT INTO media_invariant_violations (object_id, level, size_bytes, threshold_bytes) VALUES (?, ?, ?, ?)',
+            await db.run('INSERT INTO media_invariant_violations (object_id, level, size_bytes, threshold_bytes) VALUES (?, ?, ?, ?) RETURNING id',
                 [obj.id, v.level, v.size_bytes, v.threshold_bytes]);
         }
         return v.level;
     }
-    if (open && !open.resolved_at) db.run('UPDATE media_invariant_violations SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?', [open.id]);
+    if (open && !open.resolved_at) await db.run('UPDATE media_invariant_violations SET resolved_at = ov_now() WHERE id = ?', [open.id]);
     return null;
 }
 
@@ -70,9 +70,9 @@ function record(obj, t = thresholds()) {
  * Scan every public playback object. Returns { thresholds, counts, objects } where
  * objects lists everything above target (largest first). record=false is a dry run.
  */
-function scan({ record: write = true, appId = null } = {}) {
+async function scan({ record: write = true, appId = null } = {}) {
     const t = thresholds();
-    const rows = db.all(`SELECT * FROM media_objects WHERE kind IN ('vod', 'clip') AND visibility != 'private' AND lifecycle_status = 'ready'
+    const rows = await db.all(`SELECT * FROM media_objects WHERE kind IN ('vod', 'clip') AND visibility != 'private' AND lifecycle_status = 'ready'
                          ${appId ? 'AND app_id = ?' : ''} ORDER BY size_bytes DESC`, appId ? [appId] : []);
     const counts = { ok: 0, above_target: 0, warn: 0, violation: 0 };
     const objects = [];
@@ -80,13 +80,13 @@ function scan({ record: write = true, appId = null } = {}) {
         const v = validate(obj, t);
         counts[v.level]++;
         if (v.level !== 'ok') objects.push({ ...v, app_id: obj.app_id, legacy_ref: obj.legacy_ref });
-        if (write) record(obj, t);
+        if (write) await record(obj, t);
     }
     // Objects that stopped being public playback (made private, deleted) resolve too.
     if (write) {
-        const stale = db.all(`SELECT o.*, v.id AS violation_id FROM media_invariant_violations v LEFT JOIN media_objects o ON o.id = v.object_id
+        const stale = await db.all(`SELECT o.*, v.id AS violation_id FROM media_invariant_violations v LEFT JOIN media_objects o ON o.id = v.object_id
                               WHERE v.resolved_at IS NULL`);
-        for (const s of stale) if (!isPublicPlayback(s)) db.run('UPDATE media_invariant_violations SET resolved_at = CURRENT_TIMESTAMP WHERE id = ?', [s.violation_id]);
+        for (const s of stale) if (!isPublicPlayback(s)) await db.run('UPDATE media_invariant_violations SET resolved_at = ov_now() WHERE id = ?', [s.violation_id]);
     }
     return { thresholds: t, counts, objects };
 }

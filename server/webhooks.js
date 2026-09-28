@@ -53,7 +53,7 @@ async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
     if (require('./drill').enabled) return false;
     let app = appOrId;
     if (typeof appOrId === 'string') {
-        try { app = db.getApp(appOrId); } catch { app = null; }
+        try { app = await db.getApp(appOrId); } catch { app = null; }
     }
     if (!app || !app.webhook_url) return false;
 
@@ -85,16 +85,16 @@ async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
  * app's webhook is sent with the same event_id. Returns { data, eventId }; throws (nothing changed,
  * nothing queued, no webhook) when the transaction fails.
  */
-function announce(appId, event, { change = null, payload }) {
+async function announce(appId, event, { change = null, payload }) {
     const events = require('./events');
     let data = null;
     let env = null;
-    db.getDb().transaction(() => {
-        if (change) change();
-        data = typeof payload === 'function' ? payload() : payload;
-        env = events.record(event, appId, data);
-        events.recordObjectChanges();       // a row the change deleted: media.object.deleted, same transaction
-    })();
+    await db.getDb().tx(async () => {
+        if (change) await change();
+        data = typeof payload === 'function' ? await payload() : payload;
+        env = await events.record(event, appId, data);
+        await events.recordObjectChanges();       // a row the change deleted: media.object.deleted, same transaction
+    });
     events.kick();
     const eventId = env ? env.event_id : null;
     sendWebhook(appId, event, data, { eventId }).catch(() => {});

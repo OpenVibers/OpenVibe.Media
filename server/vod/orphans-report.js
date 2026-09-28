@@ -45,18 +45,18 @@ function parseRecordingName(base) {
     return { app: m[1], id: Number(m[2]), recorded_at: new Date(Number(m[3])).toISOString() };
 }
 
-function rowByBasename(base) {
-    const vod = db.getVodByFileBasename(base);
+async function rowByBasename(base) {
+    const vod = await db.getVodByFileBasename(base);
     if (vod) return { kind: 'vod', row: vod };
-    const byKey = db.all('SELECT * FROM vods WHERE storage_key LIKE ?', [`%${base}`]).find(r => path.basename(r.storage_key || '') === base);
+    const byKey = (await db.all('SELECT * FROM vods WHERE storage_key ILIKE ?', [`%${base}`])).find(r => path.basename(r.storage_key || '') === base);
     if (byKey) return { kind: 'vod', row: byKey };
-    const clip = db.getClipByFileBasename(base);
+    const clip = await db.getClipByFileBasename(base);
     if (clip) return { kind: 'clip', row: clip };
     return null;
 }
 
-function objectFor(kind, app, id) {
-    try { return db.get('SELECT id, lifecycle_status, deleted_at FROM media_objects WHERE legacy_ref = ?', [`legacy:${app}:${kind}:${id}`]); } catch { return null; }
+async function objectFor(kind, app, id) {
+    try { return await db.get('SELECT id, lifecycle_status, deleted_at FROM media_objects WHERE legacy_ref = ?', [`legacy:${app}:${kind}:${id}`]); } catch { return null; }
 }
 
 async function head(provider, key) {
@@ -79,17 +79,17 @@ async function assess(obj, { provider = 'b2' } = {}) {
     const base = path.basename(obj.key);
     const parsed = parseRecordingName(base);
     const out = { key: obj.key, size: obj.size, last_modified: obj.last_modified, name: parsed, match: null, copies: {}, recommendation: null, reason: null };
-    const found = rowByBasename(base);
+    const found = await rowByBasename(base);
     if (!found) {
         if (parsed) {
-            const byId = db.get('SELECT * FROM vods WHERE id = ? AND app_id = ?', [parsed.id, parsed.app]);
+            const byId = await db.get('SELECT * FROM vods WHERE id = ? AND app_id = ?', [parsed.id, parsed.app]);
             if (byId) {
                 out.match = { kind: 'vod', id: byId.id, app_id: byId.app_id, file: path.basename(byId.file_path || ''), storage_provider: byId.storage_provider || 'local' };
                 out.recommendation = 'review_row_mismatch';
                 out.reason = `vod ${byId.id} exists but points at ${out.match.file || 'no file'}`;
                 return out;
             }
-            const o = objectFor('vod', parsed.app, parsed.id);
+            const o = await objectFor('vod', parsed.app, parsed.id);
             out.match = { kind: 'vod', id: parsed.id, app_id: parsed.app, row: 'gone', object: o ? { id: o.id, lifecycle_status: o.lifecycle_status, deleted_at: o.deleted_at } : null };
             out.recommendation = 'delete_row_gone';
             out.reason = `vod ${parsed.id} (${parsed.app}) no longer exists${o && o.deleted_at ? ` (deleted ${o.deleted_at})` : ''}; recorded ${parsed.recorded_at}`;
@@ -213,18 +213,18 @@ const LOCATION_ROWS = `SELECT l.provider, l.bucket, l.key, o.id AS object_id, o.
 const sidecarsOf = (p) => [p.replace(/\.webm$/, '.seekable.webm'), p.replace(/\.mp4$/, '.seekable.mp4'), p.replace(/\.webm$/, '.master.mkv')].filter(x => x !== p);
 
 /** What the database names on local disk: { wanted: Set(abs path), deleted: Map(abs path → location), segmentBases, sessions, jobs }. */
-function localReferences() {
+async function localReferences() {
     const vs = vodStorage();
     const model = require('../objects/model');
     const wanted = new Set();
     const add = (p) => { if (p) wanted.add(path.resolve(String(p))); };
     const deleted = new Map();
-    for (const l of db.all(`${LOCATION_ROWS} WHERE l.provider = 'local'`)) {
+    for (const l of await db.all(`${LOCATION_ROWS} WHERE l.provider = 'local'`)) {
         if (locationWanted(l)) add(l.key); else deleted.set(path.resolve(String(l.key)), l);
     }
     const thumb = (u) => { const name = model.thumbFileFromUrl(u); if (name) add(path.join(config.thumbnails.path, name)); };
     const segmentBases = new Set();      // browser-chunk segments <base>.seg-<n>-<ms>.webm belong to <base>.webm
-    for (const v of db.all('SELECT id, file_path, master_file_path, thumbnail_url FROM vods')) {
+    for (const v of await db.all('SELECT id, file_path, master_file_path, thumbnail_url FROM vods')) {
         if (v.file_path) {
             for (const f of [v.file_path, vs.localPathForVod(v)]) {
                 add(f);
@@ -235,15 +235,15 @@ function localReferences() {
         add(v.master_file_path);
         thumb(v.thumbnail_url);
     }
-    for (const c of db.all('SELECT file_path, thumbnail_url FROM clips')) {
+    for (const c of await db.all('SELECT file_path, thumbnail_url FROM clips')) {
         if (c.file_path) { add(c.file_path); add(path.join(config.vod.clipsPath, path.basename(c.file_path))); }
         thumb(c.thumbnail_url);
     }
-    for (const f of db.all('SELECT key, app_id FROM files')) add(path.join(config.files.path, f.app_id, f.key));
-    for (const p of db.all('SELECT screenshot_path FROM pastes WHERE screenshot_path IS NOT NULL')) add(p.screenshot_path);
-    for (const a of db.all('SELECT file_path FROM assets WHERE file_path IS NOT NULL')) add(a.file_path);
-    const sessions = new Set(db.all("SELECT id FROM media_uploads WHERE status IN ('active', 'completing')").map(r => r.id));
-    const jobs = new Set(db.all("SELECT id FROM media_jobs WHERE status IN ('queued', 'running')").map(r => r.id));
+    for (const f of await db.all('SELECT key, app_id FROM files')) add(path.join(config.files.path, f.app_id, f.key));
+    for (const p of await db.all('SELECT screenshot_path FROM pastes WHERE screenshot_path IS NOT NULL')) add(p.screenshot_path);
+    for (const a of await db.all('SELECT file_path FROM assets WHERE file_path IS NOT NULL')) add(a.file_path);
+    const sessions = new Set((await db.all("SELECT id FROM media_uploads WHERE status IN ('active', 'completing')")).map(r => r.id));
+    const jobs = new Set((await db.all("SELECT id FROM media_jobs WHERE status IN ('queued', 'running')")).map(r => r.id));
     return { wanted, deleted, segmentBases, sessions, jobs };
 }
 
@@ -263,51 +263,51 @@ function classifyLocal(f, refs, now) {
 }
 
 /** A recorder-style name (vod-<app>-<id>-<ms>.<ext>): whose recording, and does its row still exist? */
-function recordingNameHint(base) {
+async function recordingNameHint(base) {
     const parsed = parseRecordingName(base);
     if (!parsed) return null;
-    const row = db.get('SELECT id, file_path FROM vods WHERE id = ? AND app_id = ?', [parsed.id, parsed.app]);
+    const row = await db.get('SELECT id, file_path FROM vods WHERE id = ? AND app_id = ?', [parsed.id, parsed.app]);
     if (!row) return `a recording of vod ${parsed.id} (${parsed.app}), whose row is gone`;
     return `named for vod ${parsed.id} (${parsed.app}), whose row points at ${path.basename(row.file_path || '') || 'no file'}`;
 }
 
-function localHint(f, refs) {
+async function localHint(f, refs) {
     const base = path.basename(f.abs);
     const del = refs.deleted.get(f.abs);
     if (del) return del.object_id ? `bytes of deleted object ${del.object_id}${del.legacy_ref ? ` (${del.legacy_ref})` : ''}` : 'named only by a location row whose object does not exist';
     if (f.root === 'objects') {
         const [top, sub] = f.path.split(path.sep);
         if (top === '.parts') {
-            const s = db.get('SELECT status FROM media_uploads WHERE id = ?', [sub]);
+            const s = await db.get('SELECT status FROM media_uploads WHERE id = ?', [sub]);
             return s ? `parts of multipart upload ${sub} (${s.status})` : `parts of multipart upload ${sub}, which has no session`;
         }
         if (top === '.jobs') {
-            const j = db.get('SELECT status FROM media_jobs WHERE id = ?', [sub]);
+            const j = await db.get('SELECT status FROM media_jobs WHERE id = ?', [sub]);
             return j ? `work files of job ${sub} (${j.status})` : `work files of job ${sub}, which does not exist`;
         }
         if (top === '.tmp') return 'an upload that never finished (temp file)';
-        const o = db.get('SELECT id, lifecycle_status FROM media_objects WHERE id = ?', [base]);
+        const o = await db.get('SELECT id, lifecycle_status FROM media_objects WHERE id = ?', [base]);
         return o ? `named for object ${o.id} (${o.lifecycle_status}), which records no local copy here` : `named for object ${base}, which does not exist`;
     }
     if (base.endsWith('.download')) return 'a restore download that never finished';
     if (/\.seekable\.(webm|mp4)$/.test(base)) return 'a DVR sidecar no VOD row names';
-    if (/\.master\.mkv$/.test(base)) return recordingNameHint(base.replace(/\.master\.mkv$/, '.webm')) || 'a master archive no VOD row names';
-    return recordingNameHint(base);
+    if (/\.master\.mkv$/.test(base)) return await recordingNameHint(base.replace(/\.master\.mkv$/, '.webm')) || 'a master archive no VOD row names';
+    return await recordingNameHint(base);
 }
 
 /** What the database names in one provider's bucket: { wanted: Set(key), deleted: Map(key → location), rows: Map(key → row) }. */
-function remoteReferences(provider) {
+async function remoteReferences(provider) {
     const vs = vodStorage();
     const bucket = vs.bucketFor(provider);
     const wanted = new Set();
     const deleted = new Map();
-    for (const l of db.all(`${LOCATION_ROWS} WHERE l.provider = ?`, [provider])) {
+    for (const l of await db.all(`${LOCATION_ROWS} WHERE l.provider = ?`, [provider])) {
         if (l.bucket && bucket && l.bucket !== bucket) continue;     // a copy recorded in another bucket
         if (locationWanted(l)) wanted.add(l.key); else deleted.set(l.key, l);
     }
     const rows = new Map();   // every key a vods/clips row points at, with the row (stale R2 copies are recognised by it)
     for (const table of ['vods', 'clips']) {
-        for (const r of db.all(`SELECT id, file_path, storage_provider, storage_key FROM ${table} WHERE COALESCE(file_path, '') != ''`)) {
+        for (const r of await db.all(`SELECT id, file_path, storage_provider, storage_key FROM ${table} WHERE COALESCE(file_path, '') != ''`)) {
             const p = vs.providerOf(r);
             if (p === 'local' && !r.storage_key) continue;
             const key = vs.keyForVod(r);
@@ -318,15 +318,15 @@ function remoteReferences(provider) {
     return { wanted, deleted, rows };
 }
 
-function remoteHint(provider, key, refs) {
+async function remoteHint(provider, key, refs) {
     if (key.startsWith(PREFIX)) return `parked in ${PREFIX}: scripts/vods-orphans-report.js says what each one is`;
     const del = refs.deleted.get(key);
     if (del) return del.object_id ? `copy of deleted object ${del.object_id}${del.legacy_ref ? ` (${del.legacy_ref})` : ''}` : 'named only by a location row whose object does not exist';
     const row = refs.rows.get(key);
     if (row && provider === 'r2') return `an R2 copy of ${row.kind} ${row.id}, which is served from ${row.provider}`;
     const shot = /paste-screenshot-(\d+)\.[a-z0-9]+$/i.exec(key);
-    if (shot) return db.get('SELECT 1 AS x FROM pastes WHERE id = ?', [Number(shot[1])]) ? `a legacy screenshot of paste ${shot[1]}` : `a legacy screenshot of paste ${shot[1]}, whose row is gone`;
-    return recordingNameHint(path.basename(key));
+    if (shot) return await db.get('SELECT 1 AS x FROM pastes WHERE id = ?', [Number(shot[1])]) ? `a legacy screenshot of paste ${shot[1]}` : `a legacy screenshot of paste ${shot[1]}, whose row is gone`;
+    return await recordingNameHint(path.basename(key));
 }
 
 /**
@@ -339,8 +339,8 @@ function remoteHint(provider, key, refs) {
 async function buildStorageReport({ providers = null, list = null, listUploads = null, limit = 2000, now = Date.now() } = {}) {
     const vs = vodStorage();
     const provs = providers || ['b2', 'r2'].filter(p => vs.providerConfigured(p));
-    const lister = list || ((p) => vs.listObjects(p, ''));
-    const uploadLister = listUploads || ((p) => vs.listMultipartUploads(p));
+    const lister = list || (async (p) => await vs.listObjects(p, ''));
+    const uploadLister = listUploads || (async (p) => await vs.listMultipartUploads(p));
     const cap = Math.max(1, Number(limit) || 2000);
     const report = {
         kind: 'media.storage_orphans.report', version: 1, generated_at: new Date(now).toISOString(), read_only: true,
@@ -366,7 +366,7 @@ async function buildStorageReport({ providers = null, list = null, listUploads =
         report.scope.roots.push({ name: root.name, dir: root.dir, exists, files });
     }
     report.scope.walk_truncated = walked.truncated;
-    const lrefs = localReferences();
+    const lrefs = await localReferences();
     const orphanLocal = [];
     for (const f of walked.files) {
         const c = classifyLocal(f, lrefs, now);
@@ -380,7 +380,7 @@ async function buildStorageReport({ providers = null, list = null, listUploads =
         t.by_root[f.root].files++; t.by_root[f.root].bytes += f.size;
     }
     orphanLocal.sort((a, b) => b.size - a.size);
-    for (const f of orphanLocal.slice(0, cap)) push('unreferenced_local', { root: f.root, path: f.path, size: f.size, modified: new Date(f.mtimeMs).toISOString(), hint: localHint(f, lrefs) });
+    for (const f of orphanLocal.slice(0, cap)) push('unreferenced_local', { root: f.root, path: f.path, size: f.size, modified: new Date(f.mtimeMs).toISOString(), hint: await localHint(f, lrefs) });
     if (orphanLocal.length > cap) report.truncated.unreferenced_local = true;
 
     // ── Buckets ──
@@ -394,10 +394,10 @@ async function buildStorageReport({ providers = null, list = null, listUploads =
         entry.keys = keys.length;
         entry.bytes = keys.reduce((n, k) => n + (Number(k.size) || 0), 0);
         listed.set(p, new Map(keys.map(k => [k.key, k])));
-        const rrefs = remoteReferences(p);
+        const rrefs = await remoteReferences(p);
         const orphans = keys.filter(k => !rrefs.wanted.has(k.key)).sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0));
         report.totals.unreferenced_remote[p] = { keys: orphans.length, bytes: orphans.reduce((n, k) => n + (Number(k.size) || 0), 0) };
-        for (const k of orphans.slice(0, cap)) push('unreferenced_remote', { provider: p, key: k.key, size: Number(k.size) || 0, last_modified: k.last_modified || null, hint: remoteHint(p, k.key, rrefs) });
+        for (const k of orphans.slice(0, cap)) push('unreferenced_remote', { provider: p, key: k.key, size: Number(k.size) || 0, last_modified: k.last_modified || null, hint: await remoteHint(p, k.key, rrefs) });
         if (orphans.length > cap) report.truncated.unreferenced_remote = true;
         let uploads = [];
         try { uploads = await uploadLister(p); } catch (err) { entry.multipart_error = err.message; }
@@ -406,7 +406,7 @@ async function buildStorageReport({ providers = null, list = null, listUploads =
     }
 
     // ── Copies the database records whose bytes are not there ──
-    for (const l of db.all(`SELECT l.provider, l.bucket, l.key, l.state, l.verified_at, o.id AS object_id, o.app_id, o.kind, o.legacy_ref, o.lifecycle_status
+    for (const l of await db.all(`SELECT l.provider, l.bucket, l.key, l.state, l.verified_at, o.id AS object_id, o.app_id, o.kind, o.legacy_ref, o.lifecycle_status
                             FROM media_locations l JOIN media_objects o ON o.id = l.object_id WHERE o.lifecycle_status != 'deleted' ORDER BY l.id`)) {
         let there;
         if (l.provider === 'local') {
@@ -425,8 +425,8 @@ async function buildStorageReport({ providers = null, list = null, listUploads =
     }
 
     // ── Media's own multipart sessions still open ──
-    for (const u of db.all(`SELECT u.*, (SELECT COUNT(*) FROM media_upload_parts p WHERE p.upload_id = u.id) AS parts_received,
-                                   (SELECT COALESCE(SUM(p.size_bytes), 0) FROM media_upload_parts p WHERE p.upload_id = u.id) AS bytes_received,
+    for (const u of await db.all(`SELECT u.*, (SELECT COUNT(*) FROM media_upload_parts p WHERE p.upload_id = u.id) AS parts_received,
+                                   (SELECT COALESCE(SUM(p.size_bytes), 0)::bigint FROM media_upload_parts p WHERE p.upload_id = u.id) AS bytes_received,
                                    (u.expires_at < datetime('now')) AS expired
                             FROM media_uploads u WHERE u.status IN ('active', 'completing') ORDER BY u.created_at`)) {
         report.totals.multipart_local.open++;

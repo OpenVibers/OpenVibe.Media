@@ -26,30 +26,31 @@ function problem(res, status, code, detail) {
     return http.sendProblem(res, status, code, { detail });
 }
 
-function shape(req, row) {
-    return namespaces.publicShape(req.appRow, row, namespaces.reconcile(req.appRow, row.namespace));
+async function shape(req, row) {
+    return await namespaces.publicShape(req.appRow, row, await namespaces.reconcile(req.appRow, row.namespace));
 }
 
 // Reads, with the default per-actor limits (server/actor-limits.js).
-router.get('/', tenantAuth({ verb: 'list', namespaced: true }), limits('media.namespace.list'), (req, res) => {
+router.get('/', tenantAuth({ verb: 'list', namespaced: true }), limits('media.namespace.list'), async (req, res) => {
     try {
-        const rows = namespaces.listForTenant(req.appId).filter(r => namespaceGrant(req, 'list', r.namespace).allowed);
-        res.json({ namespaces: rows.map(r => shape(req, r)) });
+        const rows = [];
+        for (const r of await namespaces.listForTenant(req.appId)) if ((await namespaceGrant(req, 'list', r.namespace)).allowed) rows.push(r);
+        res.json({ namespaces: (await Promise.all(rows.map(async r => await shape(req, r)))) });
     } catch (err) {
         console.error('[Namespaces] list error:', err.message);
         problem(res, 500, 'media.namespace.list_failed', 'Failed to list namespaces');
     }
 });
 
-router.get('/:namespace', tenantAuth({ verb: 'read', namespaced: true }), limits('media.namespace.read'), (req, res) => {
+router.get('/:namespace', tenantAuth({ verb: 'read', namespaced: true }), limits('media.namespace.read'), async (req, res) => {
     try {
         const named = namespaces.resolveName(req.appRow, req.params.namespace);
         if (named.error) return problem(res, 400, 'media.namespace.invalid', named.error);
-        const g = namespaceGrant(req, 'read', named.namespace);
+        const g = await namespaceGrant(req, 'read', named.namespace);
         if (!g.allowed) return problem(res, 403, g.code, g.reason);
-        const row = namespaces.get(named.namespace);
+        const row = await namespaces.get(named.namespace);
         if (!row || row.app_id !== req.appId) return problem(res, 404, 'media.namespace.not_found', 'No such namespace in this tenant');
-        res.json(shape(req, row));
+        res.json(await shape(req, row));
     } catch (err) {
         console.error('[Namespaces] read error:', err.message);
         problem(res, 500, 'media.namespace.read_failed', 'Failed to read the namespace');

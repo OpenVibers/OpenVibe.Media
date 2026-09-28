@@ -43,22 +43,22 @@ function who(req) {
     return `app:${req.appId}${req.authType === 'user' ? `:user:${req.userId}` : ''}`;
 }
 
-function ownsJob(req, job) {
+async function ownsJob(req, job) {
     if (req.authType !== 'user') return true;
     if (job.owner_user_id != null && job.owner_user_id === req.userId) return true;
-    const obj = job.object_id ? model.getObject(job.object_id) : null;
+    const obj = job.object_id ? await model.getObject(job.object_id) : null;
     return !!(obj && obj.owner_user_id != null && obj.owner_user_id === req.userId);
 }
 
-function load(req, res) {
-    const job = queue.getForApp(String(req.params.jobId || ''), req.appId);
-    if (!job || !ownsJob(req, job)) { problem(res, 404, 'media.job.not_found', 'No such job in this namespace'); return null; }
+async function load(req, res) {
+    const job = await queue.getForApp(String(req.params.jobId || ''), req.appId);
+    if (!job || !await ownsJob(req, job)) { problem(res, 404, 'media.job.not_found', 'No such job in this namespace'); return null; }
     return job;
 }
 
 /** Transform is granted per namespace: the job's object's, or the tenant's root for a job with none (else answered). */
-function mayTransform(req, res, obj) {
-    const g = namespaceGrant(req, 'transform', obj ? obj.namespace : db.rootNamespace(req.appRow));
+async function mayTransform(req, res, obj) {
+    const g = await namespaceGrant(req, 'transform', obj ? obj.namespace : db.rootNamespace(req.appRow));
     if (!g.allowed) { problem(res, 403, g.code, g.reason); return false; }
     return true;
 }
@@ -75,12 +75,12 @@ function sendJobError(res, err) {
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
-router.get('/', list, limits('media.job.list'), (req, res) => {
+router.get('/', list, limits('media.job.list'), async (req, res) => {
     try {
         const q = req.query;
         if (q.cursor && !/^mjob_[0-9A-Za-z_]{1,40}$/.test(String(q.cursor))) return problem(res, 400, 'media.job.invalid', 'Bad cursor');
         if (q.status && !queue.STATUSES.includes(String(q.status))) return problem(res, 400, 'media.job.invalid', `status must be one of ${queue.STATUSES.join(', ')}`);
-        const out = queue.list(req.appId, {
+        const out = await queue.list(req.appId, {
             status: q.status, type: q.type, objectId: q.object_id, cursor: q.cursor, limit: q.limit,
             actingUserId: req.authType === 'user' ? req.userId : null,
         });
@@ -88,7 +88,7 @@ router.get('/', list, limits('media.job.list'), (req, res) => {
     } catch (err) { sendJobError(res, err); }
 });
 
-router.post('/', transform, limits('media.job.create', QUEUE), (req, res) => {
+router.post('/', transform, limits('media.job.create', QUEUE), async (req, res) => {
     try {
         const b = req.body || {};
         const type = String(b.type || '');
@@ -96,7 +96,7 @@ router.post('/', transform, limits('media.job.create', QUEUE), (req, res) => {
         if (!spec) return problem(res, 400, 'media.job.unknown_type', `type must be one of ${queue.typeNames().join(', ')}`);
         let obj = null;
         if (b.object_id != null && b.object_id !== '') {
-            obj = model.resolveObject(String(b.object_id), req.appId);
+            obj = await model.resolveObject(String(b.object_id), req.appId);
             if (!obj || (req.authType === 'user' && obj.visibility === 'private' && obj.owner_user_id !== req.userId)) {
                 return problem(res, 404, 'media.object.not_found', 'No such object in this namespace');
             }
@@ -104,14 +104,14 @@ router.post('/', transform, limits('media.job.create', QUEUE), (req, res) => {
         } else if (spec.needsObject) {
             return problem(res, 400, 'media.job.invalid', `${type} needs object_id`);
         }
-        if (!mayTransform(req, res, obj)) return;
+        if (!await mayTransform(req, res, obj)) return;
         if (b.params != null && (typeof b.params !== 'object' || Array.isArray(b.params) || JSON.stringify(b.params).length > 16384)) {
             return problem(res, 400, 'media.job.invalid', 'params must be an object of at most 16 KB');
         }
-        const params = spec.validate ? spec.validate({ appId: req.appId, obj, params: b.params || {} }) : (b.params || {});
+        const params = spec.validate ? await spec.validate({ appId: req.appId, obj, params: b.params || {} }) : (b.params || {});
         const key = req.headers['idempotency-key'] || b.idempotency_key || null;
         if (key != null && !/^[\x21-\x7e]{1,200}$/.test(String(key))) return problem(res, 400, 'media.job.invalid', 'Idempotency-Key must be 1-200 visible ASCII characters');
-        const r = queue.enqueue({
+        const r = await queue.enqueue({
             appId: req.appId, type, objectId: obj ? obj.id : null, params, idempotencyKey: key,
             createdBy: who(req), ownerUserId: req.authType === 'user' ? req.userId : null, maxAttempts: b.max_attempts,
         });
@@ -121,28 +121,28 @@ router.post('/', transform, limits('media.job.create', QUEUE), (req, res) => {
     } catch (err) { sendJobError(res, err); }
 });
 
-router.get('/:jobId', read, limits('media.job.read'), (req, res) => {
-    const job = load(req, res);
+router.get('/:jobId', read, limits('media.job.read'), async (req, res) => {
+    const job = await load(req, res);
     if (job) res.json({ job: queue.jobPublic(job) });
 });
 
-router.post('/:jobId/approve', transform, limits('media.job.approve', QUEUE), (req, res) => {
+router.post('/:jobId/approve', transform, limits('media.job.approve', QUEUE), async (req, res) => {
     try {
-        const job = load(req, res);
-        if (!job || !mayTransform(req, res, job.object_id ? model.getObject(job.object_id) : null)) return;
+        const job = await load(req, res);
+        if (!job || !await mayTransform(req, res, job.object_id ? await model.getObject(job.object_id) : null)) return;
         if (job.status !== 'proposed') return problem(res, 409, 'media.job.not_proposed', `The job is ${job.status}; only proposals are approved`);
-        const out = queue.approve(job.id, { by: who(req) });
+        const out = await queue.approve(job.id, { by: who(req) });
         if (!out) return problem(res, 409, 'media.job.not_proposed', 'The job was decided meanwhile');
         require('./worker').kick();
         res.json({ job: queue.jobPublic(out) });
     } catch (err) { sendJobError(res, err); }
 });
 
-function cancelHandler(req, res) {
+async function cancelHandler(req, res) {
     try {
-        const job = load(req, res);
-        if (!job || !mayTransform(req, res, job.object_id ? model.getObject(job.object_id) : null)) return;
-        const out = queue.cancel(job.id, { by: who(req) });
+        const job = await load(req, res);
+        if (!job || !await mayTransform(req, res, job.object_id ? await model.getObject(job.object_id) : null)) return;
+        const out = await queue.cancel(job.id, { by: who(req) });
         if (out.finished) return problem(res, 409, 'media.job.finished', `The job already ${out.job.status}`);
         res.status(out.pending ? 202 : 200).json({ job: queue.jobPublic(out.job) });
     } catch (err) { sendJobError(res, err); }

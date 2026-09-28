@@ -62,17 +62,32 @@ function validate(v) {
 }
 
 let store = null;
+let explicit = new Set();   // keys the active revision sets explicitly (read on activation: snapshots are async)
 
-/** The store (created on first use, once the database is open). */
-function get() {
+async function keysOf(revision) {
+    const snap = store && revision != null ? await store.snapshot(revision) : null;
+    return new Set(Object.keys((snap && snap.values) || {}));
+}
+
+/** Create the store once the database is open (boot: server/index.js; tests). */
+async function init() {
     if (store) return store;
-    store = config.createConfigStore({
+    const s = await config.createConfigStore({
         db: db.getDb(), service: 'media', namespace: 'media.object_tier',
         defaults: DEFAULTS, schema: SCHEMA, validate,
         // Revision 1 is empty: the defaults apply, and a key set later shows as a setting.
         legacy: () => ({}),
+        onActivate: async (_values, _previous, { revision }) => { if (store) explicit = await keysOf(revision); },
         log: { info: (m) => console.log(`[ObjectTiers] ${m}`), warn: (m) => console.warn(`[ObjectTiers] ${m}`), error: (m) => console.error(`[ObjectTiers] ${m}`) },
     });
+    store = s;
+    explicit = await keysOf(s.revision());
+    return store;
+}
+
+/** The store init() created (get() on it reads memory). */
+function get() {
+    if (!store) throw new Error('media.object_tier is not loaded yet (tier-policy init() at boot)');
     return store;
 }
 
@@ -82,16 +97,14 @@ function settings() {
 }
 
 /** Change some keys: one validated revision merged over the active one → the new snapshot (throws ConfigError 422/409). */
-function set(updates, { actor = null, reason = null } = {}) {
-    return get().apply(updates, { merge: true, actor, reason });
+async function set(updates, { actor = null, reason = null } = {}) {
+    return await get().apply(updates, { merge: true, actor, reason });
 }
 
 /** Keys the active revision sets explicitly (anything else is its default). */
 function explicitKeys() {
-    const s = get();
-    if (s.revision() == null) return new Set();
-    const snap = s.snapshot(s.revision());
-    return new Set(Object.keys((snap && snap.values) || {}));
+    get();
+    return new Set(explicit);
 }
 
 /** Each key as { value, default, source: default | setting }. */
@@ -117,4 +130,4 @@ function describe(v = settings()) {
     };
 }
 
-module.exports = { DEFAULTS, SCHEMA, validate, get, settings, set, explicitKeys, thresholds, describe, _reset: () => { store = null; } };
+module.exports = { DEFAULTS, SCHEMA, validate, init, get, settings, set, explicitKeys, thresholds, describe, _reset: () => { store = null; explicit = new Set(); } };

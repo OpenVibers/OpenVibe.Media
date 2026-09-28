@@ -47,8 +47,8 @@ const views = require('../views/service');
 // Views + unique views live in ../views/service (visit-based with a cooldown, hashed
 // visitors, owner/bot/rate-limit exclusions). A playback session counts once: only the
 // request for the first bytes, not every seek/range request.
-function trackUniqueView(kind, id, req, ownerUserId = null) {
-    try { if (views.isInitialPlaybackRequest(req)) views.recordView(kind, id, { req, ownerUserId }); } catch { /* non-critical */ }
+async function trackUniqueView(kind, id, req, ownerUserId = null) {
+    try { if (views.isInitialPlaybackRequest(req)) await views.recordView(kind, id, { req, ownerUserId }); } catch { /* non-critical */ }
 }
 
 /** public | unlisted | private. Rows without a visibility fall back to is_public (0 = private). */
@@ -143,15 +143,15 @@ async function serveMediaRecord(kind, record, req, res) {
     // recording's sidecar through it while the stream is still being recorded.
     if (pages.wantsHtmlPage(req)) {
         res.set('Cache-Control', visibility === 'public' ? 'public, max-age=60' : 'private, no-store');
-        return res.type('html').send(pages.renderWatchPage(kind, record, require('../objects/readiness').forRow(record)));
+        return res.type('html').send(pages.renderWatchPage(kind, record, await require('../objects/readiness').forRow(record)));
     }
     if (drill.refuseBytes(res)) return;
 
-    trackUniqueView(kind, record.id, req, record.user_id);
+    await trackUniqueView(kind, record.id, req, record.user_id);
 
     // Track last access time for storage tier decisions
     if (kind === 'vod') {
-        try { db.run("UPDATE vods SET last_accessed_at = datetime('now') WHERE id = ?", [record.id]); } catch {}
+        try { await db.run("UPDATE vods SET last_accessed_at = datetime('now') WHERE id = ?", [record.id]); } catch {}
     }
 
     // Resolve the local file. Clips keep their own absolute path; VODs resolve
@@ -204,13 +204,13 @@ async function serveMediaRecord(kind, record, req, res) {
 router.get('/v/:id', optionalIdentity, async (req, res) => {
     try {
         if (/^\d+$/.test(req.params.id)) {
-            const vod = db.getVodById(parseInt(req.params.id, 10));
+            const vod = await db.getVodById(parseInt(req.params.id, 10));
             if (!vod || vod.clips_only) return notFound(res);
             return await serveMediaRecord('vod', vod, req, res);
         }
-        const vod = db.getVodByFileBasename(req.params.id);
+        const vod = await db.getVodByFileBasename(req.params.id);
         if (vod && !vod.clips_only) return await serveMediaRecord('vod', vod, req, res);
-        const clip = db.getClipByFileBasename(req.params.id);
+        const clip = await db.getClipByFileBasename(req.params.id);
         if (clip) return await serveMediaRecord('clip', clip, req, res);
         notFound(res);
     } catch (err) {
@@ -223,7 +223,7 @@ router.get('/v/:id', optionalIdentity, async (req, res) => {
 router.get('/c/:id', optionalIdentity, async (req, res) => {
     try {
         if (!/^\d+$/.test(req.params.id)) return notFound(res);
-        const clip = db.getClipById(parseInt(req.params.id, 10));
+        const clip = await db.getClipById(parseInt(req.params.id, 10));
         // A clip still being cut (or whose cut failed) has no file yet: its bytes are a 404, and a
         // browser navigation gets the watch page saying so (private clips still look missing).
         if (!clip || (!clip.file_path && !pages.wantsHtmlPage(req))) return notFound(res);
@@ -291,16 +291,16 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
         const w = frames.quantizeWidth(req.query.w);
 
         const resolved = await frames.resolveSelector(appId, req.params.sel);
-        if (!resolved.msid) return sendCard(404, resolved.label, 'is offline right now');
+        if (!resolved.msid) return await sendCard(404, resolved.label, 'is offline right now');
 
         const out = await frames.getLiveFrame(appId, resolved.msid, w);
         if (!out.ok) {
-            if (out.reason === 'not_live') return sendCard(404, resolved.label, 'is offline right now');
+            if (out.reason === 'not_live') return await sendCard(404, resolved.label, 'is offline right now');
             if (out.reason === 'busy') {
                 res.set('Retry-After', '2');
-                return sendCard(503, resolved.label, 'is live — server busy, retry shortly');
+                return await sendCard(503, resolved.label, 'is live — server busy, retry shortly');
             }
-            return sendCard(503, resolved.label, 'is live — frame unavailable, retry shortly');
+            return await sendCard(503, resolved.label, 'is live — frame unavailable, retry shortly');
         }
         res.set({
             'Content-Type': 'image/jpeg',
@@ -316,10 +316,10 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
 });
 
 // ── App assets (emotes / sounds) by id ───────────────────────
-router.get('/a/:id', (req, res) => {
+router.get('/a/:id', async (req, res) => {
     if (drill.refuseBytes(res)) return;
     try {
-        const a = db.getAssetById(parseInt(req.params.id, 10));
+        const a = await db.getAssetById(parseInt(req.params.id, 10));
         if (!a || !a.file_path || !fs.existsSync(a.file_path)) return res.status(404).json({ error: 'Not found' });
         // Content is replaced under the same URL on re-upload — cache a day, not immutable.
         streamFileWithRange(req, res, a.file_path, {
@@ -338,7 +338,7 @@ router.get('/a/:id', (req, res) => {
 // GET / — server-rendered mass index of all public media (tabs: All / Videos /
 // Clips / Images / Text / Thumbnails / Files), each card linking back to its
 // source page in the owning app. See public/browse.js.
-router.get('/', (req, res) => require('./browse').handle(req, res));
+router.get('/', async (req, res) => await require('./browse').handle(req, res));
 
 // What shipped on OpenVibe.Media: the shared update log every OpenVibe site has.
 router.get('/updates', (req, res) => {
@@ -350,7 +350,7 @@ router.get('/updates', (req, res) => {
         footer: { variant: 'full' },
     }));
 });
-router.get('/browse', (req, res) => require('./browse').handle(req, res));
+router.get('/browse', async (req, res) => await require('./browse').handle(req, res));
 
 // ── Dev data APIs: transcripts / AI timelines / chat insight ─
 // JSON companions to the frame API — same selector grammar, 30s cache as the
@@ -388,14 +388,14 @@ router.get('/v/:id/transcript.json', _devDataRoute((req) => {
 // rows still carry those absolute URLs. Basenames change when a thumbnail is
 // regenerated, so resolve the vod/clip id from the name and redirect to the
 // current canonical URL; serve the exact file when it still exists.
-router.get('/api/thumbnails/:name', (req, res) => {
+router.get('/api/thumbnails/:name', async (req, res) => {
     if (drill.refuseBytes(res)) return;
     const name = path.basename(String(req.params.name || ''));
     const m = /^(vod|clip)-(\d+)-\d+\.(?:jpg|jpeg|png)$/i.exec(name);
     if (m) {
         const row = m[1].toLowerCase() === 'vod'
-            ? db.getVodById(parseInt(m[2], 10), 'live')
-            : db.getClipById(parseInt(m[2], 10), 'live');
+            ? await db.getVodById(parseInt(m[2], 10), 'live')
+            : await db.getClipById(parseInt(m[2], 10), 'live');
         // Never for a private row: the redirect would hand out the current thumbnail URL of any
         // private recording to whoever guesses vod-<id>-0.jpg. The exact file name still serves.
         if (row && row.thumbnail_url && recordVisibility(row) !== 'private' && !row.thumbnail_url.endsWith(`/${name}`)) {
@@ -429,14 +429,14 @@ router.get('/f/screenshots/:name', (req, res) => {
 });
 
 // ── Files ────────────────────────────────────────────────────
-router.get('/f/:key', (req, res) => {
+router.get('/f/:key', async (req, res) => {
     if (drill.refuseBytes(res)) return;
     try {
-        const row = db.getFileByKey(String(req.params.key));
+        const row = await db.getFileByKey(String(req.params.key));
         if (!row) return res.status(404).json({ error: 'Not found' });
         // Developer-project sandbox files are never public: only a valid signed URL (from the
         // Files API) serves them, and a missing signature looks exactly like a missing file.
-        const sandbox = db.isSandboxTenant(row.app_id);
+        const sandbox = await db.isSandboxTenant(row.app_id);
         if (sandbox && !require('../objects/signing').verifyFile(row.key, req.query.exp, req.query.sig)) return res.status(404).json({ error: 'Not found' });
         const filesRoutes = require('../files/routes');
         const filePath = filesRoutes.filePathForKey(row);
@@ -492,10 +492,10 @@ router.get('/f/:key', (req, res) => {
 // Community's now, so send people there. Screenshot bytes keep being served from here.
 const movedTo = () => String(process.env.PASTES_MOVED_TO || '').replace(/\/$/, '');
 
-router.get('/p/:slug', optionalIdentity, (req, res) => {
+router.get('/p/:slug', optionalIdentity, async (req, res) => {
     if (movedTo()) return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(req.params.slug)}`);
     try {
-        const paste = db.getPasteBySlug(String(req.params.slug));
+        const paste = await db.getPasteBySlug(String(req.params.slug));
         if (!paste) return res.status(404).send('Paste not found');
 
         // Unlisted pastes stay reachable by direct link (that's the point).
@@ -508,14 +508,14 @@ router.get('/p/:slug', optionalIdentity, (req, res) => {
         // keep the literal every-read counter — one read is the whole point of them.
         const isOwner = req.userId != null && paste.user_id === req.userId;
         if (!isOwner) {
-            if (paste.burn_after_read) { db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]); paste.views += 1; }
-            else { const r = views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } }
+            if (paste.burn_after_read) { await db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]); paste.views += 1; }
+            else { const r = await views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } }
         }
 
         // Burn-after-read: allow one non-owner read, then delete.
         if (paste.burn_after_read && !isOwner && paste.views > 1) {
-            require('../pastes/routes').removePasteScreenshot(paste);
-            db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
+            await require('../pastes/routes').removePasteScreenshot(paste);
+            await db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
             return res.status(410).send('This paste has been burned after reading.');
         }
 
@@ -527,9 +527,9 @@ router.get('/p/:slug', optionalIdentity, (req, res) => {
     }
 });
 
-router.get('/p/:slug/raw', (req, res) => {
+router.get('/p/:slug/raw', async (req, res) => {
     try {
-        const found = db.getPasteBySlug(String(req.params.slug));
+        const found = await db.getPasteBySlug(String(req.params.slug));
         // A private paste answers exactly like a missing slug (no redirect that proves it exists).
         const paste = found && found.visibility !== 'private' ? found : null;
         // Image pastes have no raw text — bounce to the screenshot (stale
@@ -544,22 +544,22 @@ router.get('/p/:slug/raw', (req, res) => {
 
         // Burn after read
         if (paste.burn_after_read && paste.views > 0) {
-            db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
+            await db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
             return res.status(410).send('This paste has been burned after reading.');
         }
 
-        if (paste.burn_after_read) db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]);
-        else views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id });
+        if (paste.burn_after_read) await db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]);
+        else await views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id });
         res.type('text/plain').send(paste.content);
     } catch {
         res.status(500).send('Error');
     }
 });
 
-router.get('/p/:slug/screenshot', (req, res) => {
+router.get('/p/:slug/screenshot', async (req, res) => {
     if (drill.refuseBytes(res)) return;
     try {
-        const paste = db.getPasteBySlug(String(req.params.slug));
+        const paste = await db.getPasteBySlug(String(req.params.slug));
         // Pastes made since the move live in Community only: send an unknown slug there, like
         // /p/:slug and /p/:slug/raw (Community answers with the image, or its own 404). Stored
         // hero-moment thumbnails pointed here and showed broken images.

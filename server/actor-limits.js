@@ -15,7 +15,7 @@
  * /metrics or the signed /internal/events deliveries (Events pushes at its own pace; a 429 there only
  * makes it retry and fall behind).
  */
-const { createActorLimiter, defaultActor } = require('openvibe-sdk/limits');
+const { createActorLimiter, createValkeyLimitStore, defaultActor } = require('openvibe-sdk/limits');
 const config = require('./config');
 
 let clock = () => Date.now();
@@ -36,21 +36,45 @@ function onLimited(e) {
     if (refused) refused.inc({ limit: e.name, window: e.window });
 }
 
-const limiter = createActorLimiter({
-    limits: { minute: config.limits.minute, hour: config.limits.hour },
-    actor,
-    now: () => clock(),
-    onLimited,
-});
+// The counters: in this process, or shared across processes on Valkey once server/index.js calls useValkey() at boot
+// (ADR-035). Routes built before that pick the shared limiter up on their next request.
+let store = null;
+let valkeyHandle = null;
+let limiter = null;
+let generation = 0;
+function current() {
+    if (!limiter) {
+        limiter = createActorLimiter({
+            limits: { minute: config.limits.minute, hour: config.limits.hour },
+            actor,
+            now: () => clock(),
+            onLimited,
+            ...(store ? { store } : {}),
+        });
+    }
+    return limiter;
+}
+/** Count on Valkey (an openvibe-sdk/valkey handle), from now on. */
+function useValkey(valkey) {
+    valkeyHandle = valkey || null;
+    store = valkey ? createValkeyLimitStore(valkey) : null;
+    limiter = null;
+    generation++;
+}
 
 /** Every named limit with its numbers, as the routes declare them (published in /limits.json). */
 const registered = new Map();
 function limits(name, own = {}) {
     registered.set(name, { minute: own.minute != null ? own.minute : config.limits.minute, hour: own.hour != null ? own.hour : config.limits.hour });
-    return limiter(name, own);
+    let mw = null;
+    let built = -1;
+    return (req, res, next) => {
+        if (built !== generation || !mw) { mw = current()(name, own); built = generation; }
+        return mw(req, res, next);
+    };
 }
-limits.stats = () => limiter.stats();
-limits.reset = () => limiter.reset();
+limits.stats = () => current().stats();
+limits.reset = () => current().reset();
 
 /** Count refusals in /metrics (server/index.js, after observability.instrument). */
 function bindMetrics(registry) {
@@ -59,6 +83,8 @@ function bindMetrics(registry) {
 }
 
 module.exports = {
+    useValkey,
+    valkey: () => valkeyHandle,
     limits,
     /** [{ id, minute, hour }] for every limit the routes have declared, sorted by id. */
     registered: () => [...registered].map(([id, n]) => ({ id, ...n })).sort((x, y) => x.id.localeCompare(y.id)),

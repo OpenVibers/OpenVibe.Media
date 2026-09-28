@@ -125,42 +125,42 @@ function createMeRoutes({ auth }) {
 
     // Per-actor limits (server/actor-limits.js), counted by the signed-in person once identify() ran:
     // reads take the defaults.
-    api.get('/objects', limits('media.me.objects'), (req, res) => {
+    api.get('/objects', limits('media.me.objects'), async (req, res) => {
         if (!needPerson(req, res)) return;
         const f = explorer.parseFilters(req.query);
         if (f.error) return problem(res, 400, 'media.me.invalid', f.error);
         try {
-            res.json(explorer.list(req.person.subject, f.filters));
+            res.json(await explorer.list(req.person.subject, f.filters));
         } catch (err) {
             console.error('[Me] list error:', err.message);
             problem(res, 500, 'media.me.list_failed', 'Failed to list your objects');
         }
     });
 
-    api.get('/objects/:id', limits('media.me.object'), (req, res) => {
+    api.get('/objects/:id', limits('media.me.object'), async (req, res) => {
         if (!needPerson(req, res)) return;
-        const obj = explorer.detail(req.person.subject, req.params.id);
+        const obj = await explorer.detail(req.person.subject, req.params.id);
         if (!obj) return problem(res, 404, 'media.object.not_found', 'No such object of yours');
         res.json(obj);
     });
 
-    api.get('/usage', limits('media.me.usage'), (req, res) => {
+    api.get('/usage', limits('media.me.usage'), async (req, res) => {
         if (!needPerson(req, res)) return;
         try {
-            res.json(explorer.usage(req.person.subject));
+            res.json(await explorer.usage(req.person.subject));
         } catch (err) {
             console.error('[Me] usage error:', err.message);
             problem(res, 500, 'media.me.usage_failed', 'Failed to count your usage');
         }
     });
 
-    api.get('/ops', limits('media.me.ops'), (req, res) => {
+    api.get('/ops', limits('media.me.ops'), async (req, res) => {
         if (!needPerson(req, res)) return;
         if (!can(req.person, 'staff.site.view')) return problem(res, 403, 'capability.denied', 'staff.site.view not granted');
         const s = opsScope(req);
         if (s.error) return problem(res, 400, 'media.me.invalid', s.error);
         try {
-            res.json(require('./ops').report({ appId: s.appId, limit: req.query.limit }));
+            res.json(await require('./ops').report({ appId: s.appId, limit: req.query.limit }));
         } catch (err) {
             console.error('[Me] ops report error:', err.message);
             problem(res, 500, 'media.ops.report_failed', 'Failed to build the operator report');
@@ -168,13 +168,13 @@ function createMeRoutes({ auth }) {
     });
 
     // A recompute counts every namespace's rows again: a staff button, pressed a few times at most.
-    api.post('/ops/recompute', limits('media.me.ops_recompute', { minute: 6, hour: 60 }), (req, res) => {
+    api.post('/ops/recompute', limits('media.me.ops_recompute', { minute: 6, hour: 60 }), async (req, res) => {
         if (!needPerson(req, res)) return;
         if (!can(req.person, 'staff.site.configure')) return problem(res, 403, 'capability.denied', 'staff.site.configure not granted');
         if (!sameOrigin(req)) return problem(res, 403, 'media.request.cross_origin', 'Only this site\'s own pages may ask for this');
         const s = opsScope(req);
         if (s.error) return problem(res, 400, 'media.me.invalid', s.error);
-        const out = require('./ops').recompute({ appId: s.appId });
+        const out = await require('./ops').recompute({ appId: s.appId });
         console.log(`[Me] Namespace usage recomputed by ${req.person.subject} (${out.scope}): ${out.namespaces} namespace(s)`);
         res.json(out);
     });
@@ -203,13 +203,13 @@ function createMeRoutes({ auth }) {
         return html(res, 200, pages.renderSignIn({ next, heading, reason }));
     }
 
-    site.get('/', (req, res) => {
+    site.get('/', async (req, res) => {
         if (!req.person) return signedOut(req, res, 'Your media', '/me');
         const f = explorer.parseFilters(req.query);
         const filters = f.error ? explorer.parseFilters({}).filters : f.filters;
         try {
             html(res, f.error ? 400 : 200, pages.renderExplorer({
-                person: req.person, filters, list: explorer.list(req.person.subject, filters), usage: explorer.usage(req.person.subject),
+                person: req.person, filters, list: await explorer.list(req.person.subject, filters), usage: await explorer.usage(req.person.subject),
                 canOps: can(req.person, 'staff.site.view'),
             }));
         } catch (err) {
@@ -218,29 +218,29 @@ function createMeRoutes({ auth }) {
         }
     });
 
-    site.get('/objects/:id', (req, res, next) => {
+    site.get('/objects/:id', async (req, res, next) => {
         if (!req.person) return signedOut(req, res, 'Your media', `/me/objects/${encodeURIComponent(req.params.id)}`);
-        const obj = explorer.detail(req.person.subject, req.params.id);
+        const obj = await explorer.detail(req.person.subject, req.params.id);
         if (!obj) return next();   // the site's own not-found, exactly as for an id that does not exist
         html(res, 200, pages.renderDetail({ person: req.person, obj }));
     });
 
-    site.get('/ops', (req, res) => {
+    site.get('/ops', async (req, res) => {
         if (!req.person) return signedOut(req, res, 'Media operations', '/me/ops');
         if (!can(req.person, 'staff.site.view')) return html(res, 403, pages.renderForbidden({ person: req.person, need: 'staff.site.view' }));
         const s = opsScope(req);
         html(res, s.error ? 400 : 200, pages.renderOps({
-            person: req.person, report: require('./ops').report({ appId: s.error ? null : s.appId }), canRecompute: can(req.person, 'staff.site.configure'),
+            person: req.person, report: await require('./ops').report({ appId: s.error ? null : s.appId }), canRecompute: can(req.person, 'staff.site.configure'),
             recomputed: /^\d+$/.test(String(req.query.recomputed || '')) ? String(req.query.recomputed) : null,
         }));
     });
 
-    site.post('/ops/recompute', (req, res) => {
+    site.post('/ops/recompute', async (req, res) => {
         if (!req.person) return signedOut(req, res, 'Media operations', '/me/ops');
         if (!can(req.person, 'staff.site.configure')) return html(res, 403, pages.renderForbidden({ person: req.person, need: 'staff.site.configure' }));
         if (!sameOrigin(req)) return problem(res, 403, 'media.request.cross_origin', 'Only this site\'s own pages may ask for this');
         const s = opsScope(req);
-        const out = require('./ops').recompute({ appId: s.error ? null : s.appId });
+        const out = await require('./ops').recompute({ appId: s.error ? null : s.appId });
         console.log(`[Me] Namespace usage recomputed by ${req.person.subject} (${out.scope}): ${out.namespaces} namespace(s)`);
         const qs = new URLSearchParams({ ...(s.appId ? { app: s.appId } : {}), recomputed: String(out.namespaces) });
         res.redirect(303, `/me/ops?${qs}`);

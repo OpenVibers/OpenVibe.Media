@@ -190,13 +190,13 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
 async function generateVodThumbnail(vodId, filePath, opts = {}) {
     const isRecording = opts.liveEdge != null
         ? !!opts.liveEdge
-        : !!db.get('SELECT is_recording FROM vods WHERE id = ?', [vodId])?.is_recording;
+        : !!(await db.get('SELECT is_recording FROM vods WHERE id = ?', [vodId]))?.is_recording;
     const thumbUrl = await generateFromVideo(filePath, 'vod', vodId,
         isRecording ? { liveEdge: true } : { seekPercent: 10 });
     if (thumbUrl) {
-        const old = db.get('SELECT thumbnail_url FROM vods WHERE id = ?', [vodId])?.thumbnail_url;
+        const old = (await db.get('SELECT thumbnail_url FROM vods WHERE id = ?', [vodId]))?.thumbnail_url;
         // The row and its objects (the VOD's, and the thumbnail object that follows the picture) together.
-        db.withObject('vod', vodId, () => db.run('UPDATE vods SET thumbnail_url = ? WHERE id = ?', [thumbUrl, vodId]));
+        await db.withObject('vod', vodId, async () => await db.run('UPDATE vods SET thumbnail_url = ? WHERE id = ?', [thumbUrl, vodId]));
         _removeOldThumb(old, thumbUrl);   // the previous picture goes once nothing names it
     }
     return thumbUrl;
@@ -206,8 +206,8 @@ async function generateVodThumbnail(vodId, filePath, opts = {}) {
 async function generateClipThumbnail(clipId, filePath) {
     const thumbUrl = await generateFromVideo(filePath, 'clip', clipId, { seekSeconds: 0.5 });
     if (thumbUrl) {
-        const old = db.get('SELECT thumbnail_url FROM clips WHERE id = ?', [clipId])?.thumbnail_url;
-        db.withObject('clip', clipId, () => db.run('UPDATE clips SET thumbnail_url = ? WHERE id = ?', [thumbUrl, clipId]));
+        const old = (await db.get('SELECT thumbnail_url FROM clips WHERE id = ?', [clipId]))?.thumbnail_url;
+        await db.withObject('clip', clipId, async () => await db.run('UPDATE clips SET thumbnail_url = ? WHERE id = ?', [thumbUrl, clipId]));
         _removeOldThumb(old, thumbUrl);
     }
     return thumbUrl;

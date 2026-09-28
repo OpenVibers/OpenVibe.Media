@@ -28,14 +28,14 @@ function targetOf(obj, params = {}) {
     return { kind, id };
 }
 
-function rowOf(appId, kind, id) {
-    return kind === 'vod' ? db.getVodById(id, appId) : db.getClipById(id, appId);
+async function rowOf(appId, kind, id) {
+    return kind === 'vod' ? await db.getVodById(id, appId) : await db.getClipById(id, appId);
 }
 
 /** Normalized params, or JobError (400). The row must exist in this tenant (and match the object when one is named). */
-function validate({ appId, obj, params }) {
+async function validate({ appId, obj, params }) {
     const t = targetOf(obj, params || {});
-    const row = rowOf(appId, t.kind, t.id);
+    const row = await rowOf(appId, t.kind, t.id);
     if (!row) throw new JobError('media.job.not_found', `${t.kind} ${t.id} not found`, { status: 404, permanent: true });
     if (obj && row.object_id && row.object_id !== obj.id) throw new JobError('media.job.invalid', `the object is not ${t.kind} ${t.id}`, { permanent: true });
     return t;
@@ -43,7 +43,7 @@ function validate({ appId, obj, params }) {
 
 async function run(job) {
     const { kind, id } = targetOf(null, job.params);
-    const row = rowOf(job.app_id, kind, id);
+    const row = await rowOf(job.app_id, kind, id);
     if (!row) throw new JobError('not_found', `${kind} ${id} not found`, { permanent: true });
     const thumbService = require('../thumbnails/thumbnail-service');
     // A recording the health scan found empty or gone has no frame to take (five such VODs failed as

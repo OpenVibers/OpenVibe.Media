@@ -132,7 +132,7 @@ function _extractFrame(file, seekSeconds, width) {
 }
 
 async function _grab(appId, managedStreamId, width) {
-    const vod = db.get(
+    const vod = await db.get(
         `SELECT file_path FROM vods
          WHERE app_id = ? AND managed_stream_id = ? AND is_recording = 1
          ORDER BY id DESC LIMIT 1`,

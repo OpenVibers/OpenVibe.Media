@@ -41,21 +41,21 @@ const WATCH_WHERE = {
           AND COALESCE(auto_generated, 0) = 0 AND COALESCE(file_path, '') != '' AND app_id != 'live' AND ${readiness.playableSql('clips.object_id')}`,
 };
 
-function sandboxApps() {
-    return new Set(db.all("SELECT app_id FROM apps WHERE env = 'sandbox'").map(r => r.app_id));
+async function sandboxApps() {
+    return new Set((await db.all("SELECT app_id FROM apps WHERE env = 'sandbox'")).map(r => r.app_id));
 }
 
 /** The indexable watch pages, newest first: [{ loc, lastmod, images }]. */
-function sitemapEntries() {
-    const sandbox = sandboxApps();
+async function sitemapEntries() {
+    const sandbox = await sandboxApps();
     const out = [];
-    const vods = db.all(`SELECT id, app_id, visibility, is_public, thumbnail_url, created_at FROM vods
+    const vods = await db.all(`SELECT id, app_id, visibility, is_public, thumbnail_url, created_at FROM vods
         WHERE ${WATCH_WHERE.vod} ORDER BY created_at DESC LIMIT ?`, [MAX_URLS]);
     for (const v of vods) {
         if (sandbox.has(v.app_id) || !pages.watchIndexable('vod', v)) continue;
         out.push({ loc: `${config.publicUrl}/v/${v.id}`, lastmod: iso(v.created_at), images: v.thumbnail_url ? [abs(v.thumbnail_url)] : [] });
     }
-    const clips = db.all(`SELECT id, app_id, visibility, is_public, auto_generated, thumbnail_url, created_at FROM clips
+    const clips = await db.all(`SELECT id, app_id, visibility, is_public, auto_generated, thumbnail_url, created_at FROM clips
         WHERE ${WATCH_WHERE.clip} ORDER BY created_at DESC LIMIT ?`, [MAX_URLS]);
     for (const c of clips) {
         if (sandbox.has(c.app_id) || !pages.watchIndexable('clip', c)) continue;
@@ -110,9 +110,9 @@ function send(res, type, body) {
 
 router.get('/robots.txt', (req, res) => send(res, 'text/plain', robotsTxt()));
 router.get('/llms.txt', (req, res) => send(res, 'text/plain', llmsTxt()));
-router.get('/sitemap.xml', (req, res) => {
+router.get('/sitemap.xml', async (req, res) => {
     try {
-        send(res, 'application/xml', seo.sitemapXml([{ loc: `${config.publicUrl}/`, changefreq: 'hourly' }, ...sitemapEntries()]));
+        send(res, 'application/xml', seo.sitemapXml([{ loc: `${config.publicUrl}/`, changefreq: 'hourly' }, ...await sitemapEntries()]));
     } catch (err) {
         console.error('[Public] sitemap error:', err.message);
         res.status(500).type('text/plain').send('sitemap unavailable');

@@ -20,9 +20,16 @@ const config = {
     nodeEnv: process.env.NODE_ENV || 'development',
     publicUrl: (process.env.MEDIA_PUBLIC_URL || 'https://openvibe.media').replace(/\/$/, ''),
 
+    // PostgreSQL (ADR-035): DATABASE_URL serves (PgBouncer), DATABASE_DIRECT_URL migrates (owner). Without them,
+    // development uses an embedded PGlite database in data/pglite. path: the SQLite file of releases before
+    // PostgreSQL, read once by scripts/migrate-to-postgres.js.
     db: {
+        url: process.env.DATABASE_URL || '',
+        directUrl: process.env.DATABASE_DIRECT_URL || '',
         path: process.env.DB_PATH || './data/media.db',
     },
+    // Valkey (ADR-035): per-actor limit counters shared across processes; without it they count in this process.
+    valkey: { url: process.env.VALKEY_URL || '', prefix: process.env.VALKEY_PREFIX || 'ov:media:' },
 
     vod: {
         path: process.env.VOD_PATH || './data/vods',

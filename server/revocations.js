@@ -5,7 +5,7 @@
  *
  * POST /internal/events is the endpoint of Media's Events subscription to that topic, signed with
  * MEDIA_INBOUND_EVENTS_SECRET (signature v2 only) and refused when it came through the proxy. A
- * delivery moves the person's cutoff (openvibe-sdk createRevocationStore: only ever forward, source
+ * delivery moves the person's cutoff (openvibe-sdk createPgRevocationStore: only ever forward, source
  * network only); user-auth.js then refuses their older tokens, so openvibe.media's navbar shows them
  * signed out at once. The same endpoint takes network.subject.merged (ADR-029): a folded-in account's media objects
  * move to the survivor (server/subject-merge.js), and network.account.export_requested / network.account.deleted (ADR-033):
@@ -18,9 +18,11 @@ const TOPIC = 'network.user.token_valid_after';
 const TOPICS = [TOPIC, 'network.subject.merged', 'network.account.export_requested', 'network.account.deleted'];
 let store = null;
 function cutoffs() {
-    if (!store) store = require('openvibe-sdk/auth').createRevocationStore(require('./db/database').getDb(), { table: 'token_revocations' });
+    if (!store) store = require('openvibe-sdk/auth').createPgRevocationStore(require('./db/database').getDb(), { table: 'token_revocations' });
     return store;
 }
+/** Read every cutoff into memory (at boot, before the app serves): isRevoked() is synchronous on every request. */
+async function load() { return await cutoffs().load(); }
 const secrets = () => String(process.env.MEDIA_INBOUND_EVENTS_SECRET || '').split(',').map((s) => s.trim()).filter((s) => s.length >= 32);
 const stats = { received: 0, revoked: 0, refused: 0 };
 
@@ -28,7 +30,7 @@ function isRevoked(claims) { try { return cutoffs().isRevoked(claims); } catch {
 
 function handler() {
     const { parseDelivery } = require('openvibe-sdk/events');
-    return [express.raw({ type: () => true, limit: '256kb' }), (req, res) => {
+    return [express.raw({ type: () => true, limit: '256kb' }), async (req, res) => {
         if (req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.headers['cf-connecting-ip']) return res.status(404).json({ error: 'Not found' });
         const keys = secrets();
         if (!keys.length) return res.status(503).json({ error: 'MEDIA_INBOUND_EVENTS_SECRET is not set' });
@@ -42,7 +44,13 @@ function handler() {
             return require('./account-data').apply(d.event).then((outcome) => res.json({ event_id: d.event.event_id || null, outcome }),
                 (e) => { console.error(`[AccountData] ${d.event.event_type} failed:`, e.message); res.status(500).json({ error: 'not applied' }); });
         }
-        const outcome = d.event.event_type === 'network.subject.merged' ? require('./subject-merge').apply(d.event) : cutoffs().apply(d.event);
+        let outcome;
+        try {
+            outcome = d.event.event_type === 'network.subject.merged' ? await require('./subject-merge').apply(d.event) : await cutoffs().apply(d.event);
+        } catch (e) {
+            console.error(`[Revocations] ${d.event.event_type} failed:`, e.message);
+            return res.status(500).json({ error: 'not applied' });
+        }
         if (outcome === 'revoked') stats.revoked++;
         res.json({ event_id: d.event.event_id || null, outcome });
     }];
@@ -77,4 +85,4 @@ async function ensureSubscription({ fetchImpl = globalThis.fetch, log = console 
     return created ? 'created' : 'exists';
 }
 
-module.exports = { handler, ensureSubscription, isRevoked, stats, TOPIC, TOPICS, _cutoffs: cutoffs };
+module.exports = { handler, ensureSubscription, isRevoked, load, stats, TOPIC, TOPICS, _cutoffs: cutoffs };

@@ -54,7 +54,7 @@ const clipUpload = multer({
 
 // { readiness: true } (API responses) adds the object's readiness levels (server/objects/readiness.js);
 // the clip.ready / clip.failed payloads leave them out, as vodPublic's do.
-function clipPublic(clip, { readiness = false } = {}) {
+async function clipPublic(clip, { readiness = false } = {}) {
     if (!clip) return null;
     const out = {
         unique_views: clip.unique_views || 0,
@@ -90,7 +90,7 @@ function clipPublic(clip, { readiness = false } = {}) {
         view_count: clip.view_count || 0,
         created_at: clip.created_at,
     };
-    if (readiness) out.readiness = require('../objects/readiness').forRow(clip);
+    if (readiness) out.readiness = await require('../objects/readiness').forRow(clip);
     return out;
 }
 
@@ -105,10 +105,10 @@ function _isPrivate(row) {
     return (row.visibility || (row.is_public ? 'public' : 'private')) === 'private';
 }
 
-function _getClipScoped(req, res) {
+async function _getClipScoped(req, res) {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) { res.status(404).json({ error: 'Clip not found' }); return null; }
-    const clip = db.getClipById(id, req.appId);
+    const clip = await db.getClipById(id, req.appId);
     if (!clip) { res.status(404).json({ error: 'Clip not found' }); return null; }
     return clip;
 }
@@ -118,8 +118,8 @@ function _getClipScoped(req, res) {
  * of its users (X-OV-User-Id) writes only that user's own clips: someone else's private one answers
  * exactly as a missing one would, anything else 403.
  */
-function _getClipForWrite(req, res) {
-    const clip = _getClipScoped(req, res);
+async function _getClipForWrite(req, res) {
+    const clip = await _getClipScoped(req, res);
     if (!clip || req.authType !== 'user') return clip;
     if (clip.user_id != null && String(clip.user_id) === String(req.userId)) return clip;
     if (_isPrivate(clip)) res.status(404).json({ error: 'Clip not found' });
@@ -138,10 +138,10 @@ const flag = (v) => (['1', 'true'].includes(String(v)) ? 1 : ['0', 'false'].incl
 router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), async (req, res) => {
     try {
         const body = req.body || {};
-        if (req.file) return _createUploadedClip(req, res);
+        if (req.file) return await _createUploadedClip(req, res);
         const vodId = parseInt(body.vod_id, 10);
         if (!Number.isFinite(vodId)) return res.status(400).json({ error: 'vod_id is required' });
-        const vod = db.getVodById(vodId, req.appId);
+        const vod = await db.getVodById(vodId, req.appId);
         if (!vod) return res.status(404).json({ error: 'VOD not found' });
         // An acting user cannot cut someone else's private VOD, and is not told it exists.
         if (req.authType === 'user' && _isPrivate(vod) && !(vod.user_id != null && String(vod.user_id) === String(req.userId))) {
@@ -156,12 +156,12 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
         if (startTime < 0 || endTime < 0) return res.status(400).json({ error: 'Time values cannot be negative' });
 
         let duration = endTime - startTime;
-        const maxClipDuration = db.getSetting('max_clip_duration') || 60;
+        const maxClipDuration = await db.getSetting('max_clip_duration') || 60;
         if (duration < 1) return res.status(400).json({ error: 'Clip must be at least 1 second' });
         if (duration > maxClipDuration) return res.status(400).json({ error: `Clips are limited to ${maxClipDuration} seconds` });
 
         // Duplicate detection — reuse a just-made clip for the same window.
-        const duplicate = db.findDuplicateClip({
+        const duplicate = await db.findDuplicateClip({
             appId: req.appId, vodId, streamId: vod.stream_id || null,
             startTime, endTime,
         });
@@ -201,7 +201,7 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
         // one of its users is a person's clip whatever it claims. The flag and the description used
         // to be dropped here, so every auto-clip was stored as if a person had made it.
         const byApp = req.authType === 'app';
-        const result = db.createClip({
+        const result = await db.createClip({
             app_id: req.appId,
             vod_id: vodId,
             stream_id: vod.stream_id || (body.stream_id != null ? parseInt(body.stream_id, 10) || null : null),
@@ -224,7 +224,7 @@ router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), as
         // The cut is a media job (clip.cut, WS-G task 3): media.job.* events, retries with backoff, and a
         // job id the caller's UI follows (GET /api/v2/:app/jobs/:id) and reattaches to after a reload.
         // clip.ready / clip.failed and the webhook come from the cut itself, as before.
-        const { job } = require('./clip-jobs').enqueueCut(appId, clipId, {
+        const { job } = await require('./clip-jobs').enqueueCut(appId, clipId, {
             reason: 'cut', createdBy: req.authType === 'user' ? `app:${appId}:user:${req.userId}` : `app:${appId}`, ownerUserId: userId ?? null,
         });
 
@@ -253,7 +253,7 @@ async function _createUploadedClip(req, res) {
             tools.cleanupTempFile(clipPath);
             return res.status(422).json({ error: 'Clip upload was corrupt or empty. Please try again.' });
         }
-        const maxClipDuration = db.getSetting('max_clip_duration') || 60;
+        const maxClipDuration = await db.getSetting('max_clip_duration') || 60;
         if (duration > maxClipDuration + 5) {
             tools.cleanupTempFile(clipPath);
             return res.status(400).json({ error: `Clips are limited to ${maxClipDuration} seconds` });
@@ -263,7 +263,7 @@ async function _createUploadedClip(req, res) {
         const endTime = Number.parseFloat(body.end_s ?? body.end_time);
         const visibility = VALID_VIS.has(body.visibility) ? body.visibility : 'public';
         const vodId = body.vod_id != null ? parseInt(body.vod_id, 10) || null : null;
-        const result = db.createClip({
+        const result = await db.createClip({
             app_id: req.appId,
             vod_id: vodId,
             stream_id: body.stream_id != null ? parseInt(body.stream_id, 10) || null : null,
@@ -284,7 +284,7 @@ async function _createUploadedClip(req, res) {
             .catch(err => console.warn(`[Clips] Thumbnail failed for clip ${clipId}:`, err.message));
 
         console.log(`[Clips] Direct upload: clip ${clipId} (${req.appId}, ${duration.toFixed ? duration.toFixed(1) : duration}s)`);
-        res.status(201).json({ ...clipPublic(db.getClipById(clipId, req.appId), { readiness: true }) });
+        res.status(201).json({ ...await clipPublic(await db.getClipById(clipId, req.appId), { readiness: true }) });
     } catch (err) {
         console.error('[Clips] Upload error:', err.message);
         tools.cleanupTempFile(clipPath);
@@ -299,7 +299,7 @@ async function _createUploadedClip(req, res) {
 //   auto_generated=1|0   clips the app's automation cut (1) or a person made (0)
 //   status=ready         playable clips only (no processing / failed rows)
 //   since=<datetime>     created at or after (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC)
-router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -318,9 +318,9 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
             ready_only: String(req.query.status || '') === 'ready',
             since: req.query.since || null,
         };
-        const clips = db.listClips(req.appId, filters);
-        const total = db.countClips(req.appId, filters);
-        res.json({ clips: clips.map(c => clipPublic(c, { readiness: true })), total, limit, offset, hasMore: offset + clips.length < total });
+        const clips = await db.listClips(req.appId, filters);
+        const total = await db.countClips(req.appId, filters);
+        res.json({ clips: (await Promise.all(clips.map(async c => await clipPublic(c, { readiness: true })))), total, limit, offset, hasMore: offset + clips.length < total });
     } catch (err) {
         console.error('[Clips] List error:', err.message);
         res.status(500).json({ error: 'Failed to list clips' });
@@ -329,17 +329,17 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
 
 // ── Get clip ─────────────────────────────────────────────────
 // A short-lived URL of a clip's bytes for a reader with no key (OpenVibe.AI transcribing it); the owning app only.
-router.get('/:id/signed-url', tenantAuth(), (req, res) => {
+router.get('/:id/signed-url', tenantAuth(), async (req, res) => {
     if (req.authType !== 'app') return res.status(403).json({ error: 'only the owning app signs a playback URL' });
-    const clip = _getClipScoped(req, res);
+    const clip = await _getClipScoped(req, res);
     if (!clip) return;
     res.set('Cache-Control', 'private, no-store');
     res.json(require('../objects/signing').signedMediaUrl('clip', clip.id, req.query.ttl));
 });
 
-router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const clip = _getClipScoped(req, res);
+        const clip = await _getClipScoped(req, res);
         if (!clip) return;
         // Acting for one of the app's users: another user's private clip looks missing (see GET /vods/:id).
         if (req.authType === 'user' && _isPrivate(clip) && !(clip.user_id != null && String(clip.user_id) === String(req.userId))) {
@@ -347,7 +347,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
         }
         // Bare object, mirroring GET /vods/:id per CONTRACTS.md.
         // Detail responses carry the transcript too (lists stay light).
-        res.json({ ...clipPublic(clip, { readiness: true }), ai_transcript: clip.ai_transcript || null });
+        res.json({ ...await clipPublic(clip, { readiness: true }), ai_transcript: clip.ai_transcript || null });
     } catch (err) {
         res.status(500).json({ error: 'Failed to get clip' });
     }
@@ -362,14 +362,14 @@ router.get('/:id', tenantAuth({ allowUser: true }), (req, res) => {
  */
 router.post('/:id/recut', tenantAuth(), async (req, res) => {
     try {
-        const clip = _getClipForWrite(req, res);
+        const clip = await _getClipForWrite(req, res);
         if (!clip) return;
         const clipId = clip.id;
         if (clip.status === 'processing') return res.status(409).json({ error: 'Clip is already being cut' });
         if (!clip.vod_id) return res.status(422).json({ error: 'Clip has no source VOD to re-cut from' });
         // A manual retry resets the attempt counter so it gets the full ladder again (not projected: no object change).
-        db.run("UPDATE clips SET cut_attempts = 0 WHERE id = ?", [clipId]);
-        const { job } = require('./clip-jobs').enqueueCut(req.appId, clipId, { reason: 're-cut', createdBy: `app:${req.appId}` });
+        await db.run("UPDATE clips SET cut_attempts = 0 WHERE id = ?", [clipId]);
+        const { job } = await require('./clip-jobs').enqueueCut(req.appId, clipId, { reason: 're-cut', createdBy: `app:${req.appId}` });
         res.status(202).json({ id: clipId, status: 'processing', job_id: job.id });
     } catch (err) {
         console.error('[Clips] Re-cut error:', err.message);
@@ -377,34 +377,34 @@ router.post('/:id/recut', tenantAuth(), async (req, res) => {
     }
 });
 
-router.put('/:id', tenantAuth(), (req, res) => {
+router.put('/:id', tenantAuth(), async (req, res) => {
     try {
-        const clip = _getClipForWrite(req, res);
+        const clip = await _getClipForWrite(req, res);
         if (!clip) return;
         const { title, visibility, auto_generated: autoGen } = req.body || {};
         if (title !== undefined) {
             const t = sanitizeClipTitle(title, '');
             if (!t) return res.status(400).json({ error: 'Title must be 1-200 characters' });
-            objects.withObject('clip', clip.id, () => db.run('UPDATE clips SET title = ? WHERE id = ?', [t, clip.id]));
+            await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET title = ? WHERE id = ?', [t, clip.id]));
         }
         // Only the app itself (its automation's own records) may say a clip was machine-made.
         if (autoGen !== undefined && flag(autoGen) !== null) {
             if (req.authType !== 'app') return res.status(403).json({ error: 'auto_generated is set by the app only' });
-            objects.withObject('clip', clip.id, () => db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]));
+            await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]));
         }
-        if (visibility !== undefined) db.setClipVisibility(clip.id, visibility);
-        res.json({ clip: clipPublic(db.getClipById(clip.id, req.appId), { readiness: true }) });
+        if (visibility !== undefined) await db.setClipVisibility(clip.id, visibility);
+        res.json({ clip: await clipPublic(await db.getClipById(clip.id, req.appId), { readiness: true }) });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update clip' });
     }
 });
 
 // ── Delete ───────────────────────────────────────────────────
-router.delete('/:id', tenantAuth(), (req, res) => {
+router.delete('/:id', tenantAuth(), async (req, res) => {
     try {
-        const clip = _getClipForWrite(req, res);
+        const clip = await _getClipForWrite(req, res);
         if (!clip) return;
-        if (objects.isHeldRow(clip)) return res.status(409).json({ error: 'Clip is under a retention hold', code: 'media.object.held' });
+        if (await objects.isHeldRow(clip)) return res.status(409).json({ error: 'Clip is under a retention hold', code: 'media.object.held' });
 
         // Delete the local file + any offloaded B2/R2 object (clips carry
         // storage_provider/storage_key like VODs).
@@ -416,7 +416,7 @@ router.delete('/:id', tenantAuth(), (req, res) => {
                 console.warn(`[Clips] Remote object cleanup failed for clip ${clip.id}:`, err.message));
         }
 
-        db.run('DELETE FROM clips WHERE id = ?', [clip.id]);   // its object is marked deleted by the row-delete trigger, same statement
+        await db.run('DELETE FROM clips WHERE id = ?', [clip.id]);   // its object is marked deleted by the row-delete trigger, same statement
         res.json({ message: 'Clip deleted' });
     } catch (err) {
         res.status(500).json({ error: 'Failed to delete clip' });

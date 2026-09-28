@@ -183,10 +183,10 @@ class StreamRecorder {
         return this.activeRecordings.size;
     }
 
-    _cleanupFailedVod(vodId, filePath) {
+    async _cleanupFailedVod(vodId, filePath) {
         if (!filePath || !fs.existsSync(filePath)) {
             try {
-                db.run('DELETE FROM vods WHERE id = ?', [vodId]);   // its object is marked deleted by the row-delete trigger
+                await db.run('DELETE FROM vods WHERE id = ?', [vodId]);   // its object is marked deleted by the row-delete trigger
                 console.log(`[VOD] Deleted stale failed VOD ${vodId}`);
             } catch (err) {
                 console.warn(`[VOD] Failed to delete stale VOD ${vodId}:`, err.message);
@@ -194,7 +194,7 @@ class StreamRecorder {
             return;
         }
         try {
-            require('../objects/model').withObject('vod', vodId, () => db.run(
+            await require('../objects/model').withObject('vod', vodId, async () => await db.run(
                 'UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?, quarantined_at = datetime(\'now\'), is_public = 0 WHERE id = ?',
                 ['corrupt', JSON.stringify(['failed_recording_start']), vodId]
             ));
@@ -215,7 +215,7 @@ class StreamRecorder {
         return { ok: true };
     }
 
-    _registerCommon(vod, proc, filePath, masterPath, extra = {}) {
+    async _registerCommon(vod, proc, filePath, masterPath, extra = {}) {
         const recording = {
             vodId: vod.id,
             appId: vod.app_id,
@@ -241,9 +241,9 @@ class StreamRecorder {
         // The row and its object in one transaction. ffmpeg is already running, so the row must say
         // so even if the object cannot be written with it: withObjectOrRow then writes the row alone
         // and re-projects after it (the finalize that follows re-projects every outcome as well).
-        require('../objects/model').withObjectOrRow('vod', vod.id, () => {
-            db.run('UPDATE vods SET is_recording = 1, file_path = ? WHERE id = ?', [filePath, vod.id]);
-            if (masterPath) db.run('UPDATE vods SET master_file_path = ? WHERE id = ?', [masterPath, vod.id]);
+        await require('../objects/model').withObjectOrRow('vod', vod.id, async () => {
+            await db.run('UPDATE vods SET is_recording = 1, file_path = ? WHERE id = ?', [filePath, vod.id]);
+            if (masterPath) await db.run('UPDATE vods SET master_file_path = ? WHERE id = ?', [masterPath, vod.id]);
         });
         return recording;
     }
@@ -283,12 +283,12 @@ class StreamRecorder {
             const rec = this.activeRecordings.get(vodId);
             const filePath = rec?.filePath;
             this._teardown(vodId);
-            require('./finalize').finalizeVod(vodId, { startTimeMs: rec?.startTime }).catch(() => {
+            require('./finalize').finalizeVod(vodId, { startTimeMs: rec?.startTime }).catch(async () => {
                 // Never bare-mark a failed recording as ready — that published
                 // 0:00 ghosts. Quarantine it out of listings instead.
                 // The live duration updates were wall-clock estimates: none of it is kept. Row and object together.
                 try {
-                    require('../objects/model').withObject('vod', vodId, () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
+                    await require('../objects/model').withObject('vod', vodId, async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
                             health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
                         [JSON.stringify(['finalize_failed']), vodId]));
                 } catch (e) { console.warn(`[VOD] Failed to quarantine vod ${vodId} after a failed finalize:`, e.message); }
@@ -311,7 +311,7 @@ class StreamRecorder {
     /**
      * Run periodic live-seeking remux and update DB duration/file size.
      */
-    _periodicRemux(vodId) {
+    async _periodicRemux(vodId) {
         const rec = this.activeRecordings.get(vodId);
         if (!rec || !rec.filePath || !fs.existsSync(rec.filePath)) return;
 
@@ -319,7 +319,7 @@ class StreamRecorder {
         try {
             const stat = fs.statSync(rec.filePath);
             // Progress estimate: the row and its object's size/duration together, or neither (next pass retries).
-            require('../objects/model').withObject('vod', rec.vodId, () => db.run('UPDATE vods SET duration_seconds = ?, file_size = ? WHERE id = ?',
+            await require('../objects/model').withObject('vod', rec.vodId, async () => await db.run('UPDATE vods SET duration_seconds = ?, file_size = ? WHERE id = ?',
                 [elapsed, stat.size, rec.vodId]));
         } catch {}
 

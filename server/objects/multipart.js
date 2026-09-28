@@ -31,16 +31,16 @@ function partsRoot() { return path.join(config.objects.path, '.parts'); }
 function sessionDir(uploadId) { return path.join(partsRoot(), uploadId); }
 function partFile(uploadId, n) { return path.join(sessionDir(uploadId), String(n)); }
 
-function getSession(uploadId) {
-    return uploadId ? db.get('SELECT * FROM media_uploads WHERE id = ?', [String(uploadId)]) : null;
+async function getSession(uploadId) {
+    return uploadId ? await db.get('SELECT * FROM media_uploads WHERE id = ?', [String(uploadId)]) : null;
 }
 
-function activeFor(objectId) {
-    return db.get("SELECT * FROM media_uploads WHERE object_id = ? AND status IN ('active', 'completing') ORDER BY created_at DESC LIMIT 1", [objectId]);
+async function activeFor(objectId) {
+    return await db.get("SELECT * FROM media_uploads WHERE object_id = ? AND status IN ('active', 'completing') ORDER BY created_at DESC LIMIT 1", [objectId]);
 }
 
-function listParts(uploadId) {
-    return db.all('SELECT part_number, size_bytes, sha256, received_at FROM media_upload_parts WHERE upload_id = ? ORDER BY part_number', [uploadId]);
+async function listParts(uploadId) {
+    return await db.all('SELECT part_number, size_bytes, sha256, received_at FROM media_upload_parts WHERE upload_id = ? ORDER BY part_number', [uploadId]);
 }
 
 /** Exact size of part n (1-based) of a session. */
@@ -73,7 +73,7 @@ function freeBytes() {
  * Start a session for `obj` (uploading, size declared). An active session for the object is
  * replaced (its parts deleted). Returns the session row, or { error, status, code }.
  */
-function initiate(obj, { partSize: requested } = {}) {
+async function initiate(obj, { partSize: requested } = {}) {
     const total = Number(obj.size_bytes) || 0;
     if (!total) return { status: 400, code: 'media.object.invalid', error: 'Declare size_bytes before a multipart upload' };
     if (total > config.objects.multipartMaxMb * MB) return { status: 413, code: 'media.object.too_large', error: `Multipart uploads are limited to ${config.objects.multipartMaxMb * MB} bytes` };
@@ -83,14 +83,14 @@ function initiate(obj, { partSize: requested } = {}) {
     const need = 2 * total + config.objects.uploadMinFreeMb * MB;
     const free = freeBytes();
     if (free < need) return { status: 507, code: 'media.storage.insufficient', error: `Not enough free space for this upload (${Math.floor(free / MB)} MB free)` };
-    const prior = activeFor(obj.id);
-    if (prior) abort(prior.id, 'aborted', { release: false });   // replaced: the object's reservation carries over
+    const prior = await activeFor(obj.id);
+    if (prior) await abort(prior.id, 'aborted', { release: false });   // replaced: the object's reservation carries over
     const id = `mup_${ids.ulid()}`;
     const parts = Math.max(1, Math.ceil(total / chosen.size));
-    db.run(`INSERT INTO media_uploads (id, object_id, app_id, part_size, total_size, parts_expected, expires_at)
+    await db.run(`INSERT INTO media_uploads (id, object_id, app_id, part_size, total_size, parts_expected, expires_at)
             VALUES (?, ?, ?, ?, ?, ?, datetime('now', ?))`, [id, obj.id, obj.app_id, chosen.size, total, parts, `+${Math.max(1, config.objects.multipartTtlHours)} hours`]);
     fs.mkdirSync(sessionDir(id), { recursive: true });
-    return getSession(id);
+    return await getSession(id);
 }
 
 /**
@@ -107,43 +107,43 @@ function receivePart(req, session, n, { expectSha256 = null } = {}) {
         let got = 0, done = false;
         const drop = () => { try { fs.unlinkSync(tmp); } catch { /* not written */ } };
         const finish = (r) => { if (done) return; done = true; resolve(r); };
-        const fail = (r) => {
+        const fail = async (r) => {
             if (done) return;
-            const end = () => { drop(); finish(r); };
-            if (out.closed) end(); else { out.once('close', end); out.destroy(); }
+            const end = async () => { drop(); await finish(r); };
+            if (out.closed) await end(); else { out.once('close', end); out.destroy(); }
         };
-        req.on('data', (c) => {
+        req.on('data', async (c) => {
             if (done) return;
             got += c.length;
-            if (got > want) { req.unpipe(out); req.resume(); return fail({ status: 413, code: 'media.upload.part_too_large', error: `Part ${n} is ${want} bytes` }); }
+            if (got > want) { req.unpipe(out); req.resume(); return await fail({ status: 413, code: 'media.upload.part_too_large', error: `Part ${n} is ${want} bytes` }); }
             hash.update(c);
         });
-        req.on('aborted', () => fail({ status: 400, code: 'media.object.upload_interrupted', error: 'Upload did not complete' }));
-        req.on('error', () => fail({ status: 400, code: 'media.object.upload_interrupted', error: 'Upload did not complete' }));
-        out.on('error', (e) => fail({ status: 500, code: 'media.object.store_failed', error: e.message }));
-        out.on('finish', () => {
+        req.on('aborted', async () => await fail({ status: 400, code: 'media.object.upload_interrupted', error: 'Upload did not complete' }));
+        req.on('error', async () => await fail({ status: 400, code: 'media.object.upload_interrupted', error: 'Upload did not complete' }));
+        out.on('error', async (e) => await fail({ status: 500, code: 'media.object.store_failed', error: e.message }));
+        out.on('finish', async () => {
             if (done) return;
             const sha = hash.digest('hex');
-            if (got !== want) { drop(); return finish({ status: 400, code: 'media.upload.part_size_mismatch', error: `Part ${n} must be ${want} bytes, received ${got}` }); }
-            if (expectSha256 && String(expectSha256).toLowerCase() !== sha) { drop(); return finish({ status: 400, code: 'media.upload.part_hash_mismatch', error: `Part ${n} does not match X-Content-SHA256` }); }
+            if (got !== want) { drop(); return await finish({ status: 400, code: 'media.upload.part_size_mismatch', error: `Part ${n} must be ${want} bytes, received ${got}` }); }
+            if (expectSha256 && String(expectSha256).toLowerCase() !== sha) { drop(); return await finish({ status: 400, code: 'media.upload.part_hash_mismatch', error: `Part ${n} does not match X-Content-SHA256` }); }
             // The session may have been completed or aborted while this part streamed in.
-            const now = getSession(session.id);
-            if (!now || now.status !== 'active') { drop(); return finish({ status: 409, code: 'media.upload.not_active', error: `The upload is ${now ? now.status : 'gone'}` }); }
+            const now = await getSession(session.id);
+            if (!now || now.status !== 'active') { drop(); return await finish({ status: 409, code: 'media.upload.not_active', error: `The upload is ${now ? now.status : 'gone'}` }); }
             try {
                 fs.renameSync(tmp, partFile(session.id, n));
-                db.run(`INSERT INTO media_upload_parts (upload_id, part_number, size_bytes, sha256) VALUES (?, ?, ?, ?)
-                        ON CONFLICT(upload_id, part_number) DO UPDATE SET size_bytes = excluded.size_bytes, sha256 = excluded.sha256, received_at = CURRENT_TIMESTAMP`,
+                await db.run(`INSERT INTO media_upload_parts (upload_id, part_number, size_bytes, sha256) VALUES (?, ?, ?, ?)
+                        ON CONFLICT(upload_id, part_number) DO UPDATE SET size_bytes = excluded.size_bytes, sha256 = excluded.sha256, received_at = ov_now()`,
                 [session.id, n, got, sha]);
-                db.run('UPDATE media_uploads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [session.id]);
-            } catch (e) { drop(); return finish({ status: 500, code: 'media.object.store_failed', error: e.message }); }
-            finish({ part_number: n, size_bytes: got, sha256: sha });
+                await db.run('UPDATE media_uploads SET updated_at = ov_now() WHERE id = ?', [session.id]);
+            } catch (e) { drop(); return await finish({ status: 500, code: 'media.object.store_failed', error: e.message }); }
+            await finish({ part_number: n, size_bytes: got, sha256: sha });
         });
         req.pipe(out);
     });
 }
 
 /** Public shape of a session (never paths). */
-function sessionPublic(session, { parts = true } = {}) {
+async function sessionPublic(session, { parts = true } = {}) {
     const out = {
         upload_id: session.id, object_id: session.object_id, status: session.status,
         part_size: session.part_size, total_size: session.total_size, parts_expected: session.parts_expected,
@@ -151,7 +151,7 @@ function sessionPublic(session, { parts = true } = {}) {
         created_at: session.created_at,
     };
     if (parts) {
-        const list = listParts(session.id);
+        const list = await listParts(session.id);
         const have = new Set(list.map(p => p.part_number));
         out.parts = list;
         out.received_bytes = list.reduce((a, p) => a + p.size_bytes, 0);
@@ -163,11 +163,11 @@ function sessionPublic(session, { parts = true } = {}) {
 }
 
 /** active -> completing, unless someone else got there first. */
-function beginComplete(session) {
-    return db.run("UPDATE media_uploads SET status = 'completing', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'active'", [session.id]).changes > 0;
+async function beginComplete(session) {
+    return (await db.run("UPDATE media_uploads SET status = 'completing', updated_at = ov_now() WHERE id = ? AND status = 'active'", [session.id])).changes > 0;
 }
-function reopen(session) {
-    db.run("UPDATE media_uploads SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'completing'", [session.id]);
+async function reopen(session) {
+    await db.run("UPDATE media_uploads SET status = 'active', updated_at = ov_now() WHERE id = ? AND status = 'completing'", [session.id]);
 }
 
 /**
@@ -176,7 +176,7 @@ function reopen(session) {
  * Resolves { bytes, sha256 } or { status, code, error, missing? }.
  */
 async function assemble(session, dest, clientParts = null) {
-    const list = listParts(session.id);
+    const list = await listParts(session.id);
     const byN = new Map(list.map(p => [p.part_number, p]));
     const missing = [];
     for (let n = 1; n <= session.parts_expected; n++) if (!byN.has(n) || !fs.existsSync(partFile(session.id, n))) missing.push(n);
@@ -218,41 +218,41 @@ async function assemble(session, dest, clientParts = null) {
     return { bytes, sha256: hash.digest('hex') };
 }
 
-function finish(session) {
-    db.run("UPDATE media_uploads SET status = 'completed', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?", [session.id]);
-    removeParts(session.id);
+async function finish(session) {
+    await db.run("UPDATE media_uploads SET status = 'completed', completed_at = ov_now(), updated_at = ov_now() WHERE id = ?", [session.id]);
+    await removeParts(session.id);
 }
 
-function removeParts(uploadId) {
+async function removeParts(uploadId) {
     try { fs.rmSync(sessionDir(uploadId), { recursive: true, force: true }); } catch { /* best effort */ }
-    db.run('DELETE FROM media_upload_parts WHERE upload_id = ?', [uploadId]);
+    await db.run('DELETE FROM media_upload_parts WHERE upload_id = ?', [uploadId]);
 }
 
 /**
  * Delete a session's parts; the object stays uploading. Its quota reservation is released down to
  * what is still stored for it (objects/namespaces.release), unless a new session replaces this one.
  */
-function abort(uploadId, status = 'aborted', { release = true } = {}) {
-    const session = getSession(uploadId);
-    db.run("UPDATE media_uploads SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('active', 'completing')", [status, uploadId]);
-    removeParts(uploadId);
-    if (release && session) require('./namespaces').release(session.object_id);
+async function abort(uploadId, status = 'aborted', { release = true } = {}) {
+    const session = await getSession(uploadId);
+    await db.run("UPDATE media_uploads SET status = ?, updated_at = ov_now() WHERE id = ? AND status IN ('active', 'completing')", [status, uploadId]);
+    await removeParts(uploadId);
+    if (release && session) await require('./namespaces').release(session.object_id);
 }
 
 /**
  * Expire sessions past their expiry (incomplete multipart uploads) and remove part directories that
  * no session owns. Returns { expired, orphan_dirs }.
  */
-function purgeExpired() {
+async function purgeExpired() {
     let expired = 0, orphans = 0;
-    for (const s of db.all("SELECT id FROM media_uploads WHERE status IN ('active', 'completing') AND expires_at < datetime('now')")) {
-        abort(s.id, 'expired');
+    for (const s of await db.all("SELECT id FROM media_uploads WHERE status IN ('active', 'completing') AND expires_at < datetime('now')")) {
+        await abort(s.id, 'expired');
         expired++;
     }
     let dirs = [];
     try { dirs = fs.readdirSync(partsRoot()); } catch { /* none yet */ }
     for (const d of dirs) {
-        const s = getSession(d);
+        const s = await getSession(d);
         if (s && ['active', 'completing'].includes(s.status)) continue;
         try { fs.rmSync(path.join(partsRoot(), d), { recursive: true, force: true }); orphans++; } catch { /* next time */ }
     }
@@ -260,8 +260,8 @@ function purgeExpired() {
 }
 
 /** Sessions that are still open (reconciliation: incomplete multipart uploads). */
-function openSessions() {
-    return db.all("SELECT u.*, (SELECT COUNT(*) FROM media_upload_parts p WHERE p.upload_id = u.id) AS parts_received FROM media_uploads u WHERE status IN ('active', 'completing') ORDER BY created_at");
+async function openSessions() {
+    return await db.all("SELECT u.*, (SELECT COUNT(*) FROM media_upload_parts p WHERE p.upload_id = u.id) AS parts_received FROM media_uploads u WHERE status IN ('active', 'completing') ORDER BY created_at");
 }
 
 module.exports = {

@@ -97,11 +97,11 @@ function requestHash(type, objectId, params) {
     return crypto.createHash('sha256').update(canonical({ type, object_id: objectId || null, params: params || {} })).digest('hex');
 }
 
-function get(id) {
-    return id ? db.get('SELECT * FROM media_jobs WHERE id = ?', [String(id)]) : null;
+async function get(id) {
+    return id ? await db.get('SELECT * FROM media_jobs WHERE id = ?', [String(id)]) : null;
 }
-function getForApp(id, appId) {
-    const row = get(id);
+async function getForApp(id, appId) {
+    const row = await get(id);
     return row && row.app_id === appId ? row : null;
 }
 
@@ -175,13 +175,13 @@ function jobEvent(row) {
  * transaction; wake the relay and tell waiters after the commit. Returns the job row, or null when
  * `change()` changed nothing (a lost race: the caller decides what that means).
  */
-function commit(id, transition, change) {
+async function commit(id, transition, change) {
     let row = null;
-    db.getDb().transaction(() => {
-        if (!change()) return;
-        row = get(id);
-        if (transition) events.recordJob(transition, jobEvent(row));
-    })();
+    await db.getDb().tx(async () => {
+        if (!await change()) return;
+        row = await get(id);
+        if (transition) await events.recordJob(transition, jobEvent(row));
+    });
     if (row) {
         if (transition) events.kick();
         bus.emit('change', row);
@@ -194,16 +194,16 @@ function commit(id, transition, change) {
  * `fence`: { token } adds AND lease_token IS <token> (a NULL token matches only an unleased row);
  * { expired: true } also requires the lease to have run out (recovery taking a job over).
  */
-function update(id, fromStatuses, sets, params = [], fence = null) {
+async function update(id, fromStatuses, sets, params = [], fence = null) {
     const from = Array.isArray(fromStatuses) ? fromStatuses : [fromStatuses];
     let where = `id = ? AND status IN (${from.map(() => '?').join(', ')})`;
     const args = [...params, id, ...from];
     if (fence) {
-        where += ' AND lease_token IS ?';
+        where += ' AND lease_token IS NOT DISTINCT FROM ?';
         args.push(fence.token == null ? null : String(fence.token));
         if (fence.expired) where += " AND (lease_until IS NULL OR lease_until < datetime('now'))";
     }
-    return db.run(`UPDATE media_jobs SET ${sets}, updated_at = CURRENT_TIMESTAMP WHERE ${where}`, args).changes > 0;
+    return (await db.run(`UPDATE media_jobs SET ${sets}, updated_at = ov_now() WHERE ${where}`, args)).changes > 0;
 }
 
 // ── Fencing ──────────────────────────────────────────────────
@@ -212,9 +212,9 @@ const stale = { succeed: 0, fail: 0, cancel: 0, renew: 0, checkpoint: 0 };
 function newLeaseToken() { return crypto.randomBytes(16).toString('hex'); }
 
 /** A holder's write was refused because its claim no longer holds the job: log, count, tell listeners. */
-function refuseStale(action, id) {
+async function refuseStale(action, id) {
     stale[action] = (stale[action] || 0) + 1;
-    const now = get(id);
+    const now = await get(id);
     const where = !now ? 'it no longer exists' : now.status === 'running' ? 'another claim holds it' : `it is ${now.status} now`;
     console.warn(`[Jobs] refused a stale ${action} of ${id} from a holder that lost it (${where})`);
     bus.emit('stale', { action, id, status: now ? now.status : null });
@@ -237,7 +237,7 @@ function holder(opts, action, id) {
  * Throws JobError: media.job.unknown_type, media.job.idempotency_conflict (409), media.job.too_many (429).
  * `params` must already be validated (routes.js / the validator do that through the type's validate()).
  */
-function enqueue({ appId, type, objectId = null, params = {}, status = 'queued', idempotencyKey = null, dedupeActive = false,
+async function enqueue({ appId, type, objectId = null, params = {}, status = 'queued', idempotencyKey = null, dedupeActive = false,
     createdBy = null, ownerUserId = null, maxAttempts = null, runAfterS = 0 }) {
     const spec = typeSpec(type);
     if (!spec) throw new JobError('media.job.unknown_type', `Unknown job type ${type}`, { status: 400, permanent: true });
@@ -246,9 +246,12 @@ function enqueue({ appId, type, objectId = null, params = {}, status = 'queued',
     const hash = requestHash(type, objectId, params);
     let out = null;
     const id = `mjob_${ids.ulid()}`;
-    db.getDb().transaction(() => {
+    await db.getDb().tx(async () => {
+        // One enqueue per tenant at a time (SQLite's one writer did this): the key, the identical active job and the
+        // active count below are read with every earlier enqueue of the tenant committed.
+        await db.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [`media.jobs:${appId}`]);
         if (key) {
-            const prior = db.get('SELECT * FROM media_jobs WHERE app_id = ? AND idempotency_key = ?', [appId, key]);
+            const prior = await db.get('SELECT * FROM media_jobs WHERE app_id = ? AND idempotency_key = ?', [appId, key]);
             if (prior) {
                 if (prior.request_hash !== hash) {
                     throw new JobError('media.job.idempotency_conflict', 'This Idempotency-Key was used for a different job request', { status: 409, permanent: true });
@@ -258,25 +261,25 @@ function enqueue({ appId, type, objectId = null, params = {}, status = 'queued',
             }
         }
         if (dedupeActive) {
-            const same = db.get(`SELECT * FROM media_jobs WHERE app_id = ? AND job_type = ? AND request_hash = ? AND status IN ('queued', 'running')
+            const same = await db.get(`SELECT * FROM media_jobs WHERE app_id = ? AND job_type = ? AND request_hash = ? AND status IN ('queued', 'running')
                                  ORDER BY id DESC LIMIT 1`, [appId, type, hash]);
             if (same) { out = { job: same, created: false, replayed: false, deduped: true }; return; }
         }
         if (status === 'queued') {
-            const active = db.get("SELECT COUNT(*) AS n FROM media_jobs WHERE app_id = ? AND status IN ('queued', 'running')", [appId]).n;
+            const active = (await db.get("SELECT COUNT(*) AS n FROM media_jobs WHERE app_id = ? AND status IN ('queued', 'running')", [appId])).n;
             if (active >= MAX_ACTIVE_PER_TENANT) {
                 throw new JobError('media.job.too_many', `At most ${MAX_ACTIVE_PER_TENANT} jobs may be queued or running per tenant`, { status: 429, retryAfterS: 60 });
             }
         }
-        db.run(`INSERT INTO media_jobs (id, app_id, object_id, job_type, status, idempotency_key, request_hash, params, max_attempts,
+        await db.run(`INSERT INTO media_jobs (id, app_id, object_id, job_type, status, idempotency_key, request_hash, params, max_attempts,
                     run_after, created_by, owner_user_id)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ${runAfterS > 0 ? `datetime('now', '+${Math.round(runAfterS)} seconds')` : 'NULL'}, ?, ?)`,
         [id, appId, objectId, type, status, key, hash, JSON.stringify(params || {}),
             Math.max(1, Math.min(10, Number(maxAttempts) || spec.maxAttempts)), createdBy, ownerUserId ?? null]);
-        const row = get(id);
-        events.recordJob(status, jobEvent(row));
+        const row = await get(id);
+        await events.recordJob(status, jobEvent(row));
         out = { job: row, created: true, replayed: false, deduped: false };
-    })();
+    });
     if (out.created) { events.kick(); bus.emit('change', out.job); }
     return out;
 }
@@ -284,8 +287,8 @@ function enqueue({ appId, type, objectId = null, params = {}, status = 'queued',
 // ── Owner decisions ──────────────────────────────────────────
 
 /** proposed -> queued. Returns the job, or null when it is not a proposal (any more). */
-function approve(id, { by = null } = {}) {
-    return commit(id, 'queued', () => update(id, 'proposed', "status = 'queued', decided_by = ?, decided_at = CURRENT_TIMESTAMP, run_after = NULL", [by]));
+async function approve(id, { by = null } = {}) {
+    return await commit(id, 'queued', async () => await update(id, 'proposed', "status = 'queued', decided_by = ?, decided_at = ov_now(), run_after = NULL", [by]));
 }
 
 /**
@@ -293,20 +296,20 @@ function approve(id, { by = null } = {}) {
  * stops at its next check (the worker also aborts it in-process); { job, pending: true } until then.
  * Finished jobs: { job, finished: true } and nothing changes.
  */
-function cancel(id, { by = null, reason = null } = {}) {
-    const row = get(id);
+async function cancel(id, { by = null, reason = null } = {}) {
+    const row = await get(id);
     if (!row) return null;
     if (FINISHED.includes(row.status)) return { job: row, finished: true };
     if (row.status === 'running') {
-        db.run('UPDATE media_jobs SET cancel_requested = 1, decided_by = COALESCE(decided_by, ?), updated_at = CURRENT_TIMESTAMP WHERE id = ?', [by, id]);
+        await db.run('UPDATE media_jobs SET cancel_requested = 1, decided_by = COALESCE(decided_by, ?), updated_at = ov_now() WHERE id = ?', [by, id]);
         try { require('./worker').abort(id); } catch { /* the heartbeat sees the flag */ }
-        return { job: get(id), pending: true };
+        return { job: await get(id), pending: true };
     }
-    const done = commit(id, 'cancelled', () => update(id, ['proposed', 'queued'],
-        `status = 'cancelled', finished_at = CURRENT_TIMESTAMP, decided_by = ?, decided_at = CURRENT_TIMESTAMP,
-         error = COALESCE(?, error), error_code = CASE WHEN ? IS NULL THEN error_code ELSE 'cancelled' END`, [by, reason, reason]));
+    const done = await commit(id, 'cancelled', async () => await update(id, ['proposed', 'queued'],
+        `status = 'cancelled', finished_at = ov_now(), decided_by = ?, decided_at = ov_now(),
+         error = COALESCE(?::text, error), error_code = CASE WHEN ?::text IS NULL THEN error_code ELSE 'cancelled' END`, [by, reason, reason]));
     if (done) return { job: done };
-    return cancel(id, { by, reason });          // it moved on meanwhile (picked up): try again from its new state
+    return await cancel(id, { by, reason });          // it moved on meanwhile (picked up): try again from its new state
 }
 
 // ── Worker side ──────────────────────────────────────────────
@@ -315,20 +318,20 @@ function cancel(id, { by = null, reason = null } = {}) {
  * Take the oldest due queued job of these types (or exactly `id`): running, attempts + 1, leased, with
  * a fresh lease_token. Returns the row (its lease_token is the holder's fence) or null.
  */
-function claim(types, { leaseS = 120, id = null } = {}) {
+async function claim(types, { leaseS = 120, id = null } = {}) {
     if (!id && !types.length) return null;
     let row = null;
-    db.getDb().transaction(() => {
+    await db.getDb().tx(async () => {
         const next = id
-            ? db.get("SELECT id FROM media_jobs WHERE id = ? AND status = 'queued'", [id])
-            : db.get(`SELECT id FROM media_jobs WHERE status = 'queued' AND job_type IN (${types.map(() => '?').join(', ')})
+            ? await db.get("SELECT id FROM media_jobs WHERE id = ? AND status = 'queued'", [id])
+            : await db.get(`SELECT id FROM media_jobs WHERE status = 'queued' AND job_type IN (${types.map(() => '?').join(', ')})
                         AND (run_after IS NULL OR run_after <= datetime('now')) ORDER BY id LIMIT 1`, types);
         if (!next) return;
-        if (!update(next.id, 'queued', `status = 'running', attempts = attempts + 1, started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+        if (!await update(next.id, 'queued', `status = 'running', attempts = attempts + 1, started_at = COALESCE(started_at, ov_now()),
                                           lease_until = datetime('now', '+${Math.round(leaseS)} seconds'), run_after = NULL, lease_token = ?`, [newLeaseToken()])) return;
-        row = get(next.id);
-        events.recordJob('started', jobEvent(row));
-    })();
+        row = await get(next.id);
+        await events.recordJob('started', jobEvent(row));
+    });
     if (row) { events.kick(); bus.emit('change', row); }
     return row;
 }
@@ -337,13 +340,13 @@ function claim(types, { leaseS = 120, id = null } = {}) {
  * Extend a running job's lease, for the holder of `token` only. Returns { running, held, cancelRequested }:
  * held false = this claim lost the job (refused as stale; the worker aborts its handler).
  */
-function renew(id, opts = {}) {
+async function renew(id, opts = {}) {
     const fence = holder(opts, 'renew', id);
     const leaseS = opts.leaseS == null ? 120 : opts.leaseS;
-    const held = db.run(`UPDATE media_jobs SET lease_until = datetime('now', '+${Math.round(leaseS)} seconds')
-                         WHERE id = ? AND status = 'running' AND lease_token IS ?`, [id, fence.token == null ? null : String(fence.token)]).changes > 0;
-    if (!held) refuseStale('renew', id);
-    const row = get(id);
+    const held = (await db.run(`UPDATE media_jobs SET lease_until = datetime('now', '+${Math.round(leaseS)} seconds')
+                         WHERE id = ? AND status = 'running' AND lease_token IS NOT DISTINCT FROM ?`, [id, fence.token == null ? null : String(fence.token)])).changes > 0;
+    if (!held) await refuseStale('renew', id);
+    const row = await get(id);
     return { running: !!row && row.status === 'running', held, cancelRequested: !!(row && row.cancel_requested) };
 }
 
@@ -352,31 +355,31 @@ function renew(id, opts = {}) {
  * became). With `{ token }` (the worker) only the job's holder may: a stale holder's checkpoint and
  * everything alsoInTx did roll back, and it throws media.job.lease_lost.
  */
-function saveCheckpoint(id, checkpoint, alsoInTx = null, opts = null) {
+async function saveCheckpoint(id, checkpoint, alsoInTx = null, opts = null) {
     const fenced = !!(opts && Object.prototype.hasOwnProperty.call(opts, 'token'));
     let lost = false;
     try {
-        db.getDb().transaction(() => {
-            if (alsoInTx) alsoInTx();
+        await db.getDb().tx(async () => {
+            if (alsoInTx) await alsoInTx();
             const changes = fenced
-                ? db.run("UPDATE media_jobs SET checkpoint = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running' AND lease_token IS ?",
-                    [JSON.stringify(checkpoint), id, opts.token == null ? null : String(opts.token)]).changes
-                : db.run('UPDATE media_jobs SET checkpoint = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [JSON.stringify(checkpoint), id]).changes;
+                ? (await db.run("UPDATE media_jobs SET checkpoint = ?, updated_at = ov_now() WHERE id = ? AND status = 'running' AND lease_token IS NOT DISTINCT FROM ?",
+                    [JSON.stringify(checkpoint), id, opts.token == null ? null : String(opts.token)])).changes
+                : (await db.run('UPDATE media_jobs SET checkpoint = ?, updated_at = ov_now() WHERE id = ?', [JSON.stringify(checkpoint), id])).changes;
             if (fenced && !changes) { lost = true; throw new JobError('media.job.lease_lost', 'This worker no longer holds the job', { permanent: true, status: 409 }); }
-        })();
+        });
     } catch (err) {
-        if (lost) refuseStale('checkpoint', id);
+        if (lost) await refuseStale('checkpoint', id);
         throw err;
     }
 }
 
 /** The holder's result: running → succeeded. { token } is the claim's; a stale holder is refused (null). */
-function succeed(id, result, opts) {
+async function succeed(id, result, opts) {
     const fence = holder(opts, 'succeed', id);
-    const row = commit(id, 'succeeded', () => update(id, 'running',
-        "status = 'succeeded', result = ?, error = NULL, error_code = NULL, lease_until = NULL, lease_token = NULL, finished_at = CURRENT_TIMESTAMP",
+    const row = await commit(id, 'succeeded', async () => await update(id, 'running',
+        "status = 'succeeded', result = ?, error = NULL, error_code = NULL, lease_until = NULL, lease_token = NULL, finished_at = ov_now()",
         [JSON.stringify(result ?? null)], fence));
-    if (!row && !fence.takeover) refuseStale('succeed', id);
+    if (!row && !fence.takeover) await refuseStale('succeed', id);
     return row;
 }
 
@@ -385,30 +388,30 @@ function succeed(id, result, opts) {
  * the claim's; a stale holder is refused (null). Recovery passes the token it read with { takeover: true }
  * (and { expired: true } past boot: only while the lease is still run out).
  */
-function fail(id, { message, code = null, retryInS = null, result = null, ...opts }) {
+async function fail(id, { message, code = null, retryInS = null, result = null, ...opts }) {
     const fence = holder(opts, 'fail', id);
     const msg = String(message || 'failed').slice(0, 1000);
     let row;
     if (retryInS != null) {
-        row = commit(id, 'retrying', () => update(id, 'running',
+        row = await commit(id, 'retrying', async () => await update(id, 'running',
             `status = 'queued', error = ?, error_code = ?, lease_until = NULL, lease_token = NULL, run_after = datetime('now', '+${Math.max(0, Math.round(retryInS))} seconds')`,
             [msg, code], fence));
     } else {
-        row = commit(id, 'failed', () => update(id, 'running',
-            "status = 'failed', error = ?, error_code = ?, result = COALESCE(?, result), lease_until = NULL, lease_token = NULL, finished_at = CURRENT_TIMESTAMP",
+        row = await commit(id, 'failed', async () => await update(id, 'running',
+            "status = 'failed', error = ?, error_code = ?, result = COALESCE(?, result), lease_until = NULL, lease_token = NULL, finished_at = ov_now()",
             [msg, code, result == null ? null : JSON.stringify(result)], fence));
     }
-    if (!row && !fence.takeover) refuseStale('fail', id);
+    if (!row && !fence.takeover) await refuseStale('fail', id);
     return row;
 }
 
 /** A running job that stopped because its owner cancelled it. { token } as for fail(). */
-function markCancelled(id, { result = null, ...opts } = {}) {
+async function markCancelled(id, { result = null, ...opts } = {}) {
     const fence = holder(opts, 'cancel', id);
-    const row = commit(id, 'cancelled', () => update(id, 'running',
-        "status = 'cancelled', error = 'cancelled by its owner', error_code = 'cancelled', result = COALESCE(?, result), lease_until = NULL, lease_token = NULL, finished_at = CURRENT_TIMESTAMP",
+    const row = await commit(id, 'cancelled', async () => await update(id, 'running',
+        "status = 'cancelled', error = 'cancelled by its owner', error_code = 'cancelled', result = COALESCE(?, result), lease_until = NULL, lease_token = NULL, finished_at = ov_now()",
         [result == null ? null : JSON.stringify(result)], fence));
-    if (!row && !fence.takeover) refuseStale('cancel', id);
+    if (!row && !fence.takeover) await refuseStale('cancel', id);
     return row;
 }
 
@@ -416,8 +419,8 @@ function markCancelled(id, { result = null, ...opts } = {}) {
  * Running jobs nobody holds any more: every one at boot (`all`), otherwise those whose lease ran out.
  * `except` = ids this process is running. Each is retried if it has attempts left, else failed.
  */
-function recoverInterrupted({ all = false, except = new Set(), retryInS = 30 } = {}) {
-    const rows = db.all(`SELECT * FROM media_jobs WHERE status = 'running'${all ? '' : " AND (lease_until IS NULL OR lease_until < datetime('now'))"}`);
+async function recoverInterrupted({ all = false, except = new Set(), retryInS = 30 } = {}) {
+    const rows = await db.all(`SELECT * FROM media_jobs WHERE status = 'running'${all ? '' : " AND (lease_until IS NULL OR lease_until < datetime('now'))"}`);
     let n = 0;
     for (const row of rows) {
         if (except.has(row.id)) continue;
@@ -426,22 +429,22 @@ function recoverInterrupted({ all = false, except = new Set(), retryInS = 30 } =
         // a holder that renewed or finished meanwhile keeps its job.
         const fence = { token: row.lease_token, takeover: true, expired: !all };
         let done;
-        if (row.cancel_requested) done = markCancelled(row.id, fence);
-        else if (row.attempts < row.max_attempts) done = fail(row.id, { message: why, code: 'interrupted', retryInS, ...fence });
-        else done = fail(row.id, { message: why, code: 'interrupted', ...fence });
+        if (row.cancel_requested) done = await markCancelled(row.id, fence);
+        else if (row.attempts < row.max_attempts) done = await fail(row.id, { message: why, code: 'interrupted', retryInS, ...fence });
+        else done = await fail(row.id, { message: why, code: 'interrupted', ...fence });
         if (done) n++;
     }
     return n;
 }
 
 /** Wait until the job is finished (or `timeoutMs` passes). Resolves with the row as it is then. */
-function waitFor(id, timeoutMs = 60000) {
-    const now = get(id);
+async function waitFor(id, timeoutMs = 60000) {
+    const now = await get(id);
     if (!now || FINISHED.includes(now.status)) return Promise.resolve(now);
     return new Promise((resolve) => {
         const ev = `finished:${id}`;
-        const done = (row) => { clearTimeout(t); bus.removeListener(ev, done); resolve(row || get(id)); };
-        const t = setTimeout(() => done(null), timeoutMs);
+        const done = async (row) => { clearTimeout(t); bus.removeListener(ev, done); resolve(row || await get(id)); };
+        const t = setTimeout(async () => await done(null), timeoutMs);
         if (t.unref) t.unref();
         bus.on(ev, done);
     });
@@ -450,7 +453,7 @@ function waitFor(id, timeoutMs = 60000) {
 // ── Reads ────────────────────────────────────────────────────
 
 /** Cursor list, newest first. filters: status, type, objectId, ownerUserId (acting user: own jobs + jobs on own objects). */
-function list(appId, { status, type, objectId, cursor, limit = 50, actingUserId = null } = {}) {
+async function list(appId, { status, type, objectId, cursor, limit = 50, actingUserId = null } = {}) {
     const conds = ['j.app_id = ?'], params = [appId];
     if (cursor) { conds.push('j.id < ?'); params.push(String(cursor)); }
     if (status) { conds.push('j.status = ?'); params.push(String(status)); }
@@ -461,21 +464,21 @@ function list(appId, { status, type, objectId, cursor, limit = 50, actingUserId 
         params.push(actingUserId, actingUserId);
     }
     const n = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-    const rows = db.all(`SELECT j.* FROM media_jobs j WHERE ${conds.join(' AND ')} ORDER BY j.id DESC LIMIT ?`, [...params, n + 1]);
+    const rows = await db.all(`SELECT j.* FROM media_jobs j WHERE ${conds.join(' AND ')} ORDER BY j.id DESC LIMIT ?`, [...params, n + 1]);
     const page = rows.slice(0, n);
     return { jobs: page, next_cursor: rows.length > n ? page[page.length - 1].id : null, limit: n };
 }
 
-function counts() {
+async function counts() {
     const out = Object.fromEntries(STATUSES.map(s => [s, 0]));
-    for (const r of db.all('SELECT status, COUNT(*) AS n FROM media_jobs GROUP BY status')) out[r.status] = r.n;
+    for (const r of await db.all('SELECT status, COUNT(*) AS n FROM media_jobs GROUP BY status')) out[r.status] = r.n;
     return out;
 }
 
 /** Delete finished jobs of high-volume types older than `days` (thumbnail requests, scheduled hashing). Others are kept. */
-function prune({ days = 30, types = ['thumbnail.regenerate', 'object.hash'] } = {}) {
-    return db.run(`DELETE FROM media_jobs WHERE status IN ('succeeded', 'failed', 'cancelled') AND job_type IN (${types.map(() => '?').join(', ')})
-                   AND finished_at < datetime('now', ?)`, [...types, `-${Math.max(1, days)} days`]).changes;
+async function prune({ days = 30, types = ['thumbnail.regenerate', 'object.hash'] } = {}) {
+    return (await db.run(`DELETE FROM media_jobs WHERE status IN ('succeeded', 'failed', 'cancelled') AND job_type IN (${types.map(() => '?').join(', ')})
+                   AND finished_at < datetime('now', ?)`, [...types, `-${Math.max(1, days)} days`])).changes;
 }
 
 module.exports = {

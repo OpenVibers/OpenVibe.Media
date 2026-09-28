@@ -38,7 +38,7 @@ function isFinalizing(vodId) {
 // Public shape of a vod row for API responses + webhooks. { readiness: true } (API responses) adds the
 // object's readiness levels (server/objects/readiness.js); webhook payloads leave them out (their shape
 // predates the object model and stays as it is).
-function vodPublic(vod, { readiness = false } = {}) {
+async function vodPublic(vod, { readiness = false } = {}) {
     if (!vod) return null;
     const out = {
         unique_views: vod.unique_views || 0,
@@ -78,7 +78,7 @@ function vodPublic(vod, { readiness = false } = {}) {
         created_at: vod.created_at,
         meta: (() => { try { return JSON.parse(vod.meta_json || '{}'); } catch { return {}; } })(),
     };
-    if (readiness) out.readiness = require('../objects/readiness').forRow(vod);
+    if (readiness) out.readiness = await require('../objects/readiness').forRow(vod);
     return out;
 }
 
@@ -116,9 +116,9 @@ function rebuildWebmFromMaster(masterPath, webmPath) {
  * inside the transaction). Returns the payload, or null when the transaction failed (then nothing
  * changed and nothing was announced). A deleted row's object is marked deleted by its trigger.
  */
-function _commitVodOutcome(vod, event, change, row = () => db.getVodById(vod.id)) {
+async function _commitVodOutcome(vod, event, change, row = async () => await db.getVodById(vod.id)) {
     try {
-        return announce(vod.app_id, event, { change: () => objects().withObject('vod', vod.id, change), payload: () => vodPublic(row()) }).data;
+        return (await announce(vod.app_id, event, { change: async () => await objects().withObject('vod', vod.id, change), payload: async () => await vodPublic(row()) })).data;
     } catch (err) {
         console.error(`[VOD] vod ${vod.id}: ${event} not committed:`, err.message);
         return null;
@@ -154,7 +154,7 @@ async function finalizeVod(vodId, opts = {}) {
         return await _doFinalize(vodId, opts);
     } catch (err) {
         // A finalize that throws leaves the recording unsettled: the vod.finalize job tries again.
-        _queueRetry(vodId, 'finalize_failed', opts);
+        await _queueRetry(vodId, 'finalize_failed', opts);
         throw err;
     } finally {
         _finalizing.delete(vodId);
@@ -162,7 +162,7 @@ async function finalizeVod(vodId, opts = {}) {
         // row's object is marked by its trigger. This follow-up only re-reads the disk after a finalize
         // that threw part-way (a merge or remux rewrote the file, no row write followed). C-75 leftover:
         // it goes with the boot backfill (server/index.js) once the drift report shows zero drift.
-        objects().safeSync('vod', vodId);
+        await objects().safeSync('vod', vodId);
     }
 }
 
@@ -170,9 +170,9 @@ async function finalizeVod(vodId, opts = {}) {
  * Queue a vod.finalize retry (server/jobs/vod-finalize.js; first attempt in 5 minutes), unless this
  * finalize IS that job (it retries itself with backoff).
  */
-function _queueRetry(vodId, reason, opts = {}) {
+async function _queueRetry(vodId, reason, opts = {}) {
     if (opts.fromJob) return;
-    try { require('../jobs/vod-finalize').queueFinalize(vodId, reason, { runAfterS: 300 }); } catch { /* the orphan sweep and the reconcile job remain */ }
+    try { await require('../jobs/vod-finalize').queueFinalize(vodId, reason, { runAfterS: 300 }); } catch { /* the orphan sweep and the reconcile job remain */ }
 }
 
 // Health issues finalize itself records when it cannot settle a recording. A later successful
@@ -189,7 +189,7 @@ function _finalizeQuarantined(vod) {
 }
 
 async function _doFinalize(vodId, opts) {
-    const vod = db.getVodById(vodId);
+    const vod = await db.getVodById(vodId);
     if (!vod) return null;
     const filePath = vod.file_path;
     // The recorder's own start time bounds the duration (a container claiming more than the
@@ -204,29 +204,29 @@ async function _doFinalize(vodId, opts) {
         try { tools.cleanupSeekableFile(filePath); } catch { /* */ }
         try { if (vod.master_file_path && fs.existsSync(vod.master_file_path)) fs.unlinkSync(vod.master_file_path); } catch { /* */ }
         try { if (vod.storage_provider && vod.storage_provider !== 'local') require('./vod-storage').deleteVodObjects(vod).catch(() => {}); } catch { /* */ }
-        try { db.run('DELETE FROM vods WHERE id = ?', [vodId]); } catch { /* */ }
+        try { await db.run('DELETE FROM vods WHERE id = ?', [vodId]); } catch { /* */ }
         console.log(`[VOD] Discarded ephemeral clips-only recording (vod ${vodId})`);
         return null;
     }
 
     // A recording under a retention hold is never deleted here (the empty-row and zero-byte cases
     // below): it is settled as failed and quarantined instead, file and row kept.
-    const keepHeld = (status) => {
+    const keepHeld = async (status) => {
         console.warn(`[VOD] vod ${vodId}: ${status} recording under a retention hold — keeping its row and file, quarantined`);
-        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?,
+        await _commitVodOutcome(vod, 'vod.failed', async () => await db.run(`UPDATE vods SET is_recording = 0, health_status = ?, health_issues_json = ?,
                 quarantined_at = COALESCE(quarantined_at, datetime('now')), is_public = 0, last_health_scan_at = datetime('now') WHERE id = ?`,
         [status, JSON.stringify([status, 'retention_hold']), vodId]));
         return null;
     };
-    const held = objects().isHeldRow(vod);
+    const held = await objects().isHeldRow(vod);
 
     if (!filePath || !fs.existsSync(filePath)) {
-        if (held) return keepHeld('missing_file');
+        if (held) return await keepHeld('missing_file');
         // No media was ever written (ingest started but produced nothing, or the
         // process died before ffmpeg opened the file). Nothing to review — delete
         // the row so a 0:00 ghost never reaches listings.
         console.warn(`[VOD] vod ${vodId}: no recording file — deleting empty row`);
-        _commitVodOutcome(vod, 'vod.failed', () => db.run('DELETE FROM vods WHERE id = ?', [vodId]), () => vod);
+        await _commitVodOutcome(vod, 'vod.failed', async () => await db.run('DELETE FROM vods WHERE id = ?', [vodId]), () => vod);
         return null;
     }
 
@@ -242,12 +242,12 @@ async function _doFinalize(vodId, opts) {
     // nothing to review, so treat it like a missing file: report the failure and
     // delete the row and file — a 0:00 ghost must never reach listings.
     if (tools.getFileSizeSafe(filePath) === 0) {
-        if (held) return keepHeld('zero_byte');
+        if (held) return await keepHeld('zero_byte');
         console.warn(`[VOD] vod ${vodId}: zero-byte recording — deleting empty recording`);
         try { fs.unlinkSync(filePath); } catch { /* */ }
         try { tools.cleanupSeekableFile(filePath); } catch { /* */ }
         try { if (vod.master_file_path && fs.existsSync(vod.master_file_path)) fs.unlinkSync(vod.master_file_path); } catch { /* */ }
-        _commitVodOutcome(vod, 'vod.failed', () => db.run('DELETE FROM vods WHERE id = ?', [vodId]),
+        await _commitVodOutcome(vod, 'vod.failed', async () => await db.run('DELETE FROM vods WHERE id = ?', [vodId]),
             () => ({ ...vod, health_status: 'zero_byte', is_public: 0 }));
         return null;
     }
@@ -308,28 +308,28 @@ async function _doFinalize(vodId, opts) {
 
     if (opts.ffmpegCorrupted) {
         console.warn(`[VOD] Finalized VOD ${vodId} marked corrupt by FFmpeg diagnostics; quarantining without deletion`);
-        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+        await _commitVodOutcome(vod, 'vod.failed', async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
             [stored, durationSource, 'corrupt', JSON.stringify(['ffmpeg-corruption-detected', ...issues]), measured, probeFormatJson, vodId]));
-        return db.getVodById(vodId);
+        return await db.getVodById(vodId);
     }
 
     // Nothing measurable (ffprobe and the packet pass both failed, or every value is impossible):
     // the stored duration is 0 and the recording waits for review, hidden. Never the wall clock.
     if (durationSource === 'unknown') {
         console.warn(`[VOD] vod ${vodId}: no measurable duration (${issues.join(', ')}) — stored 0, needs_review`);
-        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review', health_issues_json = ?, probe_duration_seconds = 0, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+        await _commitVodOutcome(vod, 'vod.failed', async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review', health_issues_json = ?, probe_duration_seconds = 0, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
             [JSON.stringify(issues), probeFormatJson, vodId]));
-        _queueRetry(vodId, issues.includes('probe_failed') ? 'probe_failed' : 'inflated_duration', opts);
-        return db.getVodById(vodId);
+        await _queueRetry(vodId, issues.includes('probe_failed') ? 'probe_failed' : 'inflated_duration', opts);
+        return await db.getVodById(vodId);
     }
 
     // Very short recordings are quarantined for review instead of deleted.
     const MIN_VOD_SECONDS = parseInt(process.env.MIN_VOD_SECONDS || '2', 10);
     if (durationSeconds < MIN_VOD_SECONDS) {
         console.log(`[VOD] Quarantining short vod ${vodId}: duration ${durationSeconds}s`);
-        _commitVodOutcome(vod, 'vod.failed', () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+        await _commitVodOutcome(vod, 'vod.failed', async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
             [stored, durationSource, 'needs_review', JSON.stringify(['short_duration', ...issues]), measured, probeFormatJson, vodId]));
-        return db.getVodById(vodId);
+        return await db.getVodById(vodId);
     }
 
     let stat;
@@ -339,9 +339,9 @@ async function _doFinalize(vodId, opts) {
         // The file vanished between the probe and here. Record it (no wall-clock duration left
         // behind by the live updates) and leave it for review.
         console.error(`[VOD] Failed to stat finalized VOD ${vodId}:`, err.message);
-        objects().withObject('vod', vodId, () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
+        await objects().withObject('vod', vodId, async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = 0, duration_source = 'unknown', health_status = 'needs_review',
                 health_issues_json = ?, last_health_scan_at = datetime('now') WHERE id = ?`, [JSON.stringify(['stat_failed', ...issues]), vodId]));
-        _queueRetry(vodId, 'stat_failed', opts);
+        await _queueRetry(vodId, 'stat_failed', opts);
         return null;
     }
     // The lossless .master.mkv archive is only a fallback. Delete it ONLY once
@@ -353,12 +353,12 @@ async function _doFinalize(vodId, opts) {
                 if (webmComplete) {
                     fs.unlinkSync(masterPath);
                     console.log(`[VOD] Removed master archive for vod ${vodId} (${path.basename(masterPath)})`);
-                    db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vodId]);   // not projected: no object change
+                    await db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vodId]);   // not projected: no object change
                 } else {
                     console.warn(`[VOD] vod ${vodId}: KEEPING master (webm ${durationSeconds}s still < master ${masterDur}s)`);
                 }
             } else {
-                db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vodId]);
+                await db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vodId]);
             }
         } catch (e) {
             console.warn(`[VOD] Master cleanup failed for vod ${vodId}:`, e.message);
@@ -376,17 +376,17 @@ async function _doFinalize(vodId, opts) {
 
     // A quarantine an earlier finalize attempt left (nothing measurable then) is lifted: the
     // recording is back to the visibility its owner chose.
-    const lift = _finalizeQuarantined(db.getVodById(vodId) || vod);
+    const lift = _finalizeQuarantined(await db.getVodById(vodId) || vod);
 
     // The ready transition, the VOD's object and the vod.ready event commit together (then the
     // webhook goes out). A failed commit throws, as the plain UPDATE did before.
-    announce(vod.app_id, 'vod.ready', {
-        change: () => objects().withObject('vod', vodId, () => db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
+    await announce(vod.app_id, 'vod.ready', {
+        change: async () => await objects().withObject('vod', vodId, async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
             [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId])),
-        payload: () => vodPublic(db.getVodById(vodId)),
+        payload: async () => await vodPublic(await db.getVodById(vodId)),
     });
     console.log(`[VOD] Finalized: vod ${vodId}, ${stored}s (${durationSource}), ${(stat.size / 1024 / 1024).toFixed(1)}MB`);
-    return db.getVodById(vodId);
+    return await db.getVodById(vodId);
 }
 
 module.exports = { finalizeVod, isFinalizing, vodPublic, rebuildWebmFromMaster, _absUrl, FINALIZE_ISSUES };

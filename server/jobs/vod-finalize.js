@@ -62,10 +62,10 @@ function vodIdOf(obj, params = {}) {
 }
 
 /** API validation: the VOD must be this tenant's (and the named object's). */
-function validate({ appId, obj, params }) {
+async function validate({ appId, obj, params }) {
     const id = vodIdOf(obj, params || {});
     if (!Number.isInteger(id) || id < 1) throw new JobError('media.job.invalid', 'vod.finalize needs params.vod_id (or a vod object)', { permanent: true });
-    const vod = db.getVodById(id, appId);
+    const vod = await db.getVodById(id, appId);
     if (!vod) throw new JobError('media.job.not_found', `vod ${id} not found`, { status: 404, permanent: true });
     if (obj && vod.object_id && vod.object_id !== obj.id) throw new JobError('media.job.invalid', `the object is not vod ${id}`, { permanent: true });
     return { vod_id: id };
@@ -81,7 +81,7 @@ function needsFinalize(vod) {
 
 async function run(job) {
     const vodId = Number(job.params && job.params.vod_id);
-    const vod = db.getVodById(vodId, job.app_id);
+    const vod = await db.getVodById(vodId, job.app_id);
     if (!vod) return { outcome: 'skipped', vod_id: vodId, reason: 'the vod no longer exists' };
     const holder = busy(vodId);
     if (holder === 'finalizing') throw new JobError('busy', 'a finalize of this vod is already running', { retryAfterS: 60 });
@@ -94,7 +94,7 @@ async function run(job) {
     } catch (err) {
         throw new JobError('finalize_threw', `finalize failed: ${err.message}`);
     }
-    const after = db.getVodById(vodId, job.app_id);
+    const after = await db.getVodById(vodId, job.app_id);
     if (!after) return { outcome: 'deleted', vod_id: vodId, reason: 'no media was ever written (empty or missing file)' };
     if (after.is_recording) throw new JobError('busy', 'the vod is still marked recording after finalize', { retryAfterS: 60 });
     const still = issuesOf(after).find(i => RETRYABLE[i]);
@@ -112,11 +112,11 @@ async function run(job) {
  * Queue a finalize for this VOD (joins one that is already queued or running). Never throws;
  * returns { job, created } or null. `reason` goes into created_by (system:vod.finalize:<reason>).
  */
-function queueFinalize(vodOrId, reason, { runAfterS = 0 } = {}) {
+async function queueFinalize(vodOrId, reason, { runAfterS = 0 } = {}) {
     try {
-        const vod = typeof vodOrId === 'object' ? vodOrId : db.getVodById(Number(vodOrId));
+        const vod = typeof vodOrId === 'object' ? vodOrId : await db.getVodById(Number(vodOrId));
         if (!vod) return null;
-        const r = queue.enqueue({
+        const r = await queue.enqueue({
             appId: vod.app_id, type: TYPE, objectId: vod.object_id || null, params: { vod_id: vod.id },
             dedupeActive: true, createdBy: `system:${TYPE}:${reason}`, runAfterS,
         });
@@ -135,10 +135,10 @@ function queueFinalize(vodOrId, reason, { runAfterS = 0 } = {}) {
  * Recordings left is_recording = 1 with nothing holding them. `graceMs`: the file must not have
  * changed for this long (a chunk upload resuming after a restart keeps writing it). Returns ids.
  */
-function orphans({ grace = graceMs(), now = Date.now() } = {}) {
+async function orphans({ grace = graceMs(), now = Date.now() } = {}) {
     const out = [];
     // clips_only recordings too: their finalize discards them (file and row).
-    for (const row of db.all('SELECT id, file_path FROM vods WHERE is_recording = 1 ORDER BY id')) {
+    for (const row of await db.all('SELECT id, file_path FROM vods WHERE is_recording = 1 ORDER BY id')) {
         if (busy(row.id)) continue;
         let mtime = 0;
         try { mtime = row.file_path ? fs.statSync(row.file_path).mtimeMs : 0; } catch { mtime = 0; }
@@ -151,11 +151,11 @@ function orphans({ grace = graceMs(), now = Date.now() } = {}) {
 let lastSweepAt = 0;
 
 /** Queue vod.finalize for every orphan (due every MEDIA_FINALIZE_SWEEP_S; `force` = now). */
-function sweepOrphans({ force = false, now = Date.now(), grace } = {}) {
+async function sweepOrphans({ force = false, now = Date.now(), grace } = {}) {
     if (!force && now - lastSweepAt < sweepEveryMs()) return 0;
     lastSweepAt = now;
     let n = 0;
-    for (const id of orphans({ grace, now })) { const r = queueFinalize(id, 'orphan'); if (r && r.created) n++; }
+    for (const id of await orphans({ grace, now })) { const r = await queueFinalize(id, 'orphan'); if (r && r.created) n++; }
     return n;
 }
 

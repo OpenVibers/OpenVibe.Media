@@ -56,7 +56,7 @@ function validateWaveform({ obj, params }) {
 }
 
 async function runWaveform(job, ctx) {
-    const src = d.loadSource(job);
+    const src = await d.loadSource(job);
     const p = validateWaveform({ obj: src, params: job.params });
     if (ctx.checkpoint && ctx.checkpoint.object_id) { d.cleanupWork(job.id); return { source_id: src.id, method: 'waveform', ...ctx.checkpoint }; }
     const source = await d.resolveSource(src);
@@ -64,7 +64,7 @@ async function runWaveform(job, ctx) {
     if (source.remote && Number(src.size_bytes) > REMOTE_MAX_BYTES) {
         throw new JobError('too_large', `A waveform decodes the whole audio track; this source is only in cloud storage and larger than ${REMOTE_MAX_BYTES / MB} MB`, { permanent: true });
     }
-    d.checkRoom(src, 8 * MB);
+    await d.checkRoom(src, 8 * MB);
     const out = path.join(d.workDir(job.id), 'waveform.png');
     const r = await d.ffmpeg(['-y', '-nostdin', '-v', 'error', ...d.inputArgs(source), '-i', source.input,
         '-filter_complex', `[0:a:0]aformat=channel_layouts=mono,showwavespic=s=${p.width}x${p.height}:colors=#60a5fa:scale=sqrt[w]`, '-map', '[w]', '-frames:v', '1', out],
@@ -104,12 +104,12 @@ function spriteLayout(duration, { frames, columns, tile_width }) {
 }
 
 async function runSprite(job, ctx) {
-    const src = d.loadSource(job);
+    const src = await d.loadSource(job);
     const p = validateSprite({ obj: src, params: job.params });
     if (ctx.checkpoint && ctx.checkpoint.object_id) { d.cleanupWork(job.id); return { source_id: src.id, method: 'sprite', ...ctx.checkpoint }; }
     const source = await d.resolveSource(src);
     if (!source) throw new JobError('media_unavailable', 'The source bytes are unavailable (no local file and no cloud copy)', { permanent: true });
-    d.checkRoom(src, 16 * MB);
+    await d.checkRoom(src, 16 * MB);
     const meta = await streamsOf(source.input);
     const md = require('../objects/model').parseJson(src.metadata, {});
     const duration = meta.duration || Number(md.duration_seconds) || 0;

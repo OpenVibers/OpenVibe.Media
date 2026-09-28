@@ -128,8 +128,8 @@ async function recoverFromMaster(vod) {
     try { const mi2 = await probeMediaInfo(vod.file_path); if (mi2.ok && mi2.duration > 0) dur = mi2.duration; } catch { /* */ }
     try {
         const stat = fs.statSync(vod.file_path);
-        db.repairVodDuration(vod.id, Math.round(dur), stat.size);
-        db.updateVodHealth(vod.id, { status: 'ok', issues: ['recovered_from_master'], probeDuration: dur });
+        await db.repairVodDuration(vod.id, Math.round(dur), stat.size);
+        await db.updateVodHealth(vod.id, { status: 'ok', issues: ['recovered_from_master'], probeDuration: dur });
     } catch { /* */ }
     return { recovered: true, duration: dur };
 }
@@ -223,13 +223,13 @@ async function scanVod(vod, options = {}) {
     }
 
     if (options.repairDuration && probeInfo.ok && probeInfo.duration > 0 && (vod.duration_seconds || 0) <= 0) {
-        result.repair = db.repairVodDuration(vod.id, Math.round(probeInfo.duration), stat.size);
+        result.repair = await db.repairVodDuration(vod.id, Math.round(probeInfo.duration), stat.size);
         result.issues.push('duration_repaired');
         result.status = 'duration_repaired';
     }
 
     if (options.quarantineBad && ['corrupt', 'missing_file', 'zero_byte'].includes(result.status)) {
-        db.updateVodHealth(vod.id, {
+        await db.updateVodHealth(vod.id, {
             status: result.status,
             issues: result.issues,
             probeDuration: probeInfo.duration,

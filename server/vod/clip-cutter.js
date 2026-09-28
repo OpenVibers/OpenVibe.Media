@@ -151,7 +151,7 @@ async function cutClip(o) {
     if (!cut.ok) return null;
 
     const ss = Math.max(0, Number(startTime) || 0);
-    const res = db.createClip({
+    const res = await db.createClip({
         app_id: appId, vod_id: vodId, stream_id: streamId, user_id: userId,
         title: (title || 'Auto Clip').slice(0, 200), description: description || '',
         file_path: cut.filePath, start_time: ss, end_time: ss + cut.duration, duration_seconds: cut.duration,
@@ -161,7 +161,7 @@ async function cutClip(o) {
     });
     const clipId = res && res.lastInsertRowid;
     if (!clipId) return null;
-    const clip = db.getClipById(clipId);
+    const clip = await db.getClipById(clipId);
     try { require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath).catch(() => {}); } catch { /* */ }
     return clip;
 }

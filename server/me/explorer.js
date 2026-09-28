@@ -78,9 +78,9 @@ function parseFilters(query = {}) {
 }
 
 /** The tenant as the person sees it: id, name, whether it is a developer project's sandbox. */
-function tenantOf(appId, cache = new Map()) {
+async function tenantOf(appId, cache = new Map()) {
     if (!cache.has(appId)) {
-        const app = db.getApp(appId);
+        const app = await db.getApp(appId);
         cache.set(appId, {
             app_id: appId,
             name: (app && app.name) || appId,
@@ -92,12 +92,12 @@ function tenantOf(appId, cache = new Map()) {
 }
 
 /** Non-deleted objects made out of each of `ids`: Map<id, count>. */
-function derivativeCounts(ids) {
+async function derivativeCounts(ids) {
     const out = new Map();
     if (!ids.length) return out;
     const ph = ids.map(() => '?').join(', ');
     const rels = DERIVED_RELATIONS.map(() => '?').join(', ');
-    const rows = db.all(`SELECT x.src AS src, COUNT(DISTINCT x.d) AS n FROM (
+    const rows = await db.all(`SELECT x.src AS src, COUNT(DISTINCT x.d) AS n FROM (
             SELECT v.object_id AS src, v.derived_object_id AS d FROM media_variants v WHERE v.object_id IN (${ph})
             UNION
             SELECT r.to_object_id, r.from_object_id FROM media_relationships r WHERE r.to_object_id IN (${ph}) AND r.relation IN (${rels})
@@ -123,13 +123,13 @@ function inFlightBytes(ctx, id) {
  * How far a native upload has got: a multipart session's parts received, the bytes a PUT stored (the
  * upload then waits for complete), or a PUT still streaming. Bytes received vs the declared size.
  */
-function uploadProgress(obj, locs, ctx) {
+async function uploadProgress(obj, locs, ctx) {
     const declared = Number(obj.size_bytes) || 0;
-    const session = db.get("SELECT * FROM media_uploads WHERE object_id = ? AND status IN ('active', 'completing') ORDER BY created_at DESC LIMIT 1", [obj.id]);
-    const reservation = db.get('SELECT expires_at FROM media_quota_reservations WHERE object_id = ?', [obj.id]);
+    const session = await db.get("SELECT * FROM media_uploads WHERE object_id = ? AND status IN ('active', 'completing') ORDER BY created_at DESC LIMIT 1", [obj.id]);
+    const reservation = await db.get('SELECT expires_at FROM media_quota_reservations WHERE object_id = ?', [obj.id]);
     let out;
     if (session) {
-        const parts = db.get('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes), 0) AS b FROM media_upload_parts WHERE upload_id = ?', [session.id]);
+        const parts = await db.get('SELECT COUNT(*) AS n, COALESCE(SUM(size_bytes), 0)::bigint AS b FROM media_upload_parts WHERE upload_id = ?', [session.id]);
         out = {
             method: 'multipart', waiting_for: session.status === 'completing' ? 'assembly' : 'parts',
             received_bytes: parts.b, parts_received: parts.n, parts_expected: session.parts_expected,
@@ -151,11 +151,11 @@ function uploadProgress(obj, locs, ctx) {
 }
 
 /** One object as its owner sees it: no keys, paths, staff notes or other people's data. */
-function item(obj, ctx, derivatives = 0) {
+async function item(obj, ctx, derivatives = 0) {
     const md = model.parseJson(obj.metadata, {}) || {};
-    const locs = model.listLocations(obj.id);
-    const r = readiness.compute(obj, locs);
-    const tenant = tenantOf(obj.app_id, ctx.tenants);
+    const locs = await model.listLocations(obj.id);
+    const r = await readiness.compute(obj, locs);
+    const tenant = await tenantOf(obj.app_id, ctx.tenants);
     const ready = obj.lifecycle_status === 'ready';
     return {
         id: obj.id,
@@ -171,9 +171,9 @@ function item(obj, ctx, derivatives = 0) {
         lifecycle_status: obj.lifecycle_status,
         readiness: { metadata: r.metadata, bytes_verified: r.bytes_verified, playable: r.playable, reason: r.reason },
         // Only whether a retention hold keeps it; its kind, reason, note and who placed it are staff's.
-        held: model.isHeld(obj.id),
+        held: await model.isHeld(obj.id),
         derivatives,
-        upload: obj.lifecycle_status === 'uploading' && !obj.legacy_ref ? uploadProgress(obj, locs, ctx) : null,
+        upload: obj.lifecycle_status === 'uploading' && !obj.legacy_ref ? await uploadProgress(obj, locs, ctx) : null,
         failure: obj.lifecycle_status === 'failed' ? text(md.failure, 60) : null,
         deleted: obj.lifecycle_status === 'deleted'
             ? { deleted_at: iso(obj.deleted_at), retention_until: iso(md.retention_until), purged: !!md.purged_at } : null,
@@ -185,7 +185,7 @@ function item(obj, ctx, derivatives = 0) {
 }
 
 /** A page of the subject's objects, newest first: { objects, next_cursor, limit }. */
-function list(subject, filters = {}) {
+async function list(subject, filters = {}) {
     const f = { limit: DEFAULT_LIMIT, ...filters };
     const conds = ['o.owner_subject = @subject'];
     const p = { subject };
@@ -199,49 +199,49 @@ function list(subject, filters = {}) {
         p.q = f.q; p.ql = f.q.toLowerCase();
     }
     const limit = Math.min(Math.max(Number(f.limit) || DEFAULT_LIMIT, 1), MAX_LIMIT);
-    const rows = db.all(`SELECT o.* FROM media_objects o WHERE ${conds.join(' AND ')} ORDER BY o.id DESC LIMIT ${limit + 1}`, p);
+    const rows = await db.all(`SELECT o.* FROM media_objects o WHERE ${conds.join(' AND ')} ORDER BY o.id DESC LIMIT ${limit + 1}`, p);
     const page = rows.slice(0, limit);
-    const counts = derivativeCounts(page.map(o => o.id));
+    const counts = await derivativeCounts(page.map(o => o.id));
     const ctx = { tenants: new Map() };
     return {
-        objects: page.map(o => item(o, ctx, counts.get(o.id) || 0)),
+        objects: (await Promise.all(page.map(async o => await item(o, ctx, counts.get(o.id) || 0)))),
         next_cursor: rows.length > limit ? page[page.length - 1].id : null,
         limit,
     };
 }
 
 /** One of the subject's objects (med_ id or legacy ref) with copies, derivatives and jobs; null when it is not theirs. */
-function detail(subject, idOrRef) {
+async function detail(subject, idOrRef) {
     const key = String(idOrRef || '');
-    const obj = key.startsWith('legacy:') ? model.getObjectByLegacyRef(key) : (ID_RE.test(key) ? model.getObject(key) : null);
+    const obj = key.startsWith('legacy:') ? await model.getObjectByLegacyRef(key) : (ID_RE.test(key) ? await model.getObject(key) : null);
     if (!obj || !subject || obj.owner_subject !== subject) return null;
     const ctx = { tenants: new Map() };
     const derived = new Map();
-    for (const v of db.all('SELECT variant_name, derived_object_id FROM media_variants WHERE object_id = ? ORDER BY id', [obj.id])) {
+    for (const v of await db.all('SELECT variant_name, derived_object_id FROM media_variants WHERE object_id = ? ORDER BY id', [obj.id])) {
         derived.set(v.derived_object_id, v.variant_name);
     }
-    for (const r of db.all(`SELECT relation, from_object_id FROM media_relationships WHERE to_object_id = ? AND relation IN (${DERIVED_RELATIONS.map(() => '?').join(', ')}) ORDER BY id`,
+    for (const r of await db.all(`SELECT relation, from_object_id FROM media_relationships WHERE to_object_id = ? AND relation IN (${DERIVED_RELATIONS.map(() => '?').join(', ')}) ORDER BY id`,
         [obj.id, ...DERIVED_RELATIONS])) {
         if (!derived.has(r.from_object_id)) derived.set(r.from_object_id, r.relation === 'thumbnail_of' ? 'thumbnail' : 'derived');
     }
     const derivatives = [];
     for (const [id, name] of derived) {
-        const d = model.getObject(id);
+        const d = await model.getObject(id);
         if (!d) continue;
         derivatives.push({ id: d.id, name, kind: d.kind, visibility: d.visibility, lifecycle_status: d.lifecycle_status, size_bytes: Number(d.size_bytes) || 0, mine: d.owner_subject === subject, created_at: iso(d.created_at) });
     }
     // What it was made from, when that is the person's too (a clip of someone else's stream names no one's VOD).
-    const src = db.get(`SELECT r.relation, r.to_object_id FROM media_relationships r JOIN media_objects s ON s.id = r.to_object_id
+    const src = await db.get(`SELECT r.relation, r.to_object_id FROM media_relationships r JOIN media_objects s ON s.id = r.to_object_id
                         WHERE r.from_object_id = ? AND r.relation IN ('derived_from', 'thumbnail_of', 'clip_of') AND s.owner_subject = ? ORDER BY r.id LIMIT 1`, [obj.id, subject]);
-    const jobs = db.all(`SELECT id, job_type, status, error_code, attempts, max_attempts, created_at, finished_at FROM media_jobs
-                         WHERE object_id = ? ORDER BY id DESC LIMIT 10`, [obj.id]).map(j => ({
+    const jobs = (await db.all(`SELECT id, job_type, status, error_code, attempts, max_attempts, created_at, finished_at FROM media_jobs
+                         WHERE object_id = ? ORDER BY id DESC LIMIT 10`, [obj.id])).map(j => ({
         id: j.id, type: j.job_type, status: j.status, error_code: j.error_code || null, attempts: j.attempts, max_attempts: j.max_attempts,
         created_at: iso(j.created_at), finished_at: iso(j.finished_at),
     }));
     return {
-        ...item(obj, ctx, derivatives.filter(d => d.lifecycle_status !== 'deleted').length),
+        ...await item(obj, ctx, derivatives.filter(d => d.lifecycle_status !== 'deleted').length),
         content_hash: obj.content_hash || null,
-        locations: model.listLocations(obj.id).map(l => ({
+        locations: (await model.listLocations(obj.id)).map(l => ({
             provider: l.provider, storage_class: l.storage_class, state: l.state, size_bytes: l.size_bytes,
             verified_at: iso(l.verified_at), canonical: l.provider === obj.canonical_provider,
         })),
@@ -268,8 +268,8 @@ function group(rows) {
  * The subject's usage: their own objects and bytes per tenant and namespace (never a tenant's totals or
  * quota). Uploading bytes are the declared sizes; deleted ones are kept until the retention purge.
  */
-function usage(subject) {
-    const rows = db.all(`SELECT app_id, namespace, lifecycle_status AS status, COUNT(*) AS n, COALESCE(SUM(size_bytes), 0) AS b
+async function usage(subject) {
+    const rows = await db.all(`SELECT app_id, namespace, lifecycle_status AS status, COUNT(*) AS n, COALESCE(SUM(size_bytes), 0)::bigint AS b
                          FROM media_objects WHERE owner_subject = ? GROUP BY app_id, namespace, lifecycle_status ORDER BY app_id, namespace`, [subject]);
     const tenants = new Map();
     const cache = new Map();
@@ -283,11 +283,11 @@ function usage(subject) {
     return {
         subject,
         totals: group(rows),
-        tenants: [...tenants].map(([appId, t]) => ({
-            ...tenantOf(appId, cache),
+        tenants: (await Promise.all([...tenants].map(async ([appId, t]) => ({
+            ...await tenantOf(appId, cache),
             ...group(t.rows),
             namespaces: [...t.namespaces].map(([namespace, nsRows]) => ({ namespace, ...group(nsRows) })),
-        })),
+        })))),
         quotas: null,
         note: 'Your own objects only. Quotas are set per app and namespace by their operators and are not shown here.',
     };

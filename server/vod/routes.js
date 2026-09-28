@@ -71,10 +71,10 @@ function _isPrivate(row) {
     return (row.visibility || (row.is_public ? 'public' : 'private')) === 'private';
 }
 
-function _getVodScoped(req, res) {
+async function _getVodScoped(req, res) {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) { res.status(404).json({ error: 'VOD not found' }); return null; }
-    const vod = db.getVodById(id, req.appId);
+    const vod = await db.getVodById(id, req.appId);
     if (!vod) { res.status(404).json({ error: 'VOD not found' }); return null; }
     return vod;
 }
@@ -85,8 +85,8 @@ function _getVodScoped(req, res) {
  * users (X-OV-User-Id) writes only that user's own VODs: someone else's private one answers exactly
  * as a missing one would, anything else 403.
  */
-function _getVodForWrite(req, res) {
-    const vod = _getVodScoped(req, res);
+async function _getVodForWrite(req, res) {
+    const vod = await _getVodScoped(req, res);
     if (!vod || req.authType !== 'user') return vod;
     if (vod.user_id != null && String(vod.user_id) === String(req.userId)) return vod;
     if (_isPrivate(vod)) res.status(404).json({ error: 'VOD not found' });
@@ -95,10 +95,10 @@ function _getVodForWrite(req, res) {
 }
 
 // ── Create VOD ───────────────────────────────────────────────
-router.post('/', tenantAuth(), (req, res) => {
+router.post('/', tenantAuth(), async (req, res) => {
     try {
         const { title, stream_id, stream_key, managed_stream_id, user_id, meta, visibility, clips_only } = req.body || {};
-        const result = db.createVod({
+        const result = await db.createVod({
             app_id: req.appId,
             stream_id: stream_id != null ? parseInt(stream_id, 10) || null : null,
             stream_key: stream_key || null,
@@ -118,9 +118,9 @@ router.post('/', tenantAuth(), (req, res) => {
 });
 
 // ── RTMP ingest ──────────────────────────────────────────────
-router.post('/:id/ingest/rtmp', tenantAuth(), (req, res) => {
+router.post('/:id/ingest/rtmp', tenantAuth(), async (req, res) => {
     try {
-        const vod = _getVodForWrite(req, res);
+        const vod = await _getVodForWrite(req, res);
         if (!vod) return;
         const result = recorder.startRtmp(vod, req.body?.rtmp_url);
         if (!result.ok) return res.status(result.status || 409).json({ error: result.error });
@@ -132,9 +132,9 @@ router.post('/:id/ingest/rtmp', tenantAuth(), (req, res) => {
 });
 
 // ── RTP ingest ───────────────────────────────────────────────
-router.post('/:id/ingest/rtp/start', tenantAuth(), (req, res) => {
+router.post('/:id/ingest/rtp/start', tenantAuth(), async (req, res) => {
     try {
-        const vod = _getVodForWrite(req, res);
+        const vod = await _getVodForWrite(req, res);
         if (!vod) return;
         const { video, audio } = req.body || {};
         const result = recorder.startRtp(vod, video, audio);
@@ -146,9 +146,9 @@ router.post('/:id/ingest/rtp/start', tenantAuth(), (req, res) => {
     }
 });
 
-router.post('/:id/ingest/rtp/stop', tenantAuth(), (req, res) => {
+router.post('/:id/ingest/rtp/stop', tenantAuth(), async (req, res) => {
     try {
-        const vod = _getVodForWrite(req, res);
+        const vod = await _getVodForWrite(req, res);
         if (!vod) return;
         const stopped = recorder.stopRecording(vod.id);
         if (!stopped && !vod.is_recording) return res.status(409).json({ error: 'VOD is not recording' });
@@ -163,7 +163,7 @@ router.post('/:id/ingest/rtp/stop', tenantAuth(), (req, res) => {
 // ── Chunked upload (browser MediaRecorder; user JWT ok) ──────
 router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('chunk'), async (req, res) => {
     try {
-        const vod = _getVodForWrite(req, res);
+        const vod = await _getVodForWrite(req, res);
         if (!vod) { if (req.file) tools.cleanupTempFile(req.file.path); return; }
         if (!req.file) return res.status(400).json({ error: 'No chunk data' });
         const segmentId = Math.max(1, parseInt(req.body?.segmentId || req.query.segmentId || '1', 10) || 1);
@@ -189,7 +189,7 @@ router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('
             fs.copyFileSync(req.file.path, filePath);
             tools.cleanupTempFile(req.file.path);
 
-            objects.withObject('vod', vod.id, () => db.run('UPDATE vods SET file_path = ?, file_size = ?, is_recording = 1 WHERE id = ?',
+            await objects.withObject('vod', vod.id, async () => await db.run('UPDATE vods SET file_path = ?, file_size = ?, is_recording = 1 WHERE id = ?',
                 [filePath, fs.statSync(filePath).size, vod.id]));
 
             rec = { filePath, startTime: Date.now(), chunkCount: 1, currentSegmentId: segmentId, currentSegmentPath: filePath };
@@ -223,7 +223,7 @@ router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('
         const size = tools.getFileSizeSafe(rec.filePath)
             + (rec.currentSegmentPath && rec.currentSegmentPath !== rec.filePath ? tools.getFileSizeSafe(rec.currentSegmentPath) : 0);
         const elapsed = Math.round((Date.now() - rec.startTime) / 1000);
-        objects.withObject('vod', vod.id, () => db.run('UPDATE vods SET file_size = ?, duration_seconds = ? WHERE id = ?', [size, elapsed, vod.id]));
+        await objects.withObject('vod', vod.id, async () => await db.run('UPDATE vods SET file_size = ?, duration_seconds = ? WHERE id = ?', [size, elapsed, vod.id]));
 
         // Seekable sidecar for live DVR (every 2 chunks ≈ ~60s)
         if (rec.chunkCount >= 2 && rec.chunkCount % 2 === 0) {
@@ -240,7 +240,7 @@ router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('
 
 async function _finalizeHandler(req, res) {
     try {
-        const vod = _getVodForWrite(req, res);
+        const vod = await _getVodForWrite(req, res);
         if (!vod) return;
 
         // Live ffmpeg recording → stop gracefully; its exit handler finalizes.
@@ -256,7 +256,7 @@ async function _finalizeHandler(req, res) {
             segmentPath: chunkRec && chunkRec.currentSegmentPath !== chunkRec.filePath ? chunkRec.currentSegmentPath : null,
         });
         if (!result) return res.status(409).json({ error: 'Nothing to finalize (finalization already in progress or VOD discarded)' });
-        res.json({ vod: vodPublic(result, { readiness: true }) });
+        res.json({ vod: await vodPublic(result, { readiness: true }) });
     } catch (err) {
         console.error('[VOD] Finalize error:', err.message);
         res.status(500).json({ error: 'Failed to finalize VOD' });
@@ -270,7 +270,7 @@ router.post('/:id/finalize', tenantAuth(), _finalizeHandler);
 // Filters follow the inherited query shapes: user_id, stream_id,
 // managed_stream_id, include_private (private+unlisted too), order
 // (newest|oldest|views|peak_viewers), since (created at or after), limit/offset.
-router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -289,9 +289,9 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
             // Created at or after (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC): "top this week".
             since: req.query.since || null,
         };
-        const vods = db.listVods(req.appId, filters);
-        const total = db.countVods(req.appId, filters);
-        res.json({ vods: vods.map(v => vodPublic(v, { readiness: true })), total, limit, offset, hasMore: offset + vods.length < total });
+        const vods = await db.listVods(req.appId, filters);
+        const total = await db.countVods(req.appId, filters);
+        res.json({ vods: (await Promise.all(vods.map(async v => await vodPublic(v, { readiness: true })))), total, limit, offset, hasMore: offset + vods.length < total });
     } catch (err) {
         console.error('[VOD] List error:', err.message);
         res.status(500).json({ error: 'Failed to list VODs' });
@@ -300,10 +300,10 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
 
 // ── Latest VOD thumbnail per managed stream (batch) ──────────
 // GET /latest-thumbs?managed_stream_ids=1,2,3 → { "<msid>": { vod_id, thumbnail_url } }
-router.get('/latest-thumbs', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/latest-thumbs', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
         const ids = String(req.query.managed_stream_ids || '').split(',').filter(Boolean);
-        res.json({ thumbs: db.latestVodThumbsByManagedStreams(req.appId, ids) });
+        res.json({ thumbs: await db.latestVodThumbsByManagedStreams(req.appId, ids) });
     } catch (err) {
         console.error('[VOD] latest-thumbs error:', err.message);
         res.status(500).json({ error: 'Failed to resolve thumbnails' });
@@ -314,9 +314,9 @@ router.get('/latest-thumbs', tenantAuth({ allowUser: true }), (req, res) => {
 // The owning app (its key alone, not a call acting for one of its users) asks for a short-lived URL of a VOD's bytes
 // to hand to a reader that holds no key: OpenVibe.AI transcribing it (roadmap WS-O task 2). ttl in seconds, 30 s to
 // 6 h (default 1 h). Public VODs get the same kind of URL; it works for any visibility.
-router.get('/:id/signed-url', tenantAuth(), (req, res) => {
+router.get('/:id/signed-url', tenantAuth(), async (req, res) => {
     if (req.authType !== 'app') return res.status(403).json({ error: 'only the owning app signs a playback URL' });
-    const vod = _getVodScoped(req, res);
+    const vod = await _getVodScoped(req, res);
     if (!vod) return;
     res.set('Cache-Control', 'private, no-store');
     res.json(require('../objects/signing').signedMediaUrl('vod', vod.id, req.query.ttl));
@@ -325,7 +325,7 @@ router.get('/:id/signed-url', tenantAuth(), (req, res) => {
 // ── Get VOD meta ─────────────────────────────────────────────
 router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const vod = _getVodScoped(req, res);
+        const vod = await _getVodScoped(req, res);
         if (!vod) return;
         // Acting for one of the app's users (X-OV-User-Id): their private VODs only — anyone
         // else's answers exactly like a missing id. The app key alone sees the namespace.
@@ -339,7 +339,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
             const duration = await tools.probeVodDuration(vod.file_path);
             if (duration > 0) {
                 const fileSize = tools.getFileSizeSafe(vod.file_path);
-                objects.withObject('vod', vod.id, () => db.run("UPDATE vods SET duration_seconds = ?, file_size = ?, duration_source = 'probe' WHERE id = ?", [duration, fileSize, vod.id]));
+                await objects.withObject('vod', vod.id, async () => await db.run("UPDATE vods SET duration_seconds = ?, file_size = ?, duration_source = 'probe' WHERE id = ?", [duration, fileSize, vod.id]));
                 vod.duration_seconds = duration;
                 vod.file_size = fileSize;
             }
@@ -347,7 +347,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
 
         // Bare object per CONTRACTS.md: { id, title, status, duration, … }
         // Detail responses carry the transcript too (lists stay light).
-        res.json({ ...vodPublic(vod, { readiness: true }), ai_transcript: vod.ai_transcript || null });
+        res.json({ ...await vodPublic(vod, { readiness: true }), ai_transcript: vod.ai_transcript || null });
     } catch (err) {
         console.error('[VOD] Get error:', err.message);
         res.status(500).json({ error: 'Failed to get VOD' });
@@ -355,9 +355,9 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
 });
 
 // ── Update ───────────────────────────────────────────────────
-router.put('/:id', tenantAuth(), (req, res) => {
+router.put('/:id', tenantAuth(), async (req, res) => {
     try {
-        const vod = _getVodForWrite(req, res);
+        const vod = await _getVodForWrite(req, res);
         if (!vod) return;
         const { title, description, visibility } = req.body || {};
         const updates = [];
@@ -365,14 +365,14 @@ router.put('/:id', tenantAuth(), (req, res) => {
         if (title !== undefined) { updates.push('title = ?'); params.push(String(title).slice(0, 300)); }
         if (description !== undefined) { updates.push('description = ?'); params.push(String(description)); }
         // Title, description and visibility, and the object, in one transaction.
-        objects.withObject('vod', vod.id, () => {
+        await objects.withObject('vod', vod.id, async () => {
             if (updates.length) {
                 params.push(vod.id);
-                db.run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
+                await db.run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
             }
-            if (visibility !== undefined) db.setVodVisibility(vod.id, visibility);
+            if (visibility !== undefined) await db.setVodVisibility(vod.id, visibility);
         });
-        res.json({ vod: vodPublic(db.getVodById(vod.id, req.appId), { readiness: true }) });
+        res.json({ vod: await vodPublic(await db.getVodById(vod.id, req.appId), { readiness: true }) });
     } catch (err) {
         console.error('[VOD] Update error:', err.message);
         res.status(500).json({ error: 'Failed to update VOD' });
@@ -380,11 +380,11 @@ router.put('/:id', tenantAuth(), (req, res) => {
 });
 
 // ── Delete ───────────────────────────────────────────────────
-router.delete('/:id', tenantAuth(), (req, res) => {
+router.delete('/:id', tenantAuth(), async (req, res) => {
     try {
-        const vod = _getVodForWrite(req, res);
+        const vod = await _getVodForWrite(req, res);
         if (!vod) return;
-        if (objects.isHeldRow(vod)) return res.status(409).json({ error: 'VOD is under a retention hold', code: 'media.object.held' });
+        if (await objects.isHeldRow(vod)) return res.status(409).json({ error: 'VOD is under a retention hold', code: 'media.object.held' });
 
         if (recorder.isRecording(vod.id)) recorder.stopRecording(vod.id);
         activeChunkUploads.delete(vod.id);
@@ -398,7 +398,7 @@ router.delete('/:id', tenantAuth(), (req, res) => {
             try { if (vod.master_file_path && fs.existsSync(vod.master_file_path)) fs.unlinkSync(vod.master_file_path); } catch { /* */ }
         }
 
-        db.run('DELETE FROM vods WHERE id = ?', [vod.id]);   // its object is marked deleted by the row-delete trigger, same statement
+        await db.run('DELETE FROM vods WHERE id = ?', [vod.id]);   // its object is marked deleted by the row-delete trigger, same statement
         res.json({ message: 'VOD deleted' });
     } catch (err) {
         console.error('[VOD] Delete error:', err.message);

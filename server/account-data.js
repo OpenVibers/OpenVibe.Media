@@ -28,32 +28,22 @@ const TOPICS = ['network.account.export_requested', 'network.account.deleted'];
 const SECRET_COL = /(^|_)(token|secret|hash|password|key|keys|stream_key|storage_key)($|_)/i;
 const ROW_LIMIT = 5000;
 
-function ensureSchema(db) {
-    db.exec(`CREATE TABLE IF NOT EXISTS account_data_events (
-        id         TEXT PRIMARY KEY,
-        kind       TEXT NOT NULL,
-        subject    TEXT NOT NULL,
-        outcome    TEXT,
-        sent_at    TEXT,
-        applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-    )`);
-}
 
 const clean = (row) => { const o = {}; for (const [k, v] of Object.entries(row)) if (!SECRET_COL.test(k)) o[k] = v; return o; };
 const inList = (xs) => `(${xs.map(() => '?').join(',')})`;
 
-function exportPart(db, subjects) {
+async function exportPart(db, subjects) {
     const model = require('./objects/model');
-    const objs = db.prepare(`SELECT * FROM media_objects WHERE owner_subject IN ${inList(subjects)} AND lifecycle_status != 'deleted' ORDER BY created_at DESC LIMIT ${ROW_LIMIT}`).all(...subjects);
-    const objects = objs.map((o) => {
-        const p = model.objectPublic(o, { locations: false });
+    const objs = await db.prepare(`SELECT * FROM media_objects WHERE owner_subject IN ${inList(subjects)} AND lifecycle_status != 'deleted' ORDER BY created_at DESC LIMIT ${ROW_LIMIT}`).all(...subjects);
+    const objects = (await Promise.all(objs.map(async (o) => {
+        const p = await model.objectPublic(o, { locations: false });
         return { id: p.id, kind: p.kind, visibility: p.visibility, lifecycle_status: p.lifecycle_status, mime_type: p.mime_type, size_bytes: p.size_bytes,
             public_url: p.public_url, legacy_ref: p.legacy_ref, created_at: p.created_at, held: p.held };
-    });
+    })));
     const ids = objs.map((o) => o.id);
-    const rows = (table) => (ids.length ? db.prepare(`SELECT * FROM ${table} WHERE object_id IN ${inList(ids)} ORDER BY created_at DESC`).all(...ids).map(clean) : []);
+    const rows = async (table) => (ids.length ? (await db.prepare(`SELECT * FROM ${table} WHERE object_id IN ${inList(ids)} ORDER BY created_at DESC`).all(...ids)).map(clean) : []);
     const files = [{ name: 'objects.json', content: objects }];
-    const vods = rows('vods'); const clips = rows('clips'); const plain = rows('files');
+    const vods = await rows('vods'); const clips = await rows('clips'); const plain = await rows('files');
     if (vods.length) files.push({ name: 'vods.json', content: vods });
     if (clips.length) files.push({ name: 'clips.json', content: clips });
     if (plain.length) files.push({ name: 'files.json', content: plain });
@@ -61,42 +51,42 @@ function exportPart(db, subjects) {
 }
 
 /** Erase what the subjects own → { erased, retained }. Each object in its own step: a hold stops only that one. */
-function erase(db, subjects) {
+async function erase(db, subjects) {
     const model = require('./objects/model');
     const erased = {};
     const retained = {};
     const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };
-    const objs = db.prepare(`SELECT * FROM media_objects WHERE owner_subject IN ${inList(subjects)} AND lifecycle_status != 'deleted' ORDER BY (kind = 'thumbnail'), created_at`).all(...subjects);
+    const objs = await db.prepare(`SELECT * FROM media_objects WHERE owner_subject IN ${inList(subjects)} AND lifecycle_status != 'deleted' ORDER BY (kind = 'thumbnail'), created_at`).all(...subjects);
     for (const o of objs) {
-        if (model.isHeld(o.id)) { bump(retained, 'held_media'); continue; }
+        if (await model.isHeld(o.id)) { bump(retained, 'held_media'); continue; }
         try {
-            if (!o.legacy_ref) { model.softDelete(o, { by: 'account_deleted' }); bump(erased, 'objects'); continue; }
+            if (!o.legacy_ref) { await model.softDelete(o, { by: 'account_deleted' }); bump(erased, 'objects'); continue; }
             if (o.kind === 'vod') {
-                const vod = db.prepare('SELECT * FROM vods WHERE object_id = ?').get(o.id);
+                const vod = await db.prepare('SELECT * FROM vods WHERE object_id = ?').get(o.id);
                 if (!vod) continue;
                 if (vod.file_path) {
                     require('./vod/vod-storage').deleteVodObjects(vod).catch((e) => console.warn(`[AccountData] VOD ${vod.id} remote cleanup:`, e.message));
                     for (const p of [vod.file_path, vod.master_file_path]) { try { if (p && fs.existsSync(p)) fs.unlinkSync(p); } catch { /* gone */ } }
                 }
-                db.prepare('DELETE FROM vods WHERE id = ?').run(vod.id);
+                await db.prepare('DELETE FROM vods WHERE id = ?').run(vod.id);
                 bump(erased, 'vods');
             } else if (o.kind === 'clip') {
-                const clip = db.prepare('SELECT * FROM clips WHERE object_id = ?').get(o.id);
+                const clip = await db.prepare('SELECT * FROM clips WHERE object_id = ?').get(o.id);
                 if (!clip) continue;
                 try { if (clip.file_path && fs.existsSync(clip.file_path)) fs.unlinkSync(clip.file_path); } catch { /* gone */ }
                 if (clip.storage_provider && clip.storage_provider !== 'local' && clip.storage_key) {
                     require('./vod/vod-storage').deleteVodObjects(clip).catch((e) => console.warn(`[AccountData] clip ${clip.id} remote cleanup:`, e.message));
                 }
-                db.prepare('DELETE FROM clips WHERE id = ?').run(clip.id);
+                await db.prepare('DELETE FROM clips WHERE id = ?').run(clip.id);
                 bump(erased, 'clips');
             } else if (o.kind === 'file') {
-                const row = db.prepare('SELECT * FROM files WHERE object_id = ?').get(o.id);
+                const row = await db.prepare('SELECT * FROM files WHERE object_id = ?').get(o.id);
                 if (!row) continue;
                 try { const p = require('./files/routes').filePathForKey(row); if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* gone */ }
-                db.prepare('DELETE FROM files WHERE key = ?').run(row.key);
+                await db.prepare('DELETE FROM files WHERE key = ?').run(row.key);
                 bump(erased, 'files');
             } else if (o.kind === 'thumbnail') {
-                db.prepare("UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = COALESCE(deleted_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lifecycle_status != 'deleted'").run(o.id);
+                await db.prepare("UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = COALESCE(deleted_at, ov_now()), updated_at = ov_now() WHERE id = ? AND lifecycle_status != 'deleted'").run(o.id);
                 bump(erased, 'thumbnails');
             } else {
                 bump(retained, `frozen_${o.kind}s`);   // screenshots and avatars: rows in the frozen paste tables
@@ -127,36 +117,36 @@ async function apply(ev, { db = require('./db/database').getDb(), send = network
     if (!ev || !TOPICS.includes(ev.event_type)) return 'ignored:type';
     if (ev.source !== 'network') return 'ignored:source';
     const p = ev.payload && typeof ev.payload === 'object' ? ev.payload : {};
-    ensureSchema(db);
     if (ev.event_type === 'network.account.export_requested') {
         if (!EXPORT_RE.test(String(p.export_id || '')) || !SUBJECT_RE.test(String(p.subject || ''))) return 'ignored:payload';
-        const seen = db.prepare('SELECT sent_at FROM account_data_events WHERE id = ?').get(p.export_id);
+        const seen = await db.prepare('SELECT sent_at FROM account_data_events WHERE id = ?').get(p.export_id);
         if (seen && seen.sent_at) return 'unchanged';
-        const part = exportPart(db, [p.subject]);
+        const part = await exportPart(db, [p.subject]);
         const res = await send(`/internal/account-exports/${p.export_id}/parts`, { subject: p.subject, ...part });
         const outcome = res.ok ? 'exported' : (res.status === 409 || res.status === 404 ? 'closed' : null);
         if (!outcome) throw new Error(`export part refused: ${res.status}`);
-        db.prepare('INSERT OR REPLACE INTO account_data_events (id, kind, subject, outcome, sent_at) VALUES (?, ?, ?, ?, ?)')
+        await db.prepare(`INSERT INTO account_data_events (id, kind, subject, outcome, sent_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET kind = excluded.kind, subject = excluded.subject, outcome = excluded.outcome, sent_at = excluded.sent_at, applied_at = ov_now_iso()`)
             .run(p.export_id, 'export', p.subject, JSON.stringify({ result: outcome, objects: part.files[0].content.length }), new Date().toISOString());
         return outcome;
     }
     if (!DELETION_RE.test(String(p.deletion_id || '')) || !SUBJECT_RE.test(String(p.subject || ''))) return 'ignored:payload';
-    let rec = db.prepare('SELECT * FROM account_data_events WHERE id = ?').get(p.deletion_id);
+    let rec = await db.prepare('SELECT * FROM account_data_events WHERE id = ?').get(p.deletion_id);
     let result = 'confirmed';
     if (!rec) {
         const subjects = [p.subject, ...(Array.isArray(p.aliases) ? p.aliases.filter((s) => SUBJECT_RE.test(String(s))) : [])];
-        const counts = erase(db, subjects);
-        db.prepare('INSERT INTO account_data_events (id, kind, subject, outcome) VALUES (?, ?, ?, ?)').run(p.deletion_id, 'deletion', p.subject, JSON.stringify(counts));
+        const counts = await erase(db, subjects);
+        await db.prepare('INSERT INTO account_data_events (id, kind, subject, outcome) VALUES (?, ?, ?, ?)').run(p.deletion_id, 'deletion', p.subject, JSON.stringify(counts));
         console.log(`[AccountData] deletion ${p.deletion_id}: ${JSON.stringify(counts)}`);
-        rec = db.prepare('SELECT * FROM account_data_events WHERE id = ?').get(p.deletion_id);
+        rec = await db.prepare('SELECT * FROM account_data_events WHERE id = ?').get(p.deletion_id);
         result = 'erased';
     }
     if (rec.sent_at) return 'unchanged';
     const o = JSON.parse(rec.outcome || '{}');
     const res = await send(`/internal/account-deletions/${p.deletion_id}/confirmations`, { subject: p.subject, completed_at: rec.applied_at, erased: o.erased || {}, retained: o.retained || {} });
     if (!res.ok && res.status !== 404) throw new Error(`confirmation refused: ${res.status}`);
-    db.prepare('UPDATE account_data_events SET sent_at = ? WHERE id = ?').run(new Date().toISOString(), p.deletion_id);
+    await db.prepare('UPDATE account_data_events SET sent_at = ? WHERE id = ?').run(new Date().toISOString(), p.deletion_id);
     return result;
 }
 
-module.exports = { apply, exportPart, erase, ensureSchema, TOPICS };
+module.exports = { apply, exportPart, erase, TOPICS };

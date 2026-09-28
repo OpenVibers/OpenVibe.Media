@@ -92,18 +92,18 @@ function canWrite(req, obj) {
 }
 
 /** The object named in the URL, in this tenant and visible to the caller, if the caller may `verb` in its namespace (else answered). */
-function load(req, res, verb = 'read') {
-    const obj = model.resolveObject(String(req.params.id || ''), req.appId);
+async function load(req, res, verb = 'read') {
+    const obj = await model.resolveObject(String(req.params.id || ''), req.appId);
     if (!obj || !canSee(req, obj)) { problem(res, 404, 'media.object.not_found', 'No such object in this namespace'); return null; }
-    const g = namespaceGrant(req, verb, obj.namespace);
+    const g = await namespaceGrant(req, verb, obj.namespace);
     if (!g.allowed) { problem(res, 403, g.code, g.reason); return null; }
     return obj;
 }
 
 /** The token-bearing request's object and tenant; the URL must address that tenant. */
-function tokenTenant(req, res, obj) {
+async function tokenTenant(req, res, obj) {
     // A developer-project tenant is addressed by its project id, whichever of its production/sandbox rows holds the object.
-    const app = obj ? db.getApp(obj.app_id) : null;
+    const app = obj ? await db.getApp(obj.app_id) : null;
     if (!app || tenantPath(app) !== String(req.params.app || '')) { res.status(404).json({ error: 'Unknown app' }); return false; }
     req.appId = app.app_id;
     req.appPath = tenantPath(app);
@@ -113,30 +113,30 @@ function tokenTenant(req, res, obj) {
 }
 
 /** Upload token (a presigned URL from init or /upload-url) or the usual tenant credential with media.object.upload. */
-function contentAuth(req, res, next) {
+async function contentAuth(req, res, next) {
     const token = req.query.token || req.headers['x-upload-token'];
     if (!token) return upload(req, res, next);
     const id = String(req.params.id || '');
-    const obj = model.getObject(id);
+    const obj = await model.getObject(id);
     // Scoped to tenant + object + size: a token for another object, tenant or size never verifies.
     const size = obj && Number(obj.size_bytes) > 0 ? Number(obj.size_bytes) : 0;
     if (!obj || !signing.verifyUploadToken(id, token, { tenant: obj.app_id, size })) return problem(res, 401, 'media.upload_token.invalid', 'Upload token is invalid or expired');
-    if (tokenTenant(req, res, obj)) next();
+    if (await tokenTenant(req, res, obj)) next();
 }
 
 /** Multipart session token (from POST /:id/multipart) or the usual tenant credential with `verb`. */
 function multipartAuth(verb) {
     const fallback = tenantAuth({ verb, namespaced: true });
-    return (req, res, next) => {
+    return async (req, res, next) => {
         const token = req.query.token || req.headers['x-upload-token'];
         if (!token) return fallback(req, res, next);
-        const obj = model.getObject(String(req.params.id || ''));
-        const session = multipart.getSession(String(req.params.uploadId || ''));
+        const obj = await model.getObject(String(req.params.id || ''));
+        const session = await multipart.getSession(String(req.params.uploadId || ''));
         const ok = obj && session && session.object_id === obj.id && signing.verifyMultipartToken(token, {
             tenant: obj.app_id, objectId: obj.id, uploadId: session.id, totalSize: session.total_size,
         });
         if (!ok) return problem(res, 401, 'media.upload_token.invalid', 'Upload token is invalid or expired');
-        if (tokenTenant(req, res, obj)) next();
+        if (await tokenTenant(req, res, obj)) next();
     };
 }
 
@@ -159,12 +159,12 @@ function presignedPut(req, obj, ttlS) {
 }
 
 /** Public shape of a multipart session plus what a client needs to send it (URLs carry the session token). */
-function multipartPublic(req, obj, session, { parts = true } = {}) {
+async function multipartPublic(req, obj, session, { parts = true } = {}) {
     const tok = signing.multipartToken({ tenant: obj.app_id, objectId: obj.id, uploadId: session.id, totalSize: session.total_size, expiresAt: Date.parse(String(session.expires_at).replace(' ', 'T') + 'Z') });
     const u = `${apiBase(req)}/${obj.id}/multipart/${session.id}`;
     const q = `token=${encodeURIComponent(tok.token)}`;
     return {
-        ...multipart.sessionPublic(session, { parts }),
+        ...await multipart.sessionPublic(session, { parts }),
         token: tok.token,
         part_url_template: `${u}/parts/{part_number}?${q}`,
         status_url: `${u}?${q}`,
@@ -182,19 +182,28 @@ function sanitizeFilename(name) {
  * Room for `bytes` (and `objects` new objects) in `namespace`: every quota from there up to the
  * tenant, and the policy's max_object_bytes (objects/namespaces.checkQuota). Answers 413 when not.
  */
-function quotaCheck(req, res, namespace, { bytes = 0, objects = 0, excludeId = null } = {}) {
-    const q = namespaces.checkQuota(req.appRow, namespace, { bytes, objects, excludeId });
-    if (!q) return true;
-    problem(res, q.status, q.code, q.detail, q.extra);
-    return false;
+async function quotaCheck(req, res, namespace, opts) {
+    return await withQuota(req, res, namespace, opts) !== undefined;
+}
+
+/**
+ * The quota check and the write it admits in one transaction, under the tenant's quota lock (namespaces.checkQuota):
+ * a racing upload or restore of the same tenant checks after this one commits. `opts` may be an async function, read
+ * inside the transaction. Answers 413 and returns undefined when there is no room; else what `write` returned.
+ */
+async function withQuota(req, res, namespace, opts, write = async () => true) {
+    const out = await db.getDb().tx(async () => {
+        const q = await namespaces.checkQuota(req.appRow, namespace, typeof opts === 'function' ? await opts() : opts);
+        return q ? { q } : { value: await write() };
+    });
+    if (out.q) { problem(res, out.q.status, out.q.code, out.q.detail, out.q.extra); return undefined; }
+    return out.value;
 }
 
 /** An upload step that has no reservation (it was released at abort) takes one again, checked like init. */
-function reserveAgain(req, res, obj, bytes) {
-    const held = namespaces.reservation(obj.id);
-    if (!quotaCheck(req, res, obj.namespace, { bytes, objects: held ? 0 : 1, excludeId: obj.id })) return false;
-    namespaces.reserve(obj, bytes);
-    return true;
+async function reserveAgain(req, res, obj, bytes) {
+    return await withQuota(req, res, obj.namespace, async () => ({ bytes, objects: await namespaces.reservation(obj.id) ? 0 : 1, excludeId: obj.id }),
+        async () => { await namespaces.reserve(obj, bytes); return true; }) === true;
 }
 
 // ── Content upload (mounted ahead of the JSON body parser — see index.js) ──
@@ -223,7 +232,7 @@ function receive(req, tmp, cap) {
 }
 
 async function putContent(req, res) {
-    const obj = load(req, res, 'write');
+    const obj = await load(req, res, 'write');
     if (!obj) { req.resume(); return; }
     if (!canWrite(req, obj)) { req.resume(); return problem(res, 403, 'media.object.forbidden', 'Not your object'); }
     if (obj.legacy_ref) { req.resume(); return problem(res, 409, 'media.object.legacy_managed', 'This object is written through the v1 API'); }
@@ -235,7 +244,7 @@ async function putContent(req, res) {
         res.set('Connection', 'close'); req.resume();
         return problem(res, 413, 'media.object.too_large', `Objects over ${single} bytes are uploaded in parts: POST /${obj.id}/multipart`);
     }
-    if (multipart.activeFor(obj.id)) { req.resume(); return problem(res, 409, 'media.upload.multipart_active', 'A multipart upload is open for this object: complete or abort it first'); }
+    if (await multipart.activeFor(obj.id)) { req.resume(); return problem(res, 409, 'media.upload.multipart_active', 'A multipart upload is open for this object: complete or abort it first'); }
     const cap = declared || single;
     const len = Number(req.headers['content-length']);
     if (Number.isFinite(len) && len > cap) {
@@ -251,7 +260,7 @@ async function putContent(req, res) {
     const tmpDir = path.join(config.objects.path, '.tmp');
     fs.mkdirSync(tmpDir, { recursive: true });
     const tmp = path.join(tmpDir, `${obj.id}-${crypto.randomBytes(4).toString('hex')}`);
-    namespaces.touch(obj.id);   // the upload is active: its reservation does not expire under it
+    await namespaces.touch(obj.id);   // the upload is active: its reservation does not expire under it
     const got = await receive(req, tmp, cap);
     const drop = () => { try { fs.unlinkSync(tmp); } catch { /* not written */ } };
     if (got.error) {
@@ -262,24 +271,23 @@ async function putContent(req, res) {
     if (declared && got.bytes !== declared) { drop(); return problem(res, 400, 'media.object.size_mismatch', `Declared ${declared} bytes, received ${got.bytes}`); }
     if (!got.bytes) { drop(); return problem(res, 400, 'media.object.empty', 'No bytes received'); }
     // The object may have been completed, deleted or expired while the bytes streamed in.
-    const current = model.getObject(obj.id);
+    const current = await model.getObject(obj.id);
     if (!current || current.lifecycle_status !== 'uploading') { drop(); return problem(res, 409, 'media.object.not_uploading', `Object is ${current ? current.lifecycle_status : 'gone'}`); }
     // The real size replaces the declared one in this upload's reservation.
-    const held = namespaces.reservation(obj.id);
-    if (!quotaCheck(req, res, obj.namespace, { bytes: got.bytes, objects: held ? 0 : 1, excludeId: obj.id })) { drop(); return; }
-
     try {
         const dest = model.objectFilePath(obj);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.renameSync(tmp, dest);
-        db.getDb().transaction(() => {
-            model.updateObject(obj.id, {
+        const stored = await withQuota(req, res, obj.namespace, async () => ({ bytes: got.bytes, objects: await namespaces.reservation(obj.id) ? 0 : 1, excludeId: obj.id }), async () => {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.renameSync(tmp, dest);
+            await model.updateObject(obj.id, {
                 size_bytes: got.bytes, content_hash: got.sha256, mime_type: effectiveType,
                 canonical_provider: 'local', canonical_key: dest,
             });
-            model.upsertLocation(obj.id, { provider: 'local', key: dest, state: 'present', size_bytes: got.bytes, checksum: got.sha256, verified: true });
-            namespaces.reserve(current, got.bytes);
-        })();
+            await model.upsertLocation(obj.id, { provider: 'local', key: dest, state: 'present', size_bytes: got.bytes, checksum: got.sha256, verified: true });
+            await namespaces.reserve(current, got.bytes);
+            return true;
+        });
+        if (!stored) { drop(); return; }
         res.json({ id: obj.id, size_bytes: got.bytes, content_hash: got.sha256 });
     } catch (err) {
         drop();
@@ -293,7 +301,7 @@ async function putContent(req, res) {
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
-router.post('/', upload, limits('media.object.upload', UPLOAD), (req, res) => {
+router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res) => {
     try {
         const b = req.body || {};
         const kind = String(b.kind || 'file');
@@ -304,9 +312,9 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), (req, res) => {
         const named = namespaces.resolveName(req.appRow, b.namespace);
         if (named.error) return problem(res, 400, 'media.namespace.invalid', named.error);
         const namespace = named.namespace;
-        const g = namespaceGrant(req, 'write', namespace);
+        const g = await namespaceGrant(req, 'write', namespace);
         if (!g.allowed) return problem(res, 403, g.code, g.reason);
-        const policy = namespaces.effectivePolicy(req.appId, namespace);
+        const policy = await namespaces.effectivePolicy(req.appId, namespace);
         if (Array.isArray(policy.kinds) && !policy.kinds.includes(kind)) return problem(res, 422, 'media.namespace.policy_denied', `${namespace} takes kinds ${policy.kinds.join(', ') || '(none)'}`);
         if (Array.isArray(policy.visibilities) && !policy.visibilities.includes(visibility)) return problem(res, 422, 'media.namespace.policy_denied', `${namespace} takes visibilities ${policy.visibilities.join(', ') || '(none)'}`);
         let size = 0;
@@ -344,39 +352,39 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), (req, res) => {
 
         // The namespace row, the quota check, the object and its reservation commit together, so two
         // inits racing for the last of a quota cannot both get it.
-        const made = db.getDb().transaction(() => {
-            const row = namespaces.ensure(req.appRow, namespace);
+        const made = await db.getDb().tx(async () => {
+            const row = await namespaces.ensure(req.appRow, namespace);
             if (row.error) return { problem: { status: row.status, code: row.code, detail: row.error } };
-            const q = namespaces.checkQuota(req.appRow, namespace, { bytes: size, objects: 1 });
+            const q = await namespaces.checkQuota(req.appRow, namespace, { bytes: size, objects: 1 });
             if (q) return { problem: q };
-            const newId = model.createObject({
+            const newId = await model.createObject({
                 app_id: req.appId, namespace, kind, owner_subject: subject, owner_app: req.appId, owner_user_id: userId,
                 visibility, lifecycle_status: 'uploading', mime_type: mime, size_bytes: size, metadata,
             });
-            namespaces.reserve(model.getObject(newId), size);
+            await namespaces.reserve(await model.getObject(newId), size);
             return { id: newId };
-        })();
+        });
         if (made.problem) return problem(res, made.problem.status, made.problem.code, made.problem.detail, made.problem.extra);
         const id = made.id;
-        const obj = model.getObject(id);
+        const obj = await model.getObject(id);
         let session = null;
         if (wantParts) {
-            session = multipart.initiate(obj, { partSize: b.part_size });
+            session = await multipart.initiate(obj, { partSize: b.part_size });
             if (session.error) {
-                namespaces.settle(id);
-                db.run('DELETE FROM media_objects WHERE id = ?', [id]);         // nothing was stored for it
+                await namespaces.settle(id);
+                await db.run('DELETE FROM media_objects WHERE id = ?', [id]);         // nothing was stored for it
                 return problem(res, session.status, session.code, session.error);
             }
         }
         const single = !wantParts ? presignedPut(req, obj, b.upload_ttl) : null;
         res.status(201).json({
             id,
-            object: model.objectPublic(obj),
+            object: await model.objectPublic(obj),
             upload: {
                 ...(single || { method: 'multipart', url: null, token: null, expires_at: null, max_bytes: size, content_type: mime }),
                 complete_url: `${apiBase(req)}/${id}/complete`,
                 multipart_url: `${apiBase(req)}/${id}/multipart`,
-                ...(session ? { multipart: multipartPublic(req, obj, session, { parts: false }) } : {}),
+                ...(session ? { multipart: await multipartPublic(req, obj, session, { parts: false }) } : {}),
             },
         });
     } catch (err) {
@@ -390,8 +398,8 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), (req, res) => {
  * invariant, the quota, and whether the bytes are what their type says; then the ready transition,
  * its invariant row and the media.object.uploaded event commit together (the webhook follows).
  */
-function completeUpload(req, res, obj, { expectedHash = null } = {}) {
-    const loc = model.listLocations(obj.id).find(l => l.provider === 'local' && l.state === 'present');
+async function completeUpload(req, res, obj, { expectedHash = null } = {}) {
+    const loc = (await model.listLocations(obj.id)).find(l => l.provider === 'local' && l.state === 'present');
     if (!loc || !fs.existsSync(loc.key)) return problem(res, 409, 'media.object.no_content', 'PUT the content first');
     const md = model.parseJson(obj.metadata, {});
     const expected = String(expectedHash || md.expected_sha256 || '').toLowerCase();
@@ -402,24 +410,24 @@ function completeUpload(req, res, obj, { expectedHash = null } = {}) {
         return problem(res, 422, 'media.invariant.public_object_too_large', `Public playback objects are limited to ${config.objects.publicMaxMb} MB`);
     }
     // Reconciled against the bytes actually stored: the object's real size, everything else as it is now.
-    if (!quotaCheck(req, res, obj.namespace, { bytes: Number(obj.size_bytes) || 0, objects: namespaces.reservation(obj.id) ? 0 : 1, excludeId: obj.id })) return;
+    if (!await quotaCheck(req, res, obj.namespace, { bytes: Number(obj.size_bytes) || 0, objects: await namespaces.reservation(obj.id) ? 0 : 1, excludeId: obj.id })) return;
     const typeWhy = ctypes.kindProblem(obj.kind, obj.mime_type) || ctypes.contentProblem(obj.kind, obj.mime_type, ctypes.readHead(loc.key));
     if (typeWhy) return problem(res, 415, 'media.object.content_mismatch', typeWhy);
-    const { data: body } = announce(req.appId, 'media.object.uploaded', {
-        change: () => {
-            model.updateObject(obj.id, { lifecycle_status: 'ready' });
-            namespaces.settle(obj.id);          // the ready object counts from now on
-            invariant.record(model.getObject(obj.id));
+    const { data: body } = await announce(req.appId, 'media.object.uploaded', {
+        change: async () => {
+            await model.updateObject(obj.id, { lifecycle_status: 'ready' });
+            await namespaces.settle(obj.id);          // the ready object counts from now on
+            await invariant.record(await model.getObject(obj.id));
         },
-        payload: () => model.objectPublic(model.getObject(obj.id)),
+        payload: async () => await model.objectPublic(await model.getObject(obj.id)),
     });
-    namespaces.reconcileChain(req.appRow, obj.namespace);
+    await namespaces.reconcileChain(req.appRow, obj.namespace);
     return res.json(body);
 }
 
 /** The object named in the URL, writable by this caller, native and still uploading (else answered). */
-function loadUploading(req, res) {
-    const obj = load(req, res, 'write');
+async function loadUploading(req, res) {
+    const obj = await load(req, res, 'write');
     if (!obj) return null;
     if (!canWrite(req, obj)) { problem(res, 403, 'media.object.forbidden', 'Not your object'); return null; }
     if (obj.legacy_ref) { problem(res, 409, 'media.object.legacy_managed', 'This object is written through the v1 API'); return null; }
@@ -428,14 +436,14 @@ function loadUploading(req, res) {
 }
 
 // Complete re-reads the stored bytes (type sniff, hash); twice the init rate leaves room for retries.
-router.post('/:id/complete', contentAuth, tenantCors, limits('media.object.complete', { minute: 60, hour: 1200 }), (req, res) => {
+router.post('/:id/complete', contentAuth, tenantCors, limits('media.object.complete', { minute: 60, hour: 1200 }), async (req, res) => {
     try {
-        const obj = load(req, res, 'write');
+        const obj = await load(req, res, 'write');
         if (!obj) return;
         if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
-        if (obj.lifecycle_status === 'ready' && !obj.legacy_ref) return res.json(model.objectPublic(obj));
+        if (obj.lifecycle_status === 'ready' && !obj.legacy_ref) return res.json(await model.objectPublic(obj));
         if (obj.legacy_ref || obj.lifecycle_status !== 'uploading') return problem(res, 409, 'media.object.not_uploading', `Object is ${obj.lifecycle_status}`);
-        completeUpload(req, res, obj, { expectedHash: req.body && req.body.content_hash });
+        await completeUpload(req, res, obj, { expectedHash: req.body && req.body.content_hash });
     } catch (err) {
         console.error('[Objects] complete error:', err.message);
         problem(res, 500, 'media.object.complete_failed', 'Failed to complete upload');
@@ -444,15 +452,15 @@ router.post('/:id/complete', contentAuth, tenantCors, limits('media.object.compl
 
 // ── Presigned single-PUT URL ─────────────────────────────────
 
-router.post('/:id/upload-url', upload, limits('media.object.upload_url', UPLOAD), (req, res) => {
-    const obj = loadUploading(req, res);
+router.post('/:id/upload-url', upload, limits('media.object.upload_url', UPLOAD), async (req, res) => {
+    const obj = await loadUploading(req, res);
     if (!obj) return;
     const ttl = req.body && req.body.ttl != null ? Number(req.body.ttl) : (req.query.ttl != null ? Number(req.query.ttl) : undefined);
     if (ttl !== undefined && !(ttl >= 60 && ttl <= 86400)) return problem(res, 400, 'media.object.invalid', 'ttl must be 60-86400 seconds');
     if (Number(obj.size_bytes) > config.objects.maxUploadMb * MB) return problem(res, 413, 'media.object.too_large', 'This object is uploaded in parts: POST /multipart');
     // A fresh URL is a fresh attempt: the upload holds its declared size again (after an abort released it).
-    const stored = Number((db.get("SELECT size_bytes FROM media_locations WHERE object_id = ? AND provider = 'local' AND state = 'present'", [obj.id]) || {}).size_bytes) || 0;
-    if (!reserveAgain(req, res, obj, Math.max(Number(obj.size_bytes) || 0, stored))) return;
+    const stored = Number((await db.get("SELECT size_bytes FROM media_locations WHERE object_id = ? AND provider = 'local' AND state = 'present'", [obj.id]) || {}).size_bytes) || 0;
+    if (!await reserveAgain(req, res, obj, Math.max(Number(obj.size_bytes) || 0, stored))) return;
     res.json(presignedPut(req, obj, ttl));
 });
 
@@ -462,18 +470,18 @@ const mpRead = multipartAuth('read');
 const mpWrite = multipartAuth('write');
 
 /** The session named in the URL, belonging to the object, still open (else answered). */
-function loadSession(req, res, obj, { open = true } = {}) {
-    const session = multipart.getSession(String(req.params.uploadId || ''));
+async function loadSession(req, res, obj, { open = true } = {}) {
+    const session = await multipart.getSession(String(req.params.uploadId || ''));
     if (!session || session.object_id !== obj.id) { problem(res, 404, 'media.upload.not_found', 'No such upload for this object'); return null; }
-    if (open && session.status === 'active' && multipart.isExpired(session)) multipart.abort(session.id, 'expired');   // releases its reservation
-    const now = multipart.getSession(session.id);
+    if (open && session.status === 'active' && multipart.isExpired(session)) await multipart.abort(session.id, 'expired');   // releases its reservation
+    const now = await multipart.getSession(session.id);
     if (open && now.status !== 'active') { problem(res, 409, 'media.upload.not_active', `The upload is ${now.status}`); return null; }
     return now;
 }
 
-router.post('/:id/multipart', upload, limits('media.object.multipart', UPLOAD), (req, res) => {
+router.post('/:id/multipart', upload, limits('media.object.multipart', UPLOAD), async (req, res) => {
     try {
-        const obj = loadUploading(req, res);
+        const obj = await loadUploading(req, res);
         if (!obj) return;
         const b = req.body || {};
         let current = obj;
@@ -485,30 +493,30 @@ router.post('/:id/multipart', upload, limits('media.object.multipart', UPLOAD), 
             if (invariant.wouldViolate({ kind: obj.kind, visibility: obj.visibility, size_bytes: size })) {
                 return problem(res, 422, 'media.invariant.public_object_too_large', `Public playback objects are limited to ${config.objects.publicMaxMb} MB`);
             }
-            if (!reserveAgain(req, res, obj, size)) return;
-            model.updateObject(obj.id, { size_bytes: size });
-            current = model.getObject(obj.id);
+            if (!await reserveAgain(req, res, obj, size)) return;
+            await model.updateObject(obj.id, { size_bytes: size });
+            current = await model.getObject(obj.id);
         } else if (b.size_bytes != null && Number(b.size_bytes) !== Number(obj.size_bytes)) {
             return problem(res, 400, 'media.object.size_mismatch', `The object declares ${obj.size_bytes} bytes`);
-        } else if (!reserveAgain(req, res, obj, Number(obj.size_bytes))) {
+        } else if (!await reserveAgain(req, res, obj, Number(obj.size_bytes))) {
             return;       // a session after an abort holds the declared size again
         }
-        const session = multipart.initiate(current, { partSize: b.part_size });
+        const session = await multipart.initiate(current, { partSize: b.part_size });
         if (session.error) return problem(res, session.status, session.code, session.error);
-        res.status(201).json(multipartPublic(req, current, session, { parts: false }));
+        res.status(201).json(await multipartPublic(req, current, session, { parts: false }));
     } catch (err) {
         console.error('[Objects] multipart init error:', err.message);
         problem(res, 500, 'media.upload.init_failed', 'Failed to start the upload');
     }
 });
 
-router.get('/:id/multipart/:uploadId', mpRead, limits('media.object.multipart_read'), (req, res) => {
-    const obj = load(req, res, 'read');
+router.get('/:id/multipart/:uploadId', mpRead, limits('media.object.multipart_read'), async (req, res) => {
+    const obj = await load(req, res, 'read');
     if (!obj) return;
-    const session = loadSession(req, res, obj, { open: false });
+    const session = await loadSession(req, res, obj, { open: false });
     if (!session) return;
-    if (session.status === 'active' && multipart.isExpired(session)) multipart.abort(session.id, 'expired');
-    res.json(multipart.sessionPublic(multipart.getSession(session.id)));
+    if (session.status === 'active' && multipart.isExpired(session)) await multipart.abort(session.id, 'expired');
+    res.json(await multipart.sessionPublic(await multipart.getSession(session.id)));
 });
 
 // Assembling concatenates and hashes every part of an object up to MEDIA_MULTIPART_MAX_MB.
@@ -516,52 +524,52 @@ router.post('/:id/multipart/:uploadId/complete', mpWrite, tenantCors, limits('me
     let session = null;
     try {
         // A repeat of a complete that already succeeded (its answer was lost on the way): the object as it is.
-        const already = model.resolveObject(String(req.params.id || ''), req.appId);
-        const prior = already && multipart.getSession(String(req.params.uploadId || ''));
+        const already = await model.resolveObject(String(req.params.id || ''), req.appId);
+        const prior = already && await multipart.getSession(String(req.params.uploadId || ''));
         if (prior && prior.object_id === already.id && prior.status === 'completed' && already.lifecycle_status === 'ready' && canSee(req, already)) {
-            return res.json(model.objectPublic(already));
+            return res.json(await model.objectPublic(already));
         }
-        const obj = loadUploading(req, res);
+        const obj = await loadUploading(req, res);
         if (!obj) return;
-        session = loadSession(req, res, obj);
+        session = await loadSession(req, res, obj);
         if (!session) return;
-        if (!multipart.beginComplete(session)) return problem(res, 409, 'media.upload.not_active', 'The upload is being completed already');
+        if (!await multipart.beginComplete(session)) return problem(res, 409, 'media.upload.not_active', 'The upload is being completed already');
         const b = req.body || {};
         const dest = model.objectFilePath(obj);
         const got = await multipart.assemble(session, dest, Array.isArray(b.parts) ? b.parts : null);
         if (got.error) {
-            multipart.reopen(session);
+            await multipart.reopen(session);
             return problem(res, got.status, got.code, got.error, got.missing ? { missing: got.missing } : undefined);
         }
-        db.getDb().transaction(() => {
-            model.updateObject(obj.id, {
+        await db.getDb().tx(async () => {
+            await model.updateObject(obj.id, {
                 size_bytes: got.bytes, content_hash: got.sha256, mime_type: obj.mime_type || 'application/octet-stream',
                 canonical_provider: 'local', canonical_key: dest,
             });
-            model.upsertLocation(obj.id, { provider: 'local', key: dest, state: 'present', size_bytes: got.bytes, checksum: got.sha256, verified: true });
-        })();
-        multipart.finish(session);
-        completeUpload(req, res, model.getObject(obj.id), { expectedHash: b.content_hash });
+            await model.upsertLocation(obj.id, { provider: 'local', key: dest, state: 'present', size_bytes: got.bytes, checksum: got.sha256, verified: true });
+        });
+        await multipart.finish(session);
+        await completeUpload(req, res, await model.getObject(obj.id), { expectedHash: b.content_hash });
     } catch (err) {
-        if (session) multipart.reopen(session);
+        if (session) await multipart.reopen(session);
         console.error('[Objects] multipart complete error:', err.message);
         if (!res.headersSent) problem(res, 500, 'media.object.complete_failed', 'Failed to complete upload');
     }
 });
 
 // An abort deletes the parts and frees the reservation: a write, cheaper than an upload.
-router.delete('/:id/multipart/:uploadId', mpWrite, limits('media.object.multipart_abort', { minute: 60, hour: 1200 }), (req, res) => {
-    const obj = load(req, res, 'write');
+router.delete('/:id/multipart/:uploadId', mpWrite, limits('media.object.multipart_abort', { minute: 60, hour: 1200 }), async (req, res) => {
+    const obj = await load(req, res, 'write');
     if (!obj) return;
     if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
-    const session = loadSession(req, res, obj, { open: false });
+    const session = await loadSession(req, res, obj, { open: false });
     if (!session) return;
     if (session.status === 'completed') return problem(res, 409, 'media.upload.not_active', 'The upload is completed');
-    multipart.abort(session.id);          // parts deleted; the quota it held is released
-    res.json(multipart.sessionPublic(multipart.getSession(session.id), { parts: false }));
+    await multipart.abort(session.id);          // parts deleted; the quota it held is released
+    res.json(await multipart.sessionPublic(await multipart.getSession(session.id), { parts: false }));
 });
 
-router.get('/', list, limits('media.object.list'), (req, res) => {
+router.get('/', list, limits('media.object.list'), async (req, res) => {
     try {
         const q = req.query;
         const limit = Math.min(Math.max(parseInt(q.limit || '50', 10) || 50, 1), 200);
@@ -570,20 +578,21 @@ router.get('/', list, limits('media.object.list'), (req, res) => {
         if (q.namespace != null && q.namespace !== '') {
             const named = namespaces.resolveName(req.appRow, q.namespace);
             if (named.error) return problem(res, 400, 'media.namespace.invalid', named.error);
-            const g = namespaceGrant(req, 'list', named.namespace);
+            const g = await namespaceGrant(req, 'list', named.namespace);
             if (!g.allowed) return problem(res, 403, g.code, g.reason);
             conds.push('(namespace = ? OR substr(namespace, 1, ?) = ?)');
             params.push(named.namespace, named.namespace.length + 1, `${named.namespace}.`);
         }
         // A Network token lists only the namespaces it may list here.
         if (req.grant) {
-            const rows = namespaces.listForTenant(req.appId);
-            const listable = rows.filter(r => namespaceGrant(req, 'list', r.namespace).allowed).map(r => r.namespace);
+            const rows = await namespaces.listForTenant(req.appId);
+            const listable = [];
+            for (const r of rows) if ((await namespaceGrant(req, 'list', r.namespace)).allowed) listable.push(r.namespace);
             if (!listable.length) {
                 // Nothing listable: refused when the verb itself is (a strict namespace), else an empty page.
-                const g = namespaceGrant(req, 'list', db.rootNamespace(req.appRow));
+                const g = await namespaceGrant(req, 'list', db.rootNamespace(req.appRow));
                 if (!g.allowed && g.code === 'capability.denied') return problem(res, 403, g.code, g.reason);
-                conds.push('0');
+                conds.push('FALSE');
             } else if (listable.length < rows.length) {
                 conds.push(`namespace IN (${listable.map(() => '?').join(', ')})`);
                 params.push(...listable);
@@ -600,32 +609,32 @@ router.get('/', list, limits('media.object.list'), (req, res) => {
         if (q.owner) { conds.push('owner_subject = ?'); params.push(String(q.owner).replace(/^user:/, '')); }
         if (q.user_id != null) { conds.push('owner_user_id = ?'); params.push(Number(q.user_id)); }
         if (req.authType === 'user') { conds.push("(visibility != 'private' OR owner_user_id = ?)"); params.push(req.userId); }
-        const rows = db.all(`SELECT * FROM media_objects WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, limit + 1]);
+        const rows = await db.all(`SELECT * FROM media_objects WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, limit + 1]);
         const page = rows.slice(0, limit);
-        res.json({ objects: page.map(o => model.objectPublic(o, { locations: false })), next_cursor: rows.length > limit ? page[page.length - 1].id : null, limit });
+        res.json({ objects: (await Promise.all(page.map(async o => await model.objectPublic(o, { locations: false })))), next_cursor: rows.length > limit ? page[page.length - 1].id : null, limit });
     } catch (err) {
         console.error('[Objects] list error:', err.message);
         problem(res, 500, 'media.object.list_failed', 'Failed to list objects');
     }
 });
 
-router.get('/:id', read, limits('media.object.read'), (req, res) => {
-    const obj = load(req, res, 'read');
-    if (obj) res.json(model.objectPublic(obj));
+router.get('/:id', read, limits('media.object.read'), async (req, res) => {
+    const obj = await load(req, res, 'read');
+    if (obj) res.json(await model.objectPublic(obj));
 });
 
 // Deletes and restores change lifecycle, quota usage and events: writes, tighter than reads.
-router.delete('/:id', remove, limits('media.object.delete', { minute: 60, hour: 1200 }), (req, res) => {
+router.delete('/:id', remove, limits('media.object.delete', { minute: 60, hour: 1200 }), async (req, res) => {
     try {
-        const obj = load(req, res, 'delete');
+        const obj = await load(req, res, 'delete');
         if (!obj) return;
         if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
         if (obj.legacy_ref) return problem(res, 409, 'media.object.legacy_managed', 'Delete this object through its v1 route (vods, clips, files, pastes)');
-        if (model.isHeld(obj.id)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
-        if (obj.lifecycle_status === 'deleted') return res.json(model.objectPublic(obj));
-        const gone = model.softDelete(obj, { by: req.principal ? req.principal.sub : `app:${req.appId}` });
-        namespaces.reconcileChain(req.appRow, obj.namespace);
-        res.json(model.objectPublic(gone));
+        if (await model.isHeld(obj.id)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
+        if (obj.lifecycle_status === 'deleted') return res.json(await model.objectPublic(obj));
+        const gone = await model.softDelete(obj, { by: req.principal ? req.principal.sub : `app:${req.appId}` });
+        await namespaces.reconcileChain(req.appRow, obj.namespace);
+        res.json(await model.objectPublic(gone));
     } catch (err) {
         if (err.code === 'media.object.held' || /retention hold/.test(err.message)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
         console.error('[Objects] delete error:', err.message);
@@ -633,29 +642,31 @@ router.delete('/:id', remove, limits('media.object.delete', { minute: 60, hour: 
     }
 });
 
-router.post('/:id/restore', remove, limits('media.object.restore', { minute: 60, hour: 1200 }), (req, res) => {
-    const obj = load(req, res, 'delete');
+router.post('/:id/restore', remove, limits('media.object.restore', { minute: 60, hour: 1200 }), async (req, res) => {
+    const obj = await load(req, res, 'delete');
     if (!obj) return;
     if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
     if (obj.lifecycle_status !== 'deleted' || obj.legacy_ref) return problem(res, 409, 'media.object.not_deleted', 'Only soft-deleted native objects can be restored');
     // A restored object counts again: it needs the room (in a developer project it never stopped counting).
     const md = model.parseJson(obj.metadata, {});
-    if (md.pre_delete_status !== 'uploading' && !md.purged_at && !quotaCheck(req, res, obj.namespace, { bytes: Number(obj.size_bytes) || 0, objects: 1, excludeId: obj.id })) return;
-    const back = model.restore(obj);
+    const back = md.pre_delete_status !== 'uploading' && !md.purged_at
+        ? await withQuota(req, res, obj.namespace, { bytes: Number(obj.size_bytes) || 0, objects: 1, excludeId: obj.id }, async () => await model.restore(obj))
+        : await model.restore(obj);
+    if (back === undefined) return;
     if (!back) return problem(res, 410, 'media.object.purged', 'The retention period has passed and the bytes are gone');
-    namespaces.reconcileChain(req.appRow, obj.namespace);
-    res.json(model.objectPublic(back));
+    await namespaces.reconcileChain(req.appRow, obj.namespace);
+    res.json(await model.objectPublic(back));
 });
 
-router.get('/:id/download', read, limits('media.object.download'), (req, res) => {
-    const obj = load(req, res, 'read');
+router.get('/:id/download', read, limits('media.object.download'), async (req, res) => {
+    const obj = await load(req, res, 'read');
     if (!obj) return;
     if (obj.lifecycle_status === 'deleted') return problem(res, 410, 'media.object.deleted', 'Object was deleted');
     if (obj.lifecycle_status !== 'ready') return problem(res, 409, 'media.object.not_ready', `Object is ${obj.lifecycle_status}`);
     const json = req.query.format === 'json';
     res.set('Cache-Control', 'private, no-store');
     // Developer-project sandbox objects are never public, whatever their visibility: always signed.
-    if (obj.visibility !== 'private' && !db.isSandboxTenant(obj.app_id)) {
+    if (obj.visibility !== 'private' && !await db.isSandboxTenant(obj.app_id)) {
         const url = model.legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`;
         return json ? res.json({ url, expires_at: null, public: true }) : res.redirect(302, url);
     }
@@ -666,15 +677,15 @@ router.get('/:id/download', read, limits('media.object.download'), (req, res) =>
 
 // ── Retention holds ──────────────────────────────────────────
 
-router.get('/:id/holds', read, limits('media.object.holds'), (req, res) => {
-    const obj = load(req, res, 'read');
+router.get('/:id/holds', read, limits('media.object.holds'), async (req, res) => {
+    const obj = await load(req, res, 'read');
     if (!obj) return;
     res.json({
         object_id: obj.id,
-        holds: model.listHolds(obj.id, { includeReleased: ['1', 'true'].includes(String(req.query.all || '')) }).map(model.holdPublic),
+        holds: (await model.listHolds(obj.id, { includeReleased: ['1', 'true'].includes(String(req.query.all || '')) })).map(model.holdPublic),
         // A clip is held while its source VOD is (released holds are the VOD's to list).
-        inherited_holds: model.inheritedHolds(obj.id).map(model.holdPublic),
-        held: model.isHeld(obj.id),
+        inherited_holds: (await model.inheritedHolds(obj.id)).map(model.holdPublic),
+        held: await model.isHeld(obj.id),
     });
 });
 
@@ -685,27 +696,27 @@ function holdsByApp(req, res) {
     return false;
 }
 
-router.post('/:id/holds', appOnly, (req, res) => {
+router.post('/:id/holds', appOnly, async (req, res) => {
     if (!holdsByApp(req, res)) return;
-    const obj = load(req, res);
+    const obj = await load(req, res);
     if (!obj) return;
     const b = req.body || {};
     if (!model.HOLD_KINDS.includes(b.kind)) return problem(res, 400, 'media.hold.invalid', `kind must be one of ${model.HOLD_KINDS.join(', ')}`);
     const named = b.placed_by || b.created_by;
     const by = named ? String(named).slice(0, 200) : `app:${req.appId}${req.userId != null ? `:user:${req.userId}` : ''}`;
-    const hold = model.placeHold({ object_id: obj.id, kind: b.kind, reason: b.reason || '', created_by: by, note: b.note });
+    const hold = await model.placeHold({ object_id: obj.id, kind: b.kind, reason: b.reason || '', created_by: by, note: b.note });
     console.log(`[Objects] Retention hold ${hold.id} placed on ${obj.id} (${obj.legacy_ref || obj.kind}) by ${by} (${req.appId}): ${hold.kind}`);
     res.status(201).json(model.holdPublic(hold));
 });
 
-router.delete('/:id/holds/:holdId', appOnly, (req, res) => {
+router.delete('/:id/holds/:holdId', appOnly, async (req, res) => {
     if (!holdsByApp(req, res)) return;
-    const obj = load(req, res);
+    const obj = await load(req, res);
     if (!obj) return;
-    const hold = db.get('SELECT * FROM media_holds WHERE id = ? AND object_id = ?', [parseInt(req.params.holdId, 10), obj.id]);
+    const hold = await db.get('SELECT * FROM media_holds WHERE id = ? AND object_id = ?', [parseInt(req.params.holdId, 10), obj.id]);
     if (!hold) return problem(res, 404, 'media.hold.not_found', 'No such hold on this object');
     const by = (req.body && req.body.released_by) ? String(req.body.released_by).slice(0, 200) : `app:${req.appId}`;
-    const out = model.releaseHold(hold.id, by);
+    const out = await model.releaseHold(hold.id, by);
     if (!hold.released_at) console.log(`[Objects] Retention hold ${hold.id} on ${obj.id} released by ${by} (${req.appId})`);
     res.json(model.holdPublic(out));
 });
@@ -719,13 +730,13 @@ publicRouter.get('/:id', async (req, res) => {
     // A restore drill (MEDIA_DRILL) serves no stored bytes, local or by a B2/R2 redirect.
     if (require('../drill').refuseBytes(res)) return;
     try {
-        const obj = model.getObject(String(req.params.id || ''));
+        const obj = await model.getObject(String(req.params.id || ''));
         if (!obj) return res.status(404).json({ error: 'Not found' });
         const signed = !!req.query.sig && signing.verifyDownload(obj.id, req.query.exp, req.query.sig);
         // Private objects (and every developer-project sandbox object) are indistinguishable from
         // missing ones without a valid signature — checked before the lifecycle answers, or a 410
         // for a deleted private object would still say it existed.
-        const sandbox = db.isSandboxTenant(obj.app_id);
+        const sandbox = await db.isSandboxTenant(obj.app_id);
         if ((obj.visibility === 'private' || sandbox) && !signed) return res.status(404).json({ error: 'Not found' });
         if (obj.lifecycle_status === 'deleted') return res.status(410).json({ error: 'Gone' });
         if (obj.lifecycle_status !== 'ready') return res.status(404).json({ error: 'Not found' });
@@ -742,8 +753,8 @@ publicRouter.get('/:id', async (req, res) => {
         };
         // A viewer of a native object, counted once a day without being identified (objects/popularity.js); the
         // object tiering reads these counts. Sandbox objects are never tiered, so they are not counted.
-        if (!obj.legacy_ref && !sandbox) require('./popularity').record(obj, req);
-        const locs = model.listLocations(obj.id);
+        if (!obj.legacy_ref && !sandbox) await require('./popularity').record(obj, req);
+        const locs = await model.listLocations(obj.id);
         const vodStorage = require('../vod/vod-storage');
         // A native object promoted to the R2 popularity cache (objects/tiering.js) plays from its verified R2 copy
         // while R2 is available, with the headers this route would send; the canonical copy is the fallback.
@@ -769,11 +780,11 @@ publicRouter.get('/:id', async (req, res) => {
 
 /** PUT /:id/multipart/:uploadId/parts/:n (raw body; mounted ahead of the JSON body parser). */
 async function putPart(req, res) {
-    const obj = load(req, res, 'write');
+    const obj = await load(req, res, 'write');
     if (!obj) { req.resume(); return; }
     if (!canWrite(req, obj)) { req.resume(); return problem(res, 403, 'media.object.forbidden', 'Not your object'); }
     if (obj.lifecycle_status !== 'uploading') { req.resume(); return problem(res, 409, 'media.object.not_uploading', `Object is ${obj.lifecycle_status}`); }
-    const session = loadSession(req, res, obj);
+    const session = await loadSession(req, res, obj);
     if (!session) { req.resume(); return; }
     const n = Number(req.params.n);
     if (!Number.isInteger(n) || n < 1 || n > session.parts_expected) {

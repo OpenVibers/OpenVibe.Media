@@ -115,14 +115,14 @@ const SLUG_NOUNS = [
     'trout', 'tulip', 'vale', 'vine', 'viper', 'wave', 'wren', 'wolf',
 ];
 
-function generateSlug(attempts = 0) {
+async function generateSlug(attempts = 0) {
     if (attempts >= 10) throw new Error('Could not generate a unique paste slug after 10 attempts');
     const adj = SLUG_ADJECTIVES[crypto.randomInt(SLUG_ADJECTIVES.length)];
     const noun = SLUG_NOUNS[crypto.randomInt(SLUG_NOUNS.length)];
     const num = crypto.randomInt(10, 100); // 10–99
     const slug = `${adj}-${noun}-${num}`;
-    const existing = db.get('SELECT 1 FROM pastes WHERE slug = ?', [slug]);
-    if (existing) return generateSlug(attempts + 1);
+    const existing = await db.get('SELECT 1 FROM pastes WHERE slug = ?', [slug]);
+    if (existing) return await generateSlug(attempts + 1);
     return slug;
 }
 
@@ -147,12 +147,12 @@ function detectLanguage(content, hint) {
     return 'text';
 }
 
-function getPasteConfig() {
+async function getPasteConfig() {
     return {
-        maxSizeKb: Number(db.getSetting('paste_max_size_kb')) || 512,
-        screenshotMaxSizeMb: Number(db.getSetting('paste_screenshot_max_size_mb')) || 8,
-        cooldownSeconds: Number(db.getSetting('paste_cooldown_seconds')) || 30,
-        maxPerUserPerDay: Number(db.getSetting('paste_max_per_user_per_day')) || 0,
+        maxSizeKb: Number(await db.getSetting('paste_max_size_kb')) || 512,
+        screenshotMaxSizeMb: Number(await db.getSetting('paste_screenshot_max_size_mb')) || 8,
+        cooldownSeconds: Number(await db.getSetting('paste_cooldown_seconds')) || 30,
+        maxPerUserPerDay: Number(await db.getSetting('paste_max_per_user_per_day')) || 0,
     };
 }
 
@@ -201,12 +201,12 @@ function _actor(req) {
     return { userId: (req.body && req.body.user_id) || null, ip: req.ip, limited: false };
 }
 
-function _rateLimitCheck(req, res) {
+async function _rateLimitCheck(req, res) {
     const actor = _actor(req);
     if (!actor.limited) return true;
-    const cfg = getPasteConfig();
+    const cfg = await getPasteConfig();
     if (cfg.cooldownSeconds > 0) {
-        const lastTime = db.getLastPasteTime(req.appId, actor.userId, actor.ip);
+        const lastTime = await db.getLastPasteTime(req.appId, actor.userId, actor.ip);
         const elapsed = (Date.now() - lastTime) / 1000;
         if (elapsed < cfg.cooldownSeconds) {
             const wait = Math.ceil(cfg.cooldownSeconds - elapsed);
@@ -215,7 +215,7 @@ function _rateLimitCheck(req, res) {
         }
     }
     if (cfg.maxPerUserPerDay > 0) {
-        const todayCount = db.countUserPastesToday(req.appId, actor.userId, actor.ip);
+        const todayCount = await db.countUserPastesToday(req.appId, actor.userId, actor.ip);
         if (todayCount >= cfg.maxPerUserPerDay) {
             res.status(429).json({ error: `Daily paste limit reached (${cfg.maxPerUserPerDay}/day)` });
             return false;
@@ -224,16 +224,16 @@ function _rateLimitCheck(req, res) {
     return true;
 }
 
-function _getPasteScoped(req, res) {
+async function _getPasteScoped(req, res) {
     const slug = String(req.params.slug);
-    const paste = db.getPasteBySlug(slug, req.appId);
+    const paste = await db.getPasteBySlug(slug, req.appId);
     if (!paste) {
         // "Paste not found" was being reported for pastes that demonstrably exist, and the
         // 404 was silent — so there was no way to tell whether the slug was wrong, the
         // tenant scope was wrong, or the row was genuinely missing. Log all three.
         let existsElsewhere = null;
         try {
-            const any = db.get('SELECT app_id FROM pastes WHERE slug = ?', [slug]);
+            const any = await db.get('SELECT app_id FROM pastes WHERE slug = ?', [slug]);
             existsElsewhere = any ? any.app_id : null;
         } catch { /* */ }
         console.warn(`[Pastes] 404 slug="${slug}" appId="${req.appId}" auth=${req.authType || 'none'}` +
@@ -245,11 +245,11 @@ function _getPasteScoped(req, res) {
 }
 
 // Fully remove a paste's screenshot from local disk AND any legacy B2 object.
-function removePasteScreenshot(paste) {
+async function removePasteScreenshot(paste) {
     if (!paste) return;
     // A held screenshot keeps its bytes (the row delete that follows is refused by the hold trigger).
     const objects = require('../objects/model');
-    if (objects.isHeldRow(paste.object_id !== undefined ? paste : db.get('SELECT object_id FROM pastes WHERE id = ?', [paste.id]))) return;
+    if (await objects.isHeldRow(paste.object_id !== undefined ? paste : await db.get('SELECT object_id FROM pastes WHERE id = ?', [paste.id]))) return;
     if (paste.screenshot_path) {
         try { fs.unlinkSync(paste.screenshot_path); } catch { /* ignore */ }
     }
@@ -257,7 +257,7 @@ function removePasteScreenshot(paste) {
 }
 
 // ── List pastes ─────────────────────────────────────────────
-router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit) || 50, 1), 200);
         const offset = Math.max(parseInt(req.query.offset) || 0, 0);
@@ -289,13 +289,13 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
         if (req.authType === 'app' && (req.query.needs_ai === '1' || req.query.needs_ai === 'true')) {
             sql = sql.replace(visClause, `AND COALESCE(ai_summary, '') = ''`);
         }
-        if (search) { sql += ` AND (title LIKE ? OR content LIKE ?)`; params.push(search, search); }
+        if (search) { sql += ` AND (title ILIKE ? OR content ILIKE ?)`; params.push(search, search); }
 
         const dir = req.query.sort === 'oldest' ? 'ASC' : 'DESC';
         sql += ` ORDER BY pinned DESC, created_at ${dir} LIMIT ? OFFSET ?`;
         params.push(limit, offset);
 
-        const pastes = db.all(sql, params).map(p => ({
+        const pastes = (await db.all(sql, params)).map(p => ({
             ...pastePublic(p),
             content: p.type === 'paste' ? (p.content || '').slice(0, 300) : null, // Preview only in list
         }));
@@ -304,8 +304,8 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
         const countParams = [req.appId];
         if (type === 'paste' || type === 'screenshot') { countSql += ` AND type = ?`; countParams.push(type); }
         if (userId != null) { countSql += ` AND user_id = ?`; countParams.push(userId); }
-        if (search) { countSql += ` AND (title LIKE ? OR content LIKE ?)`; countParams.push(search, search); }
-        const { total } = db.get(countSql, countParams);
+        if (search) { countSql += ` AND (title ILIKE ? OR content ILIKE ?)`; countParams.push(search, search); }
+        const { total } = await db.get(countSql, countParams);
 
         res.json({ pastes, total, limit, offset });
     } catch (err) {
@@ -316,16 +316,16 @@ router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
 
 // ── Paste config / limits (inherited SPA reads this before posting) ──
 // Registered before /:slug so the literal path wins.
-router.get('/config', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/config', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const cfg = getPasteConfig();
+        const cfg = await getPasteConfig();
         const actor = _actor(req);
         res.json({
             maxSizeKb: cfg.maxSizeKb,
             screenshotMaxSizeMb: cfg.screenshotMaxSizeMb,
             cooldownSeconds: cfg.cooldownSeconds,
             maxPerUserPerDay: cfg.maxPerUserPerDay,
-            todayCount: db.countUserPastesToday(req.appId, actor.userId, actor.ip),
+            todayCount: await db.countUserPastesToday(req.appId, actor.userId, actor.ip),
         });
     } catch (err) {
         console.error('[Pastes] Config error:', err.message);
@@ -338,9 +338,9 @@ router.get('/config', tenantAuth({ allowUser: true }), (req, res) => {
 // ═════════════════════════════════════════════════════════════
 
 // ── Paste stats ─────────────────────────────────────────────
-router.get('/admin/stats', tenantAuth(), (req, res) => {
+router.get('/admin/stats', tenantAuth(), async (req, res) => {
     try {
-        res.json({ stats: db.getPasteStats(req.appId) });
+        res.json({ stats: await db.getPasteStats(req.appId) });
     } catch (err) {
         console.error('[Pastes] Stats error:', err.message);
         res.status(500).json({ error: 'Failed to get paste stats' });
@@ -348,18 +348,18 @@ router.get('/admin/stats', tenantAuth(), (req, res) => {
 });
 
 // ── List forked pastes ──────────────────────────────────────
-router.get('/admin/forks', tenantAuth(), (req, res) => {
+router.get('/admin/forks', tenantAuth(), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit) || 100, 1), 500);
         const offset = Math.max(parseInt(req.query.offset) || 0, 0);
-        const forks = db.all(`
+        const forks = await db.all(`
             SELECT id, slug, user_id, type, title, forked_from, visibility,
                    views, copies, likes, created_at
             FROM pastes
             WHERE app_id = ? AND forked_from IS NOT NULL
             ORDER BY created_at DESC LIMIT ? OFFSET ?
         `, [req.appId, limit, offset]);
-        const total = db.get('SELECT COUNT(*) AS c FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]).c;
+        const total = (await db.get('SELECT COUNT(*) AS c FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId])).c;
         res.json({ forks, total, limit, offset });
     } catch (err) {
         console.error('[Pastes] List forks error:', err.message);
@@ -368,11 +368,11 @@ router.get('/admin/forks', tenantAuth(), (req, res) => {
 });
 
 // ── Delete ALL forks (ported predecessor semantics) ─────────
-router.delete('/admin/forks', tenantAuth(), (req, res) => {
+router.delete('/admin/forks', tenantAuth(), async (req, res) => {
     try {
-        const forks = db.all('SELECT id, screenshot_path FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);
-        for (const f of forks) removePasteScreenshot(f);   // unlink screenshots so they don't leak on disk
-        db.run('DELETE FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);   // objects: the row-delete trigger
+        const forks = await db.all('SELECT id, screenshot_path FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);
+        for (const f of forks) await removePasteScreenshot(f);   // unlink screenshots so they don't leak on disk
+        await db.run('DELETE FROM pastes WHERE app_id = ? AND forked_from IS NOT NULL', [req.appId]);   // objects: the row-delete trigger
         res.json({ success: true, deleted: forks.length });
     } catch (err) {
         console.error('[Pastes] Delete forks error:', err.message);
@@ -381,22 +381,22 @@ router.delete('/admin/forks', tenantAuth(), (req, res) => {
 });
 
 // ── Bulk action: delete | public | unlisted | private ───────
-router.post('/bulk', tenantAuth(), (req, res) => {
+router.post('/bulk', tenantAuth(), async (req, res) => {
     try {
         const { slugs, action } = req.body || {};
         if (!Array.isArray(slugs) || !slugs.length) return res.status(400).json({ error: 'No slugs provided' });
         if (!['delete', 'public', 'unlisted', 'private'].includes(action)) return res.status(400).json({ error: 'Invalid action' });
         let done = 0, skipped = 0;
         for (const slug of slugs.slice(0, 500)) {
-            const paste = db.getPasteBySlug(String(slug), req.appId);
+            const paste = await db.getPasteBySlug(String(slug), req.appId);
             if (!paste) { skipped++; continue; }
             if (action === 'delete') {
                 // A held screenshot is skipped (its row and bytes stay), not failed halfway.
-                if (require('../objects/model').isHeldRow(paste)) { skipped++; continue; }
-                removePasteScreenshot(paste);
-                db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);   // its object: the row-delete trigger
+                if (await require('../objects/model').isHeldRow(paste)) { skipped++; continue; }
+                await removePasteScreenshot(paste);
+                await db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);   // its object: the row-delete trigger
             } else {
-                db.withObject('paste', paste.id, () => db.run('UPDATE pastes SET visibility = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [action, paste.id]));
+                await db.withObject('paste', paste.id, async () => await db.run('UPDATE pastes SET visibility = ?, updated_at = ov_now() WHERE id = ?', [action, paste.id]));
             }
             done++;
         }
@@ -408,17 +408,17 @@ router.post('/bulk', tenantAuth(), (req, res) => {
 });
 
 // ── Censor a screenshot (replace with an uploaded image) ────
-router.post('/:slug/censor', tenantAuth(), (req, res) => {
+router.post('/:slug/censor', tenantAuth(), async (req, res) => {
     // Accept slug or numeric paste id (the predecessor keyed this by slug).
-    let paste = db.getPasteBySlug(String(req.params.slug), req.appId);
+    let paste = await db.getPasteBySlug(String(req.params.slug), req.appId);
     if (!paste && /^\d+$/.test(String(req.params.slug))) {
-        paste = db.get('SELECT * FROM pastes WHERE id = ? AND app_id = ?', [parseInt(req.params.slug, 10), req.appId]);
+        paste = await db.get('SELECT * FROM pastes WHERE id = ? AND app_id = ?', [parseInt(req.params.slug, 10), req.appId]);
     }
     if (!paste) return res.status(404).json({ error: 'Paste not found' });
     if (paste.type !== 'screenshot' || !paste.screenshot_path) {
         return res.status(400).json({ error: 'Not a screenshot paste' });
     }
-    if (require('../objects/model').isHeldRow(paste)) return res.status(409).json({ error: 'Screenshot is under a retention hold', code: 'media.object.held' });
+    if (await require('../objects/model').isHeldRow(paste)) return res.status(409).json({ error: 'Screenshot is under a retention hold', code: 'media.object.held' });
 
     const censorUpload = multer({
         storage: screenshotStorage,
@@ -429,16 +429,16 @@ router.post('/:slug/censor', tenantAuth(), (req, res) => {
         },
     }).single('screenshot');
 
-    censorUpload(req, res, (err) => {
+    censorUpload(req, res, async (err) => {
         if (err) return res.status(400).json({ error: err.message || 'Upload failed' });
         if (!req.file) return res.status(400).json({ error: 'Censored image is required' });
 
         try {
             // Delete the old screenshot file, then swap in the censored one.
             try { fs.unlinkSync(paste.screenshot_path); } catch { /* */ }
-            db.withObject('paste', paste.id, () => db.run('UPDATE pastes SET screenshot_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            await db.withObject('paste', paste.id, async () => await db.run('UPDATE pastes SET screenshot_path = ?, updated_at = ov_now() WHERE id = ?',
                 [req.file.path, paste.id]));
-            res.json({ paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
+            res.json({ paste: pastePublic(await db.getPasteBySlug(paste.slug, req.appId)) });
         } catch (err2) {
             console.error('[Pastes] Censor error:', err2.message);
             if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
@@ -448,9 +448,9 @@ router.post('/:slug/censor', tenantAuth(), (req, res) => {
 });
 
 // ── Get single paste by slug ────────────────────────────────
-router.get('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/:slug', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
         // Private pastes: owner (or the app itself) only — decided before anything is counted.
         if (paste.visibility === 'private') {
@@ -458,14 +458,14 @@ router.get('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
             if (!allowed) return res.status(404).json({ error: 'Paste not found' });
         }
         // The owning app renders the paste page itself — count the view here (real client
-        // IP via X-Forwarded-For, viewer via the user JWT / X-OV-User-Id) unless it says
+        // IP via X-Forwarded-For, viewer via the "user" JWT / X-OV-User-Id) unless it says
         // this fetch is not a page view (?no_view=1 for edit forms, embeds, bots).
         if (String(req.query.no_view || '') !== '1' && !paste.burn_after_read) {
-            try { const r = require('../views/service').recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } } catch { /* */ }
+            try { const r = await require('../views/service').recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } } catch { /* */ }
         }
 
 
-        paste.liked = req.userId != null ? db.hasUserLikedPaste(paste.id, req.userId) : false;
+        paste.liked = req.userId != null ? await db.hasUserLikedPaste(paste.id, req.userId) : false;
         res.json({ paste: { ...pastePublic(paste), liked: paste.liked } });
     } catch (err) {
         console.error('[Pastes] Get error:', err.message);
@@ -477,9 +477,9 @@ router.get('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
 router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('screenshot'), async (req, res) => {
     try {
         const body = req.body || {};
-        const cfg = getPasteConfig();
+        const cfg = await getPasteConfig();
 
-        if (!_rateLimitCheck(req, res)) {
+        if (!await _rateLimitCheck(req, res)) {
             if (req.file) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
             return;
         }
@@ -489,7 +489,7 @@ router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('scree
         const vis = ['unlisted', 'private'].includes(body.visibility) ? body.visibility : 'public';
         const burn = body.burn_after_read ? 1 : 0;
         const nsfw = body.is_nsfw ? 1 : 0;
-        const slug = generateSlug();
+        const slug = await generateSlug();
 
         // ── Screenshot paste ────────────────────────────────
         if (req.file) {
@@ -525,14 +525,14 @@ router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('scree
             });
 
             // The row and the screenshot's object in one transaction.
-            db.withObject('paste', (r) => r.lastInsertRowid, () => db.run(
+            await db.withObject('paste', (r) => r.lastInsertRowid, async () => await db.run(
                 `INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, stream_id, screenshot_path, metadata, burn_after_read, is_nsfw, ip_address)
-                 VALUES (?, ?, ?, 'screenshot', ?, ?, 'text', ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, 'screenshot', ?, ?, 'text', ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
                 [req.appId, slug, userId, sanitizeTitle(body.title || 'Screenshot'),
                  body.description || body.content || '', vis, body.stream_id || null, req.file.path, metadata, burn, nsfw, actor.ip]
             ));
 
-            const paste = db.getPasteBySlug(slug, req.appId);
+            const paste = await db.getPasteBySlug(slug, req.appId);
             return res.status(201).json({ id: paste.id, slug, url: `/p/${slug}`, paste: pastePublic(paste) });
         }
 
@@ -547,14 +547,14 @@ router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('scree
         }
 
         const lang = detectLanguage(content, body.language);
-        db.run(
+        await db.run(
             `INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, stream_id, burn_after_read, is_nsfw, ip_address)
-             VALUES (?, ?, ?, 'paste', ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, 'paste', ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
             [req.appId, slug, userId, sanitizeTitle(body.title), content.trim(), lang, vis,
              body.stream_id || null, burn, nsfw, actor.ip]
         );
 
-        const paste = db.getPasteBySlug(slug, req.appId);
+        const paste = await db.getPasteBySlug(slug, req.appId);
         res.status(201).json({ id: paste.id, slug, url: `/p/${slug}`, paste: pastePublic(paste) });
     } catch (err) {
         console.error('[Pastes] Create error:', err.message);
@@ -571,19 +571,19 @@ router.post('/', tenantAuth({ allowUser: true }), screenshotUpload.single('scree
  * OWN pastes table, which no longer receives rows, so every paste created since had no
  * summary. There was no route to write one either; this is it.
  */
-router.post('/:slug/ai', tenantAuth(), (req, res) => {
+router.post('/:slug/ai', tenantAuth(), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
         const { ai_summary, ai_tags } = req.body || {};
         const summary = ai_summary == null ? null : String(ai_summary).slice(0, 2000);
         const tags = ai_tags == null ? null
             : (typeof ai_tags === 'string' ? ai_tags : JSON.stringify(ai_tags)).slice(0, 2000);
-        db.run(
-            'UPDATE pastes SET ai_summary = ?, ai_tags = ?, ai_analyzed_at = CURRENT_TIMESTAMP WHERE id = ?',
+        await db.run(
+            'UPDATE pastes SET ai_summary = ?, ai_tags = ?, ai_analyzed_at = ov_now() WHERE id = ?',
             [summary, tags, paste.id]
         );
-        res.json({ ok: true, paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
+        res.json({ ok: true, paste: pastePublic(await db.getPasteBySlug(paste.slug, req.appId)) });
     } catch (err) {
         console.error('[Pastes] AI update error:', err.message);
         res.status(500).json({ error: 'Failed to store paste AI' });
@@ -591,9 +591,9 @@ router.post('/:slug/ai', tenantAuth(), (req, res) => {
 });
 
 // ── Update paste ────────────────────────────────────────────
-router.put('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
+router.put('/:slug', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
         if (req.authType === 'user' && !(req.userId != null && paste.user_id === req.userId)) {
             return res.status(403).json({ error: 'Not authorized for this paste' });
@@ -605,7 +605,7 @@ router.put('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
 
         if (title !== undefined) { updates.push('title = ?'); params.push(sanitizeTitle(title)); }
         if (content !== undefined && paste.type === 'paste') {
-            const cfg = getPasteConfig();
+            const cfg = await getPasteConfig();
             if (content.length > cfg.maxSizeKb * 1024) return res.status(400).json({ error: 'Too large' });
             updates.push('content = ?'); params.push(content);
             updates.push('language = ?'); params.push(detectLanguage(content, language));
@@ -618,11 +618,11 @@ router.put('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
 
         if (updates.length === 0) return res.status(400).json({ error: 'Nothing to update' });
 
-        updates.push('updated_at = CURRENT_TIMESTAMP');
+        updates.push('updated_at = ov_now()');
         params.push(paste.id);
         // A screenshot's title/visibility are its object's too: row and object in one transaction (text pastes have none).
-        db.withObject('paste', paste.id, () => db.run(`UPDATE pastes SET ${updates.join(', ')} WHERE id = ?`, params));
-        res.json({ paste: pastePublic(db.getPasteBySlug(paste.slug, req.appId)) });
+        await db.withObject('paste', paste.id, async () => await db.run(`UPDATE pastes SET ${updates.join(', ')} WHERE id = ?`, params));
+        res.json({ paste: pastePublic(await db.getPasteBySlug(paste.slug, req.appId)) });
     } catch (err) {
         console.error('[Pastes] Update error:', err.message);
         res.status(500).json({ error: 'Failed to update paste' });
@@ -630,17 +630,17 @@ router.put('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Delete paste ────────────────────────────────────────────
-router.delete('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
+router.delete('/:slug', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
         if (req.authType === 'user' && !(req.userId != null && paste.user_id === req.userId)) {
             return res.status(403).json({ error: 'Not authorized for this paste' });
         }
-        if (require('../objects/model').isHeldRow(paste)) return res.status(409).json({ error: 'Screenshot is under a retention hold', code: 'media.object.held' });
+        if (await require('../objects/model').isHeldRow(paste)) return res.status(409).json({ error: 'Screenshot is under a retention hold', code: 'media.object.held' });
 
-        removePasteScreenshot(paste);
-        db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);   // its object: the row-delete trigger
+        await removePasteScreenshot(paste);
+        await db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);   // its object: the row-delete trigger
         res.json({ success: true });
     } catch (err) {
         console.error('[Pastes] Delete error:', err.message);
@@ -649,24 +649,24 @@ router.delete('/:slug', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Fork (copy) a paste ─────────────────────────────────────
-router.post('/:slug/fork', tenantAuth({ allowUser: true }), (req, res) => {
+router.post('/:slug/fork', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const original = _getPasteScoped(req, res);
+        const original = await _getPasteScoped(req, res);
         if (!original) return;
         if (original.type !== 'paste') return res.status(400).json({ error: 'Only text pastes can be forked' });
-        if (!_rateLimitCheck(req, res)) return;
+        if (!await _rateLimitCheck(req, res)) return;
 
         const actor = _actor(req);
         const userId = req.authType === 'user' ? req.userId : (req.body?.user_id ?? null);
-        const slug = generateSlug();
-        db.run(
+        const slug = await generateSlug();
+        await db.run(
             `INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, forked_from, ip_address)
-             VALUES (?, ?, ?, 'paste', ?, ?, ?, 'public', ?, ?)`,
+             VALUES (?, ?, ?, 'paste', ?, ?, ?, 'public', ?, ?) RETURNING id`,
             [req.appId, slug, userId, `Fork of ${original.title}`,
              original.content, original.language, original.id, actor.ip]
         );
 
-        const paste = db.getPasteBySlug(slug, req.appId);
+        const paste = await db.getPasteBySlug(slug, req.appId);
         res.status(201).json({ id: paste.id, slug, url: `/p/${slug}`, paste: pastePublic(paste) });
     } catch (err) {
         console.error('[Pastes] Fork error:', err.message);
@@ -675,15 +675,15 @@ router.post('/:slug/fork', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Like / Unlike a paste ───────────────────────────────────
-router.post('/:slug/like', tenantAuth({ allowUser: true }), (req, res) => {
+router.post('/:slug/like', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
         const userId = req.authType === 'user' ? req.userId : (req.body?.user_id ?? null);
         if (userId == null) return res.status(400).json({ error: 'user_id required to like' });
 
-        const alreadyLiked = db.hasUserLikedPaste(paste.id, userId);
-        const result = alreadyLiked ? db.unlikePaste(paste.id, userId) : db.likePaste(paste.id, userId);
+        const alreadyLiked = await db.hasUserLikedPaste(paste.id, userId);
+        const result = alreadyLiked ? await db.unlikePaste(paste.id, userId) : await db.likePaste(paste.id, userId);
         res.json({ liked: !alreadyLiked, likes: result?.likes || 0 });
     } catch (err) {
         console.error('[Pastes] Like error:', err.message);
@@ -692,11 +692,11 @@ router.post('/:slug/like', tenantAuth({ allowUser: true }), (req, res) => {
 });
 
 // ── Track a copy event ──────────────────────────────────────
-router.post('/:slug/copy', tenantAuth({ allowUser: true }), (req, res) => {
+router.post('/:slug/copy', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
-        db.incrementPasteCopies(paste.slug);
+        await db.incrementPasteCopies(paste.slug);
         res.json({ copies: (paste.copies || 0) + 1 });
     } catch (err) {
         res.status(500).json({ error: 'Failed to track copy' });
@@ -718,19 +718,19 @@ const _cooldownSweep = require('../drill').enabled ? null : setInterval(() => {
 }, 600_000);
 if (_cooldownSweep && _cooldownSweep.unref) _cooldownSweep.unref();
 
-router.get('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/:slug/comments', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
 
         const limit = Math.min(parseInt(req.query.limit || '50'), 100);
         const offset = parseInt(req.query.offset || '0');
 
-        const comments = db.getPasteComments(paste.id, limit, offset);
-        const total = db.getPasteCommentCount(paste.id);
+        const comments = await db.getPasteComments(paste.id, limit, offset);
+        const total = await db.getPasteCommentCount(paste.id);
 
         for (const c of comments) {
-            c.replies = db.getPasteCommentReplies(c.id);
+            c.replies = await db.getPasteCommentReplies(c.id);
             c.reply_count = c.replies.length;
         }
 
@@ -741,22 +741,22 @@ router.get('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
     }
 });
 
-router.post('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
+router.post('/:slug/comments', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
 
         const ip = req.ip || 'unknown';
         const userId = req.authType === 'user' ? req.userId : (req.body?.user_id ?? null);
 
         // ── Anon check ──────────────────────────────────────
-        if (userId == null && db.getSetting('paste_comment_anon_allowed') === false) {
+        if (userId == null && await db.getSetting('paste_comment_anon_allowed') === false) {
             return res.status(401).json({ error: 'You must be logged in to comment' });
         }
 
         // ── Message validation ──────────────────────────────
         const message = (req.body?.message || '').trim();
-        const maxLen = Number(db.getSetting('paste_comment_max_length')) || 2000;
+        const maxLen = Number(await db.getSetting('paste_comment_max_length')) || 2000;
         if (!message) return res.status(400).json({ error: 'Comment cannot be empty' });
         if (message.length > maxLen) {
             return res.status(400).json({ error: `Comment must be under ${maxLen} characters` });
@@ -771,13 +771,13 @@ router.post('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
 
         // ── Rate limits (user-JWT/browser callers) ──────────
         if (req.authType === 'user') {
-            const cooldownSec = Number(db.getSetting('paste_comment_cooldown_seconds')) || 10;
+            const cooldownSec = Number(await db.getSetting('paste_comment_cooldown_seconds')) || 10;
             const lastComment = commentCooldowns.get(ip);
             if (lastComment && (Date.now() - lastComment) < cooldownSec * 1000) {
                 const wait = Math.ceil((cooldownSec * 1000 - (Date.now() - lastComment)) / 1000);
                 return res.status(429).json({ error: `Please wait ${wait}s before commenting again` });
             }
-            const recentFromIp = db.getRecentPasteCommentsByIp(ip, 60);
+            const recentFromIp = await db.getRecentPasteCommentsByIp(ip, 60);
             if (recentFromIp.length >= 5) {
                 return res.status(429).json({ error: 'Too many comments. Please slow down.' });
             }
@@ -790,7 +790,7 @@ router.post('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
         const parentId = req.body?.parent_id ? parseInt(req.body.parent_id) : null;
         let parent = null;
         if (parentId) {
-            parent = db.getPasteCommentById(parentId);
+            parent = await db.getPasteCommentById(parentId);
             if (!parent || parent.paste_id !== paste.id) {
                 return res.status(400).json({ error: 'Invalid parent comment' });
             }
@@ -800,7 +800,7 @@ router.post('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
             }
         }
 
-        const result = db.createPasteComment({
+        const result = await db.createPasteComment({
             paste_id: paste.id,
             user_id: userId,
             parent_id: parentId,
@@ -811,7 +811,7 @@ router.post('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
 
         commentCooldowns.set(ip, Date.now());
 
-        const comment = db.getPasteCommentById(result.lastInsertRowid);
+        const comment = await db.getPasteCommentById(result.lastInsertRowid);
         res.status(201).json({ comment });
     } catch (err) {
         console.error('[PasteComments] Create error:', err.message);
@@ -819,12 +819,12 @@ router.post('/:slug/comments', tenantAuth({ allowUser: true }), (req, res) => {
     }
 });
 
-router.delete('/:slug/comments/:commentId', tenantAuth({ allowUser: true }), (req, res) => {
+router.delete('/:slug/comments/:commentId', tenantAuth({ allowUser: true }), async (req, res) => {
     try {
-        const paste = _getPasteScoped(req, res);
+        const paste = await _getPasteScoped(req, res);
         if (!paste) return;
 
-        const comment = db.getPasteCommentById(parseInt(req.params.commentId));
+        const comment = await db.getPasteCommentById(parseInt(req.params.commentId));
         if (!comment || comment.paste_id !== paste.id) {
             return res.status(404).json({ error: 'Comment not found' });
         }
@@ -839,7 +839,7 @@ router.delete('/:slug/comments/:commentId', tenantAuth({ allowUser: true }), (re
             }
         }
 
-        db.deletePasteComment(comment.id);
+        await db.deletePasteComment(comment.id);
         res.json({ message: 'Comment deleted' });
     } catch (err) {
         console.error('[PasteComments] Delete error:', err.message);

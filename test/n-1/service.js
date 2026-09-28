@@ -51,6 +51,31 @@ const SEED = `
     db.close();
 `;
 
+// A release on PostgreSQL (ADR-035: migrations/): its database is an embedded PGlite directory under dataDir, which
+// the seed and then the drill-mode boot open one after the other (never both at once).
+const isPg = (dir) => fs.existsSync(path.join(dir, 'migrations'));
+const pgDir = (dataDir) => path.join(dataDir, 'pglite');
+const SEED_PG = `
+    console.log = () => {}; console.warn = () => {};
+    const fs = require('fs'); const path = require('path');
+    const db = require('./server/db/database');
+    (async () => {
+        await db.initDb();
+        await db.upsertApp({ app_id: 'live', name: 'OpenVibe.Live', api_key: ${JSON.stringify(APP_BEARER)} });
+        const put = (dir, name) => { const f = path.join(process.env[dir], name); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'bytes of ' + name); return f; };
+        await db.run("INSERT INTO vods (app_id, user_id, title, file_path, file_size, thumbnail_url, duration_seconds, is_public, visibility) VALUES ('live', 1, 'N-1 VOD', ?, 18, '/t/vod-1-1.jpg', 60, 1, 'public')", [put('VOD_PATH', 'vod-1.mp4')]);
+        await db.run("INSERT INTO clips (app_id, vod_id, user_id, title, file_path, duration_seconds, status, is_public, visibility) VALUES ('live', 1, 1, 'N-1 clip', ?, 10, 'ready', 1, 'public')", [put('CLIPS_PATH', 'clip-1.mp4')]);
+        await db.run("INSERT INTO pastes (app_id, slug, type, title, content, visibility) VALUES ('live', 'n1paste', 'paste', 'N-1 paste', 'hello from N-1', 'public')");
+        await db.run("INSERT INTO files (key, app_id, original_name, size, mime) VALUES ('n1file.txt', 'live', 'n1file.txt', 17, 'text/plain')");
+        put('FILES_PATH', 'live/n1file.txt'); put('THUMBNAILS_PATH', 'vod-1-1.jpg');
+        await require('./server/objects/backfill').backfill({ onlyMissing: true });
+        const obj = await db.get("SELECT id FROM media_objects WHERE kind = 'vod' ORDER BY created_at, id LIMIT 1");
+        fs.writeFileSync(path.join(process.env.N1_DATA, 'n1-ids.json'), JSON.stringify({ object: obj ? obj.id : null }));
+        await db.close();
+        process.exit(0);
+    })().catch((err) => { process.stderr.write(String(err.stack || err)); process.exit(1); });
+`;
+
 module.exports = {
     service: 'media',
 
@@ -84,7 +109,9 @@ module.exports = {
 
     /** Seeds a database with the release in `dir` (opening it migrates first). */
     seed({ dir, dbPath, dataDir }) {
-        const r = spawnSync(process.execPath, ['-e', SEED], { cwd: dir, encoding: 'utf8', timeout: 120000, env: baseEnv(dbPath, dataDir, {}) });
+        const pg = isPg(dir);
+        const r = spawnSync(process.execPath, ['-e', pg ? SEED_PG : SEED], { cwd: dir, encoding: 'utf8', timeout: 120000,
+            env: baseEnv(dbPath, dataDir, pg ? { MEDIA_PGLITE_DIR: pgDir(dataDir), N1_DATA: dataDir } : {}) });
         if (r.status !== 0) throw new Error(`seeding failed:\n${String(r.stderr || '').slice(-2000)}`);
     },
 
@@ -93,7 +120,7 @@ module.exports = {
         const port = await freePort();
         const child = spawn(process.execPath, ['-r', PRELOAD, 'server/index.js'], {
             cwd: dir,
-            env: baseEnv(dbPath, dataDir, { MEDIA_DRILL: '1', HOST: '127.0.0.1', PORT: String(port), N1_SQL_OUT: sqlOut }),
+            env: baseEnv(dbPath, dataDir, { MEDIA_DRILL: '1', HOST: '127.0.0.1', PORT: String(port), N1_SQL_OUT: sqlOut, ...(isPg(dir) ? { MEDIA_PGLITE_DIR: pgDir(dataDir) } : {}) }),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         let log = '';
@@ -109,7 +136,9 @@ module.exports = {
         }
         // The seeded VOD's object (ids are random): the SDK's object calls address it.
         let object = null;
-        try {
+        if (isPg(dir)) {
+            try { object = JSON.parse(fs.readFileSync(path.join(dataDir, 'n1-ids.json'), 'utf8')).object; } catch { /* not seeded */ }
+        } else try {
             const Database = require('better-sqlite3');
             const d = new Database(dbPath, { readonly: true, fileMustExist: true });
             try { object = (d.prepare("SELECT id FROM media_objects WHERE kind = 'vod' ORDER BY created_at, id LIMIT 1").get() || {}).id || null; } finally { d.close(); }

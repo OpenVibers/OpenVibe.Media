@@ -173,9 +173,9 @@ function verbAllowed(claims, verb, namespace, { strict = false } = {}) {
  * namespace reads) checks each namespace it touches with namespaceGrant(); here the token must hold
  * the verb and some namespace of this tenant. A `capability` route checks it for the root, as before.
  */
-function tenantGrant(claims, { capability, verb, namespaced }, appId, root) {
+async function tenantGrant(claims, { capability, verb, namespaced }, appId, root) {
     if (!verb) return capabilities.check({ ...claims, ns: grantedNamespaces(claims) }, capability, { namespace: root });
-    if (!namespaced) return verbAllowed(claims, verb, root, { strict: require('./objects/namespaces').isStrict(appId, root) });
+    if (!namespaced) return verbAllowed(claims, verb, root, { strict: await require('./objects/namespaces').isStrict(appId, root) });
     const c = verbAllowed(claims, verb, undefined);
     if (!c.allowed) return c;
     return touchesTenant(grantedNamespaces(claims), root) ? c : { allowed: false, code: 'capability.namespace_denied', reason: `namespace ${root} not granted` };
@@ -185,9 +185,9 @@ function tenantGrant(claims, { capability, verb, namespaced }, appId, root) {
  * May this request do `verb` in `namespace` of its tenant? The app key (and an upload or session
  * token, scoped to its object already) may do anything; a Network token as its grant says.
  */
-function namespaceGrant(req, verb, namespace) {
+async function namespaceGrant(req, verb, namespace) {
     if (!req.grant) return { allowed: true, code: null, reason: null };
-    return verbAllowed(req.grant, verb, namespace, { strict: require('./objects/namespaces').isStrict(req.appId, namespace) });
+    return verbAllowed(req.grant, verb, namespace, { strict: await require('./objects/namespaces').isStrict(req.appId, namespace) });
 }
 
 // ── Developer-project tenants (roadmap Wave 20, ADR-014) ─────
@@ -202,17 +202,17 @@ const isAppPrincipal = (claims) => !!claims && (claims.actor_type === 'app' || /
  * app.<project_id> and app.<project_id>.sandbox with their children. Nothing is created unless the
  * token's project_id is the path's project and the token holds this route's verb there.
  */
-function projectTenant(req, res, next, projectId, claims, grant) {
+async function projectTenant(req, res, next, projectId, claims, grant) {
     if (claims.project_id !== projectId) {
         return problem(res, 403, 'capability.namespace_denied', `this app token belongs to ${claims.project_id || 'no project'}, not ${projectId}`);
     }
     const env = claims.env === 'sandbox' ? 'sandbox' : 'production';
     const tenantId = db.projectTenantId(projectId, env);
-    const c = tenantGrant(claims, grant, tenantId, db.rootNamespace({ app_id: tenantId, project_id: projectId, env }));
+    const c = await tenantGrant(claims, grant, tenantId, db.rootNamespace({ app_id: tenantId, project_id: projectId, env }));
     if (!c.allowed) return problem(res, 403, c.code, c.reason);
     let tenant;
     try {
-        tenant = db.ensureProjectTenant(projectId, env, (env === 'sandbox' ? config.apps.sandboxQuotaMb : config.apps.projectQuotaMb) * 1024 * 1024);
+        tenant = await db.ensureProjectTenant(projectId, env, (env === 'sandbox' ? config.apps.sandboxQuotaMb : config.apps.projectQuotaMb) * 1024 * 1024);
     } catch (err) {
         if (err.code === 'media.tenant.conflict') return problem(res, 409, err.code, err.message);
         throw err;
@@ -236,7 +236,7 @@ function tenantPath(app) {
  * Tenants that exist only to be reached with service tokens (no API key is ever issued):
  * OpenVibe.Community stores screenshot bytes here under its own namespace.
  */
-function ensureTokenOnlyApps() {
+async function ensureTokenOnlyApps() {
     // Services that reach Media only with Network service tokens (no app key). Quotas are per tenant.
     for (const [appId, name, quotaGb] of [
         ['community', 'OpenVibe.Community', 10],
@@ -245,8 +245,8 @@ function ensureTokenOnlyApps() {
         ['wiki', 'OpenVibe.Wiki', 10],         // Wave 16 page attachments
         ['blog', 'OpenVibe.Blog', 10],         // Wave 16 post attachments
     ]) {
-        if (!db.getApp(appId)) db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, quotaGb * 1024 ** 3]);
-        db.ensureRootNamespace(db.getApp(appId));
+        if (!await db.getApp(appId)) await db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, quotaGb * 1024 ** 3]);
+        await db.ensureRootNamespace(await db.getApp(appId));
     }
 }
 
@@ -305,7 +305,7 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
     if (verb && !VERBS[verb]) throw new Error(`tenantAuth: unknown verb ${verb}`);
     const named = verb ? VERBS[verb][0] : capability;
     const grant = { capability, verb, namespaced };
-    return (req, res, next) => {
+    return async (req, res, next) => {
         const appId = String(req.params.app || '').trim();
         const token = bearerToken(req);
 
@@ -327,11 +327,11 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
                 return problem(res, 403, named ? 'capability.namespace_denied' : 'capability.denied',
                     named ? 'app tokens reach only /<project_id>/ tenants' : 'app tokens are not accepted on this route');
             }
-            return projectTenant(req, res, next, appId, svc, grant);
+            return await projectTenant(req, res, next, appId, svc, grant);
         }
         if (svc && svc.env === 'sandbox') return problem(res, 401, 'token.sandbox_refused', 'only developer-app sandbox tokens are accepted, on their own project tenant');
 
-        const app = appId ? db.getApp(appId) : null;
+        const app = appId ? await db.getApp(appId) : null;
         // Developer-project tenants are reachable only through their project's app tokens (above).
         if (!app || app.project_id) return res.status(404).json({ error: 'Unknown app' });
         req.appId = appId;
@@ -351,7 +351,7 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
             }
             return next();
         }
-        if (token && isKeyOfOtherApp(token, appId)) {
+        if (token && await isKeyOfOtherApp(token, appId)) {
             return res.status(403).json({ error: 'API key not valid for this app' });
         }
 
@@ -361,7 +361,7 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
         //     that one action — no acting user.
         if (svc) {
             if (!named) return problem(res, 403, 'capability.denied', 'service tokens are not accepted on this route');
-            const c = tenantGrant(svc, grant, appId, db.rootNamespace(app));
+            const c = await tenantGrant(svc, grant, appId, db.rootNamespace(app));
             if (!c.allowed) return problem(res, 403, c.code, c.reason);
             req.authType = 'app';
             req.principal = { sub: svc.sub, cap: svc.cap, jti: svc.jti };
@@ -392,9 +392,9 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
 }
 
 /** Does the presented key belong to some OTHER app? (for a precise 403) */
-function isKeyOfOtherApp(presentedKey, exceptAppId) {
+async function isKeyOfOtherApp(presentedKey, exceptAppId) {
     const hash = db.hashApiKey(presentedKey);
-    const row = db.get('SELECT app_id FROM apps WHERE api_key_hash = ?', [hash]);
+    const row = await db.get('SELECT app_id FROM apps WHERE api_key_hash = ?', [hash]);
     return !!(row && row.app_id !== exceptAppId);
 }
 
@@ -405,11 +405,11 @@ function isKeyOfOtherApp(presentedKey, exceptAppId) {
  * A Network JWT is deliberately NOT an identity here — see tenantAuth for why its
  * subject cannot be used as an app-local user id.
  */
-function optionalIdentity(req, _res, next) {
+async function optionalIdentity(req, _res, next) {
     const token = bearerToken(req);
     if (token) {
         const hash = db.hashApiKey(token);
-        const appRow = db.get('SELECT * FROM apps WHERE api_key_hash = ?', [hash]);
+        const appRow = await db.get('SELECT * FROM apps WHERE api_key_hash = ?', [hash]);
         if (appRow) {
             req.authType = 'app';
             req.appRow = appRow;
@@ -438,7 +438,7 @@ function tenantCors(req, res, next) {
 
 // ── App seeding ──────────────────────────────────────────────
 
-function seedApps() {
+async function seedApps() {
     let seeded = 0;
 
     if (config.apps.seedJson) {
@@ -447,7 +447,7 @@ function seedApps() {
             for (const entry of Array.isArray(list) ? list : []) {
                 if (!entry || !entry.app_id || !entry.api_key) continue;
                 if (/^prj_/.test(String(entry.app_id))) { console.warn(`[Auth] MEDIA_APPS_SEED: ${entry.app_id} skipped (developer-project tenants never get an API key)`); continue; }
-                db.upsertApp(entry);
+                await db.upsertApp(entry);
                 seeded++;
             }
         } catch (err) {
@@ -464,9 +464,9 @@ function seedApps() {
             if (!app_id || !api_key) continue;
             if (/^prj_/.test(app_id)) { console.warn(`[Auth] MEDIA_APP_KEYS: ${app_id} skipped (developer-project tenants never get an API key)`); continue; }
             // Don't clobber a richer MEDIA_APPS_SEED entry for the same app.
-            const existing = db.getApp(app_id);
+            const existing = await db.getApp(app_id);
             if (existing && config.apps.seedJson && config.apps.seedJson.includes(`"${app_id}"`)) continue;
-            db.upsertApp({
+            await db.upsertApp({
                 app_id,
                 name: existing?.name || app_id,
                 api_key,
@@ -479,8 +479,8 @@ function seedApps() {
         }
     }
 
-    if (seeded) console.log(`[Auth] Seeded/updated ${seeded} app(s): ${db.listApps().map(a => a.app_id).join(', ')}`);
-    else if (!db.listApps().length) console.warn('[Auth] No apps configured — set MEDIA_APPS_SEED (all API calls will 404)');
+    if (seeded) console.log(`[Auth] Seeded/updated ${seeded} app(s): ${(await db.listApps()).map(a => a.app_id).join(', ')}`);
+    else if (!(await db.listApps()).length) console.warn('[Auth] No apps configured — set MEDIA_APPS_SEED (all API calls will 404)');
 }
 
 module.exports = {

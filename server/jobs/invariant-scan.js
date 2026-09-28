@@ -50,8 +50,8 @@ function proposalKey(objectId, type) {
  * The validator. `dryRun` writes nothing (no violation rows, no proposals) and returns what it would
  * propose. Used by the job below and by scripts/media-jobs.js scan.
  */
-function scanTenant(appId, { dryRun = false, scanJobId = null } = {}) {
-    const report = invariant.scan({ record: !dryRun, appId });
+async function scanTenant(appId, { dryRun = false, scanJobId = null } = {}) {
+    const report = await invariant.scan({ record: !dryRun, appId });
     const t = report.thresholds;
     const out = {
         thresholds: t, counts: report.counts, violations: 0, proposed: 0, already_proposed: 0, withdrawn: 0,
@@ -62,19 +62,19 @@ function scanTenant(appId, { dryRun = false, scanJobId = null } = {}) {
         if (v.level !== 'violation') continue;
         out.violations++;
         violating.add(v.object_id);
-        const obj = model.getObject(v.object_id);
+        const obj = await model.getObject(v.object_id);
         if (!obj) continue;
         const plan = planFor(obj, t);
         out.by_type[plan.type] = (out.by_type[plan.type] || 0) + 1;
         const key = proposalKey(obj.id, plan.type);
         if (dryRun) {
-            const prior = db.get('SELECT id, status FROM media_jobs WHERE app_id = ? AND idempotency_key = ?', [appId, key]);
+            const prior = await db.get('SELECT id, status FROM media_jobs WHERE app_id = ? AND idempotency_key = ?', [appId, key]);
             if (prior) out.already_proposed++; else out.proposed++;
             out.proposals.push({ object_id: obj.id, legacy_ref: obj.legacy_ref, size_bytes: obj.size_bytes, type: plan.type, params: plan.params, existing: prior || null });
             continue;
         }
         try {
-            const r = queue.enqueue({
+            const r = await queue.enqueue({
                 appId, type: plan.type, objectId: obj.id, params: plan.params, status: 'proposed',
                 idempotencyKey: key, createdBy: scanJobId ? `${SYSTEM}:${scanJobId}` : SYSTEM,
             });
@@ -85,11 +85,11 @@ function scanTenant(appId, { dryRun = false, scanJobId = null } = {}) {
         }
     }
     // Withdraw open proposals whose object no longer breaks the policy.
-    const open = db.all(`SELECT id, object_id FROM media_jobs WHERE app_id = ? AND status = 'proposed' AND created_by LIKE ?`, [appId, `${SYSTEM}%`]);
+    const open = await db.all(`SELECT id, object_id FROM media_jobs WHERE app_id = ? AND status = 'proposed' AND created_by ILIKE ?`, [appId, `${SYSTEM}%`]);
     for (const p of open) {
         if (violating.has(p.object_id)) continue;
         if (dryRun) { out.withdrawn++; continue; }
-        const r = queue.cancel(p.id, { by: SYSTEM, reason: 'the object no longer breaks the public size policy' });
+        const r = await queue.cancel(p.id, { by: SYSTEM, reason: 'the object no longer breaks the public size policy' });
         if (r && r.job && r.job.status === 'cancelled') out.withdrawn++;
     }
     if (!dryRun) delete out.proposals;
@@ -97,7 +97,7 @@ function scanTenant(appId, { dryRun = false, scanJobId = null } = {}) {
 }
 
 async function run(job) {
-    return scanTenant(job.app_id, { scanJobId: job.id });
+    return await scanTenant(job.app_id, { scanJobId: job.id });
 }
 
 function validate({ obj }) {

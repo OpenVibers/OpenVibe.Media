@@ -119,22 +119,22 @@ function writeReport(report, file = null) {
 }
 
 /** Write one repair (only if the row still has the value we read). Returns true when it changed. */
-function applyRepair(row) {
+async function applyRepair(row) {
     // The row and its object in one transaction (the object only when the row changed).
-    return db.withObject('vod', (r) => (r.changes > 0 ? row.vod_id : null), () => db.run(`UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ?
+    return (await db.withObject('vod', (r) => (r.changes > 0 ? row.vod_id : null), async () => await db.run(`UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ?
                             WHERE id = ? AND COALESCE(duration_seconds, 0) = ? AND COALESCE(duration_source, '') = ? AND COALESCE(is_recording, 0) = 0`,
-    [Math.round(row.measured), row.measured, row.measured_source, row.vod_id, row.stored, row.stored_source || ''])).changes > 0;
+    [Math.round(row.measured), row.measured, row.measured_source, row.vod_id, row.stored, row.stored_source || '']))).changes > 0;
 }
 
 /** Undo repairs listed in a report (only rows that still hold what the repair wrote). */
-function rollback(rows, { apply = false } = {}) {
+async function rollback(rows, { apply = false } = {}) {
     const out = { restored: 0, would_restore: 0, changed_since: 0 };
     for (const r of rows || []) {
         if (r.action !== 'repaired') continue;
-        const cur = db.get('SELECT duration_seconds, duration_source FROM vods WHERE id = ?', [r.vod_id]);
+        const cur = await db.get('SELECT duration_seconds, duration_source FROM vods WHERE id = ?', [r.vod_id]);
         if (!cur || Number(cur.duration_seconds) !== Math.round(r.measured) || (cur.duration_source || '') !== (r.measured_source || '')) { out.changed_since++; continue; }
         if (!apply) { out.would_restore++; continue; }
-        db.withObject('vod', r.vod_id, () => db.run('UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ? WHERE id = ?',
+        await db.withObject('vod', r.vod_id, async () => await db.run('UPDATE vods SET duration_seconds = ?, probe_duration_seconds = ?, duration_source = ? WHERE id = ?',
             [r.stored, r.stored_probe ?? r.stored, r.stored_source || null, r.vod_id]));
         out.restored++;
     }
@@ -152,7 +152,7 @@ async function reconcileBatch({ appId = null, afterId = 0, limit = 50, ids = nul
     const params = [];
     if (appId) { conds.push('app_id = ?'); params.push(appId); }
     if (ids && ids.length) { conds.push(`id IN (${ids.map(() => '?').join(', ')})`); params.push(...ids.map(Number)); } else { conds.push('id > ?'); params.push(Number(afterId) || 0); }
-    const vods = db.all(`SELECT * FROM vods WHERE ${conds.join(' AND ')} ORDER BY id LIMIT ?`, [...params, n]);
+    const vods = await db.all(`SELECT * FROM vods WHERE ${conds.join(' AND ')} ORDER BY id LIMIT ?`, [...params, n]);
     const report = {
         kind: 'media.vod.duration_reconcile', version: 1, run_at: new Date().toISOString(), mode: apply ? 'apply' : 'dry-run',
         app_id: appId, thresholds: THRESHOLDS, confirm_remote: !!confirmRemote,
@@ -185,13 +185,13 @@ async function reconcileBatch({ appId = null, afterId = 0, limit = 50, ids = nul
             if (verdict === 'wrong' || verdict === 'missing') {
                 if (!m.confirmed) { row.action = 'unconfirmed'; report.counts.unconfirmed++; }
                 else if (!apply) { row.action = 'would_repair'; report.counts.would_repair++; }
-                else if (applyRepair(row)) { row.action = 'repaired'; report.counts.repaired++; }
+                else if (await applyRepair(row)) { row.action = 'repaired'; report.counts.repaired++; }
                 else { row.action = 'changed_since'; report.counts.changed_since++; }
             }
         }
         report.counts[row.verdict]++;
         report.rows.push(row);
-        if (onRow) onRow(row);
+        if (onRow) await onRow(row);
     }
     return report;
 }

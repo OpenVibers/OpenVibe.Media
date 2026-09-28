@@ -27,23 +27,23 @@ function scoped(appId, col = 'app_id') {
     return appId ? { sql: ` AND ${col} = ?`, params: [appId] } : { sql: '', params: [] };
 }
 
-function tableExists(name) {
-    return !!db.get("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?", [name]);
+async function tableExists(name) {
+    return !!await db.get("SELECT 1 AS x FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?", [name]);
 }
 
 // ── Jobs ─────────────────────────────────────────────────────
 
-function jobs(appId, limit) {
+async function jobs(appId, limit) {
     const s = scoped(appId);
     const byStatus = {};
-    for (const r of db.all(`SELECT status, COUNT(*) AS n FROM media_jobs WHERE 1 = 1${s.sql} GROUP BY status`, s.params)) byStatus[r.status] = r.n;
+    for (const r of await db.all(`SELECT status, COUNT(*) AS n FROM media_jobs WHERE 1 = 1${s.sql} GROUP BY status`, s.params)) byStatus[r.status] = r.n;
     const total = byStatus.failed || 0;
-    const week = db.all(`SELECT job_type, COALESCE(error_code, '') AS error_code, COUNT(*) AS n FROM media_jobs
+    const week = (await db.all(`SELECT job_type, COALESCE(error_code, '') AS error_code, COUNT(*) AS n FROM media_jobs
                          WHERE status = 'failed' AND COALESCE(finished_at, updated_at) >= datetime('now', '-7 days')${s.sql}
-                         GROUP BY job_type, error_code ORDER BY n DESC, job_type`, s.params)
+                         GROUP BY job_type, error_code ORDER BY n DESC, job_type`, s.params))
         .map(r => ({ type: r.job_type, error_code: r.error_code || null, count: r.n }));
-    const recent = db.all(`SELECT id, app_id, object_id, job_type, error_code, error, attempts, max_attempts, created_by, created_at, finished_at, updated_at
-                           FROM media_jobs WHERE status = 'failed'${s.sql} ORDER BY COALESCE(finished_at, updated_at) DESC, id DESC LIMIT ?`, [...s.params, limit])
+    const recent = (await db.all(`SELECT id, app_id, object_id, job_type, error_code, error, attempts, max_attempts, created_by, created_at, finished_at, updated_at
+                           FROM media_jobs WHERE status = 'failed'${s.sql} ORDER BY COALESCE(finished_at, updated_at) DESC, id DESC LIMIT ?`, [...s.params, limit]))
         .map(j => ({
             id: j.id, app_id: j.app_id, object_id: j.object_id || null, type: j.job_type, error_code: j.error_code || null,
             error: clip(j.error, 500), attempts: j.attempts, max_attempts: j.max_attempts, created_by: j.created_by || null,
@@ -54,32 +54,32 @@ function jobs(appId, limit) {
 
 // ── Missing media ────────────────────────────────────────────
 
-function missing(appId, limit) {
+async function missing(appId, limit) {
     const s = scoped(appId, 'o.app_id');
-    const q = { get: (sql, p) => db.get(sql, p), all: (sql, p) => db.all(sql, p) };
-    const noGood = copyReport.countNoGoodCopy(q, { appId });
-    const hasVerifications = tableExists('media_verifications');
-    const noGoodList = db.all(`SELECT o.id, o.app_id, o.kind, o.legacy_ref, o.size_bytes${hasVerifications ? ', v.status AS verify_status, v.verified_at' : ''}
+    const q = { get: async (sql, p) => await db.get(sql, p), all: async (sql, p) => await db.all(sql, p) };
+    const noGood = await copyReport.countNoGoodCopy(q, { appId });
+    const hasVerifications = await tableExists('media_verifications');
+    const noGoodList = (await db.all(`SELECT o.id, o.app_id, o.kind, o.legacy_ref, o.size_bytes${hasVerifications ? ', v.status AS verify_status, v.verified_at' : ''}
                                FROM media_objects o${hasVerifications ? ' LEFT JOIN media_verifications v ON v.object_id = o.id' : ''}
-                               WHERE ${copyReport.NO_GOOD_COPY_WHERE}${s.sql} ORDER BY o.app_id, o.id LIMIT ?`, [...s.params, limit])
+                               WHERE ${copyReport.NO_GOOD_COPY_WHERE}${s.sql} ORDER BY o.app_id, o.id LIMIT ?`, [...s.params, limit]))
         .map(o => ({ id: o.id, app_id: o.app_id, kind: o.kind, legacy_ref: o.legacy_ref || null, size_bytes: o.size_bytes,
             last_verification: hasVerifications && o.verify_status ? { status: o.verify_status, at: iso(o.verified_at) } : null }));
-    const byState = db.all(`SELECT l.provider, l.state, COUNT(*) AS n FROM media_locations l JOIN media_objects o ON o.id = l.object_id
-                            WHERE o.lifecycle_status != 'deleted'${s.sql} GROUP BY l.provider, l.state ORDER BY l.provider, l.state`, s.params)
+    const byState = (await db.all(`SELECT l.provider, l.state, COUNT(*) AS n FROM media_locations l JOIN media_objects o ON o.id = l.object_id
+                            WHERE o.lifecycle_status != 'deleted'${s.sql} GROUP BY l.provider, l.state ORDER BY l.provider, l.state`, s.params))
         .map(r => ({ provider: r.provider, state: r.state, count: r.n }));
-    const bad = db.all(`SELECT l.object_id, l.provider, l.state, l.verified_at, o.app_id, o.kind, o.legacy_ref, o.lifecycle_status
+    const bad = (await db.all(`SELECT l.object_id, l.provider, l.state, l.verified_at, o.app_id, o.kind, o.legacy_ref, o.lifecycle_status
                         FROM media_locations l JOIN media_objects o ON o.id = l.object_id
                         WHERE l.state IN ('missing', 'corrupt') AND o.lifecycle_status != 'deleted'${s.sql}
-                        ORDER BY COALESCE(l.verified_at, '') DESC, l.id DESC LIMIT ?`, [...s.params, limit])
+                        ORDER BY COALESCE(l.verified_at, '') DESC, l.id DESC LIMIT ?`, [...s.params, limit]))
         .map(r => ({ object_id: r.object_id, app_id: r.app_id, kind: r.kind, legacy_ref: r.legacy_ref || null, lifecycle_status: r.lifecycle_status,
             provider: r.provider, state: r.state, verified_at: iso(r.verified_at) }));
     const vs = scoped(appId);
     const quarantined = {};
-    for (const r of db.all(`SELECT health_status, COUNT(*) AS n FROM vods WHERE health_status IN ('missing_file', 'zero_byte', 'corrupt', 'needs_review')${vs.sql}
+    for (const r of await db.all(`SELECT health_status, COUNT(*) AS n FROM vods WHERE health_status IN ('missing_file', 'zero_byte', 'corrupt', 'needs_review')${vs.sql}
                             GROUP BY health_status`, vs.params)) quarantined[r.health_status] = r.n;
     const verification = { last_run: null, statuses: {} };
-    if (tableExists('media_verify_runs')) {
-        const r = db.get('SELECT * FROM media_verify_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1');
+    if (await tableExists('media_verify_runs')) {
+        const r = await db.get('SELECT * FROM media_verify_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1');
         if (r) {
             verification.last_run = { id: r.id, started_at: iso(r.started_at), finished_at: iso(r.finished_at), objects_checked: r.objects_checked,
                 good: r.good, no_good_copy: r.no_good_copy, unverifiable: r.unverifiable, reuploaded: r.reuploaded, reupload_failed: r.reupload_failed,
@@ -87,7 +87,7 @@ function missing(appId, limit) {
         }
     }
     if (hasVerifications) {
-        for (const r of db.all(`SELECT v.status, COUNT(*) AS n FROM media_verifications v JOIN media_objects o ON o.id = v.object_id WHERE 1 = 1${s.sql} GROUP BY v.status`, s.params)) {
+        for (const r of await db.all(`SELECT v.status, COUNT(*) AS n FROM media_verifications v JOIN media_objects o ON o.id = v.object_id WHERE 1 = 1${s.sql} GROUP BY v.status`, s.params)) {
             verification.statuses[r.status] = r.n;
         }
     }
@@ -102,16 +102,16 @@ function missing(appId, limit) {
 
 // ── Backfill ─────────────────────────────────────────────────
 
-function backfill(appId) {
+async function backfill(appId) {
     const s = scoped(appId);
-    const last = require('../objects/backfill').lastReport();
+    const last = await require('../objects/backfill').lastReport();
     const unprojected = {
-        vods: db.get(`SELECT COUNT(*) AS n FROM vods WHERE object_id IS NULL AND COALESCE(clips_only, 0) = 0${s.sql}`, s.params).n,
-        clips: db.get(`SELECT COUNT(*) AS n FROM clips WHERE object_id IS NULL${s.sql}`, s.params).n,
-        files: db.get(`SELECT COUNT(*) AS n FROM files WHERE object_id IS NULL${s.sql}`, s.params).n,
-        screenshots: db.get(`SELECT COUNT(*) AS n FROM pastes WHERE object_id IS NULL AND type = 'screenshot' AND COALESCE(screenshot_path, '') != ''${s.sql}`, s.params).n,
+        vods: (await db.get(`SELECT COUNT(*) AS n FROM vods WHERE object_id IS NULL AND COALESCE(clips_only, 0) = 0${s.sql}`, s.params)).n,
+        clips: (await db.get(`SELECT COUNT(*) AS n FROM clips WHERE object_id IS NULL${s.sql}`, s.params)).n,
+        files: (await db.get(`SELECT COUNT(*) AS n FROM files WHERE object_id IS NULL${s.sql}`, s.params)).n,
+        screenshots: (await db.get(`SELECT COUNT(*) AS n FROM pastes WHERE object_id IS NULL AND type = 'screenshot' AND COALESCE(screenshot_path, '') != ''${s.sql}`, s.params)).n,
     };
-    const owner = db.all(`SELECT app_id, COUNT(*) AS n FROM media_objects WHERE owner_subject IS NULL AND owner_user_id IS NOT NULL
+    const owner = await db.all(`SELECT app_id, COUNT(*) AS n FROM media_objects WHERE owner_subject IS NULL AND owner_user_id IS NOT NULL
                           AND lifecycle_status != 'deleted'${s.sql} GROUP BY app_id ORDER BY n DESC`, s.params);
     return {
         objects: last ? {
@@ -122,48 +122,48 @@ function backfill(appId) {
         } : null,
         unprojected,
         owner_subject: { missing: owner.reduce((a, r) => a + r.n, 0), by_app: owner.map(r => ({ app_id: r.app_id, count: r.n })) },
-        namespace_reservations_seeded: !!db.get("SELECT 1 AS x FROM media_settings WHERE key = 'namespaces.reservations_seeded'"),
+        namespace_reservations_seeded: !!await db.get("SELECT 1 AS x FROM media_settings WHERE key = 'namespaces.reservations_seeded'"),
         note: 'objects: the last boot or scripted backfill that changed something (media_settings objects.backfill.last_report). unprojected: rows with no object yet. owner_subject: objects the owner-subject job has not resolved.',
     };
 }
 
 // ── Tiering ──────────────────────────────────────────────────
 
-function tiering(appId, limit) {
+async function tiering(appId, limit) {
     const vodStorage = require('../vod/vod-storage');
     const s = scoped(appId);
-    const providers = (table, bytes) => {
+    const providers = async (table, bytes) => {
         const out = {};
-        for (const r of db.all(`SELECT COALESCE(storage_provider, 'local') AS p, COUNT(*) AS n${bytes ? ', COALESCE(SUM(file_size), 0) AS b' : ''}
+        for (const r of await db.all(`SELECT COALESCE(storage_provider, 'local') AS p, COUNT(*) AS n${bytes ? ', COALESCE(SUM(file_size), 0)::bigint AS b' : ''}
                                 FROM ${table} WHERE 1 = 1${s.sql} GROUP BY p`, s.params)) out[r.p] = bytes ? { count: r.n, bytes: r.b } : { count: r.n };
         return out;
     };
-    const objects = db.all(`SELECT COALESCE(canonical_provider, 'none') AS p, CASE WHEN legacy_ref IS NULL THEN 'native' ELSE 'projected' END AS origin,
-                                   COUNT(*) AS n, COALESCE(SUM(size_bytes), 0) AS b
-                            FROM media_objects WHERE lifecycle_status != 'deleted'${s.sql} GROUP BY p, origin ORDER BY origin, p`, s.params)
+    const objects = (await db.all(`SELECT COALESCE(canonical_provider, 'none') AS p, CASE WHEN legacy_ref IS NULL THEN 'native' ELSE 'projected' END AS origin,
+                                   COUNT(*) AS n, COALESCE(SUM(size_bytes), 0)::bigint AS b
+                            FROM media_objects WHERE lifecycle_status != 'deleted'${s.sql} GROUP BY p, origin ORDER BY origin, p`, s.params))
         .map(r => ({ canonical_provider: r.p, origin: r.origin, count: r.n, bytes: r.b }));
     const settings = vodStorage.getSettings();
-    const pendingOffload = db.get(`SELECT COUNT(*) AS c FROM vods WHERE ${vodStorage.OFFLOADABLE_WHERE}
+    const pendingOffload = (await db.get(`SELECT COUNT(*) AS c FROM vods WHERE ${vodStorage.OFFLOADABLE_WHERE}
             AND created_at <= datetime('now', ?) AND COALESCE(view_count, 0) <= ?
             AND (last_accessed_at IS NULL OR last_accessed_at <= datetime('now', ?))${s.sql}`,
-    [`-${Number(settings.minAgeDays) || 0} days`, Number(settings.maxViewsForCold) || 0, `-${Number(settings.minLastAccessDays) || 0} days`, ...s.params]).c;
+    [`-${Number(settings.minAgeDays) || 0} days`, Number(settings.maxViewsForCold) || 0, `-${Number(settings.minLastAccessDays) || 0} days`, ...s.params])).c;
     const decisions = { promote: { done: 0, already: 0, refused: 0, failed: 0 }, demote: { done: 0, already: 0, refused: 0, failed: 0 } };
-    for (const r of db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_tier_decisions
-                            WHERE decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')${s.sql} GROUP BY action, outcome`, s.params)) {
+    for (const r of await db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_tier_decisions
+                            WHERE decided_at >= ov_now_iso('-1 day')${s.sql} GROUP BY action, outcome`, s.params)) {
         if (decisions[r.action]) decisions[r.action][r.outcome] = r.n;
     }
-    const problems = db.all(`SELECT id, decided_at, app_id, vod_id, object_id, action, from_provider, to_provider, outcome, trigger, reason, error
-                             FROM media_tier_decisions WHERE outcome IN ('refused', 'failed')${s.sql} ORDER BY id DESC LIMIT ?`, [...s.params, Math.min(limit, 20)])
+    const problems = (await db.all(`SELECT id, decided_at, app_id, vod_id, object_id, action, from_provider, to_provider, outcome, trigger, reason, error
+                             FROM media_tier_decisions WHERE outcome IN ('refused', 'failed')${s.sql} ORDER BY id DESC LIMIT ?`, [...s.params, Math.min(limit, 20)]))
         .map(r => ({ ...r, reason: clip(r.reason, 300), error: clip(r.error, 300) }));
     const sweep = vodStorage.sweepInfo();
     // Native v2 objects (objects/tiering.js): the activation gate, the policy, R2 copies, what would be promoted
     // now, and the decisions (dry runs included), from the database like everything here.
-    const nativeObjects = require('../objects/tiering').report({ appId, limit: Math.min(limit, 20) });
+    const nativeObjects = await require('../objects/tiering').report({ appId, limit: Math.min(limit, 20) });
     return {
         providers: { b2: vodStorage.providerConfigured('b2'), r2: vodStorage.providerConfigured('r2') },
         policy: { enabled: !!settings.enabled, r2_enabled: !!settings.r2Enabled, min_age_days: settings.minAgeDays, max_views_for_cold: settings.maxViewsForCold, min_last_access_days: settings.minLastAccessDays },
-        vods: providers('vods', true),
-        clips: providers('clips', false),
+        vods: await providers('vods', true),
+        clips: await providers('clips', false),
         objects,
         pending_offload: pendingOffload,
         decisions_24h: decisions,
@@ -185,38 +185,38 @@ function tiering(appId, limit) {
 
 // ── Namespaces ───────────────────────────────────────────────
 
-function namespaceSnapshot(appId) {
+async function namespaceSnapshot(appId) {
     const s = scoped(appId);
     const apps = new Map();
-    return db.all(`SELECT * FROM media_namespaces WHERE 1 = 1${s.sql} ORDER BY app_id, namespace`, s.params).map((row) => {
-        if (!apps.has(row.app_id)) apps.set(row.app_id, db.getApp(row.app_id) || { app_id: row.app_id });
-        return { app_id: row.app_id, ...namespaces.publicShape(apps.get(row.app_id), row) };
-    });
+    return (await Promise.all((await db.all(`SELECT * FROM media_namespaces WHERE 1 = 1${s.sql} ORDER BY app_id, namespace`, s.params)).map(async (row) => {
+        if (!apps.has(row.app_id)) apps.set(row.app_id, await db.getApp(row.app_id) || { app_id: row.app_id });
+        return { app_id: row.app_id, ...await namespaces.publicShape(apps.get(row.app_id), row) };
+    })));
 }
 
 /** The whole operator report (see the header). `limit` bounds each list (1-200, default 50). */
-function report({ appId = null, limit = 50 } = {}) {
+async function report({ appId = null, limit = 50 } = {}) {
     const n = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
     return {
         generated_at: new Date().toISOString(),
         scope: appId || 'all',
-        tenants: db.all('SELECT app_id FROM apps ORDER BY app_id').map(r => r.app_id),
-        jobs: jobs(appId, n),
-        missing: missing(appId, n),
-        backfill: backfill(appId),
-        tiering: tiering(appId, n),
-        namespaces: namespaceSnapshot(appId),
+        tenants: (await db.all('SELECT app_id FROM apps ORDER BY app_id')).map(r => r.app_id),
+        jobs: await jobs(appId, n),
+        missing: await missing(appId, n),
+        backfill: await backfill(appId),
+        tiering: await tiering(appId, n),
+        namespaces: await namespaceSnapshot(appId),
     };
 }
 
 /** Refresh the usage snapshot of every namespace (or one tenant's) from the rows: { namespaces, recomputed_at }. */
-function recompute({ appId = null } = {}) {
+async function recompute({ appId = null } = {}) {
     let count = 0;
     if (appId) {
-        const app = db.getApp(appId) || { app_id: appId };
-        for (const row of namespaces.listForTenant(appId)) { namespaces.reconcile(app, row.namespace); count++; }
+        const app = await db.getApp(appId) || { app_id: appId };
+        for (const row of await namespaces.listForTenant(appId)) { await namespaces.reconcile(app, row.namespace); count++; }
     } else {
-        count = namespaces.reconcileAll();
+        count = await namespaces.reconcileAll();
     }
     return { namespaces: count, scope: appId || 'all', recomputed_at: new Date().toISOString() };
 }

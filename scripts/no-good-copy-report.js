@@ -6,32 +6,36 @@
  * can decide what to do with each one. READ-ONLY: the database is opened read-only and nothing is
  * deleted, moved or re-projected.
  *
- *   node scripts/no-good-copy-report.js [--app live] [--json] [--out report.json] [--db ./data/media.db]
+ *   node scripts/no-good-copy-report.js [--app live] [--json] [--out report.json]
  *
  * Exit code 0 when there are none, 1 when some were found, 2 on error.
  */
 const fs = require('fs');
 const path = require('path');
 
-const args = process.argv.slice(2);
-const has = (name) => args.includes(`--${name}`);
-const arg = (name, dflt) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : dflt; };
+(async () => {
+    await require('../server/db/database').initDb();   // PostgreSQL (DATABASE_URL), as the service
+    const args = process.argv.slice(2);
+    const has = (name) => args.includes(`--${name}`);
+    const arg = (name, dflt) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : dflt; };
 
-try {
-    const dbPath = arg('db') ? path.resolve(arg('db')) : require('../server/config').db.path;
-    const Database = require('better-sqlite3');
-    const h = new Database(dbPath, { readonly: true, fileMustExist: true });
-    const q = {
-        all: (sql, params = []) => h.prepare(sql).all(...params),
-        get: (sql, params = []) => h.prepare(sql).get(...params),
-    };
-    const { buildReport, formatReport } = require('../server/objects/copy-report');
-    const report = buildReport(q, { appId: arg('app', null) });
-    h.close();
-    if (arg('out')) fs.writeFileSync(arg('out'), JSON.stringify(report, null, 2));
-    console.log(has('json') ? JSON.stringify(report, null, 2) : formatReport(report));
-    process.exit(report.count ? 1 : 0);
-} catch (err) {
-    console.error(err.message);
-    process.exit(2);
-}
+    try {
+        // Read-only: the report runs in a READ ONLY transaction (PostgreSQL refuses any write inside it).
+        const { buildReport, formatReport } = require('../server/objects/copy-report');
+        const d = require('../server/db/database').getDb();
+        const q = {
+            all: async (sql, params = []) => await d.prepare(sql).all(...params),
+            get: async (sql, params = []) => await d.prepare(sql).get(...params),
+        };
+        const report = await d.tx(async (t) => {
+            await t.query('SET TRANSACTION READ ONLY');
+            return await buildReport(q, { appId: arg('app', null) });
+        });
+        if (arg('out')) fs.writeFileSync(arg('out'), JSON.stringify(report, null, 2));
+        console.log(has('json') ? JSON.stringify(report, null, 2) : formatReport(report));
+        process.exit(report.count ? 1 : 0);
+    } catch (err) {
+        console.error(err.message);
+        process.exit(2);
+    }
+})().catch((err) => { console.error(err); process.exit(1); });

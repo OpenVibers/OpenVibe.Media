@@ -115,13 +115,13 @@ function thumbListable(name, publicIds) {
 }
 
 let _thumbListCache = { at: 0, list: [] };
-function thumbList() {
+async function thumbList() {
     if (Date.now() - _thumbListCache.at < 60_000) return _thumbListCache.list;
     let list = [];
     try {
         const publicIds = {
-            vod: new Set(db.all(`SELECT id FROM vods WHERE ${THUMB_PUBLIC.vod}`).map(r => r.id)),
-            clip: new Set(db.all(`SELECT id FROM clips WHERE ${THUMB_PUBLIC.clip}`).map(r => r.id)),
+            vod: new Set((await db.all(`SELECT id FROM vods WHERE ${THUMB_PUBLIC.vod}`)).map(r => r.id)),
+            clip: new Set((await db.all(`SELECT id FROM clips WHERE ${THUMB_PUBLIC.clip}`)).map(r => r.id)),
         };
         list = fs.readdirSync(THUMB_DIR)
             .filter(f => /\.(jpe?g|png|webp)$/i.test(f) && thumbListable(f, publicIds))
@@ -133,44 +133,44 @@ function thumbList() {
     return list;
 }
 
-function fetchTab(tab, page) {
+async function fetchTab(tab, page) {
     const off = (page - 1) * PAGE_SIZE;
     const L = `ORDER BY created_at DESC LIMIT ${PAGE_SIZE} OFFSET ${off}`;
     switch (tab) {
         case 'videos': return {
-            total: db.get(`SELECT COUNT(*) c FROM vods WHERE ${V_WHERE}`).c,
-            cards: db.all(`SELECT * FROM vods WHERE ${V_WHERE} ${L}`).map(vodCard),
+            total: (await db.get(`SELECT COUNT(*) c FROM vods WHERE ${V_WHERE}`)).c,
+            cards: (await db.all(`SELECT * FROM vods WHERE ${V_WHERE} ${L}`)).map(vodCard),
         };
         case 'clips': return {
-            total: db.get(`SELECT COUNT(*) c FROM clips WHERE ${C_WHERE}`).c,
-            cards: db.all(`SELECT * FROM clips WHERE ${C_WHERE} ${L}`).map(clipCard),
+            total: (await db.get(`SELECT COUNT(*) c FROM clips WHERE ${C_WHERE}`)).c,
+            cards: (await db.all(`SELECT * FROM clips WHERE ${C_WHERE} ${L}`)).map(clipCard),
         };
         case 'images': return {
-            total: db.get(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`).c,
-            cards: db.all(`SELECT * FROM pastes WHERE ${P_WHERE} AND type = 'screenshot' ${L}`).map(pasteCard),
+            total: (await db.get(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`)).c,
+            cards: (await db.all(`SELECT * FROM pastes WHERE ${P_WHERE} AND type = 'screenshot' ${L}`)).map(pasteCard),
         };
         case 'text': return {
-            total: db.get(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`).c,
-            cards: db.all(`SELECT * FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot' ${L}`).map(pasteCard),
+            total: (await db.get(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`)).c,
+            cards: (await db.all(`SELECT * FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot' ${L}`)).map(pasteCard),
         };
         case 'files': return {
-            total: db.get(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`).c,
-            cards: db.all(`SELECT * FROM files WHERE ${F_WHERE} ${L}`).map(fileCard),
+            total: (await db.get(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`)).c,
+            cards: (await db.all(`SELECT * FROM files WHERE ${F_WHERE} ${L}`)).map(fileCard),
         };
         case 'emotes': return {
-            total: db.get("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'").c,
-            cards: db.all(`SELECT * FROM assets WHERE kind = 'emote' ${L}`).map(assetCard),
+            total: (await db.get("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'")).c,
+            cards: (await db.all(`SELECT * FROM assets WHERE kind = 'emote' ${L}`)).map(assetCard),
         };
         case 'sounds': return {
-            total: db.get("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'").c,
-            cards: db.all(`SELECT * FROM assets WHERE kind = 'sound' ${L}`).map(assetCard),
+            total: (await db.get("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'")).c,
+            cards: (await db.all(`SELECT * FROM assets WHERE kind = 'sound' ${L}`)).map(assetCard),
         };
         case 'thumbnails': {
-            const list = thumbList();
+            const list = await thumbList();
             return { total: list.length, cards: list.slice(off, off + PAGE_SIZE).map(([f, t]) => thumbCard(f, t)) };
         }
         default: { // all — one unified reverse-chronological index across DB-backed media
-            const rows = db.all(`
+            const rows = await db.all(`
                 SELECT 'vod' k, id ref, title, description, ai_overview, thumbnail_url, duration_seconds, created_at, app_id, NULL slug, NULL type, NULL content, NULL language FROM vods WHERE ${V_WHERE}
                 UNION ALL
                 SELECT 'clip', id, title, description, ai_overview, thumbnail_url, duration_seconds, created_at, app_id, NULL, NULL, NULL, NULL FROM clips WHERE ${C_WHERE}
@@ -179,11 +179,11 @@ function fetchTab(tab, page) {
                 UNION ALL
                 SELECT 'asset', id, name, username, channel_username, kind, duration_seconds, created_at, app_id, NULL, NULL, NULL, NULL FROM assets
                 ORDER BY created_at DESC LIMIT ${PAGE_SIZE} OFFSET ${off}`);
-            const total = db.get(`SELECT
+            const total = (await db.get(`SELECT
                 (SELECT COUNT(*) FROM vods WHERE ${V_WHERE}) +
                 (SELECT COUNT(*) FROM clips WHERE ${C_WHERE}) +
                 (SELECT COUNT(*) FROM pastes WHERE ${P_WHERE}) +
-                (SELECT COUNT(*) FROM assets) c`).c;
+                (SELECT COUNT(*) FROM assets) c`)).c;
             const cards = rows.map(r => r.k === 'vod' ? vodCard({ ...r, id: r.ref })
                 : r.k === 'clip' ? clipCard({ ...r, id: r.ref })
                 : r.k === 'asset' ? assetCard({ id: r.ref, name: r.title, username: r.description, channel_username: r.ai_overview, kind: r.thumbnail_url, duration_seconds: r.duration_seconds, created_at: r.created_at, app_id: r.app_id })
@@ -194,18 +194,18 @@ function fetchTab(tab, page) {
 }
 
 let _countCache = { at: 0, counts: null };
-function tabCounts() {
+async function tabCounts() {
     if (_countCache.counts && Date.now() - _countCache.at < 60_000) return _countCache.counts;
-    const c = (sql) => { try { return db.get(sql).c; } catch { return 0; } };
+    const c = async (sql) => { try { return (await db.get(sql)).c; } catch { return 0; } };
     const counts = {
-        videos: c(`SELECT COUNT(*) c FROM vods WHERE ${V_WHERE}`),
-        clips: c(`SELECT COUNT(*) c FROM clips WHERE ${C_WHERE}`),
-        images: c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`),
-        text: c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`),
-        files: c(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`),
-        emotes: c("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'"),
-        sounds: c("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'"),
-        thumbnails: thumbList().length,
+        videos: await c(`SELECT COUNT(*) c FROM vods WHERE ${V_WHERE}`),
+        clips: await c(`SELECT COUNT(*) c FROM clips WHERE ${C_WHERE}`),
+        images: await c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`),
+        text: await c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`),
+        files: await c(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`),
+        emotes: await c("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'"),
+        sounds: await c("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'"),
+        thumbnails: (await thumbList()).length,
     };
     counts.all = counts.videos + counts.clips + counts.images + counts.text + counts.emotes + counts.sounds;
     _countCache = { at: Date.now(), counts };
@@ -299,13 +299,13 @@ ${require('./page-frame').frameScripts({ footer: { variant: 'full' } })}
 </body></html>`;
 }
 
-function handle(req, res) {
+async function handle(req, res) {
     try {
         const tab = TABS.some(([k]) => k === req.query.tab) ? req.query.tab : 'all';
         const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-        const data = fetchTab(tab, page);
+        const data = await fetchTab(tab, page);
         res.set({ 'Cache-Control': 'public, max-age=30', 'Content-Type': 'text/html; charset=utf-8' });
-        res.send(renderPage(tab, page, data, tabCounts()));
+        res.send(renderPage(tab, page, data, await tabCounts()));
     } catch (err) {
         console.error('[Browse] render error:', err.message);
         res.status(500).send('Failed to render media index');

@@ -120,12 +120,12 @@ function thresholdSnapshot(settings) {
 }
 
 /** What a decision saw: the object's popularity, size, lifecycle, copies, hold and the gate. */
-function inputsOf(obj, { locs, pop, held, settings }) {
+async function inputsOf(obj, { locs, pop, held, settings }) {
     const canon = canonicalLocation(obj, locs);
     const r2 = locs.find((l) => l.provider === 'r2');
     return {
         unique_viewers_7d: pop ? pop.unique_viewers : 0,
-        last_viewed_day: pop ? pop.last_viewed_day : popularity.lastViewedDay(obj.id),
+        last_viewed_day: pop ? pop.last_viewed_day : await popularity.lastViewedDay(obj.id),
         size_bytes: Number(obj.size_bytes) || 0,
         kind: obj.kind, visibility: obj.visibility, lifecycle_status: obj.lifecycle_status,
         content_hash: !!obj.content_hash,
@@ -139,12 +139,12 @@ function inputsOf(obj, { locs, pop, held, settings }) {
 }
 
 /** Log one decision. Never throws: the move already happened (or did not). → the row id, or null */
-function recordDecision({ obj, action, from, to, outcome, trigger, reason, inputs, settings, error = null }) {
+async function recordDecision({ obj, action, from, to, outcome, trigger, reason, inputs, settings, error = null }) {
     try {
-        return db.run(`INSERT INTO media_object_tier_decisions (object_id, app_id, action, from_provider, to_provider, outcome, trigger, reason, inputs, thresholds, error)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        return (await db.run(`INSERT INTO media_object_tier_decisions (object_id, app_id, action, from_provider, to_provider, outcome, trigger, reason, inputs, thresholds, error)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         [obj.id, obj.app_id || null, action, from || null, to || null, outcome, String(trigger || 'manual').slice(0, 40), String(reason || '').slice(0, 1000),
-            JSON.stringify(inputs || {}), JSON.stringify(thresholdSnapshot(settings)), error == null ? null : String(error).slice(0, 500)]).lastInsertRowid;
+            JSON.stringify(inputs || {}), JSON.stringify(thresholdSnapshot(settings)), error == null ? null : String(error).slice(0, 500)])).lastInsertRowid;
     } catch (err) {
         console.warn(`[ObjectTiers] decision for ${obj && obj.id} not logged: ${err.message}`);
         return null;
@@ -152,48 +152,48 @@ function recordDecision({ obj, action, from, to, outcome, trigger, reason, input
 }
 
 /** The sweep logged the same outcome for this object and action within the last day. */
-function loggedToday(objectId, action, outcome) {
-    return !!db.get(`SELECT 1 AS x FROM media_object_tier_decisions WHERE object_id = ? AND action = ? AND outcome = ? AND trigger = 'sweep'
-                     AND decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') LIMIT 1`, [objectId, action, outcome]);
+async function loggedToday(objectId, action, outcome) {
+    return !!await db.get(`SELECT 1 AS x FROM media_object_tier_decisions WHERE object_id = ? AND action = ? AND outcome = ? AND trigger = 'sweep'
+                     AND decided_at >= ov_now_iso('-1 day') LIMIT 1`, [objectId, action, outcome]);
 }
 
 /** A move of this object failed within the back-off window. */
-function inBackoff(objectId, action) {
-    return !!db.get(`SELECT 1 AS x FROM media_object_tier_decisions WHERE object_id = ? AND action = ? AND outcome = 'failed'
-                     AND decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?) LIMIT 1`, [objectId, action, `-${FAILED_BACKOFF_H} hours`]);
+async function inBackoff(objectId, action) {
+    return !!await db.get(`SELECT 1 AS x FROM media_object_tier_decisions WHERE object_id = ? AND action = ? AND outcome = 'failed'
+                     AND decided_at >= ov_now_iso(?) LIMIT 1`, [objectId, action, `-${FAILED_BACKOFF_H} hours`]);
 }
 
 /**
  * Shared frame of promote()/demote(): loads the object and its facts, and returns log(outcome, reason, extra)
  * which records the decision (the sweep's repeated refusals and dry runs once a day) and shapes the answer.
  */
-function frame(objectId, action, ctx) {
+async function frame(objectId, action, ctx) {
     const settings = ctx.settings || policy.settings();
-    const obj = model().getObject(String(objectId || ''));
+    const obj = await model().getObject(String(objectId || ''));
     if (!obj) return { missing: true };
-    const locs = model().listLocations(obj.id);
-    const pop = ctx.pop !== undefined ? ctx.pop : (popularity.stats({ ids: [obj.id], now: ctx.now }).get(obj.id) || null);
-    const held = model().isHeld(obj.id);
-    const inputs = inputsOf(obj, { locs, pop, held, settings });
+    const locs = await model().listLocations(obj.id);
+    const pop = ctx.pop !== undefined ? ctx.pop : ((await popularity.stats({ ids: [obj.id], now: ctx.now })).get(obj.id) || null);
+    const held = await model().isHeld(obj.id);
+    const inputs = await inputsOf(obj, { locs, pop, held, settings });
     const canon = canonicalLocation(obj, locs);
     const trigger = ctx.trigger || 'manual';
     const why = ctx.reason || 'requested';
     const from = action === 'promote' ? (canon ? canon.provider : null) : 'r2';
     const to = action === 'promote' ? 'r2' : (canon ? canon.provider : null);
-    const log = (outcome, reason, extra = {}) => {
-        const repeat = trigger === 'sweep' && (outcome === 'refused' || outcome === 'dry_run') && loggedToday(obj.id, action, outcome);
-        if (!repeat) recordDecision({ obj, action, from, to, outcome, trigger, reason, inputs, settings, error: extra.error });
+    const log = async (outcome, reason, extra = {}) => {
+        const repeat = trigger === 'sweep' && (outcome === 'refused' || outcome === 'dry_run') && await loggedToday(obj.id, action, outcome);
+        if (!repeat) await recordDecision({ obj, action, from, to, outcome, trigger, reason, inputs, settings, error: extra.error });
         return { ok: outcome === 'done' || outcome === 'already', outcome, object_id: obj.id, repeat, ...extra };
     };
     return { obj, locs, canon, held, settings, why, log };
 }
 
 /** Why an object may not be promoted at all, from the record (no I/O), or null. */
-function promoteRefusal(obj, { locs, held }) {
+async function promoteRefusal(obj, { locs, held }) {
     if (held) return 'under a retention hold (a hold freezes placement)';
     if (obj.legacy_ref) return 'not a native object (projected objects tier with their VOD)';
     if (obj.lifecycle_status !== 'ready') return `the object is ${obj.lifecycle_status}`;
-    if (db.isSandboxTenant(obj.app_id)) return 'developer sandbox objects are never tiered';
+    if (await db.isSandboxTenant(obj.app_id)) return 'developer sandbox objects are never tiered';
     return canonicalUnverified(obj, locs);
 }
 
@@ -204,20 +204,20 @@ function promoteRefusal(obj, { locs, held }) {
  * → { ok, outcome: done | already | refused | failed | dry_run, error?, bytes? }
  */
 async function promote(objectId, ctx = {}) {
-    const f = frame(objectId, 'promote', ctx);
+    const f = await frame(objectId, 'promote', ctx);
     if (f.missing) return { ok: false, outcome: 'refused', error: 'object not found' };
     const { obj, locs, canon, held, settings, why, log } = f;
-    if (held) return log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
+    if (held) return await log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
     const r2Now = locs.find((l) => l.provider === 'r2');
-    if (r2Now && r2Now.state === 'present' && r2Now.verified_at) return log('already', `${why}; the R2 copy is already present`);
-    const refusal = promoteRefusal(obj, { locs, held });
-    if (refusal) return log('refused', `${why}; refused: ${refusal}`, { error: refusal });
+    if (r2Now && r2Now.state === 'present' && r2Now.verified_at) return await log('already', `${why}; the R2 copy is already present`);
+    const refusal = await promoteRefusal(obj, { locs, held });
+    if (refusal) return await log('refused', `${why}; refused: ${refusal}`, { error: refusal });
     const vs = vodStorage();
-    if (!settings.active) return log('dry_run', `gate off (active = false): would promote: ${why}${vs.providerAvailable('r2') ? '' : ' (R2 is not available now)'}`);
-    if (!vs.providerAvailable('r2')) return log('refused', `${why}; refused: R2 is not available`, { error: 'R2 not available' });
+    if (!settings.active) return await log('dry_run', `gate off (active = false): would promote: ${why}${vs.providerAvailable('r2') ? '' : ' (R2 is not available now)'}`);
+    if (!vs.providerAvailable('r2')) return await log('refused', `${why}; refused: R2 is not available`, { error: 'R2 not available' });
 
     const check = await confirmCanonical(obj, canon);
-    if (!check.ok) return log('refused', `${why}; refused: ${check.why}`, { error: check.why });
+    if (!check.ok) return await log('refused', `${why}; refused: ${check.why}`, { error: check.why });
     const key = r2KeyFor(obj, canon);
     const size = Number(obj.size_bytes);
     try {
@@ -229,26 +229,26 @@ async function promote(objectId, ctx = {}) {
         if (!read || read.sha256 !== obj.content_hash) throw new Error('the R2 copy read back does not match the sha256 on record');
     } catch (err) {
         await vs.deleteObject('r2', key).catch(() => {});      // never leave an unrecorded or unverified copy behind
-        return log('failed', `${why}; the copy to R2 did not verify`, { error: err.message });
+        return await log('failed', `${why}; the copy to R2 did not verify`, { error: err.message });
     }
 
     // A hold placed (or a delete made) while the bytes were copied wins: the new copy was never recorded, so
     // removing it moves nothing anyone could see.
-    const now = model().getObject(obj.id);
-    if (!now || model().isHeld(obj.id) || now.lifecycle_status !== 'ready') {
+    const now = await model().getObject(obj.id);
+    if (!now || await model().isHeld(obj.id) || now.lifecycle_status !== 'ready') {
         await vs.deleteObject('r2', key).catch(() => {});
-        return log('refused', `${why}; refused: the object was ${!now ? 'removed' : now.lifecycle_status !== 'ready' ? now.lifecycle_status : 'put under a hold'} during the copy (the copy was removed)`,
+        return await log('refused', `${why}; refused: the object was ${!now ? 'removed' : now.lifecycle_status !== 'ready' ? now.lifecycle_status : 'put under a hold'} during the copy (the copy was removed)`,
             { error: 'changed during the copy' });
     }
-    db.getDb().transaction(() => {
+    await db.getDb().tx(async () => {
         // A fresh row: its created_at is when the object entered R2 (the demotion's "in R2 at least that long").
-        db.run("DELETE FROM media_locations WHERE object_id = ? AND provider = 'r2'", [obj.id]);
-        model().upsertLocation(obj.id, { provider: 'r2', bucket: vs.bucketFor('r2'), key, storage_class: 'cache', state: 'present',
+        await db.run("DELETE FROM media_locations WHERE object_id = ? AND provider = 'r2'", [obj.id]);
+        await model().upsertLocation(obj.id, { provider: 'r2', bucket: vs.bucketFor('r2'), key, storage_class: 'cache', state: 'present',
             checksum: obj.content_hash, size_bytes: size, verified: true });
-        model().setLocationState(canon.id, { state: 'present', size_bytes: size });
-    })();
+        await model().setLocationState(canon.id, { state: 'present', size_bytes: size });
+    });
     console.log(`[ObjectTiers] ${obj.id} (${obj.app_id}) promoted to R2: ${key} (${(size / MB).toFixed(1)} MB)`);
-    return log('done', why, { bytes: size });
+    return await log('done', why, { bytes: size });
 }
 
 /**
@@ -256,42 +256,42 @@ async function promote(objectId, ctx = {}) {
  * ctx as for promote(). → { ok, outcome, error? }
  */
 async function demote(objectId, ctx = {}) {
-    const f = frame(objectId, 'demote', ctx);
+    const f = await frame(objectId, 'demote', ctx);
     if (f.missing) return { ok: false, outcome: 'refused', error: 'object not found' };
     const { obj, locs, canon, held, settings, why, log } = f;
-    if (held) return log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
+    if (held) return await log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
     const r2 = locs.find((l) => l.provider === 'r2');
-    if (!r2) return log('already', `${why}; there is no R2 copy`);
+    if (!r2) return await log('already', `${why}; there is no R2 copy`);
     const vs = vodStorage();
-    if (!settings.active) return log('dry_run', `gate off (active = false): would demote: ${why}`);
-    if (!vs.providerConfigured('r2')) return log('refused', `${why}; refused: R2 is not configured`, { error: 'R2 not configured' });
-    if (!canon || canon.provider === 'r2') return log('refused', `${why}; refused: no canonical copy besides R2 (the R2 copy is kept)`, { error: 'no canonical copy' });
+    if (!settings.active) return await log('dry_run', `gate off (active = false): would demote: ${why}`);
+    if (!vs.providerConfigured('r2')) return await log('refused', `${why}; refused: R2 is not configured`, { error: 'R2 not configured' });
+    if (!canon || canon.provider === 'r2') return await log('refused', `${why}; refused: no canonical copy besides R2 (the R2 copy is kept)`, { error: 'no canonical copy' });
 
     // The last good copy is never the one removed: the canonical copy must check out now.
     const check = await confirmCanonical(obj, canon);
-    if (!check.ok) return log('refused', `${why}; refused: ${check.why}; the R2 copy is kept (it may be the last good copy)`, { error: check.why });
+    if (!check.ok) return await log('refused', `${why}; refused: ${check.why}; the R2 copy is kept (it may be the last good copy)`, { error: check.why });
     try {
         await vs.deleteObject('r2', r2.key);
         const still = await vs.headObject('r2', r2.key);
         if (still) throw new Error('the R2 copy is still there after the delete');
     } catch (err) {
-        return log('failed', `${why}; the R2 copy could not be removed`, { error: err.message });
+        return await log('failed', `${why}; the R2 copy could not be removed`, { error: err.message });
     }
-    db.getDb().transaction(() => {
-        db.run('DELETE FROM media_locations WHERE id = ?', [r2.id]);
-        model().setLocationState(canon.id, { state: 'present', size_bytes: Number(obj.size_bytes) });
-    })();
+    await db.getDb().tx(async () => {
+        await db.run('DELETE FROM media_locations WHERE id = ?', [r2.id]);
+        await model().setLocationState(canon.id, { state: 'present', size_bytes: Number(obj.size_bytes) });
+    });
     console.log(`[ObjectTiers] ${obj.id} (${obj.app_id}) demoted from R2 (${why})`);
-    return log('done', why);
+    return await log('done', why);
 }
 
 // ── Candidates ───────────────────────────────────────────────
 
 /** Ready native objects that pass the popularity, recency and size thresholds and have no R2 copy yet, most viewed first. */
-function promotionCandidates(settings, { now = Date.now(), appId = null, limit = 200 } = {}) {
+async function promotionCandidates(settings, { now = Date.now(), appId = null, limit = 200 } = {}) {
     const today = popularity.dayOf(now);
-    return db.all(`SELECT o.*, p.viewers AS unique_viewers_7d, p.last_day AS last_viewed_day
-        FROM (SELECT object_id, SUM(unique_viewers) AS viewers, MAX(day) AS last_day FROM media_object_views_daily
+    return await db.all(`SELECT o.*, p.viewers AS unique_viewers_7d, p.last_day AS last_viewed_day
+        FROM (SELECT object_id, SUM(unique_viewers)::bigint AS viewers, MAX(day) AS last_day FROM media_object_views_daily
               WHERE day >= ? AND unique_viewers > 0 GROUP BY object_id) p
         JOIN media_objects o ON o.id = p.object_id
         WHERE o.legacy_ref IS NULL AND o.lifecycle_status = 'ready'
@@ -303,9 +303,9 @@ function promotionCandidates(settings, { now = Date.now(), appId = null, limit =
 }
 
 /** Native objects with an R2 copy that should lose it: not ready any more, or idle. → [{ obj row, reason }] */
-function demotionCandidates(settings, { now = Date.now(), appId = null } = {}) {
+async function demotionCandidates(settings, { now = Date.now(), appId = null } = {}) {
     const idleFrom = popularity.windowStart(popularity.dayOf(now), settings.demoteIdleDays);
-    const rows = db.all(`SELECT o.*, l.created_at AS r2_since,
+    const rows = await db.all(`SELECT o.*, l.created_at AS r2_since,
                 (SELECT MAX(d.day) FROM media_object_views_daily d WHERE d.object_id = o.id AND d.unique_viewers > 0) AS last_viewed_day
             FROM media_locations l JOIN media_objects o ON o.id = l.object_id
             WHERE l.provider = 'r2' AND o.legacy_ref IS NULL${appId ? ' AND o.app_id = ?' : ''}
@@ -329,11 +329,11 @@ function promoteReason(c, s) {
 }
 
 /** What the policy would promote now, each with what (on record) would refuse it; database only. */
-function candidates({ appId = null, limit = 20, now = Date.now(), settings = policy.settings() } = {}) {
-    return promotionCandidates(settings, { now, appId, limit: Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200) }).map((c) => ({
+async function candidates({ appId = null, limit = 20, now = Date.now(), settings = policy.settings() } = {}) {
+    return (await Promise.all((await promotionCandidates(settings, { now, appId, limit: Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200) })).map(async (c) => ({
         object_id: c.id, app_id: c.app_id, kind: c.kind, size_bytes: c.size_bytes, unique_viewers_7d: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day,
-        blocked_by: promoteRefusal(c, { locs: model().listLocations(c.id), held: model().isHeld(c.id) }),
-    }));
+        blocked_by: await promoteRefusal(c, { locs: await model().listLocations(c.id), held: await model().isHeld(c.id) }),
+    }))));
 }
 
 // ── The sweep ────────────────────────────────────────────────
@@ -357,27 +357,27 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
     try {
         const settings = policy.settings();
         const out = { gate: !!settings.active, promoted: 0, demoted: 0, would_promote: 0, would_demote: 0, already: 0, refused: 0, failed: 0,
-            repeats: 0, skipped_backoff: 0, candidates: { promote: 0, demote: 0 }, rotated: popularity.rotate({ now }), errors: [] };
+            repeats: 0, skipped_backoff: 0, candidates: { promote: 0, demote: 0 }, rotated: await popularity.rotate({ now }), errors: [] };
 
         // Demotions first: they free the R2 cache, and a deleted object's copy should not wait behind promotions.
-        const demote_ = demotionCandidates(settings, { now });
+        const demote_ = await demotionCandidates(settings, { now });
         out.candidates.demote = demote_.length;
         let budget = settings.maxDemotionsPerSweep;
         for (const { row, reason } of demote_) {
             if (budget <= 0) break;
-            if (inBackoff(row.id, 'demote')) { out.skipped_backoff++; continue; }
+            if (await inBackoff(row.id, 'demote')) { out.skipped_backoff++; continue; }
             const r = await demote(row.id, { trigger, reason, settings, now });
             tally(out, { ...r, action: 'demote' });
             if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) budget--;
         }
 
-        const promote_ = promotionCandidates(settings, { now, limit: Math.max(50, settings.maxPromotionsPerSweep * 10) })
-            .filter((c) => !db.isSandboxTenant(c.app_id));
+        const promote_ = [];
+        for (const c of await promotionCandidates(settings, { now, limit: Math.max(50, settings.maxPromotionsPerSweep * 10) })) if (!await db.isSandboxTenant(c.app_id)) promote_.push(c);
         out.candidates.promote = promote_.length;
         budget = settings.maxPromotionsPerSweep;
         for (const c of promote_) {
             if (budget <= 0) break;
-            if (inBackoff(c.id, 'promote')) { out.skipped_backoff++; continue; }
+            if (await inBackoff(c.id, 'promote')) { out.skipped_backoff++; continue; }
             const r = await promote(c.id, { trigger, reason: promoteReason(c, settings), settings, now,
                 pop: { unique_viewers: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day } });
             tally(out, { ...r, action: 'promote' });
@@ -412,18 +412,18 @@ function decisionPublic(r) {
 }
 
 /** Decisions of the last 24 hours by action and outcome (appId narrows them). */
-function counts24h(appId = null) {
+async function counts24h(appId = null) {
     const empty = () => Object.fromEntries(OUTCOMES.map((o) => [o, 0]));
     const out = { promote: empty(), demote: empty() };
-    for (const r of db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_object_tier_decisions
-                            WHERE decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')${appId ? ' AND app_id = ?' : ''} GROUP BY action, outcome`, appId ? [appId] : [])) {
+    for (const r of await db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_object_tier_decisions
+                            WHERE decided_at >= ov_now_iso('-1 day')${appId ? ' AND app_id = ?' : ''} GROUP BY action, outcome`, appId ? [appId] : [])) {
         if (out[r.action]) out[r.action][r.outcome] = r.n;
     }
     return out;
 }
 
 /** A page of decisions, newest first: { decisions, next_before_id }. */
-function listDecisions({ appId = null, objectId = null, action = null, outcome = null, beforeId = null, limit = 50 } = {}) {
+async function listDecisions({ appId = null, objectId = null, action = null, outcome = null, beforeId = null, limit = 50 } = {}) {
     const conds = ['1 = 1'], params = [];
     if (appId) { conds.push('app_id = ?'); params.push(appId); }
     if (objectId) { conds.push('object_id = ?'); params.push(objectId); }
@@ -431,18 +431,19 @@ function listDecisions({ appId = null, objectId = null, action = null, outcome =
     if (outcome) { conds.push('outcome = ?'); params.push(outcome); }
     if (beforeId != null) { conds.push('id < ?'); params.push(Number(beforeId) || 0); }
     const n = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-    const rows = db.all(`SELECT * FROM media_object_tier_decisions WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, n + 1]);
+    const rows = await db.all(`SELECT * FROM media_object_tier_decisions WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, n + 1]);
     const page = rows.slice(0, n);
     return { decisions: page.map(decisionPublic), next_before_id: rows.length > n ? page[page.length - 1].id : null, limit: n };
 }
 
 /** The operator views' part (server/me/ops.js): database only, no provider or file. */
-function report({ appId = null, limit = 20 } = {}) {
+async function report({ appId = null, limit = 20 } = {}) {
     const settings = policy.settings();
     const s = appId ? { sql: ' AND o.app_id = ?', params: [appId] } : { sql: '', params: [] };
-    const r2 = db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(o.size_bytes), 0) AS b FROM media_locations l JOIN media_objects o ON o.id = l.object_id
+    const r2 = await db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(o.size_bytes), 0)::bigint AS b FROM media_locations l JOIN media_objects o ON o.id = l.object_id
                        WHERE l.provider = 'r2' AND o.legacy_ref IS NULL AND l.state = 'present'${s.sql}`, s.params);
-    const eligible = promotionCandidates(settings, { appId, limit: 100000 }).filter((c) => !db.isSandboxTenant(c.app_id)).length;
+    let eligible = 0;
+    for (const c of await promotionCandidates(settings, { appId, limit: 100000 })) if (!await db.isSandboxTenant(c.app_id)) eligible++;
     const n = Math.min(Math.max(parseInt(limit, 10) || 20, 1), 50);
     const last = sweepState.lastResult;
     return {
@@ -450,8 +451,8 @@ function report({ appId = null, limit = 20 } = {}) {
         policy: Object.fromEntries(Object.keys(policy.DEFAULTS).filter((k) => k !== 'active').map((k) => [k, settings[k]])),
         r2_copies: { count: r2.n, bytes: r2.b },
         eligible_to_promote: eligible,
-        decisions_24h: counts24h(appId),
-        recent: listDecisions({ appId, limit: n }).decisions.map((d) => ({ id: d.id, decided_at: d.decided_at, app_id: d.app_id, object_id: d.object_id,
+        decisions_24h: await counts24h(appId),
+        recent: (await listDecisions({ appId, limit: n })).decisions.map((d) => ({ id: d.id, decided_at: d.decided_at, app_id: d.app_id, object_id: d.object_id,
             action: d.action, outcome: d.outcome, trigger: d.trigger, reason: String(d.reason || '').slice(0, 300), error: d.error ? String(d.error).slice(0, 300) : null })),
         sweep: {
             last_run_at: sweepState.lastRunAt ? new Date(sweepState.lastRunAt).toISOString() : null,

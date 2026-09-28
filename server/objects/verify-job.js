@@ -44,7 +44,7 @@ function sha256File(p) {
 
 /** Real provider HEAD: undefined when the provider is not configured here, null on 404. */
 async function defaultHead(provider, key) {
-    return require('./reconcile').defaultHead(provider, key);
+    return await require('./reconcile').defaultHead(provider, key);
 }
 
 /** Real re-upload through the storage engine (it HEADs afterwards and throws on a size mismatch). */
@@ -54,12 +54,12 @@ async function defaultUpload(provider, key, filePath, contentType, loc) {
     if (loc && loc.bucket && vs.bucketFor(provider) && loc.bucket !== vs.bucketFor(provider)) {
         throw new Error(`location is in bucket ${loc.bucket}, the configured ${provider} bucket is ${vs.bucketFor(provider)}`);
     }
-    return vs.uploadFile(provider, key, filePath, contentType || 'application/octet-stream');
+    return await vs.uploadFile(provider, key, filePath, contentType || 'application/octet-stream');
 }
 
 /** Write a verdict only if the location still points where it did when we looked (a tier move may have re-projected it). */
-function writeState(loc, state, size) {
-    db.run(`UPDATE media_locations SET state = ?, size_bytes = COALESCE(?, size_bytes), verified_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+async function writeState(loc, state, size) {
+    await db.run(`UPDATE media_locations SET state = ?, size_bytes = COALESCE(?, size_bytes), verified_at = ov_now(), updated_at = ov_now()
             WHERE id = ? AND key = ?`, [state, size ?? null, loc.id, loc.key]);
 }
 
@@ -70,7 +70,7 @@ function writeState(loc, state, size) {
 async function verifyObject(obj, opts) {
     const { head, upload, hashMaxBytes, repairCorrupt, budget } = opts;
     const expected = Number(obj.size_bytes) || 0;
-    const locs = db.all('SELECT * FROM media_locations WHERE object_id = ? ORDER BY id', [obj.id]);
+    const locs = await db.all('SELECT * FROM media_locations WHERE object_id = ? ORDER BY id', [obj.id]);
     const results = [];
     let goodLocal = null;
 
@@ -80,7 +80,7 @@ async function verifyObject(obj, opts) {
         if (loc.provider === 'local') {
             let st = null;
             try { const s = fs.statSync(loc.key); if (s.isFile()) st = s; } catch { /* missing */ }
-            if (!st) { r.state = 'missing'; writeState(loc, 'missing', null); continue; }
+            if (!st) { r.state = 'missing'; await writeState(loc, 'missing', null); continue; }
             r.size_bytes = st.size;
             // Same rule as reconcile: a local size that differs from the recorded size is reported, not
             // condemned (recordings and remuxes change it) — but such a file is never used as a re-upload source.
@@ -96,7 +96,7 @@ async function verifyObject(obj, opts) {
                 }
             }
             r.state = state;
-            writeState(loc, state, st.size);
+            await writeState(loc, state, st.size);
             if (state === 'present' && sizeOk && hashOk !== false) goodLocal = loc;
             continue;
         }
@@ -105,12 +105,12 @@ async function verifyObject(obj, opts) {
         try { h = await head(loc.provider, loc.key, loc.bucket); }
         catch (err) { r.state = loc.state; r.note = `unverifiable: ${err.message}`; r.unverifiable = true; continue; }
         if (h === undefined) { r.state = loc.state; r.note = 'unverifiable: provider not configured'; r.unverifiable = true; continue; }
-        if (!h) { r.state = 'missing'; writeState(loc, 'missing', null); continue; }
+        if (!h) { r.state = 'missing'; await writeState(loc, 'missing', null); continue; }
         r.size_bytes = Number(h.size);
         const state = expected && Number(h.size) !== expected ? 'corrupt' : 'present';
         if (state === 'corrupt') r.note = `size ${h.size} ≠ expected ${expected}`;
         r.state = state;
-        writeState(loc, state, Number(h.size));
+        await writeState(loc, state, Number(h.size));
     }
 
     // Restore missing (and, when allowed, corrupt) remote copies from a verified-good local copy.
@@ -127,7 +127,7 @@ async function verifyObject(obj, opts) {
                 const out = await upload(loc.provider, loc.key, goodLocal.key, obj.mime_type, loc);
                 if (out === undefined) { reuploads.push({ provider: loc.provider, key: loc.key, ok: false, error: 'provider not configured' }); continue; }
                 const size = Number(out && out.size) || fs.statSync(goodLocal.key).size;
-                writeState(loc, 'present', size);
+                await writeState(loc, 'present', size);
                 r.state = 'present'; r.size_bytes = size; r.note = `re-uploaded from ${goodLocal.key}`;
                 reuploads.push({ provider: loc.provider, key: loc.key, ok: true, size_bytes: size, from: goodLocal.key });
             } catch (err) {
@@ -151,9 +151,9 @@ async function runOnce({ batch = config.verify.batch, head = defaultHead, upload
         reuploaded: 0, reupload_failed: 0, no_good_copy_total: null, error: null, objects: [] };
     let runId = null;
     try {
-        runId = db.run('INSERT INTO media_verify_runs (started_at) VALUES (?)', [summary.started_at]).lastInsertRowid;
+        runId = (await db.run('INSERT INTO media_verify_runs (started_at) VALUES (?) RETURNING id', [summary.started_at])).lastInsertRowid;
         const n = Math.max(1, Number(batch) || 1);
-        const objects = db.all(`SELECT o.* FROM media_objects o LEFT JOIN media_verifications v ON v.object_id = o.id
+        const objects = await db.all(`SELECT o.* FROM media_objects o LEFT JOIN media_verifications v ON v.object_id = o.id
                                 WHERE o.lifecycle_status = 'ready'
                                 ORDER BY (v.verified_at IS NOT NULL), v.verified_at, o.id LIMIT ?`, [n]);
         const budget = { left: Math.max(0, Number(maxReuploads) || 0) };
@@ -165,7 +165,7 @@ async function runOnce({ batch = config.verify.batch, head = defaultHead, upload
             summary.locations_checked += res.locations.length;
             summary[res.status]++;
             for (const u of res.reuploads) { if (u.ok) summary.reuploaded++; else if (!/^deferred/.test(u.error || '')) summary.reupload_failed++; }
-            db.run(`INSERT INTO media_verifications (object_id, verified_at, status, good_providers, detail, run_id) VALUES (?, ?, ?, ?, ?, ?)
+            await db.run(`INSERT INTO media_verifications (object_id, verified_at, status, good_providers, detail, run_id) VALUES (?, ?, ?, ?, ?, ?)
                     ON CONFLICT(object_id) DO UPDATE SET verified_at = excluded.verified_at, status = excluded.status,
                         good_providers = excluded.good_providers, detail = excluded.detail, run_id = excluded.run_id`,
             [obj.id, nowIso(), res.status, res.good_providers.join(',') || null,
@@ -182,10 +182,10 @@ async function runOnce({ batch = config.verify.batch, head = defaultHead, upload
         console.warn('[Verify] run failed:', err.message);
     } finally {
         summary.finished_at = nowIso();
-        try { summary.no_good_copy_total = copyReport.countNoGoodCopy(db); } catch { /* */ }
+        try { summary.no_good_copy_total = await copyReport.countNoGoodCopy(db); } catch { /* */ }
         if (runId != null) {
             try {
-                db.run(`UPDATE media_verify_runs SET finished_at = ?, objects_checked = ?, locations_checked = ?, good = ?, no_good_copy = ?, unverifiable = ?,
+                await db.run(`UPDATE media_verify_runs SET finished_at = ?, objects_checked = ?, locations_checked = ?, good = ?, no_good_copy = ?, unverifiable = ?,
                         reuploaded = ?, reupload_failed = ?, no_good_copy_total = ?, error = ? WHERE id = ?`,
                 [summary.finished_at, summary.objects_checked, summary.locations_checked, summary.good, summary.no_good_copy, summary.unverifiable,
                     summary.reuploaded, summary.reupload_failed, summary.no_good_copy_total, summary.error, runId]);
@@ -203,13 +203,13 @@ async function runOnce({ batch = config.verify.batch, head = defaultHead, upload
 }
 
 /** Last finished run and the current no-good-copy count (readiness detail, operators). */
-function status() {
-    const last = db.get('SELECT * FROM media_verify_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1');
+async function status() {
+    const last = await db.get('SELECT * FROM media_verify_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1');
     return {
         enabled: !!config.verify.enabled,
         running: !!_timer,
-        no_good_copy: copyReport.countNoGoodCopy(db),
-        verified_objects: db.get('SELECT COUNT(*) AS n FROM media_verifications').n,
+        no_good_copy: await copyReport.countNoGoodCopy(db),
+        verified_objects: (await db.get('SELECT COUNT(*) AS n FROM media_verifications')).n,
         last_run: last ? { id: last.id, finished_at: last.finished_at, objects_checked: last.objects_checked, no_good_copy: last.no_good_copy,
             reuploaded: last.reuploaded, reupload_failed: last.reupload_failed, error: last.error || null } : null,
     };

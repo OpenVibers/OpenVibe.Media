@@ -41,7 +41,7 @@ function expectedFields(p) {
 const same = (a, b) => (a == null ? '' : String(a)) === (b == null ? '' : String(b));
 
 /** Every row of `table` (optionally one tenant's) in key order, a page at a time. */
-function* eachRow(q, table, keyCol, { appId = null, where = null } = {}) {
+async function* eachRow(q, table, keyCol, { appId = null, where = null } = {}) {
     const conds = [];
     const params = [];
     if (appId) { conds.push('app_id = ?'); params.push(appId); }
@@ -49,7 +49,7 @@ function* eachRow(q, table, keyCol, { appId = null, where = null } = {}) {
     let last = null;
     for (;;) {
         const c = last == null ? conds : [...conds, `${keyCol} > ?`];
-        const page = q.all(`SELECT * FROM ${table}${c.length ? ` WHERE ${c.join(' AND ')}` : ''} ORDER BY ${keyCol} LIMIT ${PAGE}`,
+        const page = await q.all(`SELECT * FROM ${table}${c.length ? ` WHERE ${c.join(' AND ')}` : ''} ORDER BY ${keyCol} LIMIT ${PAGE}`,
             last == null ? params : [...params, last]);
         for (const r of page) yield r;
         if (page.length < PAGE) return;
@@ -57,7 +57,7 @@ function* eachRow(q, table, keyCol, { appId = null, where = null } = {}) {
     }
 }
 
-function buildReport(q, { appId = null, limit = 20 } = {}) {
+async function buildReport(q, { appId = null, limit = 20 } = {}) {
     const report = {
         generated_at: new Date().toISOString(),
         app_id: appId,
@@ -69,15 +69,15 @@ function buildReport(q, { appId = null, limit = 20 } = {}) {
         total_drift: 0,
     };
     // Objects by legacy ref, loaded once (the compared columns only); a row's object_id is looked up when its ref finds none.
-    const byRef = new Map(q.all(`SELECT ${OBJECT_COLS} FROM media_objects WHERE legacy_ref IS NOT NULL`).map(o => [o.legacy_ref, o]));
-    const byId = (id) => (id ? q.get(`SELECT ${OBJECT_COLS} FROM media_objects WHERE id = ?`, [id]) || null : null);
+    const byRef = new Map((await q.all(`SELECT ${OBJECT_COLS} FROM media_objects WHERE legacy_ref IS NOT NULL`)).map(o => [o.legacy_ref, o]));
+    const byId = async (id) => (id ? await q.get(`SELECT ${OBJECT_COLS} FROM media_objects WHERE id = ?`, [id]) || null : null);
 
     /** Compare one row's projection with its object. Returns the object found (or null). */
-    const check = (kind, where, p, linkedId) => {
+    const check = async (kind, where, p, linkedId) => {
         const k = report.kinds[kind];
         k.rows++;
         report.total_rows++;
-        const found = byRef.get(p.legacy_ref) || byId(linkedId);
+        const found = byRef.get(p.legacy_ref) || await byId(linkedId);
         const problems = [];
         const diff = {};
         if (!found) {
@@ -100,29 +100,29 @@ function buildReport(q, { appId = null, limit = 20 } = {}) {
         return found;
     };
     const skip = (kind) => { report.kinds[kind].skipped++; };
-    const thumbnailOf = (row, table, parentKind, parent) => {
+    const thumbnailOf = async (row, table, parentKind, parent) => {
         const tp = model.thumbnailProjection(row, parentKind);
         if (!tp) return;
         if (tp.skipped) return skip('thumbnail');
-        const variant = parent ? q.get("SELECT derived_object_id FROM media_variants WHERE object_id = ? AND variant_name = 'thumbnail'", [parent.id]) : null;
-        check('thumbnail', { table, id: row.id, of: parentKind }, tp, variant ? variant.derived_object_id : null);
+        const variant = parent ? await q.get("SELECT derived_object_id FROM media_variants WHERE object_id = ? AND variant_name = 'thumbnail'", [parent.id]) : null;
+        await check('thumbnail', { table, id: row.id, of: parentKind }, tp, variant ? variant.derived_object_id : null);
     };
 
-    for (const row of eachRow(q, 'vods', 'id', { appId })) {
+    for await (const row of await eachRow(q, 'vods', 'id', { appId })) {
         const p = model.vodProjection(row);
         if (p.skipped) { skip('vod'); continue; }
-        thumbnailOf(row, 'vods', 'vod', check('vod', { table: 'vods', id: row.id }, p, row.object_id));
+        await thumbnailOf(row, 'vods', 'vod', await check('vod', { table: 'vods', id: row.id }, p, row.object_id));
     }
-    for (const row of eachRow(q, 'clips', 'id', { appId })) {
-        thumbnailOf(row, 'clips', 'clip', check('clip', { table: 'clips', id: row.id }, model.clipProjection(row), row.object_id));
+    for await (const row of await eachRow(q, 'clips', 'id', { appId })) {
+        await thumbnailOf(row, 'clips', 'clip', await check('clip', { table: 'clips', id: row.id }, model.clipProjection(row), row.object_id));
     }
-    for (const row of eachRow(q, 'files', 'key', { appId })) {
-        check('file', { table: 'files', id: row.key }, model.fileProjection(row), row.object_id);
+    for await (const row of await eachRow(q, 'files', 'key', { appId })) {
+        await check('file', { table: 'files', id: row.key }, model.fileProjection(row), row.object_id);
     }
-    for (const row of eachRow(q, 'pastes', 'id', { appId, where: "type = 'screenshot'" })) {
+    for await (const row of await eachRow(q, 'pastes', 'id', { appId, where: "type = 'screenshot'" })) {
         const p = model.pasteProjection(row);
         if (p.skipped) { skip('screenshot'); continue; }
-        check(p.kind, { table: 'pastes', id: row.id, slug: row.slug }, p, row.object_id);
+        await check(p.kind, { table: 'pastes', id: row.id, slug: row.slug }, p, row.object_id);
     }
     return report;
 }

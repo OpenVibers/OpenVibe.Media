@@ -29,7 +29,7 @@
  */
 const { createClient } = require('openvibe-sdk/core');
 const { createServiceTokenClient } = require('openvibe-sdk/auth');
-const { createEventsClient, createOutbox } = require('openvibe-sdk/events');
+const { createEventsClient, createPgOutbox } = require('openvibe-sdk/events');
 const db = require('./db/database');
 
 const TYPES = {
@@ -65,14 +65,15 @@ function init({
     if (process.env.EVENTS_PUBLISH === 'off' || !eventsUrl || !clientSecret) {
         // No outbox: object changes staged by the triggers are not events here; drop them hourly.
         if (!drainTimer) {
-            drainTimer = setInterval(() => { try { discardObjectChanges(); } catch { /* next hour */ } }, 60 * 60 * 1000);
+            drainTimer = setInterval(() => { discardObjectChanges().catch(() => { /* next hour */ }); }, 60 * 60 * 1000);
             if (drainTimer.unref) drainTimer.unref();
         }
         return null;
     }
     const tokens = createServiceTokenClient({ tokenUrl: `${networkUrl}/oauth/token`, clientId, clientSecret, fetch: fetchImpl });
     const client = createClient({ baseUrls: { events: eventsUrl }, tokenProvider: tokens, fetch: fetchImpl, retries: 0 });
-    outbox = createOutbox(db.getDb(), {
+    // The PostgreSQL outbox (its table is in migrations/0001_initial.sql); enqueue() joins the caller's transaction.
+    outbox = createPgOutbox(db.getDb(), {
         events: createEventsClient(client, { source: 'media' }),
         intervalMs,
         onError: (err) => {
@@ -81,16 +82,15 @@ function init({
             stats.lastError = msg;
         },
     });
-    outbox.ensureSchema();
     outbox.start();
-    const prune = setInterval(() => { try { outbox.prune(); } catch { /* next time */ } }, 6 * 60 * 60 * 1000);
+    const prune = setInterval(() => { outbox.prune().catch(() => { /* next time */ }); }, 6 * 60 * 60 * 1000);
     if (prune.unref) prune.unref();
     // Object changes that no Media transaction recorded (a row deleted outside one, operator SQL).
     if (drainTimer) clearInterval(drainTimer);
-    drainTimer = setInterval(() => { try { drainObjectChanges(); } catch (err) { console.warn('[Events] object changes:', err.message); } }, intervalMs);
+    drainTimer = setInterval(() => { drainObjectChanges().catch((err) => console.warn('[Events] object changes:', err.message)); }, intervalMs);
     if (drainTimer.unref) drainTimer.unref();
-    try { drainObjectChanges(); } catch { /* the timer retries */ }
-    console.log(`[Events] media outcomes → ${eventsUrl} (${outbox.pending()} pending)`);
+    drainObjectChanges().catch(() => { /* the timer retries */ });
+    outbox.pending().then((n) => console.log(`[Events] media outcomes → ${eventsUrl} (${n} pending)`), () => {});
     return outbox;
 }
 
@@ -106,7 +106,7 @@ function slim(appId, data) {
  * it. Returns the envelope (with event_id), or null when the outbox is off, the tenant is a sandbox
  * or the webhook event has no durable twin.
  */
-function record(webhookEvent, appId, data) {
+async function record(webhookEvent, appId, data) {
     const map = TYPES[webhookEvent];
     if (!map) return null;
     const [eventType, subjectType] = map;
@@ -114,7 +114,7 @@ function record(webhookEvent, appId, data) {
     const subject = subjectType === 'storage'
         ? { type: 'storage', id: String((data && data.kind) || 'storage') }
         : { type: subjectType, id: String(id == null ? 'unknown' : id) };
-    return enqueue(eventType, appId, subject, data, eventType === 'media.storage.recovered' ? 'low' : 'important');
+    return await enqueue(eventType, appId, subject, data, eventType === 'media.storage.recovered' ? 'low' : 'important');
 }
 
 /**
@@ -123,20 +123,27 @@ function record(webhookEvent, appId, data) {
  * tenant-scoped GET /api/v2/:app/jobs/:id has those). Same rule as record(): call it inside the
  * transaction that changes the job's state; it throws when the insert fails.
  */
-function recordJob(transition, job) {
+async function recordJob(transition, job) {
     const priority = JOB_TRANSITIONS[transition];
     if (!priority) throw new Error(`unknown job transition ${transition}`);
     // A service-wide maintenance job (queue.SYSTEM_APP) is no tenant's: nothing to announce.
     if (job.app_id === require('./jobs/queue').SYSTEM_APP) return null;
-    return enqueue(`media.job.${transition}`, job.app_id, { type: 'job', id: String(job.id) }, job, priority);
+    return await enqueue(`media.job.${transition}`, job.app_id, { type: 'job', id: String(job.id) }, job, priority);
 }
 
-function enqueue(eventType, appId, subject, data, priority) {
+/** The handle an event is written through: only inside the transaction that makes the change (it commits with it or not at all). */
+function inTx() {
+    const h = db.getDb();
+    if (!h.inTransaction()) throw new Error('an event must be recorded inside the transaction that makes the change');
+    return h;
+}
+
+async function enqueue(eventType, appId, subject, data, priority) {
     if (!outbox) return null;
     // Developer-project sandbox tenants (ADR-014) produce no platform events: sandbox activity must
     // never reach production consumers.
-    if (appId && db.isSandboxTenant(appId)) return null;
-    const env = outbox.enqueue({
+    if (appId && await db.isSandboxTenant(appId)) return null;
+    const env = await outbox.enqueue(inTx(), {
         event_type: eventType,
         actor: { type: 'service', id: 'media' },
         subject,
@@ -152,9 +159,9 @@ function enqueue(eventType, appId, subject, data, priority) {
  * Queue a Search document or tombstone (media.index_document.*, ./public/search-documents.js) as is:
  * no tenant field, low priority. Same rule as record(): inside the transaction that records the push.
  */
-function recordIndexDocument(eventType, subject, payload) {
+async function recordIndexDocument(eventType, subject, payload) {
     if (!outbox) return null;
-    const env = outbox.enqueue({ event_type: eventType, actor: { type: 'service', id: 'media' }, subject, visibility: 'internal', priority: 'low', payload });
+    const env = await outbox.enqueue(inTx(), { event_type: eventType, actor: { type: 'service', id: 'media' }, subject, visibility: 'internal', priority: 'low', payload });
     stats.queued++;
     return env;
 }
@@ -164,10 +171,10 @@ function recordIndexDocument(eventType, subject, payload) {
  * Network's moderation audit. Same rule as record(): inside the transaction that performs the action.
  * Sandbox tenants announce nothing.
  */
-function recordModeration(appId, payload) {
+async function recordModeration(appId, payload) {
     if (!outbox) return null;
-    if (appId && db.isSandboxTenant(appId)) return null;
-    const env = outbox.enqueue({
+    if (appId && await db.isSandboxTenant(appId)) return null;
+    const env = await outbox.enqueue(inTx(), {
         event_type: 'media.moderation.action',
         actor: payload.actor_subject ? { type: 'user', id: payload.actor_subject } : { type: 'service', id: 'media' },
         subject: { type: 'moderation_action', id: `${payload.target.type}:${payload.target.id}` },
@@ -182,13 +189,12 @@ function recordModeration(appId, payload) {
  * service. When the service's outbox table exists (the outbox is on there), the script writes its
  * events into it too, and the service's relay publishes them. No relay runs in the script.
  */
-function initWriter() {
+async function initWriter() {
     if (outbox) return outbox;
     const raw = db.getDb();
-    if (!raw.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'event_outbox'").get()) return null;
+    if (!await raw.prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'event_outbox'").get()) return null;
     const client = createClient({ baseUrls: { events: 'http://127.0.0.1:9' }, retries: 0 });
-    outbox = createOutbox(raw, { events: createEventsClient(client, { source: 'media' }) });
-    outbox.ensureSchema();
+    outbox = createPgOutbox(raw, { events: createEventsClient(client, { source: 'media' }) });
     return outbox;
 }
 
@@ -222,44 +228,43 @@ function objectChangeEvent(change, obj) {
  * rest. With the outbox off it does nothing (the rows wait, or the service drops them hourly).
  * Returns how many rows it turned into events (sandbox tenants' rows are removed without one).
  */
-function recordObjectChanges({ limit = 1000 } = {}) {
+async function recordObjectChanges({ limit = 1000 } = {}) {
     if (!outbox) return 0;
     const raw = db.getDb();
-    if (!raw.inTransaction) throw new Error('recordObjectChanges() must run inside the transaction that changed the objects');
-    const rows = raw.prepare('SELECT * FROM media_object_changes ORDER BY id LIMIT ?').all(limit);
+    if (!raw.inTransaction()) throw new Error('recordObjectChanges() must run inside the transaction that changed the objects');
+    const rows = await raw.prepare('SELECT * FROM media_object_changes ORDER BY id LIMIT ?').all(limit);
     let n = 0;
     for (const c of rows) {
-        const obj = raw.prepare('SELECT id, app_id, kind, legacy_ref FROM media_objects WHERE id = ?').get(c.object_id);
+        const obj = await raw.prepare('SELECT id, app_id, kind, legacy_ref FROM media_objects WHERE id = ?').get(c.object_id);
         if (obj) {
             const [type, payload] = objectChangeEvent(c, obj);
-            if (enqueue(type, obj.app_id, { type: 'object', id: obj.id }, payload, 'important')) n++;
+            if (await enqueue(type, obj.app_id, { type: 'object', id: obj.id }, payload, 'important')) n++;
         }
-        raw.prepare('DELETE FROM media_object_changes WHERE id = ?').run(c.id);
+        await raw.prepare('DELETE FROM media_object_changes WHERE id = ?').run(c.id);
     }
     return n;
 }
 
 /** Drain staged object changes in a transaction of their own (the relay's timer). */
-function drainObjectChanges() {
+async function drainObjectChanges() {
     if (!outbox) return 0;
-    let n = 0;
-    db.getDb().transaction(() => { n = recordObjectChanges(); })();
+    const n = await db.getDb().tx(async () => await recordObjectChanges());
     if (n) kick();
     return n;
 }
 
-function discardObjectChanges() {
-    return db.run('DELETE FROM media_object_changes').changes;
+async function discardObjectChanges() {
+    return (await db.run('DELETE FROM media_object_changes')).changes;
 }
 
 /** Wake the relay once the transaction that queued events has committed. */
 function kick() {
-    if (outbox) setImmediate(() => outbox && outbox.kick());
+    if (outbox) db.getDb().afterCommit(() => outbox && outbox.kick());
 }
 
-function status() {
+async function status() {
     if (!outbox) return { enabled: false };
-    return { enabled: true, pending: outbox.pending(), rejected: outbox.rejected(), queued_since_boot: stats.queued, last_error: stats.lastError };
+    return { enabled: true, pending: await outbox.pending(), rejected: await outbox.rejected(), queued_since_boot: stats.queued, last_error: stats.lastError };
 }
 
 function _reset() {

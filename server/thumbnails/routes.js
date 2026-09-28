@@ -58,7 +58,7 @@ router.post('/:kind/:id', tenantAuth({ allowUser: true }), upload.single('thumbn
         }
 
         const numId = parseInt(id, 10);
-        const row = kind === 'vod' ? db.getVodById(numId, req.appId) : db.getClipById(numId, req.appId);
+        const row = kind === 'vod' ? await db.getVodById(numId, req.appId) : await db.getClipById(numId, req.appId);
         if (!row) return res.status(404).json({ error: `${kind} not found` });
         // Acting for one of the app's users (X-OV-User-Id): only that user's own VOD or clip. Someone
         // else's private one answers as a missing one would; anything else 403.
@@ -77,14 +77,14 @@ router.post('/:kind/:id', tenantAuth({ allowUser: true }), upload.single('thumbn
             fs.writeFileSync(path.join(thumbService.THUMB_DIR, filename), buffer);
             const url = `/t/${filename}`;
             const table = kind === 'vod' ? 'vods' : 'clips';
-            db.withObject(kind, numId, () => db.run(`UPDATE ${table} SET thumbnail_url = ? WHERE id = ?`, [url, numId]));   // row + objects together
+            await db.withObject(kind, numId, async () => await db.run(`UPDATE ${table} SET thumbnail_url = ? WHERE id = ?`, [url, numId]));   // row + objects together
             return res.json({ url });
         }
 
         // Generate from the media file (local or presigned remote) as a thumbnail.regenerate job.
         const queue = require('../jobs/queue');
         const worker = require('../jobs/worker');
-        const r = queue.enqueue({
+        const r = await queue.enqueue({
             appId: req.appId, type: 'thumbnail.regenerate', objectId: row.object_id || null, params: { kind, id: numId },
             dedupeActive: true, maxAttempts: 1, createdBy: `app:${req.appId}${req.authType === 'user' ? `:user:${req.userId}` : ''}`,
             ownerUserId: req.authType === 'user' ? req.userId : null,

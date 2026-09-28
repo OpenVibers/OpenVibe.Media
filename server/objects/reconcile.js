@@ -35,7 +35,7 @@ const ISSUES = ['no_canonical_location', 'canonical_missing_replica_present', 'n
 async function defaultHead(provider, key) {
     const vs = require('../vod/vod-storage');
     if (!vs.providerConfigured(provider)) return undefined;
-    return vs.headObject(provider, key);
+    return await vs.headObject(provider, key);
 }
 
 function sha256File(p) {
@@ -65,19 +65,19 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
     };
     const issue = (k, item) => { const i = report.issues[k]; i.count++; if (i.items.length < listLimit) i.items.push(item); };
 
-    const objects = db.all(`SELECT * FROM media_objects${appId ? ' WHERE app_id = ?' : ''}`, appId ? [appId] : []);
+    const objects = await db.all(`SELECT * FROM media_objects${appId ? ' WHERE app_id = ?' : ''}`, appId ? [appId] : []);
     const byId = new Map(objects.map(o => [o.id, o]));
     const locations = appId
-        ? db.all('SELECT l.* FROM media_locations l LEFT JOIN media_objects o ON o.id = l.object_id WHERE o.app_id = ? OR o.id IS NULL', [appId])
-        : db.all('SELECT * FROM media_locations');
+        ? await db.all('SELECT l.* FROM media_locations l LEFT JOIN media_objects o ON o.id = l.object_id WHERE o.app_id = ? OR o.id IS NULL', [appId])
+        : await db.all('SELECT * FROM media_locations');
     report.counts.objects = objects.length;
     report.counts.locations = locations.length;
 
     const effective = new Map();   // location id → state after this run's checks
     const byObject = new Map();
-    const write = (loc, state, size) => {
+    const write = async (loc, state, size) => {
         if (!verify) return;
-        model.setLocationState(loc.id, { state, size_bytes: size });
+        await model.setLocationState(loc.id, { state, size_bytes: size });
         report.counts.locations_updated++;
     };
 
@@ -98,7 +98,7 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
             if (!st) {
                 effective.set(loc.id, 'missing');
                 if (live) issue('missing_local_file', { object_id: obj.id, kind: obj.kind, legacy_ref: obj.legacy_ref, path: loc.key });
-                write(loc, 'missing', null);
+                await write(loc, 'missing', null);
                 continue;
             }
             let state = 'present';
@@ -113,7 +113,7 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
                 }
             }
             effective.set(loc.id, state);
-            write(loc, state, st.size);
+            await write(loc, state, st.size);
             continue;
         }
 
@@ -130,7 +130,7 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
         if (!h) {
             effective.set(loc.id, 'missing');
             if (live) issue('remote_missing', { object_id: obj.id, provider: loc.provider, key: loc.key, legacy_ref: obj.legacy_ref });
-            write(loc, 'missing', null);
+            await write(loc, 'missing', null);
             continue;
         }
         let state = 'present';
@@ -139,7 +139,7 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
             issue('size_mismatch', { object_id: obj.id, provider: loc.provider, expected, actual: Number(h.size), legacy_ref: obj.legacy_ref });
         }
         effective.set(loc.id, state);
-        write(loc, state, Number(h.size));
+        await write(loc, state, Number(h.size));
     }
 
     // Per object: is the canonical copy there, and is any copy there at all?
@@ -159,11 +159,11 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
 
     // Deleted objects that the inherited routes still serve.
     for (const p of PROJECTIONS) {
-        const rows = db.all(`SELECT t.* FROM ${p.table} t JOIN media_objects o ON o.id = t.object_id WHERE o.lifecycle_status = 'deleted'${appId ? ' AND o.app_id = ?' : ''}`, appId ? [appId] : []);
+        const rows = await db.all(`SELECT t.* FROM ${p.table} t JOIN media_objects o ON o.id = t.object_id WHERE o.lifecycle_status = 'deleted'${appId ? ' AND o.app_id = ?' : ''}`, appId ? [appId] : []);
         for (const r of rows) if (p.open(r)) issue('deleted_publicly_reachable', { object_id: r.object_id, table: p.table, id: r.id ?? r.key, reason: 'the inherited row still serves it' });
     }
     // …and derivatives (thumbnails) of deleted objects that are still served by name.
-    const orphanThumbs = db.all(`SELECT d.* FROM media_variants v JOIN media_objects p ON p.id = v.object_id JOIN media_objects d ON d.id = v.derived_object_id
+    const orphanThumbs = await db.all(`SELECT d.* FROM media_variants v JOIN media_objects p ON p.id = v.object_id JOIN media_objects d ON d.id = v.derived_object_id
                                  WHERE p.lifecycle_status = 'deleted' AND d.lifecycle_status != 'deleted' AND d.visibility != 'private'${appId ? ' AND p.app_id = ?' : ''}`, appId ? [appId] : []);
     for (const d of orphanThumbs) {
         const loc = (byObject.get(d.id) || []).find(l => effective.get(l.id) === 'present');
@@ -178,12 +178,12 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
         ['pastes', 'id', "object_id IS NULL AND type = 'screenshot' AND screenshot_path IS NOT NULL"],
     ];
     for (const [table, keyCol, cond] of gaps) {
-        for (const r of db.all(`SELECT ${keyCol} AS k FROM ${table} WHERE ${cond}${appId ? ' AND app_id = ?' : ''}`, appId ? [appId] : [])) {
+        for (const r of await db.all(`SELECT ${keyCol} AS k FROM ${table} WHERE ${cond}${appId ? ' AND app_id = ?' : ''}`, appId ? [appId] : [])) {
             issue('missing_projection', { table, id: r.k });
         }
     }
 
-    for (const u of db.all(`SELECT u.*, (SELECT COUNT(*) FROM media_upload_parts p WHERE p.upload_id = u.id) AS parts_received FROM media_uploads u
+    for (const u of await db.all(`SELECT u.*, (SELECT COUNT(*) FROM media_upload_parts p WHERE p.upload_id = u.id) AS parts_received FROM media_uploads u
                             WHERE u.status IN ('active', 'completing') AND u.expires_at < datetime('now')${appId ? ' AND u.app_id = ?' : ''}`, appId ? [appId] : [])) {
         issue('incomplete_multipart', { upload_id: u.id, object_id: u.object_id, parts_received: u.parts_received, parts_expected: u.parts_expected, expires_at: u.expires_at });
     }

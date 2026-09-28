@@ -77,7 +77,23 @@ async function check(name, fn) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     fs.mkdirSync(dataDir, { recursive: true });
     let server = null;
+    // This release on PostgreSQL (ADR-035) and N-1 on SQLite: they never share a database (the switch stops the
+    // service, imports, then starts this release), so N-1's SQL has no schema of this release to run on. The client
+    // half still runs, on a freshly migrated and seeded database. Both on PostgreSQL: N keeps every migration N-1 ran.
+    const pg = fs.existsSync(path.join(ROOT, 'migrations'));
+    const sqlSkip = pg && worker.engine !== 'postgresql' ? 'N-1 SQL: skipped (N-1 runs on SQLite and this release on PostgreSQL: no shared database, so no N-1 statement runs on this schema; scripts/migrate-to-postgres.js moves the data and was rehearsed)' : null;
+    if (pg && worker.engine === 'postgresql') {
+        await check(`N-1's ${worker.migrations.length} migration file(s) are all here, unchanged`, () => {
+            const dir = path.join(ROOT, 'migrations');
+            const hash = (f) => require('crypto').createHash('sha256').update(fs.readFileSync(path.join(dir, f))).digest('hex');
+            const bad = worker.migrations.filter((m) => !fs.existsSync(path.join(dir, m.name)) || hash(m.name) !== m.sha256).map((m) => m.name);
+            assert.deepStrictEqual(bad, [], 'a migration N-1 ran was removed or edited: write a new one instead');
+        });
+    }
     try {
+        if (pg) {
+            svc.seed({ dir: ROOT, dbPath, dataDir });
+        } else {
         console.log(`n-1: this release on a database N-1 created`);
         await check('N-1\'s schema, ledger and first-use tables load, and this release migrates and seeds it', () => {
             const d = new Database(dbPath);
@@ -95,6 +111,7 @@ async function check(name, fn) {
             d.close();
             svc.seed({ dir: ROOT, dbPath, dataDir });
         });
+        }
         server = await svc.boot({ dir: ROOT, dbPath, dataDir });
         const manifest = await (await fetch(`${server.url}/release.json`)).json();
 
@@ -124,6 +141,8 @@ async function check(name, fn) {
         await server.close();
         server = null;
 
+        if (sqlSkip) console.log(sqlSkip);
+        else if (!pg) {
         console.log('n-1: N-1\'s SQL on the schema this release migrated');
         await check(`every statement N-1 runs still prepares (${worker.statements.length}), and none of its INSERTs misses a new required column`, () => {
             const d = new Database(dbPath, { readonly: true });
@@ -131,6 +150,7 @@ async function check(name, fn) {
             d.close();
             assert.deepStrictEqual(problems.map((p) => `${p.error}: ${p.sql.slice(0, 160)}`), [], 'N-1 SQL that breaks on this schema (expand first, contract a release later: ADR-028)');
         });
+        }
     } finally {
         if (server) { console.log(server.log().slice(-1500)); await server.close(); }
         fs.rmSync(tmp, { recursive: true, force: true });

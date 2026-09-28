@@ -41,9 +41,9 @@ function isVerifiedCopy(obj, l) {
 }
 
 /** Readiness of one object row (null → nothing known). `locations` may be passed when already loaded. */
-function compute(obj, locations = null) {
+async function compute(obj, locations = null) {
     if (!obj) return { metadata: false, bytes_verified: false, playable: false, hash_verified: false, verified_copies: [], reason: 'no_object' };
-    const locs = locations || db.all('SELECT provider, state, checksum, verified_at FROM media_locations WHERE object_id = ? ORDER BY id', [obj.id]);
+    const locs = locations || await db.all('SELECT provider, state, checksum, verified_at FROM media_locations WHERE object_id = ? ORDER BY id', [obj.id]);
     const md = metadataOf(obj);
     const verified = locs.filter(l => isVerifiedCopy(obj, l));
     const bytesVerified = verified.length > 0;
@@ -66,9 +66,9 @@ function compute(obj, locations = null) {
 }
 
 /** Readiness of an inherited vods/clips row, through its object (object_id). */
-function forRow(row) {
-    if (!row || !row.object_id) return compute(null);
-    return compute(db.get('SELECT * FROM media_objects WHERE id = ?', [row.object_id]));
+async function forRow(row) {
+    if (!row || !row.object_id) return await compute(null);
+    return await compute(await db.get('SELECT * FROM media_objects WHERE id = ?', [row.object_id]));
 }
 
 /** SQL condition: the object named by the SQL expression `ref` is playable (the rule of compute()). */

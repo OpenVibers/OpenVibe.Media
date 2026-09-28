@@ -50,7 +50,7 @@ async function _scanOne(vod, { deep }) {
 
     if (!broken) {
         // Healthy (or duration just repaired) — record the clean scan.
-        try { db.updateVodHealth(vod.id, { status: 'ok', issues: scan.issues || [] }); } catch { /* */ }
+        try { await db.updateVodHealth(vod.id, { status: 'ok', issues: scan.issues || [] }); } catch { /* */ }
         // The lossless .master.mkv is only a finalize-time recovery fallback. This
         // VOD probed healthy and is long finished — reclaim a lingering master.
         try {
@@ -62,7 +62,7 @@ async function _scanOne(vod, { deep }) {
             if (master && fs.existsSync(master)) {
                 const freedMb = (fs.statSync(master).size / 1024 / 1024).toFixed(0);
                 fs.unlinkSync(master);
-                if (vod.master_file_path) { try { db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vod.id]); } catch { /* */ } }   // not projected
+                if (vod.master_file_path) { try { await db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vod.id]); } catch { /* */ } }   // not projected
                 console.log(`[VOD-Health] Reclaimed orphaned master for vod ${vod.id} (${freedMb}MB)`);
             }
         } catch { /* */ }
@@ -81,7 +81,7 @@ async function _scanOne(vod, { deep }) {
             const r = await scanner.recoverFromMaster(vod);
             if (r.recovered) {
                 // Re-scan the rebuilt file to confirm it's actually good now.
-                const fresh = db.getVodById(vod.id) || vod;
+                const fresh = await db.getVodById(vod.id) || vod;
                 const rescan = await scanner.scanVod(fresh, { decode: deep, repairDuration: true, quarantineBad: false });
                 recovered = !['corrupt', 'zero_byte', 'missing_file'].includes(rescan.status)
                     && !(rescan.issues || []).some(i => /decode_failed|probe_failed/.test(i));
@@ -97,7 +97,7 @@ async function _scanOne(vod, { deep }) {
     // 'needs_review' (e.g. very short) is flagged but NOT hidden — it may be watchable.
     const terminal = ['corrupt', 'zero_byte', 'missing_file'].includes(scan.status);
     try {
-        db.updateVodHealth(vod.id, {
+        await db.updateVodHealth(vod.id, {
             status: scan.status,
             issues: scan.issues || [],
             probeDuration: scan.probe ? scan.probe.duration : undefined,
@@ -113,7 +113,7 @@ async function _scanOne(vod, { deep }) {
 async function _scanPass(deep) {
     const limit = deep ? SCAN_BATCH_IDLE : SCAN_BATCH_LIVE;
     let vods = [];
-    try { vods = db.getVodsNeedingHealthScan({ staleDays: SCAN_STALE_DAYS, limit }); } catch { return; }
+    try { vods = await db.getVodsNeedingHealthScan({ staleDays: SCAN_STALE_DAYS, limit }); } catch { return; }
     for (const vod of vods) {
         try { await _scanOne(vod, { deep }); }
         catch (e) { console.warn(`[VOD-Health] scan error for vod ${vod.id}:`, e.message); }
@@ -121,9 +121,9 @@ async function _scanPass(deep) {
 }
 
 // Delete a VOD's files everywhere + its DB row. Mirrors the manual delete route.
-function _hardDeleteVod(vod) {
+async function _hardDeleteVod(vod) {
     try {
-        if (require('../objects/model').isHeldRow(db.get('SELECT object_id FROM vods WHERE id = ?', [vod.id]))) {
+        if (await require('../objects/model').isHeldRow(await db.get('SELECT object_id FROM vods WHERE id = ?', [vod.id]))) {
             console.log(`[VOD-Health] vod ${vod.id} is under a retention hold — not deleting`);
             return false;
         }
@@ -134,7 +134,7 @@ function _hardDeleteVod(vod) {
                 try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* */ }
             }
         }
-        db.run('DELETE FROM vods WHERE id = ?', [vod.id]);   // its object is marked deleted by the row-delete trigger
+        await db.run('DELETE FROM vods WHERE id = ?', [vod.id]);   // its object is marked deleted by the row-delete trigger
         return true;
     } catch (e) {
         console.warn(`[VOD-Health] cleanup delete failed for vod ${vod.id}:`, e.message);
@@ -144,7 +144,7 @@ function _hardDeleteVod(vod) {
 
 async function _cleanupPass(deep) {
     let vods = [];
-    try { vods = db.getQuarantinedVodsForCleanup({ graceDays: QUARANTINE_GRACE_DAYS, limit: CLEANUP_BATCH }); } catch { return; }
+    try { vods = await db.getQuarantinedVodsForCleanup({ graceDays: QUARANTINE_GRACE_DAYS, limit: CLEANUP_BATCH }); } catch { return; }
     for (const vod of vods) {
         // One last recovery attempt before deleting — the master may have survived
         // even if the served file didn't. If it recovers, un-quarantine and keep it.
@@ -152,12 +152,12 @@ async function _cleanupPass(deep) {
             try {
                 const r = await scanner.recoverFromMaster(vod);
                 if (r.recovered) {
-                    const fresh = db.getVodById(vod.id) || vod;
+                    const fresh = await db.getVodById(vod.id) || vod;
                     const rescan = await scanner.scanVod(fresh, { decode: true, repairDuration: true, quarantineBad: false });
                     if (!['corrupt', 'zero_byte', 'missing_file'].includes(rescan.status)) {
                         // Row and object together; a failed write keeps the recovered VOD (never falls through to the delete).
                         try {
-                            require('../objects/model').withObject('vod', vod.id, () => db.run("UPDATE vods SET quarantined_at = NULL, health_status = 'ok' WHERE id = ?", [vod.id]));
+                            await require('../objects/model').withObject('vod', vod.id, async () => await db.run("UPDATE vods SET quarantined_at = NULL, health_status = 'ok' WHERE id = ?", [vod.id]));
                             console.log(`[VOD-Health] Cleanup recovered vod ${vod.id} from master — un-quarantined`);
                         } catch (e) { console.warn(`[VOD-Health] vod ${vod.id} recovered from master but not un-quarantined (next pass retries):`, e.message); }
                         continue;
@@ -165,7 +165,7 @@ async function _cleanupPass(deep) {
                 }
             } catch { /* fall through to delete */ }
         }
-        if (_hardDeleteVod(vod)) {
+        if (await _hardDeleteVod(vod)) {
             console.log(`[VOD-Health] Cleaned up unrecoverable vod ${vod.id} (quarantined ${vod.health_status}, ${vod.quarantined_at})`);
         }
     }
@@ -175,7 +175,7 @@ async function _cleanupPass(deep) {
 // gone or finished-and-healthy. PROTECTS masters that are still needed — any
 // recording, and any broken/quarantined VOD whose master is a recovery source —
 // plus a 30-min mtime grace so a just-finished finalize is never raced.
-function _masterSweep() {
+async function _masterSweep() {
     let dir, files;
     try {
         dir = path.resolve(config.vod.path);
@@ -185,7 +185,7 @@ function _masterSweep() {
 
     const protectedNames = new Set();
     try {
-        const rows = db.all(`SELECT file_path, master_file_path FROM vods
+        const rows = await db.all(`SELECT file_path, master_file_path FROM vods
             WHERE COALESCE(is_recording,0)=1
                OR quarantined_at IS NOT NULL
                OR health_status IN ('corrupt','zero_byte','needs_review')`);
@@ -222,7 +222,7 @@ async function _tick() {
     try {
         const deep = !_anyRecording();     // full decode + recovery only while idle
         await _scanPass(deep);
-        if (deep) { await _cleanupPass(deep); _masterSweep(); }
+        if (deep) { await _cleanupPass(deep); await _masterSweep(); }
     } catch (e) {
         console.warn('[VOD-Health] tick error:', e.message);
     } finally {
@@ -233,10 +233,10 @@ async function _tick() {
 // One boot-time sweep for 0:00 ghost VODs that older failure paths marked
 // ready+public (finalize crash fallbacks, killed processes). Rows with no
 // media at all are deleted; short-but-nonempty ones are quarantined.
-function sweepJunkVods() {
+async function sweepJunkVods() {
     try {
         const fs = require('fs');
-        const rows = db.all(`SELECT id, file_path, file_size, duration_seconds FROM vods
+        const rows = await db.all(`SELECT id, file_path, file_size, duration_seconds FROM vods
             WHERE is_recording = 0 AND is_public = 1
               AND COALESCE(duration_seconds, 0) < 3
               AND COALESCE(file_size, 0) < 10000000
@@ -247,17 +247,17 @@ function sweepJunkVods() {
         for (const v of rows) {
             const hasFile = v.file_path && fs.existsSync(v.file_path) && (() => { try { return fs.statSync(v.file_path).size > 0; } catch { return false; } })();
             // A held row is never deleted (and its file never unlinked): it is left for its hold's owner.
-            if (!hasFile && objects.isHeldRow(db.get('SELECT object_id FROM vods WHERE id = ?', [v.id]))) {
+            if (!hasFile && await objects.isHeldRow(await db.get('SELECT object_id FROM vods WHERE id = ?', [v.id]))) {
                 console.log(`[VOD-Health] Junk sweep: vod ${v.id} has no media but is under a retention hold — not deleting`);
                 held++;
                 continue;
             }
             if (!hasFile) {
                 try { if (v.file_path && fs.existsSync(v.file_path)) fs.unlinkSync(v.file_path); } catch { /* */ }
-                db.run('DELETE FROM vods WHERE id = ?', [v.id]);
+                await db.run('DELETE FROM vods WHERE id = ?', [v.id]);
                 deleted++;
             } else {
-                objects.withObject('vod', v.id, () => db.run(`UPDATE vods SET health_status = 'needs_review', health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+                await objects.withObject('vod', v.id, async () => await db.run(`UPDATE vods SET health_status = 'needs_review', health_issues_json = ?, quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
                     [JSON.stringify(['short_duration']), v.id]));
                 quarantined++;
             }
@@ -266,10 +266,10 @@ function sweepJunkVods() {
     } catch (e) { console.warn('[VOD-Health] junk sweep error:', e.message); }
 }
 
-function start() {
+async function start() {
     if (_running) return;
     _running = true;
-    sweepJunkVods();
+    await sweepJunkVods();
     // First pass shortly after boot (idle window), then on the interval.
     const first = setTimeout(() => { _tick().catch(() => {}); }, 90 * 1000);
     if (first.unref) first.unref();

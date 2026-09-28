@@ -3,12 +3,13 @@
  * Restore-drill mode: MEDIA_DRILL=1 (`ovhost drill media`, see OpenVibe.Host docs/restore-drills.md).
  *
  * A drill starts a second Media from the production checkout, with the production env file, against
- * a restored copy of media.db on a spare loopback port, and compares its public reads with
- * production's. That instance must serve reads from the copy and do nothing else. With MEDIA_DRILL:
+ * a restored copy of the database (pgBackRest restores the cluster on a spare port; ADR-035) on a spare loopback
+ * port, and compares its public reads with production's. That instance must serve reads from the copy and do
+ * nothing else. With MEDIA_DRILL:
  *
- *   - assertSafe(): Media refuses to start unless DB_PATH is set and lies outside the checkout and
- *     outside /opt/openvibe.media (so it cannot be production's media.db), PORT is set and is not
- *     production's 4100, and HOST is loopback. It runs before the database is opened.
+ *   - assertSafe(): Media refuses to start unless DATABASE_URL is set and does not name production's database
+ *     (ov_media on the host's 5432 or PgBouncer's 6432), DATABASE_DIRECT_URL is unset (a drill never migrates),
+ *     PORT is set and is not production's 4100, and HOST is loopback. It runs before the database is opened.
  *   - installGuards(): no outbound connection (net.Socket#connect, fetch), so no webhook, event, B2/R2
  *     or Network call leaves the process; no program other than git (child_process: no ffmpeg or
  *     ffprobe ever; git only reads the checkout for /release.json); no UDP socket (RTP ingest); nothing
@@ -42,6 +43,9 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 /** Where production runs (OpenVibe.Host inventory: repo /opt/openvibe.media, database data/media.db). */
 const PRODUCTION_ROOT = '/opt/openvibe.media';
 const PRODUCTION_PORT = 4100;
+// Production's database: ov_media on the host's PostgreSQL (5432) or through PgBouncer (6432).
+const PRODUCTION_DBS = new Set(['ov_media']);
+const PRODUCTION_DB_PORTS = new Set([5432, 6432]);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost', '::ffff:127.0.0.1']);
 
 function isLoopbackHost(host) {
@@ -49,41 +53,27 @@ function isLoopbackHost(host) {
     return LOOPBACK_HOSTS.has(h) || /^127(\.\d{1,3}){3}$/.test(h);
 }
 
-/** The real location of p, following symlinks on the part of it that exists. */
-function realish(p) {
-    let head = path.resolve(p);
-    const tail = [];
-    for (;;) {
-        try { return path.join(fs.realpathSync(head), ...tail.reverse()); } catch { /* not there (yet) */ }
-        const parent = path.dirname(head);
-        if (parent === head) return path.resolve(p);
-        tail.push(path.basename(head));
-        head = parent;
-    }
-}
 
-function inside(p, root) {
-    const rel = path.relative(root, p);
-    return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
-}
 
 /**
  * Why this environment is not safe for a drill ([] = safe). Pure, for tests.
  * `repoRoot` is the checkout the process runs from; `cwd` resolves relative paths.
  */
-function problems(env = process.env, { repoRoot = REPO_ROOT, cwd = process.cwd() } = {}) {
+function problems(env = process.env) {
     const out = [];
-    const roots = [...new Set([repoRoot, realish(repoRoot), PRODUCTION_ROOT])];
-    const productionDb = new Set([path.join(PRODUCTION_ROOT, 'data', 'media.db'), path.join(repoRoot, 'data', 'media.db'), path.join(cwd, 'data', 'media.db')]);
-    if (!env.DB_PATH) {
-        out.push('DB_PATH is not set; it must name the restored copy of media.db');
+    if (!env.DATABASE_URL) {
+        // Outside production a local embedded copy (MEDIA_PGLITE_DIR) may stand in for it (the N-1 test boots one).
+        if (!(env.MEDIA_PGLITE_DIR && env.NODE_ENV !== 'production')) out.push('DATABASE_URL is not set; it must name the restored copy of the database');
     } else {
-        const abs = path.resolve(cwd, env.DB_PATH);
-        const real = realish(abs);
-        const root = roots.find((r) => inside(abs, r) || inside(real, r));
-        if (productionDb.has(abs) || productionDb.has(real)) out.push(`DB_PATH (${abs}) is production's database; point it at the restored copy`);
-        else if (root) out.push(`DB_PATH (${abs}${real !== abs ? ` → ${real}` : ''}) is inside ${root}; a drill writes nothing in the checkout or in production's data`);
+        let u = null;
+        try { u = new URL(env.DATABASE_URL); } catch { out.push('DATABASE_URL is not a postgres:// URL'); }
+        if (u) {
+            const name = decodeURIComponent(u.pathname.replace(/^\//, ''));
+            const port = Number(u.port || 5432);
+            if (PRODUCTION_DBS.has(name) && PRODUCTION_DB_PORTS.has(port)) out.push(`DATABASE_URL (${name} on port ${port}) is production's database; point it at the restored copy`);
+        }
     }
+    if (env.DATABASE_DIRECT_URL) out.push('DATABASE_DIRECT_URL is set; a drill never migrates or writes: unset it');
     if (!isLoopbackHost(env.HOST)) out.push(`HOST (${env.HOST || 'unset, i.e. 0.0.0.0'}) is not loopback; a drill binds 127.0.0.1 only`);
     const port = Number(env.PORT);
     if (!env.PORT || !Number.isInteger(port) || port < 1 || port > 65535) out.push('PORT is not set; it must be the drill\'s own port');

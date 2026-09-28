@@ -16,31 +16,31 @@ const views = require('./service');
 
 const router = express.Router({ mergeParams: true });
 
-function ownerOf(type, id) {
+async function ownerOf(type, id) {
     const t = views.TABLES[type]; if (!t) return null;
-    try { const r = db.get(`SELECT user_id FROM ${t.table} WHERE id = ?`, [id]); return r ? r.user_id : null; } catch { return null; }
+    try { const r = await db.get(`SELECT user_id FROM ${t.table} WHERE id = ?`, [id]); return r ? r.user_id : null; } catch { return null; }
 }
 
-router.post('/', tenantAuth(), (req, res) => {
+router.post('/', tenantAuth(), async (req, res) => {
     const body = req.body || {};
     const type = String(body.type || '');
     const id = parseInt(body.id, 10);
     if (!views.TABLES[type] || !id) return res.status(400).json({ error: 'type (vod|clip|paste|file) and id required' });
     // Deletion/tenancy guard: only the owning app may count views on its content.
     const t = views.TABLES[type];
-    const row = db.get(`SELECT app_id, user_id FROM ${t.table} WHERE id = ?`, [id]);
+    const row = await db.get(`SELECT app_id, user_id FROM ${t.table} WHERE id = ?`, [id]);
     if (!row) return res.status(404).json({ error: 'Not found' });
     if (row.app_id && row.app_id !== req.appId) return res.status(403).json({ error: 'Not your content' });
     const userId = body.user_id != null ? body.user_id : (req.userId != null ? req.userId : null);
-    const out = views.recordView(type, id, { req, ip: body.ip || undefined, userId, ownerUserId: row.user_id, userAgent: body.user_agent || undefined });
+    const out = await views.recordView(type, id, { req, ip: body.ip || undefined, userId, ownerUserId: row.user_id, userAgent: body.user_agent || undefined });
     res.json(out);
 });
 
-router.get('/', tenantAuth({ allowUser: true }), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
     const type = String(req.query.type || '');
     if (!views.TABLES[type]) return res.status(400).json({ error: 'type required' });
     const ids = String(req.query.ids || '').split(',').map(x => parseInt(x, 10)).filter(n => Number.isInteger(n) && n > 0).slice(0, 200);
-    res.json({ type, counts: views.countsMany(type, ids) });
+    res.json({ type, counts: await views.countsMany(type, ids) });
 });
 
 module.exports = router;

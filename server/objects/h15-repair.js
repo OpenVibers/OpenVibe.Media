@@ -80,21 +80,21 @@ function plan(item, probes = {}, facts = {}) {
  * Apply one planned change. h = better-sqlite3 handle. facts: { size, sha256 } of the good bytes (rebaseline,
  * regenerate). → the change with old values, or { skipped } when the row moved on.
  */
-function apply(h, step, facts = {}) {
-    const cur = h.prepare('SELECT id, size_bytes, content_hash, lifecycle_status FROM media_objects WHERE id = ?').get(step.object_id);
+async function apply(h, step, facts = {}) {
+    const cur = await h.prepare('SELECT id, size_bytes, content_hash, lifecycle_status FROM media_objects WHERE id = ?').get(step.object_id);
     if (!cur) return { ...step, skipped: 'object gone' };
     const obj = { ...cur, ...(step.read || {}) };
-    const tx = h.transaction(() => {
+    const tx = async () => await h.tx(async () => {
         if (step.action === 'rebaseline' || step.action === 'regenerate' || step.action === 'resize') {
             const provider = step.action === 'regenerate' ? 'local' : step.provider;
-            const loc = h.prepare('SELECT id, state, size_bytes FROM media_locations WHERE object_id = ? AND provider = ?').get(obj.id, provider);
+            const loc = await h.prepare('SELECT id, state, size_bytes FROM media_locations WHERE object_id = ? AND provider = ?').get(obj.id, provider);
             if (!loc) return { ...step, skipped: `no ${provider} location` };
             if (step.action === 'resize' && facts.sha256 !== obj.content_hash) return { ...step, skipped: 'the copy does not hash to the object\'s content_hash' };
-            const r = h.prepare("UPDATE media_objects SET size_bytes = ?, content_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND size_bytes IS ? AND content_hash IS ?")
+            const r = await h.prepare("UPDATE media_objects SET size_bytes = ?, content_hash = ?, updated_at = ov_now() WHERE id = ? AND size_bytes IS NOT DISTINCT FROM ? AND content_hash IS NOT DISTINCT FROM ?")
                 .run(facts.size, facts.sha256, obj.id, obj.size_bytes, obj.content_hash);
             if (!r.changes) return { ...step, skipped: 'the object changed since it was read' };
-            h.prepare("UPDATE media_locations SET state = 'present', size_bytes = ?, verified_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(facts.size, loc.id);
-            const legacy = step.action === 'regenerate' ? null : legacySize(h, step.legacy_ref, facts.size);
+            await h.prepare("UPDATE media_locations SET state = 'present', size_bytes = ?, verified_at = ov_now(), updated_at = ov_now() WHERE id = ?").run(facts.size, loc.id);
+            const legacy = step.action === 'regenerate' ? null : await legacySize(h, step.legacy_ref, facts.size);
             return {
                 ...step,
                 old: { size_bytes: obj.size_bytes, content_hash: obj.content_hash, location_state: loc.state, location_size: loc.size_bytes, ...(legacy ? { legacy_file_size: legacy.old } : {}) },
@@ -102,47 +102,47 @@ function apply(h, step, facts = {}) {
             };
         }
         if (step.action === 'failed_recording') {
-            const r = h.prepare("UPDATE media_objects SET lifecycle_status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lifecycle_status = ?").run(obj.id, obj.lifecycle_status);
+            const r = await h.prepare("UPDATE media_objects SET lifecycle_status = 'failed', updated_at = ov_now() WHERE id = ? AND lifecycle_status = ?").run(obj.id, obj.lifecycle_status);
             if (!r.changes) return { ...step, skipped: 'the object changed since it was read' };
             return { ...step, old: { lifecycle_status: obj.lifecycle_status }, new: { lifecycle_status: 'failed' } };
         }
         return { ...step, skipped: 'nothing to write' };
     });
-    return tx();
+    return await tx();
 }
 
 /**
  * The legacy vods row behind a VOD object gets the object's size (file_size), so the projection from that
  * row (vodProjection) agrees with the object. Inside apply()'s transaction. → { old } or null (no row).
  */
-function legacySize(h, legacyRef, size) {
+async function legacySize(h, legacyRef, size) {
     const m = VOD_REF.exec(String(legacyRef || ''));
     if (!m) return null;
-    const hasTable = h.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'vods'").get();
-    const row = hasTable && h.prepare('SELECT file_size FROM vods WHERE id = ?').get(Number(m[1]));
+    const hasTable = await h.prepare("SELECT 1 FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'vods'").get();
+    const row = hasTable && await h.prepare('SELECT file_size FROM vods WHERE id = ?').get(Number(m[1]));
     if (!row) return null;
-    h.prepare('UPDATE vods SET file_size = ? WHERE id = ?').run(size, Number(m[1]));
+    await h.prepare('UPDATE vods SET file_size = ? WHERE id = ?').run(size, Number(m[1]));
     return { old: row.file_size };
 }
 
 /** Undo one applied change where the row still holds what the repair wrote. → { restored } | { skipped } */
-function rollback(h, change) {
+async function rollback(h, change) {
     if (!change || !change.old || !change.new) return { ...change, skipped: 'not an applied change' };
-    const tx = h.transaction(() => {
+    const tx = async () => await h.tx(async () => {
         if (change.action === 'failed_recording') {
-            const r = h.prepare('UPDATE media_objects SET lifecycle_status = ? WHERE id = ? AND lifecycle_status = ?').run(change.old.lifecycle_status, change.object_id, change.new.lifecycle_status);
+            const r = await h.prepare('UPDATE media_objects SET lifecycle_status = ? WHERE id = ? AND lifecycle_status = ?').run(change.old.lifecycle_status, change.object_id, change.new.lifecycle_status);
             return r.changes ? { ...change, restored: true } : { ...change, skipped: 'the row changed since' };
         }
-        const r = h.prepare('UPDATE media_objects SET size_bytes = ?, content_hash = ? WHERE id = ? AND size_bytes IS ? AND content_hash IS ?')
+        const r = await h.prepare('UPDATE media_objects SET size_bytes = ?, content_hash = ? WHERE id = ? AND size_bytes IS NOT DISTINCT FROM ? AND content_hash IS NOT DISTINCT FROM ?')
             .run(change.old.size_bytes, change.old.content_hash, change.object_id, change.new.size_bytes, change.new.content_hash);
         if (!r.changes) return { ...change, skipped: 'the row changed since' };
         const provider = change.action === 'regenerate' ? 'local' : change.provider;
-        h.prepare('UPDATE media_locations SET state = ?, size_bytes = ? WHERE object_id = ? AND provider = ?').run(change.old.location_state, change.old.location_size, change.object_id, provider);
+        await h.prepare('UPDATE media_locations SET state = ?, size_bytes = ? WHERE object_id = ? AND provider = ?').run(change.old.location_state, change.old.location_size, change.object_id, provider);
         const m = VOD_REF.exec(String(change.legacy_ref || ''));
-        if (m && 'legacy_file_size' in change.old) h.prepare('UPDATE vods SET file_size = ? WHERE id = ? AND file_size IS ?').run(change.old.legacy_file_size, Number(m[1]), change.new.legacy_file_size);
+        if (m && 'legacy_file_size' in change.old) await h.prepare('UPDATE vods SET file_size = ? WHERE id = ? AND file_size IS NOT DISTINCT FROM ?').run(change.old.legacy_file_size, Number(m[1]), change.new.legacy_file_size);
         return { ...change, restored: true };
     });
-    return tx();
+    return await tx();
 }
 
 module.exports = { plan, apply, rollback, judgeProbe, MIN_SECONDS, SHOT_RE };

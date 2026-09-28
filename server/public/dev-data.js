@@ -132,14 +132,14 @@ function getTranscriptTimeline(appId, sel, limit) {
             const user = await _resolveUser(appId, String(sel).slice(1));
             if (!user) return { status: 404, body: { error: `Streamer ${sel} not found` } };
             uid = user.uid; scope = 'streamer'; label = `@${user.username}`;
-            rows = db.all(
+            rows = await db.all(
                 `SELECT ${VOD_COLS} FROM vods WHERE app_id = ? AND user_id = ? AND is_public = 1 AND COALESCE(clips_only,0) = 0
                  ORDER BY COALESCE(is_recording,0) DESC, created_at DESC LIMIT ?`, [appId, uid, n]);
         } else {
             const resolved = await frames.resolveSelector(appId, sel);
             if (!resolved.msid) return { status: 404, body: { error: `Slot '${sel}' not found or not live (slugs resolve while live; slot ids always work)` } };
             scope = 'slot'; label = resolved.label;
-            rows = db.all(
+            rows = await db.all(
                 `SELECT ${VOD_COLS} FROM vods WHERE app_id = ? AND managed_stream_id = ? AND is_public = 1 AND COALESCE(clips_only,0) = 0
                  ORDER BY COALESCE(is_recording,0) DESC, created_at DESC LIMIT ?`, [appId, resolved.msid, n]);
             uid = rows[0]?.user_id ?? null;
@@ -166,7 +166,7 @@ function getTranscriptTimeline(appId, sel, limit) {
 /** Transcript + AI overview for one existing VOD id. */
 function getVodTranscript(vodId) {
     return cached(`vt:${vodId}`, async () => {
-        const v = db.get(`SELECT ${VOD_COLS}, app_id, is_public, clips_only FROM vods WHERE id = ?`, [vodId]);
+        const v = await db.get(`SELECT ${VOD_COLS}, app_id, is_public, clips_only FROM vods WHERE id = ?`, [vodId]);
         // Private (including legacy rows with no visibility and is_public = 0) and clips-only
         // source recordings answer exactly like a missing id — the same rule /v/:id applies.
         const hidden = v && ((v.visibility || (v.is_public ? 'public' : 'private')) === 'private' || v.clips_only);

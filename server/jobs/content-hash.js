@@ -55,8 +55,8 @@ const CANDIDATES = `SELECT o.id, o.size_bytes, l.id AS loc_id, l.key AS loc_key
     FROM media_objects o JOIN media_locations l ON l.object_id = o.id AND l.provider = 'local' AND l.state = 'present'
     WHERE o.lifecycle_status = 'ready' AND o.content_hash IS NULL`;
 
-function remaining(appId) {
-    return db.get(`SELECT COUNT(*) AS n FROM (${CANDIDATES} AND o.app_id = ?)`, [appId]).n;
+async function remaining(appId) {
+    return (await db.get(`SELECT COUNT(*) AS n FROM (${CANDIDATES} AND o.app_id = ?)`, [appId])).n;
 }
 
 function validate({ obj, params }) {
@@ -74,20 +74,20 @@ function validate({ obj, params }) {
 }
 
 /** Record one hash, only if nothing changed since the file was read. Returns true when written. */
-function record(c, hash, st) {
+async function record(c, hash, st) {
     let wrote = false;
-    db.getDb().transaction(() => {
-        const o = db.get('SELECT content_hash, metadata, lifecycle_status FROM media_objects WHERE id = ?', [c.id]);
-        const l = db.get('SELECT key, state FROM media_locations WHERE id = ?', [c.loc_id]);
+    await db.getDb().tx(async () => {
+        const o = await db.get('SELECT content_hash, metadata, lifecycle_status FROM media_objects WHERE id = ?', [c.id]);
+        const l = await db.get('SELECT key, state FROM media_locations WHERE id = ?', [c.loc_id]);
         if (!o || o.content_hash || o.lifecycle_status !== 'ready' || !l || l.key !== c.loc_key || l.state !== 'present') return;
         let md = {};
         try { md = JSON.parse(o.metadata || '{}') || {}; } catch { md = {}; }
         md.hash_basis = { key: c.loc_key, size: st.size, at: new Date().toISOString() };
-        db.run('UPDATE media_objects SET content_hash = ?, metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND content_hash IS NULL', [hash, JSON.stringify(md), c.id]);
-        db.run(`UPDATE media_locations SET checksum = ?, size_bytes = ?, verified_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        await db.run('UPDATE media_objects SET content_hash = ?, metadata = ?, updated_at = ov_now() WHERE id = ? AND content_hash IS NULL', [hash, JSON.stringify(md), c.id]);
+        await db.run(`UPDATE media_locations SET checksum = ?, size_bytes = ?, verified_at = ov_now(), updated_at = ov_now()
                 WHERE id = ? AND key = ?`, [hash, st.size, c.loc_id, c.loc_key]);
         wrote = true;
-    })();
+    });
     return wrote;
 }
 
@@ -96,8 +96,8 @@ async function hashBatch({ appId, objectId = null, limit = 50, budgetMb = settin
     const s = settings();
     const budget = budgetMb * MB;
     const rows = objectId
-        ? db.all(`${CANDIDATES} AND o.id = ? AND o.app_id = ?`, [objectId, appId])
-        : db.all(`${CANDIDATES} AND o.app_id = ? ORDER BY o.id LIMIT ?`, [appId, limit]);
+        ? await db.all(`${CANDIDATES} AND o.id = ? AND o.app_id = ?`, [objectId, appId])
+        : await db.all(`${CANDIDATES} AND o.app_id = ? ORDER BY o.id LIMIT ?`, [appId, limit]);
     const out = { hashed: 0, bytes: 0, skipped: {}, remaining: 0 };
     const skip = (why) => { out.skipped[why] = (out.skipped[why] || 0) + 1; };
     for (const c of rows) {
@@ -115,26 +115,26 @@ async function hashBatch({ appId, objectId = null, limit = 50, budgetMb = settin
         try { after = fs.statSync(c.loc_key); } catch { skip('file_missing'); continue; }
         if (after.size !== st.size || after.mtimeMs !== st.mtimeMs) { skip('changed_while_reading'); continue; }
         out.bytes += st.size;
-        if (record(c, hash, st)) out.hashed++; else skip('changed_in_database');
+        if (await record(c, hash, st)) out.hashed++; else skip('changed_in_database');
     }
-    out.remaining = remaining(appId);
+    out.remaining = await remaining(appId);
     return out;
 }
 
 async function run(job, ctx = {}) {
     const p = validate({ obj: null, params: job.params });
-    return hashBatch({ appId: job.app_id, objectId: job.object_id || null, limit: p.limit, budgetMb: p.budget_mb || settings().budgetMb, signal: ctx.signal });
+    return await hashBatch({ appId: job.app_id, objectId: job.object_id || null, limit: p.limit, budgetMb: p.budget_mb || settings().budgetMb, signal: ctx.signal });
 }
 
 /** Queue one batch per tenant that has unhashed local copies, every MEDIA_HASH_INTERVAL_MIN. */
-function schedule(nowMs = Date.now()) {
+async function schedule(nowMs = Date.now()) {
     const minutes = settings().intervalMin;
     if (!(minutes > 0)) return 0;
     const period = Math.floor(nowMs / (minutes * 60 * 1000));
     let n = 0;
-    for (const { app_id: appId } of db.all(`SELECT DISTINCT o.app_id FROM (${CANDIDATES}) c JOIN media_objects o ON o.id = c.id`)) {
+    for (const { app_id: appId } of await db.all(`SELECT DISTINCT o.app_id FROM (${CANDIDATES}) c JOIN media_objects o ON o.id = c.id`)) {
         try {
-            const r = queue.enqueue({ appId, type: TYPE, params: { limit: 50 }, idempotencyKey: `${TYPE}:${minutes}m:${period}`, createdBy: 'system:schedule' });
+            const r = await queue.enqueue({ appId, type: TYPE, params: { limit: 50 }, idempotencyKey: `${TYPE}:${minutes}m:${period}`, createdBy: 'system:schedule' });
             if (r.created) n++;
         } catch (err) { console.warn(`[Jobs] could not schedule ${TYPE} for ${appId}: ${err.message}`); }
     }

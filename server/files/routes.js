@@ -58,8 +58,8 @@ function filePathForKey(row) {
     return path.join(config.files.path, row.app_id, row.key);
 }
 
-function filePublic(row) {
-    const sandbox = db.isSandboxTenant(row.app_id);
+async function filePublic(row) {
+    const sandbox = await db.isSandboxTenant(row.app_id);
     const signed = sandbox ? require('../objects/signing').signedFileUrl(row.key) : null;
     return {
         key: row.key,
@@ -99,7 +99,7 @@ router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), limits('media.f
         const tag = req.appRow.project_id ? `${crypto.createHash('sha256').update(`tenant:${req.appId}`).digest('hex').slice(0, 8)}-` : '';
         const key = `${digest.slice(0, 12)}-${tag}${name}`;
 
-        const existing = db.getFileByKey(key);
+        const existing = await db.getFileByKey(key);
         if (existing) {
             // Same content + name already stored (any app hash-collides only on
             // identical bytes+name for its own app; cross-app: key is global, so
@@ -108,42 +108,51 @@ router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), limits('media.f
             if (existing.app_id !== req.appId) {
                 return res.status(409).json({ error: 'Key conflict — rename the file and retry' });
             }
-            return res.status(200).json({ ...filePublic(existing), deduplicated: true });
+            return res.status(200).json({ ...await filePublic(existing), deduplicated: true });
         }
 
-        // The root namespace's quotas (bytes and objects: files + native objects + uploads in progress).
-        // Checked after the last await, so nothing else is stored between this check and the row below
-        // (concurrent uploads each saw the same usage when it ran before hashing).
+        // The root namespace's quotas (bytes and objects: files + native objects + uploads in progress), checked and
+        // the row written in one transaction under the tenant's quota lock, so concurrent uploads cannot all fit.
         const root = db.rootNamespace(req.appRow);
-        const q = namespaces.checkQuota(req.appRow, root, { bytes: req.file.size, objects: 1 });
+        const dest = path.join(appDir(req.appId), key);
+        const userId = req.authType === 'user' ? req.userId : (req.body?.user_id ?? null);
+        const q = await db.getDb().tx(async () => {
+            const over = await namespaces.checkQuota(req.appRow, root, { bytes: req.file.size, objects: 1 });
+            if (over) return over;
+            // A same-tenant upload of the same bytes and name that committed while this one hashed.
+            const same = await db.getFileByKey(key);
+            if (same) return { same };
+            await db.createFile({
+                key,
+                app_id: req.appId,
+                user_id: userId,
+                original_name: req.file.originalname || name,
+                size: req.file.size,
+                mime: req.file.mimetype || 'application/octet-stream',
+                sha256: digest,
+            });
+            try {
+                fs.renameSync(req.file.path, dest);
+            } catch {
+                fs.copyFileSync(req.file.path, dest);
+                try { fs.unlinkSync(req.file.path); } catch { /* */ }
+            }
+            return null;
+        });
+        if (q && q.same) {
+            try { fs.unlinkSync(req.file.path); } catch { /* */ }
+            if (q.same.app_id !== req.appId) return res.status(409).json({ error: 'Key conflict — rename the file and retry' });
+            return res.status(200).json({ ...await filePublic(q.same), deduplicated: true });
+        }
         if (q) {
             try { fs.unlinkSync(req.file.path); } catch { /* */ }
             return res.status(413).json({ error: q.code === 'media.quota.objects_exceeded' ? 'App object quota exceeded' : 'App file quota exceeded', code: q.code, ...q.extra });
         }
 
-        const dest = path.join(appDir(req.appId), key);
-        try {
-            fs.renameSync(req.file.path, dest);
-        } catch {
-            fs.copyFileSync(req.file.path, dest);
-            try { fs.unlinkSync(req.file.path); } catch { /* */ }
-        }
-
-        const userId = req.authType === 'user' ? req.userId : (req.body?.user_id ?? null);
-        db.createFile({
-            key,
-            app_id: req.appId,
-            user_id: userId,
-            original_name: req.file.originalname || name,
-            size: req.file.size,
-            mime: req.file.mimetype || 'application/octet-stream',
-            sha256: digest,
-        });
-
-        const row = db.getFileByKey(key, req.appId);
-        namespaces.reconcileChain(req.appRow, root);
+        const row = await db.getFileByKey(key, req.appId);
+        await namespaces.reconcileChain(req.appRow, root);
         console.log(`[Files] Stored ${key} for app ${req.appId} (${(req.file.size / 1024).toFixed(1)} KB)`);
-        res.status(201).json(filePublic(row));
+        res.status(201).json(await filePublic(row));
     } catch (err) {
         console.error('[Files] Upload error:', err.message);
         if (req.file?.path) { try { fs.unlinkSync(req.file.path); } catch { /* */ } }
@@ -152,14 +161,14 @@ router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), limits('media.f
 });
 
 // ── List ─────────────────────────────────────────────────────
-router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), limits('media.file.list'), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), limits('media.file.list'), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
-        const files = db.listFiles(req.appId, { limit, offset });
+        const files = await db.listFiles(req.appId, { limit, offset });
         res.json({
-            files: files.map(filePublic),
-            used_bytes: require('../objects/model').usedBytes(req.appId),
+            files: (await Promise.all(files.map(filePublic))),
+            used_bytes: await require('../objects/model').usedBytes(req.appId),
             quota_bytes: Number(req.appRow.quota_bytes) || 0,
             limit, offset,
         });
@@ -169,11 +178,11 @@ router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), limits('media.fil
 });
 
 // ── Meta ─────────────────────────────────────────────────────
-router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), limits('media.file.read'), (req, res) => {
+router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), limits('media.file.read'), async (req, res) => {
     try {
-        const row = db.getFileByKey(String(req.params.key), req.appId);
+        const row = await db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });
-        res.json(filePublic(row));
+        res.json(await filePublic(row));
     } catch (err) {
         res.status(500).json({ error: 'Failed to get file' });
     }
@@ -181,19 +190,19 @@ router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), limits('media
 
 // ── Delete ───────────────────────────────────────────────────
 // A delete removes bytes and frees quota: a write, tighter than reads.
-router.delete('/:key', tenantAuth({ allowUser: true, verb: 'delete' }), limits('media.file.delete', { minute: 60, hour: 1200 }), (req, res) => {
+router.delete('/:key', tenantAuth({ allowUser: true, verb: 'delete' }), limits('media.file.delete', { minute: 60, hour: 1200 }), async (req, res) => {
     try {
-        const row = db.getFileByKey(String(req.params.key), req.appId);
+        const row = await db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });
         if (req.authType === 'user' && !(req.userId != null && row.user_id === req.userId)) {
             return res.status(403).json({ error: 'Not authorized to delete this file' });
         }
-        if (require('../objects/model').isHeldRow(row)) return res.status(409).json({ error: 'File is under a retention hold', code: 'media.object.held' });
+        if (await require('../objects/model').isHeldRow(row)) return res.status(409).json({ error: 'File is under a retention hold', code: 'media.object.held' });
 
         const filePath = filePathForKey(row);
         try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* */ }
-        db.deleteFileRow(row.key);
-        namespaces.reconcileChain(req.appRow, db.rootNamespace(req.appRow));
+        await db.deleteFileRow(row.key);
+        await namespaces.reconcileChain(req.appRow, db.rootNamespace(req.appRow));
         res.json({ message: 'File deleted' });
     } catch (err) {
         res.status(500).json({ error: 'Failed to delete file' });

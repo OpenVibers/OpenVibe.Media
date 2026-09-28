@@ -5,7 +5,7 @@
  * criterion; docs/object-model.md#r2-eviction-drill). Dry run unless --execute.
  *
  *   node scripts/r2-eviction-drill.js (--vod <id> | --pick) [--execute] [--base-url https://openvibe.media]
- *                                     [--no-http] [--max-mb 512] [--out artifact.json] [--json] [--db ./data/media.db]
+ *                                     [--no-http] [--max-mb 512] [--out artifact.json] [--json]
  *
  * The VOD must be served from R2 today (storage_provider r2: a B2 canonical copy plus an R2 cache copy),
  * not recording, not under a retention hold (a hold freezes placement), and public or unlisted unless
@@ -90,21 +90,22 @@ async function runDrill(opts, deps) {
         checks: {}, steps: [], locations: {}, verdict: null, reason: null,
     };
     const step = (name, ok, detail = {}) => { art.steps.push({ name, ok, at: nowIso(), ...detail }); return ok; };
-    const locations = () => (art.object_id ? model.listLocations(art.object_id).map(l => ({ provider: l.provider, state: l.state, size_bytes: l.size_bytes, verified_at: l.verified_at })) : []);
+    const locations = async () => (art.object_id ? (await model.listLocations(art.object_id)).map(l => ({ provider: l.provider, state: l.state, size_bytes: l.size_bytes, verified_at: l.verified_at })) : []);
     const refuse = (reason) => { art.verdict = 'refused'; art.reason = reason; art.finished_at = nowIso(); return art; };
-    const fail = (reason) => { art.verdict = 'fail'; art.reason = reason; art.finished_at = nowIso(); art.locations.at_failure = locations(); return art; };
+    const fail = async (reason) => { art.verdict = 'fail'; art.reason = reason; art.finished_at = nowIso(); art.locations.at_failure = await locations(); return art; };
 
     if (!storage.providerConfigured('b2') || !storage.providerConfigured('r2')) return refuse('B2 and R2 must both be configured (MEDIA_B2_*, MEDIA_R2_*)');
 
     // ── Choose the VOD ──
     let vod = null;
-    if (opts.vodId) vod = db.get('SELECT * FROM vods WHERE id = ?', [opts.vodId]);
+    if (opts.vodId) vod = await db.get('SELECT * FROM vods WHERE id = ?', [opts.vodId]);
     else if (opts.pick) {
-        const cands = db.all(`SELECT * FROM vods WHERE storage_provider = 'r2' AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
+        const cands = await db.all(`SELECT * FROM vods WHERE storage_provider = 'r2' AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
                                 AND file_path IS NOT NULL AND COALESCE(file_size, 0) > 0 AND file_size <= ?
-                                ${opts.http ? "AND COALESCE(visibility, CASE WHEN is_public THEN 'public' ELSE 'private' END) != 'private'" : ''}
+                                ${opts.http ? "AND COALESCE(visibility, CASE WHEN is_public = 1 THEN 'public' ELSE 'private' END) != 'private'" : ''}
                               ORDER BY file_size ASC LIMIT 50`, [Math.max(1, opts.maxMb) * MIB]);
-        vod = cands.find(v => !model.isHeldRow(v)) || null;
+        vod = null;
+        for (const v of cands) if (!await model.isHeldRow(v)) { vod = v; break; }
         if (!vod) return refuse(`no VOD served from R2 fits (not recording, not held${opts.http ? ', public or unlisted' : ''}, at most ${opts.maxMb} MB)`);
     } else return refuse('name a VOD (--vod <id>) or --pick one');
     if (!vod) return refuse(`vod ${opts.vodId} not found`);
@@ -116,10 +117,10 @@ async function runDrill(opts, deps) {
     if (storage.providerOf(vod) !== 'r2') return refuse(`vod ${vod.id} is served from ${storage.providerOf(vod)}, not R2: there is no R2 copy to evict`);
     if (vod.is_recording) return refuse(`vod ${vod.id} is recording`);
     if (vod.clips_only) return refuse(`vod ${vod.id} is a clips-only recording`);
-    if (model.isHeldRow(vod)) return refuse(`vod ${vod.id} is under a retention hold (holds freeze placement)`);
+    if (await model.isHeldRow(vod)) return refuse(`vod ${vod.id} is under a retention hold (holds freeze placement)`);
     if (opts.http && vis === 'private') return refuse(`vod ${vod.id} is private: /v/<id> would not serve it anonymously (use --no-http)`);
     if (opts.http && !opts.baseUrl) return refuse('--base-url (or MEDIA_PUBLIC_URL) is needed for the HTTP checks');
-    art.locations.before = locations();
+    art.locations.before = await locations();
 
     // ── Both copies agree (size, and the first MiB) ──
     const [b2, r2] = await Promise.all([storage.headObject('b2', art.key), storage.headObject('r2', art.key)]);
@@ -141,7 +142,7 @@ async function runDrill(opts, deps) {
     /** Where playback goes now: GET /v/<id>?raw=1 (or resolvePlayback in-process) and the first MiB served there. */
     const served = async () => {
         if (!opts.http) {
-            const plan = await storage.resolvePlayback(db.get('SELECT * FROM vods WHERE id = ?', [vod.id]));
+            const plan = await storage.resolvePlayback(await db.get('SELECT * FROM vods WHERE id = ?', [vod.id]));
             if (!plan || plan.kind !== 'redirect') return { provider: plan ? plan.kind : null };
             const got = await firstMibSha(plan.url, fetchImpl);
             return { via: 'resolvePlayback', provider: plan.provider, status: 302, first_mib_sha256: got.sha256 };
@@ -169,34 +170,34 @@ async function runDrill(opts, deps) {
 
     // 1. before
     const before = await served();
-    if (!step('before: served from R2', before.provider === 'r2' && before.first_mib_sha256 === expectSha, before)) return fail('playback is not coming from R2 before the eviction');
+    if (!step('before: served from R2', before.provider === 'r2' && before.first_mib_sha256 === expectSha, before)) return await fail('playback is not coming from R2 before the eviction');
     // 2. evict
     const ev = await storage.demoteFromR2(vod.id, { trigger: 'drill', reason: 'R2 eviction drill: evict the R2 copy' });
-    const rowAfterEvict = db.get('SELECT storage_provider FROM vods WHERE id = ?', [vod.id]);
+    const rowAfterEvict = await db.get('SELECT storage_provider FROM vods WHERE id = ?', [vod.id]);
     const r2Gone = await storage.headObject('r2', art.key);
-    art.locations.after_evict = locations();
+    art.locations.after_evict = await locations();
     if (!step('evict: R2 copy removed', !!(ev && ev.ok) && !r2Gone && rowAfterEvict.storage_provider === 'b2', { result: ev, r2_head: r2Gone, storage_provider: rowAfterEvict.storage_provider })) {
-        return fail('the eviction did not complete');
+        return await fail('the eviction did not complete');
     }
     // 3. served from B2
     const fromB2 = await served();
     const b2Head = await storage.headObject('b2', art.key);
     if (!step('from B2: served from the canonical copy', fromB2.provider === 'b2' && fromB2.first_mib_sha256 === expectSha && !!b2Head && b2Head.size === b2.size, { ...fromB2, b2_head: b2Head })) {
-        return fail('after the eviction the VOD is not served from B2');
+        return await fail('after the eviction the VOD is not served from B2');
     }
     // 4. re-warm
     const pr = await storage.promoteToR2(vod.id, { trigger: 'drill', reason: 'R2 eviction drill: re-warm R2 from B2' });
     const r2Back = await storage.headObject('r2', art.key);
-    const rowAfterWarm = db.get('SELECT storage_provider FROM vods WHERE id = ?', [vod.id]);
+    const rowAfterWarm = await db.get('SELECT storage_provider FROM vods WHERE id = ?', [vod.id]);
     if (!step('re-warm: R2 copy restored from B2', !!(pr && pr.ok) && !!r2Back && r2Back.size === b2.size && rowAfterWarm.storage_provider === 'r2', { result: pr, r2_head: r2Back, storage_provider: rowAfterWarm.storage_provider })) {
-        return fail('the re-warm did not complete (the VOD is still served from B2)');
+        return await fail('the re-warm did not complete (the VOD is still served from B2)');
     }
     // 5. after
     const after = await served();
-    art.locations.after = locations();
+    art.locations.after = await locations();
     const locOk = !art.object_id || ['b2', 'r2'].every(p => (art.locations.after.find(l => l.provider === p) || {}).state === 'present');
     if (!step('after: served from R2 again', after.provider === 'r2' && after.first_mib_sha256 === expectSha && locOk, { ...after, locations_present: locOk })) {
-        return fail('after the re-warm the VOD is not served from R2');
+        return await fail('after the re-warm the VOD is not served from R2');
     }
     art.verdict = 'pass';
     art.finished_at = nowIso();
@@ -211,19 +212,20 @@ function summarize(art) {
 
 if (require.main === module) {
     const opts = parseArgs(process.argv);
-    if (opts.db) process.env.DB_PATH = path.resolve(opts.db);
     const config = require('../server/config');
     if (!opts.baseUrl) opts.baseUrl = config.publicUrl;
     const storage = require('../server/vod/vod-storage');
     const db = require('../server/db/database');
     const model = require('../server/objects/model');
     (async () => {
+        await db.initDb();   // PostgreSQL (DATABASE_URL), as the service
+        await storage.tierConfig.init(storage.DEFAULTS, { log: { info() {}, warn: (m) => console.error(`[Tiers] ${m}`), error: (m) => console.error(`[Tiers] ${m}`) } });
         const art = await runDrill(opts, { storage, db, model });
         const out = opts.out || path.join(path.dirname(config.db.path), 'drills', `r2-eviction-${art.vod_id ?? 'none'}-${art.started_at.replace(/[:.]/g, '-')}.json`);
         fs.mkdirSync(path.dirname(out), { recursive: true });
         fs.writeFileSync(out, JSON.stringify(art, null, 2));
         console.log(opts.json ? JSON.stringify(art, null, 2) : `${summarize(art)}\nartifact: ${out}`);
-        db.close();
+        await db.close();
         process.exit(art.verdict === 'pass' || art.verdict === 'dry-run' ? 0 : art.verdict === 'refused' ? 2 : 1);
     })().catch((err) => { console.error(err); process.exit(1); });
 }

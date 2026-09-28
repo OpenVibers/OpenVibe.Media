@@ -66,7 +66,7 @@ async function resolveSource(obj) {
     const vodStorage = require('../vod/vod-storage');
     const ref = model.parseLegacyRef(obj.legacy_ref);
     if (ref && (ref.kind === 'vod' || ref.kind === 'clip')) {
-        const row = db.get(`SELECT * FROM ${ref.kind === 'vod' ? 'vods' : 'clips'} WHERE id = ?`, [Number(ref.id)]);
+        const row = await db.get(`SELECT * FROM ${ref.kind === 'vod' ? 'vods' : 'clips'} WHERE id = ?`, [Number(ref.id)]);
         if (!row || !row.file_path) return null;
         const local = ref.kind === 'vod'
             ? existing(vodStorage.localPathForVod(row)) || existing(row.file_path)
@@ -75,7 +75,7 @@ async function resolveSource(obj) {
         const src = await vodStorage.resolveMediaSource(row);
         return src ? { input: src.value, name: row.file_path, remote: src.kind === 'url' } : null;
     }
-    const locs = model.listLocations(obj.id);
+    const locs = await model.listLocations(obj.id);
     const local = locs.find(l => l.provider === 'local' && l.state !== 'missing' && existing(l.key));
     if (local) return { input: local.key, name: obj.canonical_key || local.key };
     for (const p of ['r2', 'b2']) {
@@ -132,23 +132,23 @@ function probeDuration(p) {
     return require('../vod/media-tools').probeVodInfo(p).then(i => i.duration || 0).catch(() => 0);
 }
 
-function loadSource(job) {
-    const obj = model.getObject(job.object_id);
+async function loadSource(job) {
+    const obj = await model.getObject(job.object_id);
     if (!obj || obj.app_id !== job.app_id) throw new JobError('not_found', 'The source object no longer exists', { permanent: true });
     if (obj.lifecycle_status !== 'ready') throw new JobError('not_ready', `The source object is ${obj.lifecycle_status}`, { permanent: true });
     if (!isMediaObject(obj)) throw new JobError('media.job.invalid', 'Only vod/clip objects (or video/audio objects) can be split or remuxed', { permanent: true });
     return obj;
 }
 
-function checkRoom(obj, needBytes) {
+async function checkRoom(obj, needBytes) {
     const reserve = config.objects.uploadMinFreeMb * MB;
     const free = freeBytes(config.objects.path);
     if (free < needBytes + reserve) {
         throw new JobError('insufficient_disk', `Not enough free disk: need ${Math.ceil((needBytes + reserve) / MB)} MB, ${Math.floor(free / MB)} MB free`, { retryAfterS: 1800 });
     }
     // Outputs go to the source's namespace: every quota from there up to the tenant must have the room.
-    const app = db.getApp(obj.app_id);
-    const q = app ? require('../objects/namespaces').checkQuota(app, obj.namespace || db.rootNamespace(app), { bytes: needBytes, objects: 1 }) : null;
+    const app = await db.getApp(obj.app_id);
+    const q = app ? await require('../objects/namespaces').checkQuota(app, obj.namespace || db.rootNamespace(app), { bytes: needBytes, objects: 1 }) : null;
     if (q) throw new JobError('quota_exceeded', `The storage quota would be exceeded (${q.detail})`, { permanent: true });
 }
 
@@ -177,16 +177,16 @@ async function adopt({ src, file, ext, job, relation, metadata, variant, saveChe
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.renameSync(file, dest);
     try {
-        saveCheckpoint(checkpointFor(id, size), () => {
-            db.run(`INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, owner_app, owner_user_id, visibility, lifecycle_status,
+        await saveCheckpoint(checkpointFor(id, size), async () => {
+            await db.run(`INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, owner_app, owner_user_id, visibility, lifecycle_status,
                         mime_type, size_bytes, content_hash, canonical_provider, canonical_key, legacy_ref, metadata)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'private', 'ready', ?, ?, ?, 'local', ?, NULL, ?)`,
-            [id, src.app_id, src.namespace || db.rootNamespace(db.getApp(src.app_id) || { app_id: src.app_id }), kind || src.kind, src.owner_subject || null, src.owner_app || src.app_id, src.owner_user_id ?? null,
+            [id, src.app_id, src.namespace || db.rootNamespace(await db.getApp(src.app_id) || { app_id: src.app_id }), kind || src.kind, src.owner_subject || null, src.owner_app || src.app_id, src.owner_user_id ?? null,
                 mimeFor(ext, src), size, hash, dest,
                 JSON.stringify({ title: md.title || null, derived_from: src.id, job_id: job.id, filename: `${src.id}${suffix ? `-${suffix}` : metadata.part ? `-part${metadata.part}` : '-remux'}${ext}`, ...metadata })]);
-            model.upsertLocation(id, { provider: 'local', key: dest, state: 'present', size_bytes: size, checksum: hash, verified: true });
-            model.setRelationship(id, 'derived_from', src.id, { job_id: job.id, ...relation });
-            if (variant) model.setVariant(src.id, variant, id, `${job.type}@1`);
+            await model.upsertLocation(id, { provider: 'local', key: dest, state: 'present', size_bytes: size, checksum: hash, verified: true });
+            await model.setRelationship(id, 'derived_from', src.id, { job_id: job.id, ...relation });
+            if (variant) await model.setVariant(src.id, variant, id, `${job.type}@1`);
         });
     } catch (err) {
         try { fs.unlinkSync(dest); } catch { /* not moved */ }
@@ -210,7 +210,7 @@ function validateSplit({ obj, params }) {
 }
 
 async function runSplit(job, ctx) {
-    const src = loadSource(job);
+    const src = await loadSource(job);
     const source = await resolveSource(src);
     if (!source) throw new JobError('media_unavailable', 'The source bytes are unavailable (no local file and no cloud copy)', { permanent: true });
     const md = model.parseJson(src.metadata, {});
@@ -223,7 +223,7 @@ async function runSplit(job, ctx) {
     const cp = ctx.checkpoint && Array.isArray(ctx.checkpoint.parts) ? ctx.checkpoint : { parts: [] };
     const doneParts = new Set(cp.parts.map(p => p.part));
     const remaining = Math.max(0, (Number(src.size_bytes) || 0) - cp.parts.reduce((a, p) => a + p.size_bytes, 0));
-    checkRoom(src, remaining);
+    await checkRoom(src, remaining);
     const ext = extFor(src, source.name);
     const dir = workDir(job.id);
     const maxBytes = Number(job.params.max_bytes) || require('../objects/invariant').thresholds().maxBytes;
@@ -274,14 +274,14 @@ function validateRemux({ obj }) {
 }
 
 async function runRemux(job, ctx) {
-    const src = loadSource(job);
+    const src = await loadSource(job);
     if (ctx.checkpoint && ctx.checkpoint.object_id) {      // finished before an interruption
         cleanupWork(job.id);
         return { source_id: src.id, method: 'remux', ...ctx.checkpoint, source_unchanged: true };
     }
     const source = await resolveSource(src);
     if (!source) throw new JobError('media_unavailable', 'The source bytes are unavailable (no local file and no cloud copy)', { permanent: true });
-    checkRoom(src, Number(src.size_bytes) || 0);
+    await checkRoom(src, Number(src.size_bytes) || 0);
     const ext = extFor(src, source.name);
     const out = path.join(workDir(job.id), `remux${ext}`);
     const r = await ffmpeg(['-y', '-nostdin', '-v', 'error', ...inputArgs(source), '-i', source.input, '-map', '0:v?', '-map', '0:a?', '-c', 'copy',

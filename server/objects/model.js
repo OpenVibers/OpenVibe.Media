@@ -78,54 +78,54 @@ const vodStorage = () => require('../vod/vod-storage');
 
 // ── Reads ────────────────────────────────────────────────────
 
-function getObject(id) {
-    return id ? db.get('SELECT * FROM media_objects WHERE id = ?', [id]) : null;
+async function getObject(id) {
+    return id ? await db.get('SELECT * FROM media_objects WHERE id = ?', [id]) : null;
 }
 
-function getObjectByLegacyRef(ref) {
-    return ref ? db.get('SELECT * FROM media_objects WHERE legacy_ref = ?', [ref]) : null;
+async function getObjectByLegacyRef(ref) {
+    return ref ? await db.get('SELECT * FROM media_objects WHERE legacy_ref = ?', [ref]) : null;
 }
 
 /** An object by med_ id or legacy ref, scoped to one tenant (null when it belongs to another). */
-function resolveObject(idOrRef, appId) {
+async function resolveObject(idOrRef, appId) {
     const key = String(idOrRef || '');
-    const obj = key.startsWith('legacy:') ? getObjectByLegacyRef(key) : getObject(key);
+    const obj = key.startsWith('legacy:') ? await getObjectByLegacyRef(key) : await getObject(key);
     return obj && obj.app_id === appId ? obj : null;
 }
 
-function listLocations(objectId) {
-    return db.all('SELECT * FROM media_locations WHERE object_id = ? ORDER BY id', [objectId]);
+async function listLocations(objectId) {
+    return await db.all('SELECT * FROM media_locations WHERE object_id = ? ORDER BY id', [objectId]);
 }
 
-function listHolds(objectId, { includeReleased = false } = {}) {
-    return db.all(`SELECT * FROM media_holds WHERE object_id = ?${includeReleased ? '' : ' AND released_at IS NULL'} ORDER BY id`, [objectId]);
+async function listHolds(objectId, { includeReleased = false } = {}) {
+    return await db.all(`SELECT * FROM media_holds WHERE object_id = ?${includeReleased ? '' : ' AND released_at IS NULL'} ORDER BY id`, [objectId]);
 }
 
 /** Unreleased holds a clip inherits from its source VOD (clip_of, or the clip row's vod_id), each with inherited_from. */
-function inheritedHolds(objectId) {
+async function inheritedHolds(objectId) {
     if (!objectId) return [];
-    return db.all(`SELECT h.*, h.object_id AS inherited_from FROM media_holds h WHERE h.released_at IS NULL AND h.object_id != @id AND (
+    return await db.all(`SELECT h.*, h.object_id AS inherited_from FROM media_holds h WHERE h.released_at IS NULL AND h.object_id != @id AND (
         h.object_id IN (SELECT r.to_object_id FROM media_relationships r WHERE r.from_object_id = @id AND r.relation = 'clip_of')
         OR h.object_id IN (SELECT v.object_id FROM clips c JOIN vods v ON v.id = c.vod_id WHERE c.object_id = @id)) ORDER BY h.id`, { id: objectId });
 }
 
 /** Under an unreleased hold: its own, or (a clip) its source VOD's. The delete triggers apply the same rule (db.heldSql). */
-function isHeld(objectId) {
+async function isHeld(objectId) {
     if (!objectId) return false;
-    return !!db.get(`SELECT ${db.heldSql('@id')} AS held`, { id: objectId }).held;
+    return !!(await db.get(`SELECT ${db.heldSql('@id')} AS held`, { id: objectId })).held;
 }
 
 /**
  * Hold check for an inherited row (vods/clips/files/pastes). A clip row also follows its source VOD's
  * hold before it has an object of its own; any other row with no object yet is not held.
  */
-function isHeldRow(row) {
+async function isHeldRow(row) {
     try {
         if (!row) return false;
-        if (row.object_id && isHeld(row.object_id)) return true;
+        if (row.object_id && await isHeld(row.object_id)) return true;
         if (row.vod_id != null) {
-            const vod = db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
-            return !!(vod && vod.object_id && isHeld(vod.object_id));
+            const vod = await db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
+            return !!(vod && vod.object_id && await isHeld(vod.object_id));
         }
         return false;
     } catch { return false; }
@@ -137,24 +137,24 @@ const OBJECT_COLUMNS = ['app_id', 'namespace', 'kind', 'owner_subject', 'owner_a
     'lifecycle_status', 'mime_type', 'size_bytes', 'content_hash', 'canonical_provider', 'canonical_key', 'legacy_ref', 'metadata', 'deleted_at'];
 
 /** The root namespace of tenant `appId`: its app id, or app.<project_id>[.sandbox] for a developer project. */
-function tenantRoot(appId) {
-    return db.rootNamespace(db.getApp(appId) || { app_id: appId });
+async function tenantRoot(appId) {
+    return db.rootNamespace(await db.getApp(appId) || { app_id: appId });
 }
 
-function createObject(o) {
+async function createObject(o) {
     if (!KINDS.includes(o.kind)) throw new Error(`unknown kind ${o.kind}`);
     const id = ids.newId('media', o.createdMs);
-    db.run(`INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, owner_app, owner_user_id, visibility,
+    await db.run(`INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, owner_app, owner_user_id, visibility,
                 lifecycle_status, mime_type, size_bytes, content_hash, canonical_provider, canonical_key, legacy_ref, metadata, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
-    [id, o.app_id, o.namespace || tenantRoot(o.app_id), o.kind, o.owner_subject || null, o.owner_app || null, o.owner_user_id ?? null,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, ov_now()))`,
+    [id, o.app_id, o.namespace || await tenantRoot(o.app_id), o.kind, o.owner_subject || null, o.owner_app || null, o.owner_user_id ?? null,
         VISIBILITIES.includes(o.visibility) ? o.visibility : 'private', LIFECYCLES.includes(o.lifecycle_status) ? o.lifecycle_status : 'uploading',
         o.mime_type || null, Number(o.size_bytes) || 0, o.content_hash || null, o.canonical_provider || null, o.canonical_key || null,
         o.legacy_ref || null, JSON.stringify(o.metadata || {}), o.created_at || null]);
     return id;
 }
 
-function updateObject(id, fields) {
+async function updateObject(id, fields) {
     const sets = [], params = [];
     for (const [k, v] of Object.entries(fields)) {
         if (!OBJECT_COLUMNS.includes(k)) continue;
@@ -163,26 +163,26 @@ function updateObject(id, fields) {
     }
     if (!sets.length) return;
     params.push(id);
-    db.run(`UPDATE media_objects SET ${sets.join(', ')}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, params);
+    await db.run(`UPDATE media_objects SET ${sets.join(', ')}, updated_at = ov_now() WHERE id = ?`, params);
 }
 
 /**
  * Upsert one provider copy. A remote copy re-derived as 'pending' keeps what
  * reconciliation already verified about the same key (never downgrade knowledge).
  */
-function upsertLocation(objectId, loc) {
-    const existing = db.get('SELECT * FROM media_locations WHERE object_id = ? AND provider = ?', [objectId, loc.provider]);
+async function upsertLocation(objectId, loc) {
+    const existing = await db.get('SELECT * FROM media_locations WHERE object_id = ? AND provider = ?', [objectId, loc.provider]);
     const verifiedAt = loc.verified ? new Date().toISOString().replace('T', ' ').slice(0, 19) : null;
     if (!existing) {
-        db.run(`INSERT INTO media_locations (object_id, provider, bucket, key, storage_class, state, checksum, size_bytes, verified_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        await db.run(`INSERT INTO media_locations (object_id, provider, bucket, key, storage_class, state, checksum, size_bytes, verified_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         [objectId, loc.provider, loc.bucket || null, loc.key, loc.storage_class || STORAGE_CLASS[loc.provider] || null,
             loc.state || 'pending', loc.checksum || null, loc.size_bytes ?? null, verifiedAt]);
         return;
     }
     const keep = existing.key === loc.key && (loc.state || 'pending') === 'pending' && existing.state !== 'pending';
-    db.run(`UPDATE media_locations SET bucket = ?, key = ?, storage_class = ?, state = ?, checksum = ?, size_bytes = ?, verified_at = ?,
-                   updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    await db.run(`UPDATE media_locations SET bucket = ?, key = ?, storage_class = ?, state = ?, checksum = ?, size_bytes = ?, verified_at = ?,
+                   updated_at = ov_now() WHERE id = ?`,
     [loc.bucket ?? existing.bucket, loc.key, loc.storage_class || existing.storage_class,
         keep ? existing.state : (loc.state || 'pending'),
         loc.clearChecksum ? null : (loc.checksum ?? (existing.key === loc.key ? existing.checksum : null)),
@@ -191,25 +191,25 @@ function upsertLocation(objectId, loc) {
         existing.id]);
 }
 
-function setLocationState(locationId, { state, size_bytes, verified = true }) {
-    db.run(`UPDATE media_locations SET state = ?, size_bytes = COALESCE(?, size_bytes), verified_at = ${verified ? 'CURRENT_TIMESTAMP' : 'verified_at'},
-                   updated_at = CURRENT_TIMESTAMP WHERE id = ?`, [state, size_bytes ?? null, locationId]);
+async function setLocationState(locationId, { state, size_bytes, verified = true }) {
+    await db.run(`UPDATE media_locations SET state = ?, size_bytes = COALESCE(?, size_bytes), verified_at = ${verified ? 'ov_now()' : 'verified_at'},
+                   updated_at = ov_now() WHERE id = ?`, [state, size_bytes ?? null, locationId]);
 }
 
-function setRelationship(fromId, relation, toId, metadata = {}) {
-    db.run(`INSERT INTO media_relationships (from_object_id, relation, to_object_id, metadata) VALUES (?, ?, ?, ?)
-            ON CONFLICT(from_object_id, relation, to_object_id) DO UPDATE SET metadata = excluded.metadata`,
+async function setRelationship(fromId, relation, toId, metadata = {}) {
+    await db.run(`INSERT INTO media_relationships (from_object_id, relation, to_object_id, metadata) VALUES (?, ?, ?, ?)
+            ON CONFLICT(from_object_id, relation, to_object_id) DO UPDATE SET metadata = excluded.metadata RETURNING id`,
     [fromId, relation, toId, JSON.stringify(metadata)]);
 }
 
-function setVariant(objectId, variantName, derivedId, recipe = null) {
-    db.run(`INSERT INTO media_variants (object_id, variant_name, derived_object_id, recipe) VALUES (?, ?, ?, ?)
-            ON CONFLICT(object_id, variant_name) DO UPDATE SET derived_object_id = excluded.derived_object_id, recipe = excluded.recipe`,
+async function setVariant(objectId, variantName, derivedId, recipe = null) {
+    await db.run(`INSERT INTO media_variants (object_id, variant_name, derived_object_id, recipe) VALUES (?, ?, ?, ?)
+            ON CONFLICT(object_id, variant_name) DO UPDATE SET derived_object_id = excluded.derived_object_id, recipe = excluded.recipe RETURNING id`,
     [objectId, variantName, derivedId, recipe]);
 }
 
-function getVariant(objectId, variantName) {
-    return db.get('SELECT * FROM media_variants WHERE object_id = ? AND variant_name = ?', [objectId, variantName]);
+async function getVariant(objectId, variantName) {
+    return await db.get('SELECT * FROM media_variants WHERE object_id = ? AND variant_name = ?', [objectId, variantName]);
 }
 
 // ── Projection core ──────────────────────────────────────────
@@ -220,11 +220,11 @@ function getVariant(objectId, variantName) {
  *   p.locations  [{ provider, bucket, key, state, size_bytes, checksum }]
  *   p.canonical  preferred canonical provider (falls back to the first location)
  */
-function project(p) {
-    const found = getObjectByLegacyRef(p.legacy_ref) || (p.existingId ? getObject(p.existingId) : null);
+async function project(p) {
+    const found = await getObjectByLegacyRef(p.legacy_ref) || (p.existingId ? await getObject(p.existingId) : null);
     const canon = p.locations.find(l => l.provider === p.canonical) || p.locations[0] || null;
     const fields = {
-        app_id: p.app_id, namespace: tenantRoot(p.app_id), kind: p.kind,
+        app_id: p.app_id, namespace: await tenantRoot(p.app_id), kind: p.kind,
         owner_app: p.owner_app || p.app_id, owner_user_id: p.owner_user_id ?? null,
         visibility: p.visibility, lifecycle_status: p.lifecycle_status,
         mime_type: p.mime_type || null, size_bytes: Number(p.size_bytes) || 0, content_hash: p.content_hash || null,
@@ -256,14 +256,14 @@ function project(p) {
         if (String(found.owner_app || found.app_id) !== String(fields.owner_app) || String(found.owner_user_id ?? '') !== String(fields.owner_user_id ?? '')) {
             fields.owner_subject = null;
         }
-        updateObject(id, fields);
+        await updateObject(id, fields);
     } else {
-        id = createObject({ ...fields, createdMs: toMs(p.created_at), created_at: p.created_at || null });
+        id = await createObject({ ...fields, createdMs: toMs(p.created_at), created_at: p.created_at || null });
         created = true;
     }
     const keep = new Set(p.locations.map(l => l.provider));
-    for (const loc of p.locations) upsertLocation(id, staleHash && loc.provider === 'local' ? { ...loc, clearChecksum: true } : loc);
-    for (const l of listLocations(id)) if (!keep.has(l.provider)) db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
+    for (const loc of p.locations) await upsertLocation(id, staleHash && loc.provider === 'local' ? { ...loc, clearChecksum: true } : loc);
+    for (const l of await listLocations(id)) if (!keep.has(l.provider)) await db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
     return { id, created };
 }
 
@@ -292,12 +292,12 @@ function tieredLocations(row, localCandidates) {
     return { locs, canonical: remoteKnown ? 'b2' : 'local' };
 }
 
-function linkRow(table, keyCol, keyVal, objectId) {
-    db.run(`UPDATE ${table} SET object_id = ? WHERE ${keyCol} = ? AND (object_id IS NULL OR object_id != ?)`, [objectId, keyVal, objectId]);
+async function linkRow(table, keyCol, keyVal, objectId) {
+    await db.run(`UPDATE ${table} SET object_id = ? WHERE ${keyCol} = ? AND (object_id IS NULL OR object_id != ?)`, [objectId, keyVal, objectId]);
 }
 
-function recordInvariant(objectId) {
-    try { require('./invariant').record(getObject(objectId)); } catch (err) { console.warn('[Objects] invariant record:', err.message); }
+async function recordInvariant(objectId) {
+    try { await require('./invariant').record(await getObject(objectId)); } catch (err) { console.warn('[Objects] invariant record:', err.message); }
 }
 
 // ── Per-kind projections ─────────────────────────────────────
@@ -379,49 +379,49 @@ function pasteProjection(row) {
     };
 }
 
-function syncVod(idOrRow) {
-    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM vods WHERE id = ?', [idOrRow]);
+async function syncVod(idOrRow) {
+    const row = typeof idOrRow === 'object' ? idOrRow : await db.get('SELECT * FROM vods WHERE id = ?', [idOrRow]);
     if (!row) return null;
     const p = vodProjection(row);
     if (p.skipped) return p;
-    const r = project(p);
-    linkRow('vods', 'id', row.id, r.id);
-    recordInvariant(r.id);
-    const thumbnail = syncThumbnail(row, r.id, 'vod');
+    const r = await project(p);
+    await linkRow('vods', 'id', row.id, r.id);
+    await recordInvariant(r.id);
+    const thumbnail = await syncThumbnail(row, r.id, 'vod');
     return { ...r, locations: p.locations.map(l => l.state), thumbnail };
 }
 
-function syncClip(idOrRow) {
-    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM clips WHERE id = ?', [idOrRow]);
+async function syncClip(idOrRow) {
+    const row = typeof idOrRow === 'object' ? idOrRow : await db.get('SELECT * FROM clips WHERE id = ?', [idOrRow]);
     if (!row) return null;
     const p = clipProjection(row);
-    const r = project(p);
-    linkRow('clips', 'id', row.id, r.id);
+    const r = await project(p);
+    await linkRow('clips', 'id', row.id, r.id);
     if (row.vod_id) {
-        const vod = db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
-        if (vod && vod.object_id) setRelationship(r.id, 'clip_of', vod.object_id, { start_time: row.start_time, end_time: row.end_time });
+        const vod = await db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
+        if (vod && vod.object_id) await setRelationship(r.id, 'clip_of', vod.object_id, { start_time: row.start_time, end_time: row.end_time });
     }
-    recordInvariant(r.id);
-    const thumbnail = syncThumbnail(row, r.id, 'clip');
+    await recordInvariant(r.id);
+    const thumbnail = await syncThumbnail(row, r.id, 'clip');
     return { ...r, locations: p.locations.map(l => l.state), thumbnail };
 }
 
-function syncFile(keyOrRow) {
-    const row = typeof keyOrRow === 'object' ? keyOrRow : db.get('SELECT * FROM files WHERE key = ?', [keyOrRow]);
+async function syncFile(keyOrRow) {
+    const row = typeof keyOrRow === 'object' ? keyOrRow : await db.get('SELECT * FROM files WHERE key = ?', [keyOrRow]);
     if (!row) return null;
     const p = fileProjection(row);
-    const r = project(p);
-    linkRow('files', 'key', row.key, r.id);
+    const r = await project(p);
+    await linkRow('files', 'key', row.key, r.id);
     return { ...r, locations: [p.locations[0].state] };
 }
 
-function syncPaste(idOrRow) {
-    const row = typeof idOrRow === 'object' ? idOrRow : db.get('SELECT * FROM pastes WHERE id = ?', [idOrRow]);
+async function syncPaste(idOrRow) {
+    const row = typeof idOrRow === 'object' ? idOrRow : await db.get('SELECT * FROM pastes WHERE id = ?', [idOrRow]);
     if (!row) return null;
     const p = pasteProjection(row);
     if (p.skipped) return p;
-    const r = project(p);
-    linkRow('pastes', 'id', row.id, r.id);
+    const r = await project(p);
+    await linkRow('pastes', 'id', row.id, r.id);
     return { ...r, kind: p.kind, locations: [p.locations[0].state] };
 }
 
@@ -459,13 +459,13 @@ function thumbnailProjection(parentRow, parentKind) {
     };
 }
 
-function syncThumbnail(parentRow, parentObjectId, parentKind) {
+async function syncThumbnail(parentRow, parentObjectId, parentKind) {
     const p = thumbnailProjection(parentRow, parentKind);
     if (!p || p.skipped) return p;
-    const variant = getVariant(parentObjectId, 'thumbnail');
-    const r = project({ ...p, existingId: variant ? variant.derived_object_id : null });
-    setVariant(parentObjectId, 'thumbnail', r.id);
-    setRelationship(r.id, 'thumbnail_of', parentObjectId);
+    const variant = await getVariant(parentObjectId, 'thumbnail');
+    const r = await project({ ...p, existingId: variant ? variant.derived_object_id : null });
+    await setVariant(parentObjectId, 'thumbnail', r.id);
+    await setRelationship(r.id, 'thumbnail_of', parentObjectId);
     return { ...r, locations: [p.locations[0].state] };
 }
 
@@ -475,15 +475,15 @@ function syncThumbnail(parentRow, parentObjectId, parentKind) {
  * outer one records the changes at its end, in the same transaction and after its own outcome event,
  * the order they had when the object was synced after the commit.
  */
-function _syncTx(fn) {
+async function _syncTx(fn) {
     const events = require('../events');
     const raw = db.getDb();
-    const outer = raw.inTransaction;
-    const out = raw.transaction(() => {
-        const r = fn();
-        if (!outer) events.recordObjectChanges();
+    const outer = raw.inTransaction();
+    const out = await raw.tx(async () => {
+        const r = await fn();
+        if (!outer) await events.recordObjectChanges();
         return r;
-    })();
+    });
     if (!outer) events.kick();
     return out;
 }
@@ -496,27 +496,27 @@ function _rowIds(ids, out) {
 }
 
 /** Re-project one inherited row: kind vod|clip|file|paste, id = row id (file key for files). */
-function sync(kind, id) {
+async function sync(kind, id) {
     const fn = SYNC_BY_KIND[kind];
     if (!fn || id == null) return null;
-    return _syncTx(() => fn(id));
+    return await _syncTx(async () => await fn(id));
 }
 
 /**
  * Never-throwing re-projection, for follow-ups that re-read what is on disk after a write already
  * committed with its object (see withObject), and for scripts. Not a write path any more.
  */
-function safeSync(kind, id) {
-    try { return sync(kind, id); } catch (err) { console.warn(`[Objects] sync ${kind} ${id}:`, err.message); return null; }
+async function safeSync(kind, id) {
+    try { return await sync(kind, id); } catch (err) { console.warn(`[Objects] sync ${kind} ${id}:`, err.message); return null; }
 }
 
 /**
  * Object-first write (WS-G task 1; retires compatibility shim C-75, "write the row, then sync its
  * object"): write() changes inherited rows and the objects behind them are re-projected in the SAME
- * SQLite transaction, so both commit or neither does: no crash or error between the two can leave
+ * transaction, so both commit or neither does: no crash or error between the two can leave
  * an object behind its row. kind vod|clip|file|paste; ids the row id (a file's key), a list of them,
  * or a function of write()'s result that gives them (an INSERT's lastInsertRowid). write() must be
- * synchronous database work. Returns write()'s result; throws, with nothing written, when either
+ * database work (awaited). Returns write()'s result; throws, with nothing written, when either
  * part fails. Inside an outer transaction (webhooks.announce) it is a savepoint of that one.
  *
  * The projection stats local files (sizes, present/missing copies) but never reads them: content
@@ -524,12 +524,12 @@ function safeSync(kind, id) {
  * tier move verifies them (afterTierMove), as before. A row write() deleted needs nothing: the
  * row-delete trigger marks its object deleted in the same statement (server/db/database.js).
  */
-function withObject(kind, ids, write) {
+async function withObject(kind, ids, write) {
     const fn = SYNC_BY_KIND[kind];
     if (!fn) throw new Error(`withObject: unknown projection ${kind}`);
-    return _syncTx(() => {
-        const out = write();
-        for (const id of _rowIds(ids, out)) fn(id);
+    return await _syncTx(async () => {
+        const out = await write();
+        for (const id of _rowIds(ids, out)) await fn(id);
         return out;
     });
 }
@@ -540,11 +540,11 @@ function withObject(kind, ids, write) {
  * combined transaction fails, the row is written alone and the object re-projected after it (the
  * pre-WS-G two steps; logged, and the drift report lists the row until a later write catches up).
  */
-function withObjectOrRow(kind, ids, write) {
-    try { return withObject(kind, ids, write); } catch (err) {
+async function withObjectOrRow(kind, ids, write) {
+    try { return await withObject(kind, ids, write); } catch (err) {
         console.warn(`[Objects] ${kind}: object not written with its row (${err.message}); writing the row alone`);
-        const out = write();
-        for (const id of _rowIds(ids, out)) safeSync(kind, id);
+        const out = await write();
+        for (const id of _rowIds(ids, out)) await safeSync(kind, id);
         return out;
     }
 }
@@ -556,22 +556,22 @@ function withObjectOrRow(kind, ids, write) {
  * object: when the combined transaction fails the row is flipped alone and re-projected after it
  * (as withObjectOrRow). Without write(), the re-projection alone. The object part never throws.
  */
-function afterTierMove(vodId, verifiedProviders = [], write = null) {
-    const reproject = () => {
-        const r = syncVod(vodId);
+async function afterTierMove(vodId, verifiedProviders = [], write = null) {
+    const reproject = async () => {
+        const r = await syncVod(vodId);
         if (!r || !r.id) return;
-        for (const l of listLocations(r.id)) {
-            if (verifiedProviders.includes(l.provider)) setLocationState(l.id, { state: 'present' });
+        for (const l of await listLocations(r.id)) {
+            if (verifiedProviders.includes(l.provider)) await setLocationState(l.id, { state: 'present' });
         }
     };
     let out;
     if (write) {
-        try { return _syncTx(() => { const w = write(); reproject(); return w; }); } catch (err) {
+        try { return await _syncTx(async () => { const w = await write(); await reproject(); return w; }); } catch (err) {
             console.warn(`[Objects] tier move vod ${vodId}: object not written with its row (${err.message}); flipping the row alone`);
-            out = write();
+            out = await write();
         }
     }
-    try { _syncTx(reproject); } catch (err) { console.warn(`[Objects] tier sync vod ${vodId}:`, err.message); }
+    try { await _syncTx(reproject); } catch (err) { console.warn(`[Objects] tier sync vod ${vodId}:`, err.message); }
     return out;
 }
 
@@ -581,12 +581,12 @@ function afterTierMove(vodId, verifiedProviders = [], write = null) {
  * A staff hold placed or released is a moderation action (media.moderation.action, ADR-022): announced in
  * the transaction that records it, for Network's moderation audit. A creator's own pin is not moderation.
  */
-function announceHold(action, hold, by) {
+async function announceHold(action, hold, by) {
     if (!hold || hold.kind === 'creator_pin') return;
-    const obj = getObject(hold.object_id);
+    const obj = await getObject(hold.object_id);
     if (!obj) return;
     const who = String(by || '');
-    require('../events').recordModeration(obj.app_id, {
+    await require('../events').recordModeration(obj.app_id, {
         action,
         target: { type: obj.kind, id: obj.id, ...(obj.owner_subject ? { owner_subject: obj.owner_subject } : {}) },
         actor_subject: /^usr_[0-9A-HJKMNP-TV-Z]{26}$/.test(who) ? who : null,
@@ -596,15 +596,15 @@ function announceHold(action, hold, by) {
 }
 
 /** Place a hold. created_by (or placed_by) is who placed it; note is free text for staff (≤ 2000). */
-function placeHold({ object_id, kind, reason = '', created_by = null, placed_by = null, note = null }) {
+async function placeHold({ object_id, kind, reason = '', created_by = null, placed_by = null, note = null }) {
     if (!HOLD_KINDS.includes(kind)) throw new Error(`hold kind must be one of ${HOLD_KINDS.join(', ')}`);
-    return db.getDb().transaction(() => {
-        const r = db.run('INSERT INTO media_holds (object_id, kind, reason, created_by, note) VALUES (?, ?, ?, ?, ?)',
+    return await db.getDb().tx(async () => {
+        const r = await db.run('INSERT INTO media_holds (object_id, kind, reason, created_by, note) VALUES (?, ?, ?, ?, ?) RETURNING id',
             [object_id, kind, String(reason || '').slice(0, 1000), placed_by ?? created_by, note == null || note === '' ? null : String(note).slice(0, 2000)]);
-        const hold = db.get('SELECT * FROM media_holds WHERE id = ?', [r.lastInsertRowid]);
-        announceHold('hold.placed', hold, placed_by ?? created_by);
+        const hold = await db.get('SELECT * FROM media_holds WHERE id = ?', [r.lastInsertRowid]);
+        await announceHold('hold.placed', hold, placed_by ?? created_by);
         return hold;
-    })();
+    });
 }
 
 /** A hold as the APIs answer it: the row, plus placed_by / placed_at (the names staff tools use for created_by / created_at). */
@@ -613,13 +613,13 @@ function holdPublic(h) {
     return { ...h, note: h.note ?? null, placed_by: h.created_by ?? null, placed_at: h.created_at ?? null };
 }
 
-function releaseHold(holdId, releasedBy = null) {
-    return db.getDb().transaction(() => {
-        const r = db.run('UPDATE media_holds SET released_at = CURRENT_TIMESTAMP, released_by = ? WHERE id = ? AND released_at IS NULL', [releasedBy, holdId]);
-        const hold = db.get('SELECT * FROM media_holds WHERE id = ?', [holdId]);
-        if (r.changes) announceHold('hold.released', hold, releasedBy);
+async function releaseHold(holdId, releasedBy = null) {
+    return await db.getDb().tx(async () => {
+        const r = await db.run('UPDATE media_holds SET released_at = ov_now(), released_by = ? WHERE id = ? AND released_at IS NULL', [releasedBy, holdId]);
+        const hold = await db.get('SELECT * FROM media_holds WHERE id = ?', [holdId]);
+        if (r.changes) await announceHold('hold.released', hold, releasedBy);
         return hold;
-    })();
+    });
 }
 
 // ── Native objects: soft delete, restore, purge, quota ───────
@@ -628,31 +628,31 @@ function objectFilePath(obj) {
     return path.join(config.objects.path, obj.app_id, obj.id);
 }
 
-function softDelete(obj, { by = null } = {}) {
-    if (isHeld(obj.id)) throw new HeldError(obj.id);
+async function softDelete(obj, { by = null } = {}) {
+    if (await isHeld(obj.id)) throw new HeldError(obj.id);
     const md = parseJson(obj.metadata, {});
     md.pre_delete_status = obj.lifecycle_status;
     md.retention_until = new Date(Date.now() + config.objects.retentionDays * 864e5).toISOString();
     if (by) md.deleted_by = by;
     const events = require('../events');
-    db.getDb().transaction(() => {
-        db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = CURRENT_TIMESTAMP, metadata = ?, updated_at = CURRENT_TIMESTAMP
+    await db.getDb().tx(async () => {
+        await db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = ov_now(), metadata = ?, updated_at = ov_now()
                 WHERE id = ?`, [JSON.stringify(md), obj.id]);
-        require('./namespaces').settle(obj.id);   // an upload deleted before it completed holds no quota
-        events.recordObjectChanges();       // media.object.deleted commits with the delete
-    })();
+        await require('./namespaces').settle(obj.id);   // an upload deleted before it completed holds no quota
+        await events.recordObjectChanges();       // media.object.deleted commits with the delete
+    });
     events.kick();
-    return getObject(obj.id);
+    return await getObject(obj.id);
 }
 
-function restore(obj) {
+async function restore(obj) {
     const md = parseJson(obj.metadata, {});
     if (md.purged_at) return null;
     const back = md.pre_delete_status && md.pre_delete_status !== 'deleted' ? md.pre_delete_status : 'ready';
     delete md.pre_delete_status; delete md.retention_until; delete md.deleted_by;
-    db.run(`UPDATE media_objects SET lifecycle_status = ?, deleted_at = NULL, metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    await db.run(`UPDATE media_objects SET lifecycle_status = ?, deleted_at = NULL, metadata = ?, updated_at = ov_now() WHERE id = ?`,
         [back, JSON.stringify(md), obj.id]);
-    return getObject(obj.id);
+    return await getObject(obj.id);
 }
 
 /**
@@ -662,21 +662,21 @@ function restore(obj) {
  * has a copy in the R2 popularity cache: the object tiering removes that first
  * (./tiering.js demotes deleted objects), so a purge never leaves it behind.
  */
-function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
-    const rows = db.all(`SELECT * FROM media_objects WHERE lifecycle_status = 'deleted' AND legacy_ref IS NULL
+async function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
+    const rows = await db.all(`SELECT * FROM media_objects WHERE lifecycle_status = 'deleted' AND legacy_ref IS NULL
                          AND deleted_at <= datetime('now', ?)`, [`-${Math.max(0, retentionDays)} days`]);
     const root = path.resolve(config.objects.path) + path.sep;
     let purged = 0;
     for (const obj of rows) {
         const md = parseJson(obj.metadata, {});
-        if (md.purged_at || isHeld(obj.id)) continue;
-        if (listLocations(obj.id).some(l => l.provider === 'r2')) continue;
-        for (const l of listLocations(obj.id)) {
+        if (md.purged_at || await isHeld(obj.id)) continue;
+        if ((await listLocations(obj.id)).some(l => l.provider === 'r2')) continue;
+        for (const l of await listLocations(obj.id)) {
             if (l.provider === 'local' && path.resolve(l.key).startsWith(root)) { try { fs.unlinkSync(l.key); } catch { /* already gone */ } }
-            if (l.provider === 'local') db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
+            if (l.provider === 'local') await db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
         }
         md.purged_at = new Date().toISOString();
-        db.run('UPDATE media_objects SET metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [JSON.stringify(md), obj.id]);
+        await db.run('UPDATE media_objects SET metadata = ?, updated_at = ov_now() WHERE id = ?', [JSON.stringify(md), obj.id]);
         purged++;
     }
     return purged;
@@ -687,9 +687,9 @@ function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
  * also soft-deleted ones until purged) and the reservations of uploads in progress
  * (objects/namespaces.usage of the tenant's root, which is the whole tenant).
  */
-function usedBytes(appId, excludeId = null) {
-    const app = db.getApp(appId) || { app_id: appId };
-    const u = require('./namespaces').usage(app, db.rootNamespace(app), { excludeId });
+async function usedBytes(appId, excludeId = null) {
+    const app = await db.getApp(appId) || { app_id: appId };
+    const u = await require('./namespaces').usage(app, db.rootNamespace(app), { excludeId });
     return u.used_bytes + u.reserved_bytes;
 }
 
@@ -704,9 +704,9 @@ function legacyPublicUrl(obj) {
     return p ? config.publicUrl + p : null;
 }
 
-function objectPublic(obj, { locations = true } = {}) {
+async function objectPublic(obj, { locations = true } = {}) {
     if (!obj) return null;
-    const locs = listLocations(obj.id);
+    const locs = await listLocations(obj.id);
     const out = {
         id: obj.id,
         media_ref: { media_id: obj.id },
@@ -721,17 +721,17 @@ function objectPublic(obj, { locations = true } = {}) {
         size_bytes: obj.size_bytes,
         content_hash: obj.content_hash || null,
         metadata: parseJson(obj.metadata, {}),
-        held: isHeld(obj.id),
+        held: await isHeld(obj.id),
         // metadata / bytes_verified / playable, from this row and its copies' recorded checks (objects/readiness.js).
-        readiness: require('./readiness').compute(obj, locs),
+        readiness: await require('./readiness').compute(obj, locs),
         // Developer-project sandbox objects have no public URL: /download hands out signed ones.
-        public_url: obj.visibility !== 'private' && obj.lifecycle_status === 'ready' && !db.isSandboxTenant(obj.app_id)
+        public_url: obj.visibility !== 'private' && obj.lifecycle_status === 'ready' && !await db.isSandboxTenant(obj.app_id)
             ? (legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`) : null,
         created_at: obj.created_at,
         updated_at: obj.updated_at,
         deleted_at: obj.deleted_at || null,
     };
-    if (db.isSandboxTenant(obj.app_id)) out.sandbox = true;
+    if (await db.isSandboxTenant(obj.app_id)) out.sandbox = true;
     // Where the bytes are, never the keys or paths themselves.
     if (locations) {
         out.locations = locs.map(l => ({

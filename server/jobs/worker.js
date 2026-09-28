@@ -72,9 +72,9 @@ async function execute(row, laneName) {
     const leaseS = cfg().leaseS;
     const token = row.lease_token;
     let cancelRequested = !!row.cancel_requested;
-    const beat = setInterval(() => {
+    const beat = setInterval(async () => {
         try {
-            const r = queue.renew(row.id, { leaseS, token });
+            const r = await queue.renew(row.id, { leaseS, token });
             if (!r.held) { clearInterval(beat); ac.abort(new queue.JobError('media.job.lease_lost', 'this worker no longer holds the job', { permanent: true })); return; }
             if (r.cancelRequested && !cancelRequested) { cancelRequested = true; ac.abort(new Error('cancelled by its owner')); }
         } catch { /* next beat */ }
@@ -89,23 +89,23 @@ async function execute(row, laneName) {
         signal: ac.signal,
         checkpoint: queue.parseJson(row.checkpoint, null),
         attempt: row.attempts,
-        saveCheckpoint: (cp, alsoInTx) => { queue.saveCheckpoint(row.id, cp, alsoInTx, { token }); ctx.checkpoint = cp; },
+        saveCheckpoint: async (cp, alsoInTx) => { await queue.saveCheckpoint(row.id, cp, alsoInTx, { token }); ctx.checkpoint = cp; },
         cancelled: () => cancelRequested,
     };
     try {
         if (!spec) throw new queue.JobError('media.job.unknown_type', `No handler for ${row.job_type}`, { permanent: true });
         const result = await spec.run(queue.jobPublic(row), ctx);
-        queue.succeed(row.id, result, { token });
+        await queue.succeed(row.id, result, { token });
     } catch (err) {
-        const fresh = queue.get(row.id);
+        const fresh = await queue.get(row.id);
         if (cancelRequested || (fresh && fresh.cancel_requested)) {
-            queue.markCancelled(row.id, { result: ctx.checkpoint ? { checkpoint: ctx.checkpoint } : null, token });
+            await queue.markCancelled(row.id, { result: ctx.checkpoint ? { checkpoint: ctx.checkpoint } : null, token });
         } else {
             const permanent = !!(err && err.permanent);
             const attempts = fresh ? fresh.attempts : row.attempts;
             const more = !permanent && attempts < (fresh ? fresh.max_attempts : row.max_attempts);
             const retryIn = err && err.retryAfterS != null ? err.retryAfterS : backoffS(spec || {}, attempts);
-            const failed = queue.fail(row.id, { message: (err && err.message) || String(err), code: (err && err.code) || null, retryInS: more ? retryIn : null, token });
+            const failed = await queue.fail(row.id, { message: (err && err.message) || String(err), code: (err && err.code) || null, retryInS: more ? retryIn : null, token });
             if (failed && !more) console.warn(`[Jobs] ${row.job_type} ${row.id} failed: ${(err && err.message) || err}`);
         }
     } finally {
@@ -122,22 +122,22 @@ async function execute(row, laneName) {
  * Resolves when it finishes; resolves null when someone else already took it.
  */
 async function runNow(id) {
-    const row = queue.claim([], { id, leaseS: cfg().leaseS });
+    const row = await queue.claim([], { id, leaseS: cfg().leaseS });
     if (!row) return null;
     await execute(row, 'direct');
-    return queue.get(id);
+    return await queue.get(id);
 }
 
-function scheduleInvariantScans(nowMs = Date.now()) {
+async function scheduleInvariantScans(nowMs = Date.now()) {
     const hours = cfg().invariantScanHours;
     if (!hours || hours <= 0) return 0;
     const periodMs = hours * 3600 * 1000;
     const period = Math.floor(nowMs / periodMs);
     let n = 0;
-    const tenants = db.all(`SELECT DISTINCT app_id FROM media_objects WHERE kind IN ('vod', 'clip') AND visibility != 'private' AND lifecycle_status = 'ready'`);
+    const tenants = await db.all(`SELECT DISTINCT app_id FROM media_objects WHERE kind IN ('vod', 'clip') AND visibility != 'private' AND lifecycle_status = 'ready'`);
     for (const { app_id: appId } of tenants) {
         try {
-            const r = queue.enqueue({ appId, type: 'invariant.scan', params: {}, idempotencyKey: `invariant.scan:${hours}h:${period}`, createdBy: 'system:schedule' });
+            const r = await queue.enqueue({ appId, type: 'invariant.scan', params: {}, idempotencyKey: `invariant.scan:${hours}h:${period}`, createdBy: 'system:schedule' });
             if (r.created) n++;
         } catch (err) { console.warn(`[Jobs] could not schedule invariant.scan for ${appId}: ${err.message}`); }
     }
@@ -150,26 +150,26 @@ async function tick() {
     try {
         do {
             kicked = false;
-            queue.recoverInterrupted({ except: new Set(running.keys()) });
+            await queue.recoverInterrupted({ except: new Set(running.keys()) });
             const now = Date.now();
             if (now - lastScheduleAt > 10 * 60 * 1000) {
                 lastScheduleAt = now;
-                scheduleInvariantScans(now);
-                try { require('./duration-reconcile').schedule(now); } catch (err) { console.warn('[Jobs] duration reconcile schedule:', err.message); }
-                try { require('./content-hash').schedule(now); } catch (err) { console.warn('[Jobs] content hash schedule:', err.message); }
-                try { require('./storage-orphans').schedule(now); } catch (err) { console.warn('[Jobs] storage orphan scan schedule:', err.message); }
+                await scheduleInvariantScans(now);
+                try { await require('./duration-reconcile').schedule(now); } catch (err) { console.warn('[Jobs] duration reconcile schedule:', err.message); }
+                try { await require('./content-hash').schedule(now); } catch (err) { console.warn('[Jobs] content hash schedule:', err.message); }
+                try { await require('./storage-orphans').schedule(now); } catch (err) { console.warn('[Jobs] storage orphan scan schedule:', err.message); }
             }
-            try { require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
+            try { await require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
             if (now - lastPruneAt > 6 * 3600 * 1000) {
                 lastPruneAt = now;
-                try { const n = queue.prune({ days: cfg().retentionDays }); if (n) console.log(`[Jobs] pruned ${n} finished thumbnail/hash job(s)`); } catch { /* next time */ }
+                try { const n = await queue.prune({ days: cfg().retentionDays }); if (n) console.log(`[Jobs] pruned ${n} finished thumbnail/hash job(s)`); } catch { /* next time */ }
             }
             for (const lane of lanes()) {
                 if (lane.name === 'heavy' && !cfg().heavyWhileRecording && recordingActive()) continue;
                 while (inLane(lane.name) < lane.max) {
-                    const row = queue.claim(lane.types, { leaseS: cfg().leaseS });
+                    const row = await queue.claim(lane.types, { leaseS: cfg().leaseS });
                     if (!row) break;
-                    execute(row, lane.name);
+                    execute(row, lane.name).catch((err) => console.warn(`[Jobs] ${row.id}: ${err.message}`));   // runs in its lane; the loop claims the next
                 }
             }
         } while (kicked);
@@ -193,10 +193,10 @@ function abort(id) {
     return !!r;
 }
 
-function start() {
+async function start() {
     if (started || !cfg().enabled) return false;
     started = true;
-    const n = queue.recoverInterrupted({ all: true });
+    const n = await queue.recoverInterrupted({ all: true });
     if (n) console.log(`[Jobs] ${n} job(s) interrupted by the restart were requeued or failed`);
     lastScheduleAt = Date.now();           // the first scheduled scan waits a few minutes after boot
     timer = setInterval(() => { tick().catch(() => {}); }, cfg().pollMs);
@@ -214,8 +214,8 @@ function stop() {
     for (const r of running.values()) r.ac.abort(new Error('the service is stopping'));
 }
 
-function status() {
-    return { enabled: cfg().enabled, started, running: [...running.entries()].map(([id, r]) => ({ id, lane: r.lane })), counts: queue.counts(), stale_refused: queue.staleStats() };
+async function status() {
+    return { enabled: cfg().enabled, started, running: [...running.entries()].map(([id, r]) => ({ id, lane: r.lane })), counts: await queue.counts(), stale_refused: queue.staleStats() };
 }
 
 module.exports = { start, stop, kick, tick, abort, runNow, execute, status, scheduleInvariantScans, isStarted: () => started, _running: running };

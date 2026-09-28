@@ -58,12 +58,12 @@ const sqlTime = (ms) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19
 
 // ── Rows ─────────────────────────────────────────────────────
 
-function get(namespace) {
-    return namespace ? db.get('SELECT * FROM media_namespaces WHERE namespace = ?', [String(namespace)]) : null;
+async function get(namespace) {
+    return namespace ? await db.get('SELECT * FROM media_namespaces WHERE namespace = ?', [String(namespace)]) : null;
 }
 
-function listForTenant(appId) {
-    return db.all('SELECT * FROM media_namespaces WHERE app_id = ? ORDER BY namespace', [appId]);
+async function listForTenant(appId) {
+    return await db.all('SELECT * FROM media_namespaces WHERE app_id = ? ORDER BY namespace', [appId]);
 }
 
 /** Is `ns` the namespace `base` or below it? */
@@ -72,21 +72,21 @@ function within(base, ns) {
 }
 
 /** The tenant's rows from its root down to `namespace` (those that exist), root first. */
-function chain(appId, namespace) {
+async function chain(appId, namespace) {
     const parts = String(namespace || '').split('.');
     const names = parts.map((_, i) => parts.slice(0, i + 1).join('.'));
     if (!names.length) return [];
-    const rows = db.all(`SELECT * FROM media_namespaces WHERE app_id = ? AND namespace IN (${names.map(() => '?').join(', ')})`, [appId, ...names]);
+    const rows = await db.all(`SELECT * FROM media_namespaces WHERE app_id = ? AND namespace IN (${names.map(() => '?').join(', ')})`, [appId, ...names]);
     return rows.sort((a, b) => a.namespace.length - b.namespace.length);
 }
 
 /** Policy in force in `namespace`: the root's, overridden key by key by each child on the way down. */
-function effectivePolicy(appId, namespace) {
-    return Object.assign({}, ...chain(appId, namespace).map(r => parsePolicy(r.policy)));
+async function effectivePolicy(appId, namespace) {
+    return Object.assign({}, ...(await chain(appId, namespace)).map(r => parsePolicy(r.policy)));
 }
 
-function isStrict(appId, namespace) {
-    return effectivePolicy(appId, namespace).strict_verbs === true;
+async function isStrict(appId, namespace) {
+    return (await effectivePolicy(appId, namespace)).strict_verbs === true;
 }
 
 /**
@@ -113,9 +113,9 @@ function resolveName(app, requested) {
  * row, or { error, status, code } when the tenant already has MEDIA_NAMESPACE_MAX_CHILDREN children
  * or the name belongs to another tenant.
  */
-function ensure(app, namespace) {
-    const root = db.ensureRootNamespace(app);
-    const found = get(namespace);
+async function ensure(app, namespace) {
+    const root = await db.ensureRootNamespace(app);
+    const found = await get(namespace);
     if (found) {
         return found.app_id === app.app_id ? found
             : { error: `namespace ${namespace} belongs to another tenant`, status: 409, code: 'media.namespace.conflict' };
@@ -123,17 +123,18 @@ function ensure(app, namespace) {
     if (!within(root, namespace)) return { error: `namespace ${namespace} is not below ${root}`, status: 400, code: 'media.namespace.invalid' };
     const segs = namespace.slice(root.length + 1).split('.');
     const names = segs.map((_, i) => `${root}.${segs.slice(0, i + 1).join('.')}`);
-    const missing = names.filter(n => !get(n));
-    const children = db.get('SELECT COUNT(*) AS n FROM media_namespaces WHERE app_id = ? AND parent IS NOT NULL', [app.app_id]).n;
+    const missing = [];
+    for (const n of names) if (!await get(n)) missing.push(n);
+    const children = (await db.get('SELECT COUNT(*) AS n FROM media_namespaces WHERE app_id = ? AND parent IS NOT NULL', [app.app_id])).n;
     if (children + missing.length > config.objects.maxChildNamespaces) {
         return { error: `a tenant has at most ${config.objects.maxChildNamespaces} namespaces below its root`, status: 413, code: 'media.quota.namespaces_exceeded' };
     }
     let parent = root;
     for (const name of names) {
-        db.run('INSERT OR IGNORE INTO media_namespaces (namespace, app_id, parent, owner) VALUES (?, ?, ?, ?)', [name, app.app_id, parent, db.namespaceOwner(app)]);
+        await db.run('INSERT INTO media_namespaces (namespace, app_id, parent, owner) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING', [name, app.app_id, parent, db.namespaceOwner(app)]);
         parent = name;
     }
-    return get(namespace);
+    return await get(namespace);
 }
 
 // ── Usage and quotas ─────────────────────────────────────────
@@ -143,7 +144,7 @@ function ensure(app, namespace) {
  * reserved_objects }. The root's subtree is the whole tenant, v1 files included. `excludeId` leaves
  * one object (and its reservation) out, for re-checking that object.
  */
-function usage(app, namespace, { excludeId = null } = {}) {
+async function usage(app, namespace, { excludeId = null } = {}) {
     const root = db.rootNamespace(app);
     const whole = namespace === root;
     const where = whole ? '' : ' AND (o.namespace = @ns OR substr(o.namespace, 1, @plen) = @prefix)';
@@ -152,13 +153,13 @@ function usage(app, namespace, { excludeId = null } = {}) {
     // Developer projects (third-party uploaders) pay for soft-deleted bytes until they are purged: they stay
     // on disk for the retention period, and upload -> delete -> upload would otherwise grow the disk.
     const retained = app.project_id ? " OR (o.lifecycle_status = 'deleted' AND json_extract(o.metadata, '$.purged_at') IS NULL)" : '';
-    const used = db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(o.size_bytes), 0) AS b FROM media_objects o
+    const used = await db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(o.size_bytes), 0)::bigint AS b FROM media_objects o
         WHERE o.app_id = @app AND o.legacy_ref IS NULL AND (o.lifecycle_status = 'ready'${retained}) AND o.id != @ex${where}`, p);
     // A reservation counts while its object is still uploading (a settled or failed one never double-counts).
-    const reserved = db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(r.bytes), 0) AS b FROM media_quota_reservations r
+    const reserved = await db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(r.bytes), 0)::bigint AS b FROM media_quota_reservations r
         JOIN media_objects o ON o.id = r.object_id AND o.lifecycle_status = 'uploading'
         WHERE r.app_id = @app AND r.object_id != @ex${rwhere}`, p);
-    const files = whole ? db.get('SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS b FROM files WHERE app_id = ?', [app.app_id]) : { n: 0, b: 0 };
+    const files = whole ? await db.get('SELECT COUNT(*) AS n, COALESCE(SUM(size), 0)::bigint AS b FROM files WHERE app_id = ?', [app.app_id]) : { n: 0, b: 0 };
     return { used_bytes: used.b + files.b, used_objects: used.n + files.n, reserved_bytes: reserved.b, reserved_objects: reserved.n };
 }
 
@@ -174,9 +175,18 @@ function limitsOf(app, row) {
  * ancestor with a limit (the root always carries the tenant's quota), and against the effective
  * policy's max_object_bytes. Returns null, or { status, code, detail, extra } for a problem answer.
  */
-function checkQuota(app, namespace, { bytes = 0, objects = 0, excludeId = null } = {}) {
+/**
+ * Inside a transaction, the tenant's quota lock (held to commit): a check and the row it admits commit before the next
+ * check of the same tenant reads usage, as SQLite's one writer made them (ADR-035).
+ */
+async function lockQuota(appId) {
+    if (db.getDb().inTransaction()) await db.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [`media.quota:${appId}`]);
+}
+
+async function checkQuota(app, namespace, { bytes = 0, objects = 0, excludeId = null } = {}) {
+    await lockQuota(app.app_id);
     const root = db.rootNamespace(app);
-    const rows = chain(app.app_id, namespace);
+    const rows = await chain(app.app_id, namespace);
     if (!rows.length || rows[0].namespace !== root) rows.unshift({ namespace: root, parent: null, quota_bytes: null, quota_objects: null });
     const policy = Object.assign({}, ...rows.map(r => parsePolicy(r.policy)));
     const maxObject = Number(policy.max_object_bytes) || 0;
@@ -186,7 +196,7 @@ function checkQuota(app, namespace, { bytes = 0, objects = 0, excludeId = null }
     for (const row of rows.slice().reverse()) {
         const lim = limitsOf(app, row);
         if (!lim.bytes && !lim.objects) continue;
-        const u = usage(app, row.namespace, { excludeId });
+        const u = await usage(app, row.namespace, { excludeId });
         if (lim.bytes && u.used_bytes + u.reserved_bytes + bytes > lim.bytes) {
             return {
                 status: 413, code: 'media.quota.exceeded', detail: `The storage quota of ${row.namespace} would be exceeded`,
@@ -205,36 +215,36 @@ function checkQuota(app, namespace, { bytes = 0, objects = 0, excludeId = null }
 
 // ── Reservations ─────────────────────────────────────────────
 
-function reservation(objectId) {
-    return objectId ? db.get('SELECT * FROM media_quota_reservations WHERE object_id = ?', [objectId]) : null;
+async function reservation(objectId) {
+    return objectId ? await db.get('SELECT * FROM media_quota_reservations WHERE object_id = ?', [objectId]) : null;
 }
 
 /** Hold `bytes` of quota for the upload of `obj` (replacing what it held); expiry moves forward, never back. */
-function reserve(obj, bytes, { hours = config.objects.reservationHours } = {}) {
-    db.run(`INSERT INTO media_quota_reservations (object_id, app_id, namespace, bytes, expires_at) VALUES (?, ?, ?, ?, ?)
+async function reserve(obj, bytes, { hours = config.objects.reservationHours } = {}) {
+    await db.run(`INSERT INTO media_quota_reservations (object_id, app_id, namespace, bytes, expires_at) VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(object_id) DO UPDATE SET bytes = excluded.bytes, namespace = excluded.namespace,
-                expires_at = MAX(expires_at, excluded.expires_at), updated_at = CURRENT_TIMESTAMP`,
+                expires_at = GREATEST(media_quota_reservations.expires_at, excluded.expires_at), updated_at = ov_now()`,
     [obj.id, obj.app_id, obj.namespace, Math.max(0, Number(bytes) || 0), sqlTime(Date.now() + hours * 3600 * 1000)]);
 }
 
 /** An upload step happened: its reservation's expiry moves forward. */
-function touch(objectId, { hours = config.objects.reservationHours } = {}) {
-    db.run('UPDATE media_quota_reservations SET expires_at = MAX(expires_at, ?), updated_at = CURRENT_TIMESTAMP WHERE object_id = ?',
+async function touch(objectId, { hours = config.objects.reservationHours } = {}) {
+    await db.run('UPDATE media_quota_reservations SET expires_at = GREATEST(expires_at, ?::text), updated_at = ov_now() WHERE object_id = ?',
         [sqlTime(Date.now() + hours * 3600 * 1000), objectId]);
 }
 
 /** The upload ended (complete, or the object was deleted): the object's own row counts from now on. */
-function settle(objectId) {
-    db.run('DELETE FROM media_quota_reservations WHERE object_id = ?', [objectId]);
+async function settle(objectId) {
+    await db.run('DELETE FROM media_quota_reservations WHERE object_id = ?', [objectId]);
 }
 
 /** An aborted or expired session: keep holding only what is still stored for the object (a PUT's bytes). */
-function release(objectId) {
-    const obj = db.get('SELECT lifecycle_status FROM media_objects WHERE id = ?', [objectId]);
+async function release(objectId) {
+    const obj = await db.get('SELECT lifecycle_status FROM media_objects WHERE id = ?', [objectId]);
     const stored = obj && obj.lifecycle_status === 'uploading'
-        ? db.get("SELECT size_bytes FROM media_locations WHERE object_id = ? AND provider = 'local' AND state = 'present'", [objectId]) : null;
-    if (stored && Number(stored.size_bytes) > 0) db.run('UPDATE media_quota_reservations SET bytes = ?, updated_at = CURRENT_TIMESTAMP WHERE object_id = ?', [Number(stored.size_bytes), objectId]);
-    else settle(objectId);
+        ? await db.get("SELECT size_bytes FROM media_locations WHERE object_id = ? AND provider = 'local' AND state = 'present'", [objectId]) : null;
+    if (stored && Number(stored.size_bytes) > 0) await db.run('UPDATE media_quota_reservations SET bytes = ?, updated_at = ov_now() WHERE object_id = ?', [Number(stored.size_bytes), objectId]);
+    else await settle(objectId);
 }
 
 /**
@@ -242,27 +252,27 @@ function release(objectId) {
  * (metadata.failure upload_expired), its stored bytes are deleted and its reservation goes; a
  * reservation whose object is no longer uploading is dropped. Returns { expired, dropped }.
  */
-function expireReservations() {
-    const rows = db.all(`SELECT r.object_id, r.app_id, r.namespace, o.lifecycle_status, o.legacy_ref, o.metadata FROM media_quota_reservations r
+async function expireReservations() {
+    const rows = await db.all(`SELECT r.object_id, r.app_id, r.namespace, o.lifecycle_status, o.legacy_ref, o.metadata FROM media_quota_reservations r
                          LEFT JOIN media_objects o ON o.id = r.object_id WHERE r.expires_at < datetime('now') ORDER BY r.expires_at LIMIT 1000`);
     const multipart = require('./multipart');
     const root = path.resolve(config.objects.path) + path.sep;
     const touched = new Map();
     let expired = 0, dropped = 0;
     for (const r of rows) {
-        if (r.lifecycle_status !== 'uploading' || r.legacy_ref) { settle(r.object_id); dropped++; continue; }
-        if (multipart.activeFor(r.object_id)) continue;   // its session expires on its own, then this does
+        if (r.lifecycle_status !== 'uploading' || r.legacy_ref) { await settle(r.object_id); dropped++; continue; }
+        if (await multipart.activeFor(r.object_id)) continue;   // its session expires on its own, then this does
         try {
             const md = parsePolicy(r.metadata);
             md.failure = 'upload_expired';
             md.expired_at = new Date().toISOString();
-            const locs = db.all("SELECT * FROM media_locations WHERE object_id = ? AND provider = 'local'", [r.object_id]);
-            db.getDb().transaction(() => {
-                db.run("UPDATE media_objects SET lifecycle_status = 'failed', metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND lifecycle_status = 'uploading'",
+            const locs = await db.all("SELECT * FROM media_locations WHERE object_id = ? AND provider = 'local'", [r.object_id]);
+            await db.getDb().tx(async () => {
+                await db.run("UPDATE media_objects SET lifecycle_status = 'failed', metadata = ?, updated_at = ov_now() WHERE id = ? AND lifecycle_status = 'uploading'",
                     [JSON.stringify(md), r.object_id]);
-                for (const l of locs) db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
-                settle(r.object_id);
-            })();
+                for (const l of locs) await db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
+                await settle(r.object_id);
+            });
             for (const l of locs) if (path.resolve(l.key).startsWith(root)) { try { fs.unlinkSync(l.key); } catch { /* already gone */ } }
             expired++;
             touched.set(`${r.app_id}\n${r.namespace}`, r);
@@ -271,34 +281,34 @@ function expireReservations() {
             console.warn(`[Namespaces] Could not expire the upload of ${r.object_id}: ${err.message}`);
         }
     }
-    for (const r of touched.values()) { const app = db.getApp(r.app_id); if (app) reconcileChain(app, r.namespace); }
+    for (const r of touched.values()) { const app = await db.getApp(r.app_id); if (app) await reconcileChain(app, r.namespace); }
     return { expired, dropped };
 }
 
 // ── Snapshot (the used_* / reserved_* columns) ───────────────
 
-function reconcile(app, namespace) {
-    const u = usage(app, namespace);
-    db.run(`UPDATE media_namespaces SET used_bytes = ?, used_objects = ?, reserved_bytes = ?, reserved_objects = ?,
-                   reconciled_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE namespace = ? AND app_id = ?`,
+async function reconcile(app, namespace) {
+    const u = await usage(app, namespace);
+    await db.run(`UPDATE media_namespaces SET used_bytes = ?, used_objects = ?, reserved_bytes = ?, reserved_objects = ?,
+                   reconciled_at = ov_now(), updated_at = ov_now() WHERE namespace = ? AND app_id = ?`,
     [u.used_bytes, u.used_objects, u.reserved_bytes, u.reserved_objects, namespace, app.app_id]);
     return u;
 }
 
 /** Refresh `namespace` and every namespace above it (after a write changed its usage). */
-function reconcileChain(app, namespace) {
+async function reconcileChain(app, namespace) {
     try {
-        for (const row of chain(app.app_id, namespace)) reconcile(app, row.namespace);
+        for (const row of await chain(app.app_id, namespace)) await reconcile(app, row.namespace);
     } catch (err) { console.warn(`[Namespaces] reconcile ${namespace}: ${err.message}`); }
 }
 
 /** Refresh every row (the hourly job). Returns how many. */
-function reconcileAll() {
+async function reconcileAll() {
     const apps = new Map();
     let n = 0;
-    for (const row of db.all('SELECT namespace, app_id FROM media_namespaces ORDER BY app_id, namespace')) {
-        if (!apps.has(row.app_id)) apps.set(row.app_id, db.getApp(row.app_id) || { app_id: row.app_id });
-        reconcile(apps.get(row.app_id), row.namespace);
+    for (const row of await db.all('SELECT namespace, app_id FROM media_namespaces ORDER BY app_id, namespace')) {
+        if (!apps.has(row.app_id)) apps.set(row.app_id, await db.getApp(row.app_id) || { app_id: row.app_id });
+        await reconcile(apps.get(row.app_id), row.namespace);
         n++;
     }
     return n;
@@ -307,7 +317,7 @@ function reconcileAll() {
 // ── Public shape ─────────────────────────────────────────────
 
 /** A namespace as its owner reads it; `fresh` is usage() just computed (else the snapshot is shown). */
-function publicShape(app, row, fresh = null) {
+async function publicShape(app, row, fresh = null) {
     const lim = limitsOf(app, row);
     const u = fresh || { used_bytes: row.used_bytes, used_objects: row.used_objects, reserved_bytes: row.reserved_bytes, reserved_objects: row.reserved_objects };
     const out = {
@@ -316,12 +326,12 @@ function publicShape(app, row, fresh = null) {
         root: row.parent == null,
         owner: row.owner,
         policy: parsePolicy(row.policy),
-        effective_policy: effectivePolicy(row.app_id, row.namespace),
+        effective_policy: await effectivePolicy(row.app_id, row.namespace),
         quota: { bytes: lim.bytes || null, objects: lim.objects || null, bytes_from: lim.bytes_from },
         usage: { ...u, reconciled_at: fresh ? new Date().toISOString() : row.reconciled_at || null },
         created_at: row.created_at,
     };
-    if (db.isSandboxTenant(row.app_id)) out.sandbox = true;
+    if (await db.isSandboxTenant(row.app_id)) out.sandbox = true;
     return out;
 }
 

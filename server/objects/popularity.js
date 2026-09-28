@@ -69,12 +69,12 @@ function networkOf(ip) {
 let _saltDay = null, _salt = null;
 
 /** The day's random salt: read, or made by the first view of the day (a racing writer keeps the first). */
-function daySalt(day) {
+async function daySalt(day) {
     if (_saltDay === day && _salt) return _salt;
-    let row = db.get('SELECT salt FROM media_object_view_salts WHERE day = ?', [day]);
+    let row = await db.get('SELECT salt FROM media_object_view_salts WHERE day = ?', [day]);
     if (!row) {
-        db.run('INSERT OR IGNORE INTO media_object_view_salts (day, salt) VALUES (?, ?)', [day, crypto.randomBytes(32).toString('hex')]);
-        row = db.get('SELECT salt FROM media_object_view_salts WHERE day = ?', [day]);
+        await db.run('INSERT INTO media_object_view_salts (day, salt) VALUES (?, ?) ON CONFLICT DO NOTHING', [day, crypto.randomBytes(32).toString('hex')]);
+        row = await db.get('SELECT salt FROM media_object_view_salts WHERE day = ?', [day]);
     }
     _saltDay = day;
     _salt = row.salt;
@@ -82,8 +82,8 @@ function daySalt(day) {
 }
 
 /** The stored form of a viewer on one day: 16 hex chars of HMAC-SHA256(salt of the day, network). */
-function viewerHash(network, day) {
-    return crypto.createHmac('sha256', daySalt(day)).update(String(network)).digest('hex').slice(0, 16);
+async function viewerHash(network, day) {
+    return crypto.createHmac('sha256', await daySalt(day)).update(String(network)).digest('hex').slice(0, 16);
 }
 
 // ── Recording ────────────────────────────────────────────────
@@ -105,7 +105,7 @@ function notCounted(req) {
  * Count the request's viewer for a native object (legacy_ref NULL), at most once per UTC day. Never throws.
  * → { counted, reason } (reason: not_native, method, range, opted_out, bot, seen, error; null when counted)
  */
-function record(obj, req, { now = Date.now() } = {}) {
+async function record(obj, req, { now = Date.now() } = {}) {
     try {
         if (!obj || !obj.id || obj.legacy_ref) return { counted: false, reason: 'not_native' };
         const why = notCounted(req);
@@ -115,19 +115,19 @@ function record(obj, req, { now = Date.now() } = {}) {
             // The first view of a new day: yesterday's hashes and salt go now (the hourly rotation would too).
             _day = day;
             _seen.clear();
-            rotate({ now });
+            await rotate({ now });
         }
-        const viewer = viewerHash(networkOf(clientIp(req)), day);
+        const viewer = await viewerHash(networkOf(clientIp(req)), day);
         const seenKey = `${obj.id}|${viewer}`;
         if (_seen.has(seenKey)) return { counted: false, reason: 'seen' };
         const at = new Date(now).toISOString();
-        const added = db.getDb().transaction(() => {
-            const r = db.run('INSERT OR IGNORE INTO media_object_viewer_days (day, object_id, viewer) VALUES (?, ?, ?)', [day, obj.id, viewer]);
+        const added = await db.getDb().tx(async () => {
+            const r = await db.run('INSERT INTO media_object_viewer_days (day, object_id, viewer) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', [day, obj.id, viewer]);
             if (!r.changes) return false;
-            db.run(`INSERT INTO media_object_views_daily (object_id, day, unique_viewers, last_viewed_at) VALUES (?, ?, 1, ?)
-                    ON CONFLICT(object_id, day) DO UPDATE SET unique_viewers = unique_viewers + 1, last_viewed_at = excluded.last_viewed_at`, [obj.id, day, at]);
+            await db.run(`INSERT INTO media_object_views_daily (object_id, day, unique_viewers, last_viewed_at) VALUES (?, ?, 1, ?)
+                    ON CONFLICT(object_id, day) DO UPDATE SET unique_viewers = media_object_views_daily.unique_viewers + 1, last_viewed_at = excluded.last_viewed_at`, [obj.id, day, at]);
             return true;
-        })();
+        });
         if (_seen.size >= SEEN_MAX) _seen.clear();
         _seen.add(seenKey);
         return { counted: added, reason: added ? null : 'seen' };
@@ -141,13 +141,13 @@ function record(obj, req, { now = Date.now() } = {}) {
  * Delete what must not outlive its day: every viewer hash and salt of a day before today, and daily counts
  * older than KEEP_DAYS. → { hashes, salts, counts } (rows deleted)
  */
-function rotate({ now = Date.now() } = {}) {
+async function rotate({ now = Date.now() } = {}) {
     const today = dayOf(now);
-    const out = db.getDb().transaction(() => ({
-        hashes: db.run('DELETE FROM media_object_viewer_days WHERE day < ?', [today]).changes,
-        salts: db.run('DELETE FROM media_object_view_salts WHERE day < ?', [today]).changes,
-        counts: db.run('DELETE FROM media_object_views_daily WHERE day < ?', [addDays(today, -KEEP_DAYS)]).changes,
-    }))();
+    const out = await db.getDb().tx(async () => ({
+        hashes: (await db.run('DELETE FROM media_object_viewer_days WHERE day < ?', [today])).changes,
+        salts: (await db.run('DELETE FROM media_object_view_salts WHERE day < ?', [today])).changes,
+        counts: (await db.run('DELETE FROM media_object_views_daily WHERE day < ?', [addDays(today, -KEEP_DAYS)])).changes,
+    }));
     if (_saltDay && _saltDay < today) { _saltDay = null; _salt = null; }
     return out;
 }
@@ -156,19 +156,19 @@ function rotate({ now = Date.now() } = {}) {
  * Unique viewers over the last `days` UTC days (today included), per object: Map(object_id → { unique_viewers,
  * last_viewed_day, last_viewed_at, days_viewed }). `ids` narrows it (else every object with a view in the window).
  */
-function stats({ ids = null, days = WINDOW_DAYS, now = Date.now() } = {}) {
+async function stats({ ids = null, days = WINDOW_DAYS, now = Date.now() } = {}) {
     const since = windowStart(dayOf(now), days);
     const list = ids == null ? null : [].concat(ids).filter(Boolean);
     if (list && !list.length) return new Map();
-    const rows = db.all(`SELECT object_id, SUM(unique_viewers) AS viewers, MAX(day) AS last_day, MAX(last_viewed_at) AS last_at, COUNT(*) AS days
+    const rows = await db.all(`SELECT object_id, SUM(unique_viewers)::bigint AS viewers, MAX(day) AS last_day, MAX(last_viewed_at) AS last_at, COUNT(*) AS days
                          FROM media_object_views_daily WHERE day >= ?${list ? ` AND object_id IN (${list.map(() => '?').join(',')})` : ''}
                          GROUP BY object_id`, [since, ...(list || [])]);
     return new Map(rows.map((r) => [r.object_id, { unique_viewers: r.viewers, last_viewed_day: r.last_day, last_viewed_at: r.last_at, days_viewed: r.days }]));
 }
 
 /** The last day anyone viewed the object (in the kept counts), or null. */
-function lastViewedDay(objectId) {
-    const r = db.get('SELECT MAX(day) AS d FROM media_object_views_daily WHERE object_id = ? AND unique_viewers > 0', [objectId]);
+async function lastViewedDay(objectId) {
+    const r = await db.get('SELECT MAX(day) AS d FROM media_object_views_daily WHERE object_id = ? AND unique_viewers > 0', [objectId]);
     return (r && r.d) || null;
 }
 

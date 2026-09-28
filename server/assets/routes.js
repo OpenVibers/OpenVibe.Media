@@ -36,7 +36,7 @@ function assetPublic(a) {
     };
 }
 
-router.post('/', tenantAuth(), upload.single('file'), (req, res) => {
+router.post('/', tenantAuth(), upload.single('file'), async (req, res) => {
     try {
         const { kind, name } = req.body || {};
         if (!['emote', 'sound'].includes(kind)) return res.status(400).json({ error: "kind must be 'emote' or 'sound'" });
@@ -47,9 +47,9 @@ router.post('/', tenantAuth(), upload.single('file'), (req, res) => {
         fs.writeFileSync(filePath, req.file.buffer);
         let meta = {};
         try { meta = req.body.meta ? JSON.parse(req.body.meta) : {}; } catch { /* */ }
-        const prev = db.get('SELECT file_path FROM assets WHERE app_id = ? AND kind = ? AND name = ? AND channel_username = ?',
+        const prev = await db.get('SELECT file_path FROM assets WHERE app_id = ? AND kind = ? AND name = ? AND channel_username = ?',
             [req.appId, kind, String(name), String(req.body.channel_username || '')]);
-        const row = db.upsertAsset({
+        const row = await db.upsertAsset({
             app_id: req.appId, kind, name: String(name).slice(0, 100),
             file_path: filePath, mime: req.file.mimetype || 'application/octet-stream',
             user_id: req.body.user_id != null ? parseInt(req.body.user_id, 10) || null : null,
@@ -69,24 +69,24 @@ router.post('/', tenantAuth(), upload.single('file'), (req, res) => {
     }
 });
 
-router.get('/', tenantAuth(), (req, res) => {
+router.get('/', tenantAuth(), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '200', 10), 1), 1000);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
         const kind = ['emote', 'sound'].includes(req.query.kind) ? req.query.kind : null;
-        const assets = db.listAssets(req.appId, { kind, limit, offset }).map(assetPublic);
-        res.json({ assets, total: db.countAssets(req.appId, { kind }), limit, offset });
+        const assets = (await db.listAssets(req.appId, { kind, limit, offset })).map(assetPublic);
+        res.json({ assets, total: await db.countAssets(req.appId, { kind }), limit, offset });
     } catch (err) {
         res.status(500).json({ error: 'Failed to list assets' });
     }
 });
 
-router.delete('/:id', tenantAuth(), (req, res) => {
+router.delete('/:id', tenantAuth(), async (req, res) => {
     try {
-        const a = db.getAssetById(parseInt(req.params.id, 10));
+        const a = await db.getAssetById(parseInt(req.params.id, 10));
         if (!a || a.app_id !== req.appId) return res.status(404).json({ error: 'Not found' });
         try { if (a.file_path && fs.existsSync(a.file_path)) fs.unlinkSync(a.file_path); } catch { /* */ }
-        db.deleteAsset(a.id);
+        await db.deleteAsset(a.id);
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: 'Failed to delete asset' });

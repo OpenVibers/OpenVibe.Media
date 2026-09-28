@@ -15,44 +15,44 @@
 const NO_GOOD_COPY_WHERE = `o.lifecycle_status = 'ready'
     AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.state IN ('present', 'pending'))`;
 
-function countNoGoodCopy(q, { appId = null } = {}) {
-    const r = q.get(`SELECT COUNT(*) AS n FROM media_objects o WHERE ${NO_GOOD_COPY_WHERE}${appId ? ' AND o.app_id = ?' : ''}`, appId ? [appId] : []);
+async function countNoGoodCopy(q, { appId = null } = {}) {
+    const r = await q.get(`SELECT COUNT(*) AS n FROM media_objects o WHERE ${NO_GOOD_COPY_WHERE}${appId ? ' AND o.app_id = ?' : ''}`, appId ? [appId] : []);
     return Number(r && r.n) || 0;
 }
 
-function listNoGoodCopy(q, { appId = null } = {}) {
-    return q.all(`SELECT o.* FROM media_objects o WHERE ${NO_GOOD_COPY_WHERE}${appId ? ' AND o.app_id = ?' : ''} ORDER BY o.app_id, o.id`, appId ? [appId] : []);
+async function listNoGoodCopy(q, { appId = null } = {}) {
+    return await q.all(`SELECT o.* FROM media_objects o WHERE ${NO_GOOD_COPY_WHERE}${appId ? ' AND o.app_id = ?' : ''} ORDER BY o.app_id, o.id`, appId ? [appId] : []);
 }
 
-function tableExists(q, name) {
-    return !!q.get("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?", [name]);
+async function tableExists(q, name) {
+    return !!await q.get("SELECT 1 AS x FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ?", [name]);
 }
 
 function parseJson(s, dflt) { try { return s ? JSON.parse(s) : dflt; } catch { return dflt; } }
 
 /** Rows elsewhere that point at the object: the inherited projections, relationships, variants, holds. */
-function references(q, obj) {
+async function references(q, obj) {
     const refs = {
-        vods: q.all(`SELECT id, app_id, user_id, stream_id, managed_stream_id, title, visibility, is_public, file_path, file_size,
+        vods: await q.all(`SELECT id, app_id, user_id, stream_id, managed_stream_id, title, visibility, is_public, file_path, file_size,
                             storage_provider, storage_key, created_at FROM vods WHERE object_id = ?`, [obj.id]),
-        clips: q.all(`SELECT id, app_id, vod_id, stream_id, user_id, channel_user_id, title, visibility, is_public, file_path, status, created_at
+        clips: await q.all(`SELECT id, app_id, vod_id, stream_id, user_id, channel_user_id, title, visibility, is_public, file_path, status, created_at
                       FROM clips WHERE object_id = ?`, [obj.id]),
-        files: q.all('SELECT key, app_id, user_id, original_name, size, mime, created_at FROM files WHERE object_id = ?', [obj.id]),
-        pastes: q.all('SELECT id, slug, app_id, user_id, title, type, visibility, screenshot_path, created_at FROM pastes WHERE object_id = ?', [obj.id]),
-        relationships: q.all(`SELECT from_object_id, relation, to_object_id FROM media_relationships
+        files: await q.all('SELECT key, app_id, user_id, original_name, size, mime, created_at FROM files WHERE object_id = ?', [obj.id]),
+        pastes: await q.all('SELECT id, slug, app_id, user_id, title, type, visibility, screenshot_path, created_at FROM pastes WHERE object_id = ?', [obj.id]),
+        relationships: await q.all(`SELECT from_object_id, relation, to_object_id FROM media_relationships
                               WHERE from_object_id = ? OR to_object_id = ? ORDER BY id`, [obj.id, obj.id]),
-        variants: q.all(`SELECT object_id, variant_name, derived_object_id FROM media_variants
+        variants: await q.all(`SELECT object_id, variant_name, derived_object_id FROM media_variants
                          WHERE object_id = ? OR derived_object_id = ? ORDER BY id`, [obj.id, obj.id]),
-        holds: q.all('SELECT id, kind, reason, created_by, created_at FROM media_holds WHERE object_id = ? AND released_at IS NULL ORDER BY id', [obj.id]),
+        holds: await q.all('SELECT id, kind, reason, created_by, created_at FROM media_holds WHERE object_id = ? AND released_at IS NULL ORDER BY id', [obj.id]),
     };
     return refs;
 }
 
 /** Everything an operator needs to decide what to do with each object that has no good copy. */
-function buildReport(q, { appId = null } = {}) {
-    const hasVerifications = tableExists(q, 'media_verifications');
-    const items = listNoGoodCopy(q, { appId }).map((o) => {
-        const last = hasVerifications ? q.get('SELECT verified_at, status, detail FROM media_verifications WHERE object_id = ?', [o.id]) : null;
+async function buildReport(q, { appId = null } = {}) {
+    const hasVerifications = await tableExists(q, 'media_verifications');
+    const items = (await Promise.all((await listNoGoodCopy(q, { appId })).map(async (o) => {
+        const last = hasVerifications ? await q.get('SELECT verified_at, status, detail FROM media_verifications WHERE object_id = ?', [o.id]) : null;
         const md = parseJson(o.metadata, {});
         return {
             object_id: o.id,
@@ -66,11 +66,11 @@ function buildReport(q, { appId = null } = {}) {
             owner: { app: o.owner_app || o.app_id, user_id: o.owner_user_id ?? null, subject: o.owner_subject || null },
             legacy_ref: o.legacy_ref || null,
             canonical: { provider: o.canonical_provider || null, key: o.canonical_key || null },
-            locations: q.all('SELECT provider, bucket, key, state, size_bytes, verified_at FROM media_locations WHERE object_id = ? ORDER BY id', [o.id]),
-            references: references(q, o),
+            locations: await q.all('SELECT provider, bucket, key, state, size_bytes, verified_at FROM media_locations WHERE object_id = ? ORDER BY id', [o.id]),
+            references: await references(q, o),
             last_verification: last ? { verified_at: last.verified_at, status: last.status, detail: parseJson(last.detail, {}) } : null,
         };
-    });
+    })));
     return { generated_at: new Date().toISOString(), app_id: appId, count: items.length, objects: items };
 }
 

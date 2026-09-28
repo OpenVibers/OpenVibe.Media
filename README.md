@@ -17,12 +17,14 @@ cp .env.example .env     # set MEDIA_APPS_SEED at minimum
 npm start                # node server/index.js
 ```
 
-Requires Node ≥ 20, `ffmpeg`/`ffprobe` on PATH. SQLite (better-sqlite3, WAL).
+Requires Node ≥ 20, `ffmpeg`/`ffprobe` on PATH. PostgreSQL 18 and Valkey 9 (OpenVibe.Host `roles/data/`, ADR-035);
+without `DATABASE_URL`, development uses an embedded PGlite database in `data/pglite`.
 
 ## Owns
 
 - VODs (recording from RTMP or RTP, chunk ingest, finalize), clips (cutting), thumbnails, generic files
-  and avatars, in one SQLite database (`media.db`) and the local media directories
+  and avatars, in one PostgreSQL database (`ov_media` on the host's data role; schema in [migrations/](migrations/))
+  and the local media directories
 - the canonical object model (`/api/v2`: objects, locations, variants, holds, derivatives, lifecycle,
   namespaces) and its jobs (`media_jobs`)
 - storage tiering (local, Backblaze B2, Cloudflare R2), copy verification and the disk guardian
@@ -42,8 +44,8 @@ Requires Node ≥ 20, `ffmpeg`/`ffprobe` on PATH. SQLite (better-sqlite3, WAL).
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.71.0, `openvibe-sdk` v0.12.0 (tokens, events outbox, per-actor limits),
-  `openvibe-shared` v1.22.0, pinned by release tarball
+- `openvibe-contracts` v0.76.0, `openvibe-sdk` v0.21.2 (tokens, events outbox, per-actor limits),
+  `openvibe-shared` v1.28.0, pinned by release tarball
 
 ## Capabilities
 
@@ -75,7 +77,7 @@ server/
   drill.js               MEDIA_DRILL: restore-drill mode (reads only, no bytes, no jobs, nothing leaves)
   db/schema.sql          apps, vods, clips, pastes(+likes/comments), files, content_views, media_settings,
                          media_objects/locations/relationships/variants/jobs/holds/invariant_violations
-  db/database.js         better-sqlite3 helpers, all app_id-scoped; legacy row importer
+  db/database.js         PostgreSQL helpers (openvibe-sdk/db, async), all app_id-scoped
   vod/recorder.js        ffmpeg recording: RTMP pull + RTP (SDP) ingest, codec passthrough
   vod/media-tools.js     probes, seekable remux, DVR sidecar, chunk-segment concat
   vod/finalize.js        finalize pipeline (remux → probe → master recovery → thumbnail → webhook)
@@ -359,7 +361,7 @@ the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
 
 Each outcome is also a durable OpenVibe.Events event (`media.vod.ready|failed`,
 `media.clip.ready|failed`, `media.object.uploaded`, `media.storage.alert|recovered`;
-`server/events.js`). The outbox row is written in the **same SQLite transaction** as the state
+`server/events.js`). The outbox row is written in the **same transaction** as the state
 change it describes (`webhooks.announce()`), so an outcome is never lost or announced for a
 rolled-back change; the webhook follows the commit and carries `event_id` = that event's id
 (absent when the outbox is off), so an app that reads both paths (Live during its webhook →
@@ -378,12 +380,14 @@ that is deleted; none for sandbox tenants. `test/object-events.test.js`.
 
 ## Restore drills (`MEDIA_DRILL=1`)
 
-`ovhost drill media` (OpenVibe.Host `docs/restore-drills.md`) restores `media.db` from the latest
-backup and starts a second Media from this checkout on 127.0.0.1:14100 with `MEDIA_DRILL=1` and
-`DB_PATH` on the copy. In that mode (`server/drill.js`) Media:
+A restore drill starts a second Media from this checkout on 127.0.0.1:14100 with `MEDIA_DRILL=1` and
+`DATABASE_URL` naming a restored copy of the database (pgBackRest restores the cluster on a spare port; the Host's
+`ovhost drill media` still restores the SQLite backups of the releases before PostgreSQL and needs that step before
+it drills this one). In that mode (`server/drill.js`) Media:
 
-- refuses to start unless `DB_PATH` is set and outside the checkout and `/opt/openvibe.media`, `HOST`
-  is loopback and `PORT` is not 4100 (before the database is opened);
+- refuses to start unless `DATABASE_URL` is set and does not name production's database (`ov_media` on 5432, or
+  PgBouncer's 6432), `DATABASE_DIRECT_URL` is unset (a drill never migrates), `HOST` is loopback and `PORT` is not
+  4100 (before the database is opened), and opens the copy without migrating it;
 - starts only its HTTP server: no app seeding, JWKS refresh, tiering sweep, health job, junk sweep,
   clip re-cuts, copy verification, jobs worker, disk guardian, thumbnail cleanup, object purge,
   backfill, orphan-recording finalize or Events relay; webhooks are never sent;
@@ -444,7 +448,7 @@ Counters are per process (a restart forgets them). `test/actor-limits.test.js`.
 | path | behavior |
 |---|---|
 | `GET /healthz` | liveness: the process answers (unchanged; it checks nothing else) |
-| `GET /api/ready` | readiness from real checks, each with `status`, `required`, `latency_ms`, `checked_at`. **Required** (503 when one fails): `db` (a query against the SQLite database), `storage_vods`, `storage_clips`, `storage_pastes`, `storage_thumbnails`, `storage_files`, `storage_objects` (a probe file is written and removed). **Optional** (listed in `degraded`, still 200): `network_jwks` (user JWTs and service tokens; app keys work without it), `remote_b2` / `remote_r2` (HeadBucket, at most once a minute; present only when the provider is configured), `events_outbox` (backlog over 1000 events). Also `recordings_in_progress`. |
+| `GET /api/ready` | readiness from real checks, each with `status`, `required`, `latency_ms`, `checked_at`. **Required** (503 when one fails): `db` (a real round trip that names the store, postgresql or pglite, and counts the tenants), `valkey` optional (skipped without `VALKEY_URL`), `storage_vods`, `storage_clips`, `storage_pastes`, `storage_thumbnails`, `storage_files`, `storage_objects` (a probe file is written and removed). **Optional** (listed in `degraded`, still 200): `network_jwks` (user JWTs and service tokens; app keys work without it), `remote_b2` / `remote_r2` (HeadBucket, at most once a minute; present only when the provider is configured), `events_outbox` (backlog over 1000 events). Also `recordings_in_progress`. |
 | `GET /metrics` | Prometheus text (openvibe-shared/metrics) for **direct loopback callers only**; 404 through nginx. HTTP golden signals by route template, process metrics, `release_info`, `release_client_updates_total{outcome,reason}`, plus `media_recordings_in_progress`, `media_object_locations{provider,state}`, `media_objects{lifecycle_status}`, `media_events_outbox{status}` (only while the outbox runs), `media_job_stale_completions_total{action}` (job writes refused by the lease-token fence). |
 | `GET /release.json` | release manifest (`registry.release-manifest@1` 1.1.0, openvibe-shared/release, ADR-016): deployed commit, package versions, components, contract ranges, `metrics_url`. The shared navbar's release-watch polls it. No components are declared, so every release still prompts open tabs to reload. |
 | `POST /release-metrics` | open tabs' update reports (release-watch beacons, at most 4 KB; 30 a minute per connecting address, which behind nginx is the proxy, so one budget for all tabs; Sec-GPC/DNT dropped) into `release_client_updates_total` on `/metrics`. 403 in a restore drill, like every write. |
@@ -569,26 +573,15 @@ guardian (refuses new recordings when free space is critical), stale live-thumb
 cleanup, and an on-boot sweep that finalizes recordings orphaned by an unclean
 shutdown.
 
-## Migration from the predecessor DB
+## Moving to PostgreSQL
 
-Every domain table carries `app_id TEXT NOT NULL DEFAULT 'live'`, and the new
-schema keeps all predecessor columns (including legacy `storage_tier`), so the
-cutover script can bulk-copy rows unchanged:
-
-```js
-const media = require('./server/db/database');
-const old = require('better-sqlite3')('/path/to/old-live.db', { readonly: true });
-for (const table of ['vods', 'clips', 'pastes', 'paste_likes', 'paste_comments', 'content_views']) {
-    const rows = old.prepare(`SELECT * FROM ${table}`).all();
-    console.log(table, media.importLegacyRows(table, rows, 'live'));
-}
-```
-
-`importLegacyRows` inserts by column-name intersection (unknown legacy columns
-ignored, new columns take defaults), preserves ids, backfills `app_id`, and is
-idempotent (`INSERT OR IGNORE`). After the copy, run
-`node server/vod/vod-storage.js migrate-legacy` to map legacy `storage_tier =
-'cold'` rows to provider `b2`.
+`scripts/migrate-to-postgres.js` is the one-time import of the SQLite `media.db` (`DB_PATH`) into `ov_media`
+(openvibe-sdk `runSqliteMigration`: migrations as the owner, every table copied into emptied tables, counts and
+checksums verified; `--pglite` rehearses it in memory). It runs while the service is stopped (OpenVibe.Host
+`roles/data/switch-service.sh media /opt/openvibe.media/data/media.db`); the SQLite file stays read-only for 7 days as
+the rollback. Timestamps stay SQLite's text (`ov_now()`, `datetime()`, `julianday()` in the migration); the retention
+hold guards and the object-change triggers are PL/pgSQL. (The predecessor-DB importer and its bulk-copy recipe were
+retired with the move.)
 
 ## Not ported
 
@@ -654,13 +647,14 @@ Reporting a vulnerability: [SECURITY.md](SECURITY.md). The rules the code keeps:
 
 Production deploys with `sudo ovhost deploy media` on the host (strategy `git-checkout`: fetch,
 fast-forward `/opt/openvibe.media`, install on a lockfile change, restart, wait for `/api/ready`, 60 s).
-ovhost refuses the restart while a VOD is recording (`vods.is_recording = 1`); `--wait-idle` holds it
-until none is. The unit is `openvibe-media.service` ([deploy/systemd/](deploy/systemd/openvibe-media.service),
-runs as `ubuntu`, data under `/opt/openvibe.media/data`) on `127.0.0.1:4100`, the env file
-`/etc/openvibe/media.env`; nginx serves `openvibe.media` from
+ovhost refuses the restart while a VOD is recording (`recordings_in_progress` on `/api/ready`); `--wait-idle`
+holds it until none is. The unit is `openvibe-media.service` ([deploy/systemd/](deploy/systemd/openvibe-media.service),
+runs as `ubuntu`, media under `/opt/openvibe.media/data`) on `127.0.0.1:4100`, the env file
+`/etc/openvibe/media.env`. The database is `ov_media` on the host's data role (`sudo /opt/openvibe.host/roles/data/add-service.sh media`
+writes its settings); the release migrates it at boot; nginx serves `openvibe.media` from
 [deploy/nginx/openvibe.media.conf](deploy/nginx/openvibe.media.conf). After a deploy, record the N-1
 fixtures (`npm run n-1:record`).
 
 Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the
-restart; afterwards `sudo ovhost rollback media --to <sha>`. One blocker: `media_jobs` was rebuilt once
-into the `app_id` shape, so a release from before that change does not know the table.
+restart; afterwards `sudo ovhost rollback media --to <sha>`. A release from before PostgreSQL reads the SQLite
+`media.db` it left (read-only for 7 days after the switch); anything written since would need moving back first.

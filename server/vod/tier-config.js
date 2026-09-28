@@ -44,47 +44,60 @@ function validate(v) {
     return errors.length ? errors : true;
 }
 
-function legacyRows() {
-    const rows = db.all("SELECT key, value FROM media_settings WHERE key LIKE 'storage_tier.%'") || [];
+async function legacyRows() {
+    const rows = await db.all("SELECT key, value FROM media_settings WHERE key ILIKE 'storage_tier.%'") || [];
     if (!rows.length) return {};                       // nothing overridden: revision 1 sets nothing (the defaults apply)
     return config.fromRows(rows.map((r) => ({ key: r.key, value: r.value, type: 'json' })), { prefix: 'storage_tier.' });
 }
 
 /** media_settings mirrors the active revision exactly: its explicit keys as rows, every other storage_tier.* row gone. */
-function writeThrough(values, defaults) {
+async function writeThrough(values, defaults) {
     const h = db.getDb();
     const up = h.prepare('INSERT INTO media_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
     const del = h.prepare('DELETE FROM media_settings WHERE key = ?');
-    h.transaction(() => {
+    await h.tx(async () => {
         for (const k of Object.keys(defaults)) {
-            if (values[k] !== undefined) up.run(`storage_tier.${k}`, JSON.stringify(values[k]));
-            else del.run(`storage_tier.${k}`);
+            if (values[k] !== undefined) await up.run(`storage_tier.${k}`, JSON.stringify(values[k]));
+            else await del.run(`storage_tier.${k}`);
         }
-    })();
+    });
 }
 
-/** The store (created on first use, once the database is open). */
-function get(defaults) {
+let explicit = new Set();   // keys the active revision sets explicitly (read on activation: snapshots are async)
+
+/** Create the store once the database is open (boot: server/index.js; tests). */
+async function init(defaults, { log = null } = {}) {
     if (store) return store;
     const known = Object.keys(defaults);
-    store = config.createConfigStore({
+    // Stored revisions only carry known keys: a key a later release dropped is ignored, not refused.
+    // Revision 1 holds exactly what was overridden, so "set explicitly" stays distinguishable from a default.
+    const legacy = await legacyRows();
+    const s = await config.createConfigStore({
         db: db.getDb(), service: 'media', namespace: 'media.storage_tier',
         defaults, schema: schemaFor(defaults), validate,
-        // Stored revisions only carry known keys: a key a later release dropped is ignored, not refused.
-        // Revision 1 holds exactly what was overridden, so "set explicitly" stays distinguishable from a default.
-        legacy: () => { const l = legacyRows(); const out = {}; for (const k of known) if (l[k] !== undefined) out[k] = l[k]; return out; },
+        legacy: () => { const out = {}; for (const k of known) if (legacy[k] !== undefined) out[k] = legacy[k]; return out; },
         onActivate: async (values, _previous, { revision }) => {
-            writeThrough(explicitValues(revision, values), defaults);
+            const ex = await explicitValues(revision, values);
+            if (store) explicit = new Set(Object.keys(ex));
+            await writeThrough(ex, defaults);
             if (onApplied) onApplied(values);
         },
-        log: { info: (m) => console.log(`[Tiers] ${m}`), warn: (m) => console.warn(`[Tiers] ${m}`), error: (m) => console.error(`[Tiers] ${m}`) },
+        log: log || { info: (m) => console.log(`[Tiers] ${m}`), warn: (m) => console.warn(`[Tiers] ${m}`), error: (m) => console.error(`[Tiers] ${m}`) },
     });
+    store = s;
+    explicit = new Set(Object.keys(await explicitValues(s.revision(), s.get())));
+    return store;
+}
+
+/** The store init() created (get() on it reads memory). */
+function get() {
+    if (!store) throw new Error('media.storage_tier is not loaded yet (tier-config init() at boot)');
     return store;
 }
 
 /** The values a revision sets explicitly (written through to media_settings; defaults stay rowless). */
-function explicitValues(revision, effective) {
-    const snap = store && revision != null ? store.snapshot(revision) : null;
+async function explicitValues(revision, effective) {
+    const snap = store && revision != null ? await store.snapshot(revision) : null;
     const out = {};
     for (const k of Object.keys((snap && snap.values) || {})) out[k] = effective[k];
     return out;
@@ -92,9 +105,8 @@ function explicitValues(revision, effective) {
 
 /** Which keys the active revision sets explicitly (anything else is its default). */
 function explicitKeys() {
-    if (!store || store.revision() == null) return new Set();
-    const snap = store.snapshot(store.revision());
-    return new Set(Object.keys((snap && snap.values) || {}));
+    if (!store) return new Set();
+    return new Set(explicit);
 }
 
-module.exports = { get, explicitKeys, schemaFor, validate, setOnApplied: (fn) => { onApplied = fn; }, _reset: () => { store = null; } };
+module.exports = { init, get, explicitKeys, schemaFor, validate, setOnApplied: (fn) => { onApplied = fn; }, _reset: () => { store = null; explicit = new Set(); } };

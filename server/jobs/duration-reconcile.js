@@ -45,28 +45,28 @@ function validate({ obj, params }) {
 async function run(job, ctx = {}) {
     const p = validate({ obj: null, params: job.params });
     const walking = p.after_id == null;
-    const afterId = walking ? (Number(db.getSetting(cursorKey(job.app_id))) || 0) : p.after_id;
+    const afterId = walking ? (Number(await db.getSetting(cursorKey(job.app_id))) || 0) : p.after_id;
     const report = await reconcile.reconcileBatch({
         appId: job.app_id, afterId, limit: p.limit, apply: p.apply, confirmRemote: p.confirm_remote, signal: ctx.signal,
     });
     report.job_id = job.id;
     const file = reconcile.writeReport(report);
     const next = report.range.done ? 0 : report.range.last_id;
-    if (walking) db.setSetting(cursorKey(job.app_id), next, 'number');
+    if (walking) await db.setSetting(cursorKey(job.app_id), next, 'number');
     return { mode: report.mode, counts: report.counts, range: report.range, next_after_id: next, report: path.basename(file) };
 }
 
 /** Queue one run per tenant with VODs every MEDIA_DURATION_RECONCILE_HOURS (0 = never). Returns how many. */
-function schedule(nowMs = Date.now()) {
+async function schedule(nowMs = Date.now()) {
     const hours = envInt('MEDIA_DURATION_RECONCILE_HOURS', 0);
     if (!(hours > 0)) return 0;
     const period = Math.floor(nowMs / (hours * 3600 * 1000));
     const apply = bool(process.env.MEDIA_DURATION_RECONCILE_APPLY || '');
     const limit = Math.min(reconcile.MAX_BATCH, Math.max(1, envInt('MEDIA_DURATION_RECONCILE_BATCH', 25)));
     let n = 0;
-    for (const { app_id: appId } of db.all('SELECT DISTINCT app_id FROM vods WHERE COALESCE(is_recording, 0) = 0 AND file_path IS NOT NULL')) {
+    for (const { app_id: appId } of await db.all('SELECT DISTINCT app_id FROM vods WHERE COALESCE(is_recording, 0) = 0 AND file_path IS NOT NULL')) {
         try {
-            const r = queue.enqueue({ appId, type: TYPE, params: { limit, apply, confirm_remote: false }, idempotencyKey: `${TYPE}:${hours}h:${period}`, createdBy: 'system:schedule' });
+            const r = await queue.enqueue({ appId, type: TYPE, params: { limit, apply, confirm_remote: false }, idempotencyKey: `${TYPE}:${hours}h:${period}`, createdBy: 'system:schedule' });
             if (r.created) n++;
         } catch (err) { console.warn(`[Jobs] could not schedule ${TYPE} for ${appId}: ${err.message}`); }
     }

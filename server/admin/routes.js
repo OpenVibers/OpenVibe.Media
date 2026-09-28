@@ -86,10 +86,10 @@ function dirStatsRecursive(dirPath) {
     return { bytes, files };
 }
 
-function _providerCounts(table, appId, withBytes) {
-    const rows = db.all(`
+async function _providerCounts(table, appId, withBytes) {
+    const rows = await db.all(`
         SELECT COALESCE(storage_provider, 'local') AS provider,
-               COUNT(*) AS count${withBytes ? ', COALESCE(SUM(file_size), 0) AS bytes' : ''}
+               COUNT(*) AS count${withBytes ? ', COALESCE(SUM(file_size), 0)::bigint AS bytes' : ''}
         FROM ${table} WHERE app_id = ?
         GROUP BY COALESCE(storage_provider, 'local')
     `, [appId]);
@@ -99,7 +99,7 @@ function _providerCounts(table, appId, withBytes) {
 }
 
 // ── GET / — disk usage & per-directory breakdown ─────────────
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
     try {
         const disk = vodStorage.diskUsage(config.vod.path);
 
@@ -117,18 +117,18 @@ router.get('/', (req, res) => {
         try { dbBytes = fs.statSync(config.db.path).size; } catch { /* */ }
 
         // App-scoped DB stats
-        const vodStats = db.get(`
-            SELECT COUNT(*) AS count, COALESCE(SUM(file_size), 0) AS bytes,
+        const vodStats = await db.get(`
+            SELECT COUNT(*) AS count, COALESCE(SUM(file_size), 0)::bigint AS bytes,
                    COALESCE(MIN(created_at), '') AS oldest, COALESCE(MAX(created_at), '') AS newest
             FROM vods WHERE app_id = ?
         `, [req.appId]) || {};
-        const clipStats = db.get('SELECT COUNT(*) AS count FROM clips WHERE app_id = ?', [req.appId]) || {};
-        const pasteStats = db.get(`
+        const clipStats = await db.get('SELECT COUNT(*) AS count FROM clips WHERE app_id = ?', [req.appId]) || {};
+        const pasteStats = await db.get(`
             SELECT COUNT(*) AS count,
                    SUM(CASE WHEN type = 'screenshot' THEN 1 ELSE 0 END) AS screenshots
             FROM pastes WHERE app_id = ?
         `, [req.appId]) || {};
-        const fileStats = db.get('SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS bytes FROM files WHERE app_id = ?', [req.appId]) || {};
+        const fileStats = await db.get('SELECT COUNT(*) AS count, COALESCE(SUM(size), 0)::bigint AS bytes FROM files WHERE app_id = ?', [req.appId]) || {};
 
         res.json({
             app_id: req.appId,
@@ -141,8 +141,8 @@ router.get('/', (req, res) => {
             pasteStats,
             fileStats,
             byProvider: {
-                vods: _providerCounts('vods', req.appId, true),
-                clips: _providerCounts('clips', req.appId, false),   // clips carry no file_size column
+                vods: await _providerCounts('vods', req.appId, true),
+                clips: await _providerCounts('clips', req.appId, false),   // clips carry no file_size column
             },
         });
     } catch (err) {
@@ -154,7 +154,7 @@ router.get('/', (req, res) => {
 // ── GET /vods — detailed VOD listing ─────────────────────────
 const PROVIDER_ALIASES = { hot: 'local', local: 'local', cold: 'b2', b2: 'b2', r2: 'r2' };
 
-router.get('/vods', (req, res) => {
+router.get('/vods', async (req, res) => {
     try {
         const sort = req.query.sort || 'size'; // size, date, duration, tier, views, accessed
         const order = String(req.query.order || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
@@ -178,7 +178,7 @@ router.get('/vods', (req, res) => {
         const providerFilter = PROVIDER_ALIASES[String(req.query.provider || req.query.tier || '').toLowerCase()];
         if (providerFilter) { conds.push("COALESCE(storage_provider, 'local') = ?"); params.push(providerFilter); }
 
-        const vods = db.all(`
+        const vods = await db.all(`
             SELECT id, title, file_path, file_size, duration_seconds, is_public, visibility,
                    is_recording, clips_only, created_at, view_count, health_status,
                    storage_provider, storage_tier, storage_key, last_accessed_at,
@@ -188,7 +188,7 @@ router.get('/vods', (req, res) => {
             ORDER BY ${orderBy}
             LIMIT ? OFFSET ?
         `, [...params, limit, offset]);
-        const total = db.get(`SELECT COUNT(*) AS c FROM vods WHERE ${conds.join(' AND ')}`, params).c;
+        const total = (await db.get(`SELECT COUNT(*) AS c FROM vods WHERE ${conds.join(' AND ')}`, params)).c;
 
         // Reconcile DB tier with what's actually on disk / in object storage.
         const enriched = vods.map(v => {
@@ -210,8 +210,8 @@ router.get('/vods', (req, res) => {
         });
 
         // Per-user summary (app-local user ids; Media holds no user profiles)
-        const userSummary = db.all(`
-            SELECT user_id, COUNT(*) AS vodCount, COALESCE(SUM(file_size), 0) AS totalSize
+        const userSummary = await db.all(`
+            SELECT user_id, COUNT(*) AS "vodCount", COALESCE(SUM(file_size), 0)::bigint AS "totalSize"
             FROM vods WHERE app_id = ?
             GROUP BY user_id
             ORDER BY totalSize DESC
@@ -242,9 +242,9 @@ router.delete('/vods/bulk', async (req, res) => {
             const id = parseInt(rawId, 10);
             const result = { id: Number.isFinite(id) ? id : rawId, ok: false };
             try {
-                const vod = Number.isFinite(id) ? db.getVodById(id, req.appId) : null;
+                const vod = Number.isFinite(id) ? await db.getVodById(id, req.appId) : null;
                 if (!vod) { result.error = 'VOD not found'; results.push(result); continue; }
-                if (require('../objects/model').isHeldRow(vod)) { result.error = 'VOD is under a retention hold'; results.push(result); continue; }
+                if (await require('../objects/model').isHeldRow(vod)) { result.error = 'VOD is under a retention hold'; results.push(result); continue; }
 
                 if (recorder.isRecording(vod.id)) recorder.stopRecording(vod.id);
                 try { require('../vod/routes').activeChunkUploads.delete(vod.id); } catch { /* */ }
@@ -262,8 +262,8 @@ router.delete('/vods/bulk', async (req, res) => {
                     try { if (fs.existsSync(thumbFile)) fs.unlinkSync(thumbFile); } catch { /* */ }
                 }
 
-                db.run('DELETE FROM vods WHERE id = ?', [vod.id]);
-                db.run("DELETE FROM content_views WHERE content_type = 'vod' AND content_id = ?", [vod.id]);
+                await db.run('DELETE FROM vods WHERE id = ?', [vod.id]);
+                await db.run("DELETE FROM content_views WHERE content_type = 'vod' AND content_id = ?", [vod.id]);
                 result.ok = true;
                 deleted++;
             } catch (err) {
@@ -285,25 +285,25 @@ router.delete('/vods/bulk', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 
 // ── GET /tiers — tier/offload status ─────────────────────────
-router.get('/tiers', (req, res) => {
+router.get('/tiers', async (req, res) => {
     try {
-        const status = vodStorage.getStatus();   // settings, providers, disk, global tier counts, sweepRunning
+        const status = await vodStorage.getStatus();   // settings, providers, disk, global tier counts, sweepRunning
 
         // App-scoped tier counts
-        const appCounts = db.get(`
+        const appCounts = await db.get(`
             SELECT
-                SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN 1 ELSE 0 END) AS localCount,
+                SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN 1 ELSE 0 END) AS "localCount",
                 SUM(CASE WHEN storage_provider = 'b2' THEN 1 ELSE 0 END) AS b2Count,
                 SUM(CASE WHEN storage_provider = 'r2' THEN 1 ELSE 0 END) AS r2Count,
-                SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN file_size ELSE 0 END) AS localBytes,
-                SUM(CASE WHEN storage_provider = 'b2' THEN file_size ELSE 0 END) AS b2Bytes,
-                SUM(CASE WHEN storage_provider = 'r2' THEN file_size ELSE 0 END) AS r2Bytes
+                SUM(CASE WHEN COALESCE(storage_provider, 'local') = 'local' THEN file_size ELSE 0 END)::bigint AS "localBytes",
+                SUM(CASE WHEN storage_provider = 'b2' THEN file_size ELSE 0 END)::bigint AS b2Bytes,
+                SUM(CASE WHEN storage_provider = 'r2' THEN file_size ELSE 0 END)::bigint AS r2Bytes
             FROM vods WHERE app_id = ?
         `, [req.appId]) || {};
 
         // VODs of this app currently eligible for the next cold-offload sweep
         const s = status.settings;
-        const pendingOffload = db.get(`
+        const pendingOffload = (await db.get(`
             SELECT COUNT(*) AS c FROM vods
             WHERE app_id = ?
               AND COALESCE(storage_provider, 'local') = 'local'
@@ -311,7 +311,7 @@ router.get('/tiers', (req, res) => {
               AND created_at <= datetime('now', ?)
               AND COALESCE(view_count, 0) <= ?
               AND (last_accessed_at IS NULL OR last_accessed_at <= datetime('now', ?))
-        `, [req.appId, `-${s.minAgeDays} days`, s.maxViewsForCold, `-${s.minLastAccessDays} days`])?.c || 0;
+        `, [req.appId, `-${s.minAgeDays} days`, s.maxViewsForCold, `-${s.minLastAccessDays} days`]))?.c || 0;
 
         res.json({
             ...status,
@@ -380,12 +380,12 @@ function _decisionPublic(r) {
     };
 }
 
-router.get('/tiers/policy', (req, res) => {
+router.get('/tiers/policy', async (req, res) => {
     try {
-        const status = vodStorage.getStatus();
+        const status = await vodStorage.getStatus();
         const counts = { promote: { done: 0, already: 0, refused: 0, failed: 0 }, demote: { done: 0, already: 0, refused: 0, failed: 0 } };
-        for (const r of db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_tier_decisions
-                                WHERE app_id = ? AND decided_at >= strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day') GROUP BY action, outcome`, [req.appId])) {
+        for (const r of await db.all(`SELECT action, outcome, COUNT(*) AS n FROM media_tier_decisions
+                                WHERE app_id = ? AND decided_at >= ov_now_iso('-1 day') GROUP BY action, outcome`, [req.appId])) {
             if (counts[r.action]) counts[r.action][r.outcome] = r.n;
         }
         res.json({
@@ -397,7 +397,7 @@ router.get('/tiers/policy', (req, res) => {
             },
             decisions: {
                 last_24h: counts,
-                recent: db.all('SELECT * FROM media_tier_decisions WHERE app_id = ? ORDER BY id DESC LIMIT 20', [req.appId]).map(_decisionPublic),
+                recent: (await db.all('SELECT * FROM media_tier_decisions WHERE app_id = ? ORDER BY id DESC LIMIT 20', [req.appId])).map(_decisionPublic),
             },
             note: 'Read-only. Thresholds change through PUT /tiers/settings (media_settings storage_tier.*); decisions are this app\'s only.',
         });
@@ -407,7 +407,7 @@ router.get('/tiers/policy', (req, res) => {
     }
 });
 
-router.get('/tiers/decisions', (req, res) => {
+router.get('/tiers/decisions', async (req, res) => {
     try {
         const q = req.query;
         const conds = ['app_id = ?'], params = [req.appId];
@@ -422,7 +422,7 @@ router.get('/tiers/decisions', (req, res) => {
         }
         if (q.before_id != null) { conds.push('id < ?'); params.push(parseInt(q.before_id, 10) || 0); }
         const limit = Math.min(Math.max(parseInt(q.limit, 10) || 50, 1), 200);
-        const rows = db.all(`SELECT * FROM media_tier_decisions WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, limit + 1]);
+        const rows = await db.all(`SELECT * FROM media_tier_decisions WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`, [...params, limit + 1]);
         const page = rows.slice(0, limit);
         res.json({ decisions: page.map(_decisionPublic), next_before_id: rows.length > limit ? page[page.length - 1].id : null, limit });
     } catch (err) {
@@ -436,7 +436,7 @@ router.get('/tiers/decisions', (req, res) => {
 // its activation gate (`active`) is off, and logs what it would do as dry_run decisions.
 const objectTiers = () => require('../objects/tiering');
 
-router.get('/tiers/objects/policy', (req, res) => {
+router.get('/tiers/objects/policy', async (req, res) => {
     try {
         const policy = require('../objects/tier-policy');
         const settings = policy.settings();
@@ -445,8 +445,8 @@ router.get('/tiers/objects/policy', (req, res) => {
             thresholds: policy.thresholds(settings),
             rules: policy.describe(settings),
             provider: { r2: { configured: vodStorage.providerConfigured('r2'), available: vodStorage.providerAvailable('r2') } },
-            candidates: objectTiers().candidates({ appId: req.appId, limit: req.query.limit, settings }),
-            decisions: { last_24h: objectTiers().counts24h(req.appId), recent: objectTiers().listDecisions({ appId: req.appId, limit: 20 }).decisions },
+            candidates: await objectTiers().candidates({ appId: req.appId, limit: req.query.limit, settings }),
+            decisions: { last_24h: await objectTiers().counts24h(req.appId), recent: (await objectTiers().listDecisions({ appId: req.appId, limit: 20 })).decisions },
             note: 'Read-only. The policy (media.object_tier) changes through /config/media.object_tier; candidates and decisions are this app\'s only.',
         });
     } catch (err) {
@@ -455,12 +455,12 @@ router.get('/tiers/objects/policy', (req, res) => {
     }
 });
 
-router.get('/tiers/objects/decisions', (req, res) => {
+router.get('/tiers/objects/decisions', async (req, res) => {
     try {
         const q = req.query;
         if (q.action && !['promote', 'demote'].includes(String(q.action))) return res.status(400).json({ error: 'action must be promote or demote' });
         if (q.outcome && !objectTiers().OUTCOMES.includes(String(q.outcome))) return res.status(400).json({ error: `outcome must be one of ${objectTiers().OUTCOMES.join(', ')}` });
-        res.json(objectTiers().listDecisions({ appId: req.appId, objectId: q.object_id ? String(q.object_id) : null, action: q.action ? String(q.action) : null,
+        res.json(await objectTiers().listDecisions({ appId: req.appId, objectId: q.object_id ? String(q.object_id) : null, action: q.action ? String(q.action) : null,
             outcome: q.outcome ? String(q.outcome) : null, beforeId: q.before_id != null ? parseInt(q.before_id, 10) || 0 : null, limit: q.limit }));
     } catch (err) {
         console.error('[Admin] Object tier decisions error:', err.message);
@@ -483,16 +483,16 @@ router.post('/tiers/sweep', async (req, res) => {
 // target → mover (predecessor's hot/cold vocabulary kept as aliases)
 // ctx { trigger, reason } goes into the R2 decision log (media_tier_decisions) for moves into or out of R2.
 const MOVERS = {
-    local: (id, ctx) => vodStorage.moveToHot(id, ctx),
-    hot: (id, ctx) => vodStorage.moveToHot(id, ctx),
-    b2: (id) => vodStorage.moveToCold(id),
-    cold: (id) => vodStorage.moveToCold(id),
-    r2: (id, ctx) => vodStorage.promoteToR2(id, ctx),
+    local: async (id, ctx) => await vodStorage.moveToHot(id, ctx),
+    hot: async (id, ctx) => await vodStorage.moveToHot(id, ctx),
+    b2: async (id) => await vodStorage.moveToCold(id),
+    cold: async (id) => await vodStorage.moveToCold(id),
+    r2: async (id, ctx) => await vodStorage.promoteToR2(id, ctx),
 };
 
 async function _moveScoped(appId, rawId, target) {
     const id = parseInt(rawId, 10);
-    if (!Number.isFinite(id) || !db.getVodById(id, appId)) return { ok: false, error: 'VOD not found' };
+    if (!Number.isFinite(id) || !await db.getVodById(id, appId)) return { ok: false, error: 'VOD not found' };
     return MOVERS[target](id, { trigger: 'admin', reason: `admin move to ${target} (app ${appId})` });
 }
 
@@ -556,59 +556,59 @@ function _staffOnly(req, res) {
  * The object a hold request names, in this app: { obj } | { error, status }. object_id is a med_ id or a
  * legacy ref; vod_id / clip_id name a v1 row, which is projected first when it has no object yet.
  */
-function _holdTarget(appId, b, { project = true } = {}) {
+async function _holdTarget(appId, b, { project = true } = {}) {
     const m = objectsModel();
     if (b.object_id != null && b.object_id !== '') {
-        const obj = m.resolveObject(String(b.object_id), appId);
+        const obj = await m.resolveObject(String(b.object_id), appId);
         return obj ? { obj } : { status: 404, error: 'No such object in this app' };
     }
     for (const [field, table, kind] of [['vod_id', 'vods', 'vod'], ['clip_id', 'clips', 'clip']]) {
         if (b[field] == null || b[field] === '') continue;
         const id = parseInt(b[field], 10);
-        const row = Number.isFinite(id) ? db.get(`SELECT id, object_id FROM ${table} WHERE id = ? AND app_id = ?`, [id, appId]) : null;
+        const row = Number.isFinite(id) ? await db.get(`SELECT id, object_id FROM ${table} WHERE id = ? AND app_id = ?`, [id, appId]) : null;
         if (!row) return { status: 404, error: `${kind === 'vod' ? 'VOD' : 'Clip'} not found` };
         let objectId = row.object_id;
-        if (!objectId && project) { const r = m.safeSync(kind, id); objectId = r && r.id; }
+        if (!objectId && project) { const r = await m.safeSync(kind, id); objectId = r && r.id; }
         if (!objectId) return { status: 409, error: `${kind} ${id} has no media object to hold (a clips-only recording is never published)` };
-        return { obj: m.getObject(objectId) };
+        return { obj: await m.getObject(objectId) };
     }
     return { status: 400, error: 'object_id, vod_id or clip_id required' };
 }
 
 /** A hold with the object it is on and, for a VOD, how many clips cut from it it protects. */
-function _holdOut(h) {
+async function _holdOut(h) {
     const m = objectsModel();
-    const obj = m.getObject(h.object_id);
+    const obj = await m.getObject(h.object_id);
     const out = { ...m.holdPublic(h), object: obj ? { id: obj.id, kind: obj.kind, legacy_ref: obj.legacy_ref || null, lifecycle_status: obj.lifecycle_status } : null };
     if (obj && obj.kind === 'vod') {
-        out.clips_protected = db.get(`SELECT COUNT(*) AS n FROM clips c WHERE c.vod_id IN (SELECT id FROM vods WHERE object_id = @o)
-                                      OR c.object_id IN (SELECT from_object_id FROM media_relationships WHERE to_object_id = @o AND relation = 'clip_of')`, { o: obj.id }).n;
+        out.clips_protected = (await db.get(`SELECT COUNT(*) AS n FROM clips c WHERE c.vod_id IN (SELECT id FROM vods WHERE object_id = @o)
+                                      OR c.object_id IN (SELECT from_object_id FROM media_relationships WHERE to_object_id = @o AND relation = 'clip_of')`, { o: obj.id })).n;
     }
     return out;
 }
 
-router.get('/holds', (req, res) => {
+router.get('/holds', async (req, res) => {
     try {
         const q = req.query;
         const conds = ['o.app_id = ?'], params = [req.appId];
         if (!['1', 'true'].includes(String(q.all || ''))) conds.push('h.released_at IS NULL');
         if (q.object_id != null || q.vod_id != null || q.clip_id != null) {
-            const t = _holdTarget(req.appId, { object_id: q.object_id, vod_id: q.vod_id, clip_id: q.clip_id }, { project: false });
+            const t = await _holdTarget(req.appId, { object_id: q.object_id, vod_id: q.vod_id, clip_id: q.clip_id }, { project: false });
             if (!t.obj) return res.status(t.status).json({ error: t.error });
             conds.push('h.object_id = ?'); params.push(t.obj.id);
         }
         if (q.before_id != null) { conds.push('h.id < ?'); params.push(parseInt(q.before_id, 10) || 0); }
         const limit = Math.min(Math.max(parseInt(q.limit, 10) || 50, 1), 200);
-        const rows = db.all(`SELECT h.* FROM media_holds h JOIN media_objects o ON o.id = h.object_id WHERE ${conds.join(' AND ')} ORDER BY h.id DESC LIMIT ?`, [...params, limit + 1]);
+        const rows = await db.all(`SELECT h.* FROM media_holds h JOIN media_objects o ON o.id = h.object_id WHERE ${conds.join(' AND ')} ORDER BY h.id DESC LIMIT ?`, [...params, limit + 1]);
         const page = rows.slice(0, limit);
-        res.json({ holds: page.map(_holdOut), next_before_id: rows.length > limit ? page[page.length - 1].id : null, limit });
+        res.json({ holds: (await Promise.all(page.map(_holdOut))), next_before_id: rows.length > limit ? page[page.length - 1].id : null, limit });
     } catch (err) {
         console.error('[Admin] Hold list error:', err.message);
         res.status(500).json({ error: 'Failed to list holds' });
     }
 });
 
-router.post('/holds', (req, res) => {
+router.post('/holds', async (req, res) => {
     try {
         if (!_staffOnly(req, res)) return;
         const b = req.body || {};
@@ -617,11 +617,11 @@ router.post('/holds', (req, res) => {
         if (!m.HOLD_KINDS.includes(kind)) return res.status(400).json({ error: `kind must be one of ${m.HOLD_KINDS.join(', ')}` });
         const reason = String(b.reason || '').trim();
         if (!reason) return res.status(400).json({ error: 'reason required (why the object must be kept)' });
-        const t = _holdTarget(req.appId, b);
+        const t = await _holdTarget(req.appId, b);
         if (!t.obj) return res.status(t.status).json({ error: t.error });
         const by = String(b.placed_by || b.created_by || `app:${req.appId}`).slice(0, 200);
-        const hold = m.placeHold({ object_id: t.obj.id, kind, reason, created_by: by, note: b.note });
-        const out = _holdOut(hold);
+        const hold = await m.placeHold({ object_id: t.obj.id, kind, reason, created_by: by, note: b.note });
+        const out = await _holdOut(hold);
         console.log(`[Admin] Retention hold ${hold.id} placed on ${t.obj.id} (${t.obj.legacy_ref || t.obj.kind}) by ${by} (${req.appId}): ${kind}, ${JSON.stringify(reason.slice(0, 200))}`
             + (out.clips_protected ? `; protects ${out.clips_protected} clip(s) cut from it` : ''));
         res.status(201).json(out);
@@ -631,15 +631,15 @@ router.post('/holds', (req, res) => {
     }
 });
 
-function _releaseHold(req, res) {
+async function _releaseHold(req, res) {
     try {
         if (!_staffOnly(req, res)) return;
-        const hold = db.get('SELECT h.* FROM media_holds h JOIN media_objects o ON o.id = h.object_id WHERE h.id = ? AND o.app_id = ?',
+        const hold = await db.get('SELECT h.* FROM media_holds h JOIN media_objects o ON o.id = h.object_id WHERE h.id = ? AND o.app_id = ?',
             [parseInt(req.params.holdId, 10) || 0, req.appId]);
         if (!hold) return res.status(404).json({ error: 'No such hold in this app' });
-        if (hold.released_at) return res.status(409).json({ error: 'The hold was released already', code: 'media.hold.released', hold: _holdOut(hold) });
+        if (hold.released_at) return res.status(409).json({ error: 'The hold was released already', code: 'media.hold.released', hold: await _holdOut(hold) });
         const by = String((req.body && req.body.released_by) || `app:${req.appId}`).slice(0, 200);
-        const out = _holdOut(objectsModel().releaseHold(hold.id, by));
+        const out = await _holdOut(await objectsModel().releaseHold(hold.id, by));
         console.log(`[Admin] Retention hold ${hold.id} on ${hold.object_id} released by ${by} (${req.appId})`);
         res.json(out);
     } catch (err) {
@@ -663,10 +663,10 @@ function _opsStaffOnly(req, res) {
 
 // GET /ops?limit — failed jobs, missing media, backfill status, tiering diagnostics and the namespaces'
 // usage snapshot of this app (server/me/ops.js; the sweep and the provider switches are service-wide).
-router.get('/ops', (req, res) => {
+router.get('/ops', async (req, res) => {
     try {
         if (!_opsStaffOnly(req, res)) return;
-        res.json(require('../me/ops').report({ appId: req.appId, limit: req.query.limit }));
+        res.json(await require('../me/ops').report({ appId: req.appId, limit: req.query.limit }));
     } catch (err) {
         console.error('[Admin] Ops report error:', err.message);
         res.status(500).json({ error: 'Failed to build the operator report' });
@@ -674,10 +674,10 @@ router.get('/ops', (req, res) => {
 });
 
 // POST /ops/recompute — refresh this app's namespaces' usage snapshot from the rows.
-router.post('/ops/recompute', (req, res) => {
+router.post('/ops/recompute', async (req, res) => {
     try {
         if (!_opsStaffOnly(req, res)) return;
-        const out = require('../me/ops').recompute({ appId: req.appId });
+        const out = await require('../me/ops').recompute({ appId: req.appId });
         console.log(`[Admin] Namespace usage recomputed (${req.appId}): ${out.namespaces} namespace(s)`);
         res.json(out);
     } catch (err) {
