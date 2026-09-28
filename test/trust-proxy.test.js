@@ -43,7 +43,7 @@ const externalAddress = () => {
         assert.ok(r.ip.endsWith(ext) && r.client.endsWith(ext), `a direct caller cannot choose its IP (got ${r.ip})`);
         console.log('✅ a non-loopback peer\'s X-Forwarded-For / CF-Connecting-IP are ignored');
     } else {
-        console.log('⚠️  no non-loopback interface: the direct-caller check is skipped');
+        console.log('direct-caller check: skipped (no non-loopback interface)');
     }
     server.close();
     // The view counter keys on req.ip, not on the headers.

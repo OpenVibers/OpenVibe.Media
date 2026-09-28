@@ -93,7 +93,7 @@ const s3 = http.createServer((req, res) => {
 
     let ids = {};
     if (!hasFfmpeg) {
-        console.log('⚠️  ffmpeg not found: the measurement checks are skipped (orphan report still runs)');
+        console.log('measurement checks: skipped (ffmpeg not found; the orphan report still runs)');
     } else {
         const V = process.env.VOD_PATH;
         mk(path.join(V, 'a.mp4'), 6);

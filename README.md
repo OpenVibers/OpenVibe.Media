@@ -107,7 +107,7 @@ server/
                          vod.duration.reconcile (stored vs measured durations, local and B2/R2),
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v1.24.0, openvibe-contracts v0.71.0, openvibe-sdk v0.12.0: pinned release tarballs, installed by npm)
+(openvibe-shared v1.25.0, openvibe-contracts v0.71.0, openvibe-sdk v0.12.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals

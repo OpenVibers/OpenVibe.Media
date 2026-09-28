@@ -33,7 +33,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitFor = async (fn, ms = 30000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await fn()) return true; await sleep(25); } return false; };
 
 (async () => {
-    if (spawnSync('ffmpeg', ['-version']).status !== 0) { console.log('⚠️  ffmpeg not found: clip.cut skipped'); process.exit(0); }
+    if (spawnSync('ffmpeg', ['-version']).status !== 0) { console.log('clip.cut: skipped (ffmpeg not found)'); process.exit(0); }
     await new Promise((r) => stub.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${stub.address().port}`;
     const db = require('../server/db/database');

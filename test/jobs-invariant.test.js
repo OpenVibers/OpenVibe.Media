@@ -137,7 +137,7 @@ const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
     assert.deepStrictEqual([r.status, r.body.code], [400, 'media.job.invalid'], 'parts 2-1000');
 
     if (!hasFfmpeg) {
-        console.log('⚠️  ffmpeg not found: split/remux execution skipped');
+        console.log('split/remux execution: skipped (ffmpeg not found)');
     } else {
         const src = path.join(process.env.VOD_PATH, 'rec-10.mp4');
         const mk6 = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=6:size=160x120:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=6',

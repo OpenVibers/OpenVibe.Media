@@ -41,7 +41,7 @@ const size = (file) => { const r = spawnSync('ffprobe', ['-v', 'error', '-select
     assert.deepStrictEqual(spriteLayout(6, { frames: 100, columns: 10, tile_width: 160 }), { count: 3, interval_seconds: 2, columns: 3, rows: 1, tile_width: 160, tile_height: 90 });
     assert.deepStrictEqual(spriteLayout(43083, { frames: 100, columns: 10, tile_width: 160 }), { count: 100, interval_seconds: 430.83, columns: 10, rows: 10, tile_width: 160, tile_height: 90 });
     assert.strictEqual(spriteLayout(1, { frames: 100, columns: 10, tile_width: 160 }).count, 1);
-    if (!hasFfmpeg) { console.log('⚠️  ffmpeg not found: preview jobs skipped'); process.exit(0); }
+    if (!hasFfmpeg) { console.log('preview jobs: skipped (ffmpeg not found)'); process.exit(0); }
 
     await new Promise((r) => stub.listen(0, '127.0.0.1', r));
     const base = `http://127.0.0.1:${stub.address().port}`;

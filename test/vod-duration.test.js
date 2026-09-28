@@ -158,7 +158,7 @@ function restore() { Object.assign(tools, realTools); }
 
     // ── 5. Real ffmpeg: an orphaned 6 s recording made 2 days ago finalizes to ~6 s (probe) ──
     if (spawnSync('ffmpeg', ['-version']).status !== 0) {
-        console.log('⚠️  ffmpeg not found: the real-file finalize check is skipped');
+        console.log('real-file finalize check: skipped (ffmpeg not found)');
     } else {
         const file = path.join(process.env.VOD_PATH, 'real.mp4');
         const mk = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=6:size=160x120:rate=10',
