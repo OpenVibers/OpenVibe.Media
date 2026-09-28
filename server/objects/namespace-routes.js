@@ -17,6 +17,7 @@ const express = require('express');
 const { http } = require('openvibe-contracts');
 const namespaces = require('./namespaces');
 const { tenantAuth, tenantCors, namespaceGrant } = require('../auth');
+const { limits } = require('../actor-limits');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
@@ -29,7 +30,8 @@ function shape(req, row) {
     return namespaces.publicShape(req.appRow, row, namespaces.reconcile(req.appRow, row.namespace));
 }
 
-router.get('/', tenantAuth({ verb: 'list', namespaced: true }), (req, res) => {
+// Reads, with the default per-actor limits (server/actor-limits.js).
+router.get('/', tenantAuth({ verb: 'list', namespaced: true }), limits('media.namespace.list'), (req, res) => {
     try {
         const rows = namespaces.listForTenant(req.appId).filter(r => namespaceGrant(req, 'list', r.namespace).allowed);
         res.json({ namespaces: rows.map(r => shape(req, r)) });
@@ -39,7 +41,7 @@ router.get('/', tenantAuth({ verb: 'list', namespaced: true }), (req, res) => {
     }
 });
 
-router.get('/:namespace', tenantAuth({ verb: 'read', namespaced: true }), (req, res) => {
+router.get('/:namespace', tenantAuth({ verb: 'read', namespaced: true }), limits('media.namespace.read'), (req, res) => {
     try {
         const named = namespaces.resolveName(req.appRow, req.params.namespace);
         if (named.error) return problem(res, 400, 'media.namespace.invalid', named.error);

@@ -1,0 +1,57 @@
+'use strict';
+/**
+ * Per-actor rate limits at Media's capability boundaries (roadmap WS-R task 4; openvibe-sdk/limits).
+ *
+ * nginx limits by address. These limit by WHO calls: the Network token's principal (svc:community,
+ * app:app_… of a developer project), the person signed in to the object explorer (user:usr_…), or an
+ * app acting for one of its users (live:user:<id>, X-OV-User-Id). An app's own API key is not counted:
+ * it is a first-party server speaking for every visitor of its site, so one budget for it would refuse
+ * the whole site; that server limits its own visitors. A browser holding only an upload token (a
+ * presigned PUT) is counted by address. Past a limit the route answers 429 problem+json `rate_limited`
+ * with Retry-After before doing any work. Reads get MEDIA_LIMITS_MINUTE / MEDIA_LIMITS_HOUR (120 and
+ * 3000); uploads, deletes and jobs set their own, tighter numbers where they are mounted.
+ *
+ * Counters live in this process: a restart forgets them. Never on /healthz, /api/ready, /release.json,
+ * /metrics or the signed /internal/events deliveries (Events pushes at its own pace; a 429 there only
+ * makes it retry and fall behind).
+ */
+const { createActorLimiter, defaultActor } = require('openvibe-sdk/limits');
+const config = require('./config');
+
+let clock = () => Date.now();
+let refused = null;      // media_rate_limited_total, once index.js has a metrics registry
+
+/** Who is counted: see above. null = not counted (an app's own API key). */
+function actor(req) {
+    if (req.principal && req.principal.sub) return req.principal.sub;
+    if (req.person && req.person.subject) return `user:${req.person.subject}`;
+    if (req.authType === 'user' && req.userId != null) return `${req.appId}:user:${req.userId}`;
+    if (req.authType === 'app') return null;
+    return defaultActor(req);
+}
+
+function onLimited(e) {
+    // The actor is a principal, a subject id or an address, never a credential.
+    console.warn(`[Limits] ${e.name}: ${e.actor} refused, over ${e.limit} per ${e.window}`);
+    if (refused) refused.inc({ limit: e.name, window: e.window });
+}
+
+const limits = createActorLimiter({
+    limits: { minute: config.limits.minute, hour: config.limits.hour },
+    actor,
+    now: () => clock(),
+    onLimited,
+});
+
+/** Count refusals in /metrics (server/index.js, after observability.instrument). */
+function bindMetrics(registry) {
+    if (refused || !registry) return;
+    refused = registry.counter({ name: 'media_rate_limited_total', help: 'Requests refused 429 by a per-actor limit, by limit name and window', labelNames: ['limit', 'window'] });
+}
+
+module.exports = {
+    limits,
+    actor,
+    bindMetrics,
+    _setClockForTests(fn) { clock = fn || (() => Date.now()); },
+};

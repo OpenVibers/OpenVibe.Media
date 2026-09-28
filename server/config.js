@@ -68,6 +68,13 @@ const config = {
         maxChildNamespaces: Math.max(0, intEnv('MEDIA_NAMESPACE_MAX_CHILDREN', 100)),   // children per tenant
     },
 
+    // Per-actor limits at the capability boundaries (server/actor-limits.js, roadmap WS-R task 4): what a
+    // read route allows each caller. Uploads, deletes and jobs set tighter numbers where they are mounted.
+    limits: {
+        minute: Math.max(1, intEnv('MEDIA_LIMITS_MINUTE', 120)),
+        hour: Math.max(1, intEnv('MEDIA_LIMITS_HOUR', 3000)),
+    },
+
     // Job system (server/jobs/; docs/object-model.md#jobs).
     jobs: {
         enabled: !['0', 'false', 'off'].includes(String(process.env.MEDIA_JOBS_ENABLED || '').toLowerCase()),

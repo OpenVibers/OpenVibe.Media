@@ -32,6 +32,7 @@ const db = require('../db/database');
 const config = require('../config');
 const namespaces = require('../objects/namespaces');
 const { tenantAuth, tenantCors } = require('../auth');
+const { limits } = require('../actor-limits');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
@@ -85,7 +86,9 @@ function sha256File(filePath) {
 }
 
 // ── Upload ───────────────────────────────────────────────────
-router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), upload.single('file'), async (req, res) => {
+// Per-actor limits (server/actor-limits.js) sit after the credential and before multer reads the body.
+// An upload stores up to MAX_FILE_SIZE_MB and counts against the quota: one every two seconds at most.
+router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), limits('media.file.upload', { minute: 30, hour: 600 }), upload.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded (multipart field: file)' });
 
@@ -149,7 +152,7 @@ router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), upload.single('
 });
 
 // ── List ─────────────────────────────────────────────────────
-router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), (req, res) => {
+router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), limits('media.file.list'), (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -166,7 +169,7 @@ router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), (req, res) => {
 });
 
 // ── Meta ─────────────────────────────────────────────────────
-router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), (req, res) => {
+router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), limits('media.file.read'), (req, res) => {
     try {
         const row = db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });
@@ -177,7 +180,8 @@ router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), (req, res) =>
 });
 
 // ── Delete ───────────────────────────────────────────────────
-router.delete('/:key', tenantAuth({ allowUser: true, verb: 'delete' }), (req, res) => {
+// A delete removes bytes and frees quota: a write, tighter than reads.
+router.delete('/:key', tenantAuth({ allowUser: true, verb: 'delete' }), limits('media.file.delete', { minute: 60, hour: 1200 }), (req, res) => {
     try {
         const row = db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });

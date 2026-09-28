@@ -25,10 +25,14 @@ const model = require('../objects/model');
 const queue = require('./queue');
 const db = require('../db/database');
 const { tenantAuth, tenantCors, namespaceGrant } = require('../auth');
+const { limits } = require('../actor-limits');
 
 const transform = tenantAuth({ verb: 'transform', namespaced: true });
 const read = tenantAuth({ verb: 'read' });
 const list = tenantAuth({ verb: 'list' });
+// Per-actor limits (server/actor-limits.js): reads take the defaults. A job runs sharp or ffmpeg on a
+// worker with one or two slots, so a caller queues or approves at most one every six seconds.
+const QUEUE = { minute: 10, hour: 200 };
 
 function problem(res, status, code, detail, extra) {
     return http.sendProblem(res, status, code, { detail, extra });
@@ -71,7 +75,7 @@ function sendJobError(res, err) {
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
-router.get('/', list, (req, res) => {
+router.get('/', list, limits('media.job.list'), (req, res) => {
     try {
         const q = req.query;
         if (q.cursor && !/^mjob_[0-9A-Za-z_]{1,40}$/.test(String(q.cursor))) return problem(res, 400, 'media.job.invalid', 'Bad cursor');
@@ -84,7 +88,7 @@ router.get('/', list, (req, res) => {
     } catch (err) { sendJobError(res, err); }
 });
 
-router.post('/', transform, (req, res) => {
+router.post('/', transform, limits('media.job.create', QUEUE), (req, res) => {
     try {
         const b = req.body || {};
         const type = String(b.type || '');
@@ -117,12 +121,12 @@ router.post('/', transform, (req, res) => {
     } catch (err) { sendJobError(res, err); }
 });
 
-router.get('/:jobId', read, (req, res) => {
+router.get('/:jobId', read, limits('media.job.read'), (req, res) => {
     const job = load(req, res);
     if (job) res.json({ job: queue.jobPublic(job) });
 });
 
-router.post('/:jobId/approve', transform, (req, res) => {
+router.post('/:jobId/approve', transform, limits('media.job.approve', QUEUE), (req, res) => {
     try {
         const job = load(req, res);
         if (!job || !mayTransform(req, res, job.object_id ? model.getObject(job.object_id) : null)) return;
@@ -143,7 +147,9 @@ function cancelHandler(req, res) {
         res.status(out.pending ? 202 : 200).json({ job: queue.jobPublic(out.job) });
     } catch (err) { sendJobError(res, err); }
 }
-router.post('/:jobId/cancel', transform, cancelHandler);
-router.delete('/:jobId', transform, cancelHandler);
+// A cancel only stops work, so it is looser than queueing; both spellings share one budget.
+const cancelLimit = limits('media.job.cancel', { minute: 60, hour: 1200 });
+router.post('/:jobId/cancel', transform, cancelLimit, cancelHandler);
+router.delete('/:jobId', transform, cancelLimit, cancelHandler);
 
 module.exports = router;

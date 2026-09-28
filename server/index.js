@@ -56,6 +56,8 @@ app.set('trust proxy', require('./client-ip').TRUST_PROXY);
 const release = require('openvibe-shared/release').createRelease({ service: 'media', root: require('path').join(__dirname, '..') });
 const observability = require('./observability');
 const instrumented = observability.instrument(app, { release: release.release });
+// Per-actor limit refusals (server/actor-limits.js) are counted there: media_rate_limited_total.
+require('./actor-limits').bindMetrics(instrumented.registry);
 // A restore-drill instance answers reads only: 403 for every other method, on every path (before the
 // raw-body upload routes below).
 if (drill.enabled) app.use(drill.readOnly);

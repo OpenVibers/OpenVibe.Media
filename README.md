@@ -369,6 +369,27 @@ that reaches port 4100 directly cannot choose its IP by sending `X-Forwarded-For
 `CF-Connecting-IP` itself. View counting, paste limits and the live-frame rate limit read `req.ip`,
 never the headers (`test/trust-proxy.test.js`).
 
+## Per-actor limits
+
+nginx limits by address; the capability routes also limit by who calls (`server/actor-limits.js`,
+openvibe-sdk/limits, roadmap WS-R task 4): the Network token's principal (`svc:community`, `app:app_…`),
+the person signed in to `/api/v2/me`, or an app acting for one of its users (`X-OV-User-Id`). An app's
+own API key is not counted (a first-party server speaks for all its visitors); a browser with only an
+upload token is counted by address. Past a limit: 429 problem+json `rate_limited` with `Retry-After`,
+before the route does any work, and one `[Limits]` log line and `media_rate_limited_total{limit,window}`.
+
+| Routes | Per caller |
+|---|---|
+| Reads: objects, files, jobs, namespaces, `/api/v2/me` | `MEDIA_LIMITS_MINUTE` / `MEDIA_LIMITS_HOUR` (120 / 3000) |
+| Object init, `/upload-url`, `/multipart`, multipart complete; file upload | 30 a minute, 600 an hour |
+| Object content PUT, complete; object and file delete, restore, multipart abort; job cancel | 60 / 1200 |
+| Multipart parts | 600 / 20000 (the session already bounds them) |
+| Job create, approve | 10 / 200 |
+| `POST /api/v2/me/ops/recompute` | 6 / 60 |
+
+Never limited: `/healthz`, `/api/ready`, `/release.json`, `/metrics`, the signed `/internal/events` deliveries.
+Counters are per process (a restart forgets them). `test/actor-limits.test.js`.
+
 ## Health, readiness and metrics
 
 | path | behavior |

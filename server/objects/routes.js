@@ -54,6 +54,7 @@ const multipart = require('./multipart');
 const namespaces = require('./namespaces');
 const { tenantAuth, tenantCors, tenantPath, namespaceGrant } = require('../auth');
 const { announce } = require('../webhooks');
+const { limits } = require('../actor-limits');
 
 const MB = 1024 * 1024;
 // Each route checks its verb for the namespace it works in (the object's, or the one init names).
@@ -62,6 +63,10 @@ const read = tenantAuth({ verb: 'read', namespaced: true });
 const list = tenantAuth({ verb: 'list', namespaced: true });
 const remove = tenantAuth({ verb: 'delete', namespaced: true });
 const appOnly = tenantAuth();
+// Per-actor limits (server/actor-limits.js), after the credential and before the work. Reads take the
+// defaults (MEDIA_LIMITS_MINUTE / _HOUR). An init reserves quota and makes a row, and each upload step
+// writes or hashes bytes, so the upload routes allow a steady app a new object every two seconds at most.
+const UPLOAD = { minute: 30, hour: 600 };
 
 function problem(res, status, code, detail, extra) {
     return http.sendProblem(res, status, code, { detail, extra });
@@ -288,7 +293,7 @@ async function putContent(req, res) {
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
-router.post('/', upload, (req, res) => {
+router.post('/', upload, limits('media.object.upload', UPLOAD), (req, res) => {
     try {
         const b = req.body || {};
         const kind = String(b.kind || 'file');
@@ -422,7 +427,8 @@ function loadUploading(req, res) {
     return obj;
 }
 
-router.post('/:id/complete', contentAuth, tenantCors, (req, res) => {
+// Complete re-reads the stored bytes (type sniff, hash); twice the init rate leaves room for retries.
+router.post('/:id/complete', contentAuth, tenantCors, limits('media.object.complete', { minute: 60, hour: 1200 }), (req, res) => {
     try {
         const obj = load(req, res, 'write');
         if (!obj) return;
@@ -438,7 +444,7 @@ router.post('/:id/complete', contentAuth, tenantCors, (req, res) => {
 
 // ── Presigned single-PUT URL ─────────────────────────────────
 
-router.post('/:id/upload-url', upload, (req, res) => {
+router.post('/:id/upload-url', upload, limits('media.object.upload_url', UPLOAD), (req, res) => {
     const obj = loadUploading(req, res);
     if (!obj) return;
     const ttl = req.body && req.body.ttl != null ? Number(req.body.ttl) : (req.query.ttl != null ? Number(req.query.ttl) : undefined);
@@ -465,7 +471,7 @@ function loadSession(req, res, obj, { open = true } = {}) {
     return now;
 }
 
-router.post('/:id/multipart', upload, (req, res) => {
+router.post('/:id/multipart', upload, limits('media.object.multipart', UPLOAD), (req, res) => {
     try {
         const obj = loadUploading(req, res);
         if (!obj) return;
@@ -496,7 +502,7 @@ router.post('/:id/multipart', upload, (req, res) => {
     }
 });
 
-router.get('/:id/multipart/:uploadId', mpRead, (req, res) => {
+router.get('/:id/multipart/:uploadId', mpRead, limits('media.object.multipart_read'), (req, res) => {
     const obj = load(req, res, 'read');
     if (!obj) return;
     const session = loadSession(req, res, obj, { open: false });
@@ -505,7 +511,8 @@ router.get('/:id/multipart/:uploadId', mpRead, (req, res) => {
     res.json(multipart.sessionPublic(multipart.getSession(session.id)));
 });
 
-router.post('/:id/multipart/:uploadId/complete', mpWrite, tenantCors, async (req, res) => {
+// Assembling concatenates and hashes every part of an object up to MEDIA_MULTIPART_MAX_MB.
+router.post('/:id/multipart/:uploadId/complete', mpWrite, tenantCors, limits('media.object.multipart_complete', UPLOAD), async (req, res) => {
     let session = null;
     try {
         // A repeat of a complete that already succeeded (its answer was lost on the way): the object as it is.
@@ -542,7 +549,8 @@ router.post('/:id/multipart/:uploadId/complete', mpWrite, tenantCors, async (req
     }
 });
 
-router.delete('/:id/multipart/:uploadId', mpWrite, (req, res) => {
+// An abort deletes the parts and frees the reservation: a write, cheaper than an upload.
+router.delete('/:id/multipart/:uploadId', mpWrite, limits('media.object.multipart_abort', { minute: 60, hour: 1200 }), (req, res) => {
     const obj = load(req, res, 'write');
     if (!obj) return;
     if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
@@ -553,7 +561,7 @@ router.delete('/:id/multipart/:uploadId', mpWrite, (req, res) => {
     res.json(multipart.sessionPublic(multipart.getSession(session.id), { parts: false }));
 });
 
-router.get('/', list, (req, res) => {
+router.get('/', list, limits('media.object.list'), (req, res) => {
     try {
         const q = req.query;
         const limit = Math.min(Math.max(parseInt(q.limit || '50', 10) || 50, 1), 200);
@@ -601,12 +609,13 @@ router.get('/', list, (req, res) => {
     }
 });
 
-router.get('/:id', read, (req, res) => {
+router.get('/:id', read, limits('media.object.read'), (req, res) => {
     const obj = load(req, res, 'read');
     if (obj) res.json(model.objectPublic(obj));
 });
 
-router.delete('/:id', remove, (req, res) => {
+// Deletes and restores change lifecycle, quota usage and events: writes, tighter than reads.
+router.delete('/:id', remove, limits('media.object.delete', { minute: 60, hour: 1200 }), (req, res) => {
     try {
         const obj = load(req, res, 'delete');
         if (!obj) return;
@@ -624,7 +633,7 @@ router.delete('/:id', remove, (req, res) => {
     }
 });
 
-router.post('/:id/restore', remove, (req, res) => {
+router.post('/:id/restore', remove, limits('media.object.restore', { minute: 60, hour: 1200 }), (req, res) => {
     const obj = load(req, res, 'delete');
     if (!obj) return;
     if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
@@ -638,7 +647,7 @@ router.post('/:id/restore', remove, (req, res) => {
     res.json(model.objectPublic(back));
 });
 
-router.get('/:id/download', read, (req, res) => {
+router.get('/:id/download', read, limits('media.object.download'), (req, res) => {
     const obj = load(req, res, 'read');
     if (!obj) return;
     if (obj.lifecycle_status === 'deleted') return problem(res, 410, 'media.object.deleted', 'Object was deleted');
@@ -657,7 +666,7 @@ router.get('/:id/download', read, (req, res) => {
 
 // ── Retention holds ──────────────────────────────────────────
 
-router.get('/:id/holds', read, (req, res) => {
+router.get('/:id/holds', read, limits('media.object.holds'), (req, res) => {
     const obj = load(req, res, 'read');
     if (!obj) return;
     res.json({
@@ -788,7 +797,10 @@ async function putPart(req, res) {
 }
 
 module.exports = router;
-module.exports.contentHandlers = [contentAuth, tenantCors, putContent];
-module.exports.partHandlers = [mpWrite, tenantCors, putPart];
+// The bytes of one object: sent once, retried after a failure.
+module.exports.contentHandlers = [contentAuth, tenantCors, limits('media.object.content', { minute: 60, hour: 1200 }), putContent];
+// A multipart upload sends its parts in a row (at least MEDIA_MULTIPART_MIN_PART_MB each, 5 MB: 600 a
+// minute is 50 MB/s) and its session already bounds them; this stops only a runaway loop.
+module.exports.partHandlers = [mpWrite, tenantCors, limits('media.object.part', { minute: 600, hour: 20000 }), putPart];
 module.exports.publicRouter = publicRouter;
 module.exports.INLINE = INLINE;

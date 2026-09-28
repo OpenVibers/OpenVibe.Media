@@ -33,6 +33,7 @@ const drill = require('../drill');
 const { extractToken } = require('../user-auth');
 const explorer = require('./explorer');
 const pages = require('./pages');
+const { limits } = require('../actor-limits');
 
 const PRINCIPAL_SUB = /^(svc|app|mod):/;
 const SITE_ORIGIN = (() => { try { return new URL(config.publicUrl).origin; } catch { return null; } })();
@@ -122,7 +123,9 @@ function createMeRoutes({ auth }) {
     const api = express.Router();
     api.use(privateHeaders, identify(auth));
 
-    api.get('/objects', (req, res) => {
+    // Per-actor limits (server/actor-limits.js), counted by the signed-in person once identify() ran:
+    // reads take the defaults.
+    api.get('/objects', limits('media.me.objects'), (req, res) => {
         if (!needPerson(req, res)) return;
         const f = explorer.parseFilters(req.query);
         if (f.error) return problem(res, 400, 'media.me.invalid', f.error);
@@ -134,14 +137,14 @@ function createMeRoutes({ auth }) {
         }
     });
 
-    api.get('/objects/:id', (req, res) => {
+    api.get('/objects/:id', limits('media.me.object'), (req, res) => {
         if (!needPerson(req, res)) return;
         const obj = explorer.detail(req.person.subject, req.params.id);
         if (!obj) return problem(res, 404, 'media.object.not_found', 'No such object of yours');
         res.json(obj);
     });
 
-    api.get('/usage', (req, res) => {
+    api.get('/usage', limits('media.me.usage'), (req, res) => {
         if (!needPerson(req, res)) return;
         try {
             res.json(explorer.usage(req.person.subject));
@@ -151,7 +154,7 @@ function createMeRoutes({ auth }) {
         }
     });
 
-    api.get('/ops', (req, res) => {
+    api.get('/ops', limits('media.me.ops'), (req, res) => {
         if (!needPerson(req, res)) return;
         if (!can(req.person, 'staff.site.view')) return problem(res, 403, 'capability.denied', 'staff.site.view not granted');
         const s = opsScope(req);
@@ -164,7 +167,8 @@ function createMeRoutes({ auth }) {
         }
     });
 
-    api.post('/ops/recompute', (req, res) => {
+    // A recompute counts every namespace's rows again: a staff button, pressed a few times at most.
+    api.post('/ops/recompute', limits('media.me.ops_recompute', { minute: 6, hour: 60 }), (req, res) => {
         if (!needPerson(req, res)) return;
         if (!can(req.person, 'staff.site.configure')) return problem(res, 403, 'capability.denied', 'staff.site.configure not granted');
         if (!sameOrigin(req)) return problem(res, 403, 'media.request.cross_origin', 'Only this site\'s own pages may ask for this');
