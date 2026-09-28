@@ -105,8 +105,8 @@ function domainMetrics(registry, { db, recorder, events }) {
     });
     registry.gauge({
         name: 'media_events_outbox', help: 'Events outbox rows waiting to reach OpenVibe.Events, and rows Events rejected', labelNames: ['status'],
-        collect: () => {
-            const s = events.status();
+        collect: async () => {
+            const s = await events.status();
             if (!s.enabled) return null;   // no outbox running: no series, never a made-up zero
             return [{ labels: { status: 'pending' }, value: s.pending }, { labels: { status: 'rejected' }, value: s.rejected }];
         },
@@ -139,8 +139,8 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
     }
     checks.push({
         name: 'events_outbox', required: false, description: 'durable events to OpenVibe.Events (webhooks are separate)',
-        check: () => {
-            const s = events.status();
+        check: async () => {
+            const s = await events.status();
             if (!s.enabled) return skip('relay off (EVENTS_URL or the service credentials unset)', { enabled: false });   // verified nothing: never ok (WS-Q task 7)
             if (s.pending > OUTBOX_BACKLOG_LIMIT) return { ok: false, error: `${s.pending} events waiting (limit ${OUTBOX_BACKLOG_LIMIT})`, detail: { pending: s.pending } };
             return { ok: true, detail: { pending: s.pending, rejected: s.rejected } };
