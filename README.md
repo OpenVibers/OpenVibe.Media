@@ -1,9 +1,13 @@
 # OpenVibe.Media
 
+## Purpose
+
 Standalone multi-tenant media service (port **4100**) extracted from the
 OpenVibe.Live predecessor. Owns VOD ingest/recording, storage tiering
-(local → Backblaze B2 → Cloudflare R2), clips, pastes, generic files, and
-thumbnails, for all OpenVibe apps (`live`, `games`, `tools`, `network`).
+(local → Backblaze B2 → Cloudflare R2), clips, generic files, the canonical
+object model and thumbnails, for all OpenVibe apps (`live`, `games`, `tools`,
+`network`, `community`) and developer projects. Pastes moved to OpenVibe.Community
+on 2026-09-22; Media's paste routes stay as the rollback path ([Pastes](#pastes)).
 
 Implements **Media API v1** from `../CONTRACTS.md`.
 
@@ -14,6 +18,51 @@ npm start                # node server/index.js
 ```
 
 Requires Node ≥ 20, `ffmpeg`/`ffprobe` on PATH. SQLite (better-sqlite3, WAL).
+
+## Owns
+
+- VODs (recording from RTMP or RTP, chunk ingest, finalize), clips (cutting), thumbnails, generic files
+  and avatars, in one SQLite database (`media.db`) and the local media directories
+- the canonical object model (`/api/v2`: objects, locations, variants, holds, derivatives, lifecycle,
+  namespaces) and its jobs (`media_jobs`)
+- storage tiering (local, Backblaze B2, Cloudflare R2), copy verification and the disk guardian
+- tenants (`apps`), developer-project tenants, public serving (`/v`, `/c`, `/t`, `/f`, `/o`) and the
+  object explorer (`/me`)
+- the `media.*` events and Media's Search documents
+
+## Does not own
+
+- pastes since 2026-09-22 (OpenVibe.Community; Media keeps the frozen rows and serves old screenshots)
+- channels, streams and who a VOD belongs to (OpenVibe.Live answers lineage), identity (OpenVibe.Network)
+- AI analysis of recordings (OpenVibe.AI reads them through signed URLs)
+
+## Depends on
+
+- OpenVibe.Network (JWKS, visitor SSO as OAuth client `media`, `identity.subject.resolve`, account
+  export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
+  the account and revocation subscriptions)
+- Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
+- `openvibe-contracts` v0.71.0, `openvibe-sdk` v0.12.0 (tokens, events outbox, per-actor limits),
+  `openvibe-shared` v1.22.0, pinned by release tarball
+
+## Capabilities
+
+Implemented here (the service manifest's `capabilities`, audience `openvibe.media`, checked per
+namespace against the token's `ns`): `media.object.upload`, `media.object.read`, `media.object.list`,
+`media.object.delete`, `media.upload.create`, `media.derivative.create`, `media.derivative.read`,
+`media.lifecycle.read` and `media.lifecycle.transition`. First-party apps also use their tenant API
+key ([Tenancy & auth](#tenancy--auth)).
+
+Called elsewhere, as the service principal `media` (the OAuth client `media`):
+
+| Service | Grant | Why |
+|---|---|---|
+| OpenVibe.Network | `identity.subject.resolve`; `network.account.export.contribute`, `network.account.deletion.confirm` | owner subjects for objects; account export and deletion (ADR-033) |
+| OpenVibe.Live | `live.lineage.resolve` | which channel and person a recording belongs to |
+| OpenVibe.Events | `events.event.publish`, `events.subscription.manage` | the outbox relay; its subscriptions |
+
+Outbound webhooks to tenants (`webhook_url`, HMAC with `webhook_secret`) stay until every consumer
+reads events.
 
 ## Layout
 
@@ -58,7 +107,7 @@ server/
                          vod.duration.reconcile (stored vs measured durations, local and B2/R2),
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v1.5.1, openvibe-contracts v0.33.0, openvibe-sdk v0.5.0: pinned release tarballs, installed by npm)
+(openvibe-shared v1.22.0, openvibe-contracts v0.71.0, openvibe-sdk v0.12.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -406,7 +455,7 @@ Counters are per process (a restart forgets them). `test/actor-limits.test.js`.
 |---|---|
 | `GET /v/:id` | VOD playback — local stream with Range support, live-DVR `.seekable` sidecar while recording, or **302** to a presigned B2/R2 URL. `X-Robots-Tag: noindex`. Also accepts a legacy **file basename** (old `/api/vods/file/<name>` URLs; clip basenames resolve too) |
 | `GET /c/:id` | clip playback, same logic, `noindex` |
-| `GET /p/:slug` | server-rendered paste HTML page (**indexable** — Media is the canonical home for pastes) |
+| `GET /p/:slug` | server-rendered paste HTML page; with `PASTES_MOVED_TO` set (production since 2026-09-22) a 301 to OpenVibe.Community, the canonical home for pastes |
 | `GET /p/:slug/raw` | `text/plain` |
 | `GET /p/:slug/screenshot` | paste screenshot image |
 | `GET /t/:id` | thumbnail (id = filename), `noindex` |
@@ -565,3 +614,53 @@ idempotent (`INSERT OR IGNORE`). After the copy, run
 - **Status** — `GET /api/v1/:app/admin/storage` includes `sweep` (last result, next run, stalled flag, needsDrain/critical).
 
 Run `npm test` for the policy regression tests.
+
+## Acceptance
+
+`npm test` runs every `test/*.test.js` in turn (temp databases, local stubs, no network). What they
+prove includes: tenancy and developer-project tenants (`app-tenants`, `app-tenant-abuse`); the object
+model, multipart, reconcile, verification and tiering (`objects-*`, `object-tiering`, `tier-*`); jobs
+with leases and fencing (`jobs*`); VOD finalize, durations and storage policy (`vod-*`); private items
+stay private and nobody acts on another's ids (`security-private`, `security-idor`,
+`private-not-found`); SSRF, secrets and open redirects (`security-ssrf`, `security-secrets`,
+`open-redirect`); client addresses (`trust-proxy`); revocation and account data (`revocations`,
+`account-data`); events in the change's transaction (`outbox-transaction`, `object-events`); the
+restore-drill mode (`drill-mode`); per-actor limits (`actor-limits`); and the previous release against
+this one (`n-1`). `npm run smoke` boots a temp instance end to end.
+
+## Security
+
+Reporting a vulnerability: [SECURITY.md](SECURITY.md). The rules the code keeps:
+
+- **Auth.** App API keys are stored as sha256 hashes and compared in constant time, valid only for
+  their own tenant. Network user JWTs and principal tokens are verified offline (RS256, audience
+  `openvibe.media`); principal tokens are checked per verb and namespace; sandbox tokens reach only
+  their project's sandbox tenant.
+- **Private data.** Anyone who may not see a private item gets the answer a missing id gets
+  (`test/private-not-found.test.js`); sandbox items need a valid signature; uploads a client labels as HTML, SVG or XML are served as
+  attachments with `nosniff`; view counts store no identifiers.
+- **Network exposure.** `trust proxy` is loopback only, so a direct caller cannot choose its address;
+  `/metrics` answers direct loopback callers only; `/internal/events` deliveries are signed
+  (`MEDIA_INBOUND_EVENTS_SECRET`).
+- **Egress.** Recording pulls only from allow-listed RTMP servers (`MEDIA_RTMP_PULL_ALLOW`,
+  `test/rtmp-allowlist.test.js`); avatar
+  ingestion fetches through the SSRF guard; other calls go to the configured Network, Live, Events, B2
+  and R2 endpoints.
+- **Secrets.** `OV_OAUTH_CLIENT_SECRET`, `MEDIA_SIGNING_SECRET`, `MEDIA_SECRET`, `MEDIA_APPS_SEED` /
+  `MEDIA_APP_KEYS`, `MEDIA_B2_*`, `MEDIA_R2_*`, `MEDIA_INBOUND_EVENTS_SECRET`, `VIEW_HASH_SECRET` and the
+  fallback `INTERNAL_API_KEY` live in `/etc/openvibe/media.env` (0600), by name only.
+
+## Deploy
+
+Production deploys with `sudo ovhost deploy media` on the host (strategy `git-checkout`: fetch,
+fast-forward `/opt/openvibe.media`, install on a lockfile change, restart, wait for `/api/ready`, 60 s).
+ovhost refuses the restart while a VOD is recording (`vods.is_recording = 1`); `--wait-idle` holds it
+until none is. The unit is `openvibe-media.service` ([deploy/systemd/](deploy/systemd/openvibe-media.service),
+runs as `ubuntu`, data under `/opt/openvibe.media/data`) on `127.0.0.1:4100`, the env file
+`/etc/openvibe/media.env`; nginx serves `openvibe.media` from
+[deploy/nginx/openvibe.media.conf](deploy/nginx/openvibe.media.conf). After a deploy, record the N-1
+fixtures (`npm run n-1:record`).
+
+Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the
+restart; afterwards `sudo ovhost rollback media --to <sha>`. One blocker: `media_jobs` was rebuilt once
+into the `app_id` shape, so a release from before that change does not know the table.

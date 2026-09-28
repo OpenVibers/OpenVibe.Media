@@ -1,0 +1,39 @@
+{
+  "repository": "OpenVibers/OpenVibe.Media",
+  "stage": "beta",
+  "code": true,
+  "plan": "OpenVibe End-to-End Realignment & Implementation Plan, revision 3 (20 Sep 2026)",
+  "runtime": "node 22, express, better-sqlite3, ffmpeg",
+  "port": 4100,
+  "domain": "openvibe.media",
+  "contracts": "openvibe-contracts v0.71.0",
+  "capabilities": [
+    "media.object.upload",
+    "media.object.read",
+    "media.object.list",
+    "media.object.delete",
+    "media.upload.create",
+    "media.derivative.create",
+    "media.derivative.read",
+    "media.lifecycle.read",
+    "media.lifecycle.transition"
+  ],
+  "capabilitiesRegistered": true,
+  "pastes": "OpenVibe.Community is the paste authority since 2026-09-22 (PASTES_FROZEN_APPS=live, PASTES_MOVED_TO); the paste routes stay as the rollback path",
+  "deployed": true,
+  "deployment": "Public at https://openvibe.media: deployed with `sudo ovhost deploy media` (restart refused while a VOD records; --wait-idle), /opt/openvibe.media, unit openvibe-media on 127.0.0.1:4100 behind the openvibe.media nginx vhost, principal media.",
+  "features": [
+    "VOD recording (RTMP pull, RTP ingest), chunk ingest and finalize",
+    "clip cutting",
+    "storage tiering local, Backblaze B2, Cloudflare R2 with copy verification and a disk guardian",
+    "canonical object model (/api/v2) with namespaces, holds, derivatives and lifecycle",
+    "media jobs with leases, retries and proposals",
+    "multi-tenant apps and developer-project tenants (sandbox separated)",
+    "public serving with presigned URLs; signed access for private and sandbox items",
+    "the object explorer (/me) and operator views",
+    "media.* events through the SDK outbox, webhooks during the transition",
+    "restore-drill mode and N-1 compatibility tests",
+    "per-actor limits (openvibe-sdk/limits)"
+  ],
+  "updated": "2026-09-28"
+}
