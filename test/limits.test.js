@@ -1,6 +1,7 @@
 'use strict';
 // GET /limits.json (WS-N task 7): the developer limits Media enforces, read from the running config
-// (an env override is what it answers), public with CORS *; Codes' /docs/limits renders it.
+// (an env override is what it answers), public with CORS *; Codes' /docs/limits renders it. rate_limits lists the
+// per-actor rate limits the routes declare (WS-R task 4).
 process.env.MEDIA_APP_SANDBOX_QUOTA_MB = '50';
 const assert = require('assert');
 const http = require('http');
@@ -23,7 +24,15 @@ const { limitsOf, mountLimits } = require('../server/limits');
     const res = await fetch(`http://127.0.0.1:${server.address().port}/limits.json`);
     assert.strictEqual(res.status, 200);
     assert.strictEqual(res.headers.get('access-control-allow-origin'), '*');
-    assert.strictEqual((await res.json()).service, 'media');
+    const body = await res.json();
+    assert.strictEqual(body.service, 'media');
+    // The per-actor rate limits, as the routes declare them (loading a router declares its limits).
+    require('../server/objects/routes');
+    const again = await (await fetch(`http://127.0.0.1:${server.address().port}/limits.json`)).json();
+    const rate = Object.fromEntries(again.rate_limits.map((l) => [l.id, l]));
+    assert.deepStrictEqual([rate['media.object.upload'].minute, rate['media.object.upload'].hour], [30, 600]);
+    assert.deepStrictEqual([rate['media.object.part'].minute, rate['media.object.part'].hour], [600, 20000]);
+    assert.strictEqual(rate['media.object.upload'].exceeded, '429 rate_limited');
     server.close();
     console.log('limits: all checks passed');
 })().catch((e) => { console.error(e); process.exit(1); });

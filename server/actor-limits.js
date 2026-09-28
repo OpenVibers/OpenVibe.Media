@@ -36,12 +36,21 @@ function onLimited(e) {
     if (refused) refused.inc({ limit: e.name, window: e.window });
 }
 
-const limits = createActorLimiter({
+const limiter = createActorLimiter({
     limits: { minute: config.limits.minute, hour: config.limits.hour },
     actor,
     now: () => clock(),
     onLimited,
 });
+
+/** Every named limit with its numbers, as the routes declare them (published in /limits.json). */
+const registered = new Map();
+function limits(name, own = {}) {
+    registered.set(name, { minute: own.minute != null ? own.minute : config.limits.minute, hour: own.hour != null ? own.hour : config.limits.hour });
+    return limiter(name, own);
+}
+limits.stats = () => limiter.stats();
+limits.reset = () => limiter.reset();
 
 /** Count refusals in /metrics (server/index.js, after observability.instrument). */
 function bindMetrics(registry) {
@@ -51,6 +60,8 @@ function bindMetrics(registry) {
 
 module.exports = {
     limits,
+    /** [{ id, minute, hour }] for every limit the routes have declared, sorted by id. */
+    registered: () => [...registered].map(([id, n]) => ({ id, ...n })).sort((x, y) => x.id.localeCompare(y.id)),
     actor,
     bindMetrics,
     _setClockForTests(fn) { clock = fn || (() => Date.now()); },
