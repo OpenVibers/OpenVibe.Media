@@ -632,8 +632,9 @@ Reporting a vulnerability: [SECURITY.md](SECURITY.md). The rules the code keeps:
   ingestion fetches through the SSRF guard; other calls go to the configured Network, Live, Events, B2
   and R2 endpoints.
 - **Secrets.** `OV_OAUTH_CLIENT_SECRET`, `MEDIA_SIGNING_SECRET`, `MEDIA_SECRET`, `MEDIA_APPS_SEED` /
-  `MEDIA_APP_KEYS`, `MEDIA_B2_*`, `MEDIA_R2_*`, `MEDIA_INBOUND_EVENTS_SECRET`, `VIEW_HASH_SECRET` and the
-  fallback `INTERNAL_API_KEY` live in `/etc/openvibe/media.env` (0600), by name only.
+  `MEDIA_APP_KEYS`, `MEDIA_B2_*`, `MEDIA_R2_*`, `MEDIA_INBOUND_EVENTS_SECRET` and `VIEW_HASH_SECRET` (the
+  secret visitor hashes are derived from; it falls back to `MEDIA_SECRET`) live in
+  `/etc/openvibe/media.env` (0600), by name only.
 
 ## Deploy
 

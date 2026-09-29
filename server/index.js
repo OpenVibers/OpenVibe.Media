@@ -106,9 +106,9 @@ const ready = (async () => {
     {
         const pastes = require('./pastes/routes');
         // Loopback only. A Network service token holding media.avatar.ingest (audience openvibe.media);
-        // while Network moves to tokens, a request with no Bearer still passes with INTERNAL_API_KEY
-        // (server/service-guard.js). A Bearer is judged on the token alone (401 bad, 403 no capability).
-        app.post('/internal/avatar-ingest', require('./service-guard').guardOrKey('media.avatar.ingest'),
+        // a Bearer is judged on the token alone (401 bad, 403 no capability) and nothing else opens the
+        // route (server/service-guard.js).
+        app.post('/internal/avatar-ingest', require('./service-guard').guard('media.avatar.ingest'),
             require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config, screenshotsDir: pastes.SCREENSHOTS_DIR, generateSlug: pastes.generateSlug }));
     }
     const userAuth = require('./user-auth');

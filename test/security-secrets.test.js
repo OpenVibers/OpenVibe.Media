@@ -28,7 +28,6 @@ const crypto = require('crypto');
     const LIVE_KEY = S('live-app-key');
     const GAMES_KEY = S('games-app-key');
     const SECRET_ENV = {
-        INTERNAL_API_KEY: S('internal-api-key'),
         MEDIA_SIGNING_SECRET: S('media-signing-secret'),
         MEDIA_SECRET: S('media-secret'),
         VIEW_HASH_SECRET: S('view-hash-secret'),
@@ -247,8 +246,8 @@ const crypto = require('crypto');
         await call('GET', `${signed}x`);
         await call('GET', signed);
         await call('GET', `/api/v2/live/objects/${privObj}/download?format=json`, { headers: IDS.app });
-        await call('POST', '/internal/avatar-ingest', { headers: { 'x-internal-key': 'wrong' }, json: { url: 'https://127.0.0.1/a.png', user_id: 1 } });
-        await call('POST', '/internal/avatar-ingest', { headers: { 'x-internal-key': SECRET_ENV.INTERNAL_API_KEY }, json: { url: 'https://127.0.0.1/a.png', user_id: 1 } });
+        await call('POST', '/internal/avatar-ingest', { json: { url: 'https://127.0.0.1/a.png', user_id: 1 } });   // no service token: refused, and it says so
+        await call('POST', '/internal/avatar-ingest', { headers: { authorization: 'Bearer forged.token.value' }, json: { url: 'https://127.0.0.1/a.png', user_id: 1 } });
         await call('POST', '/internal/events', { headers: { 'content-type': 'application/json', 'x-openvibe-signature': 'v2=forged' }, body: '{}' });
         await call('GET', '/auth/callback?code=forged&state=forged');
         await call('GET', '/auth/login?next=/me');

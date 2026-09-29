@@ -130,7 +130,6 @@ const config = {
     network: {
         url: (process.env.OV_NETWORK_URL || 'https://openvibe.network').replace(/\/$/, ''),
         internalUrl: (process.env.OV_NETWORK_INTERNAL_URL || 'http://127.0.0.1:4000').replace(/\/$/, ''),
-        internalApiKey: process.env.INTERNAL_API_KEY || '',
     },
 
     apps: {

@@ -24,7 +24,12 @@ const BOT_UA = /bot|crawl|spider|slurp|facebookexternalhit|preview|discordbot|tw
 let _secret = null;
 async function secret() {
     if (_secret) return _secret;
-    _secret = process.env.VIEW_HASH_SECRET || process.env.MEDIA_SECRET || process.env.INTERNAL_API_KEY || '';
+    _secret = process.env.VIEW_HASH_SECRET || process.env.MEDIA_SECRET || '';
+    if (!_secret && process.env.NODE_ENV === 'production') {
+        // Hashes already on disk were derived from the old secret; without it they can never match again.
+        // Never the value, only the name.
+        console.warn('[views] VIEW_HASH_SECRET and MEDIA_SECRET are unset in production; visitor hashes fall back to the persisted per-process secret and past hashes stop matching.');
+    }
     if (!_secret) {
         // Persist a random secret so visitor hashes stay stable across restarts.
         try {

@@ -18,7 +18,7 @@ const { ids } = require('openvibe-contracts');
         VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
         THUMBNAILS_PATH: dir('thumbnails'), PASTES_PATH: dir('pastes'), OBJECTS_PATH: dir('objects'), ASSETS_PATH: dir('assets'),
         MEDIA_PUBLIC_URL: 'https://media.test', OV_NETWORK_URL: 'http://127.0.0.1:9', MEDIA_SIGNING_SECRET: 'test-signing-secret',
-        INTERNAL_API_KEY: 'internal-key-0123456789abcdef', OV_OAUTH_CLIENT_ID: 'media', OV_OAUTH_CLIENT_SECRET: 'media-secret',
+        OV_OAUTH_CLIENT_ID: 'media', OV_OAUTH_CLIENT_SECRET: 'media-secret',
     };
     for (const k of ['MEDIA_B2_ENDPOINT', 'MEDIA_B2_BUCKET', 'MEDIA_R2_ENDPOINT', 'MEDIA_R2_BUCKET', 'EVENTS_URL', 'MEDIA_OWNER_SUBJECT_SYNC']) process.env[k] = '';
     Object.assign(process.env, env);

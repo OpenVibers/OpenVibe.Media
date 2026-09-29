@@ -122,7 +122,7 @@ const { spawnSync, execFileSync } = require('child_process');
         Object.assign(process.env, {
             MEDIA_DRILL: '1', DATABASE_URL: DRILL_URL, DATABASE_DIRECT_URL: '', HOST: '127.0.0.1', PORT: String(port), NODE_ENV: 'production',
             // What the production env file sets; a normal boot would act on all of it.
-            EVENTS_URL: 'http://127.0.0.1:9', OV_OAUTH_CLIENT_SECRET: 's'.repeat(40), INTERNAL_API_KEY: 'k'.repeat(40),
+            EVENTS_URL: 'http://127.0.0.1:9', OV_OAUTH_CLIENT_SECRET: 's'.repeat(40),
             MEDIA_APP_KEYS: `live:${'n'.repeat(40)},games:${'g'.repeat(40)}`,
             MEDIA_B2_ENDPOINT: 'https://s3.example.invalid', MEDIA_B2_BUCKET: 'b', MEDIA_B2_KEY_ID: 'id', MEDIA_B2_APP_KEY: 'key',
             MEDIA_R2_ENDPOINT: 'https://r2.example.invalid', MEDIA_R2_BUCKET: 'r', MEDIA_R2_ACCESS_KEY_ID: 'id', MEDIA_R2_SECRET_ACCESS_KEY: 'key',
