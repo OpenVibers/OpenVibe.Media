@@ -103,7 +103,7 @@ function createIngestHandler({ db, config, screenshotsDir, generateSlug, log = c
             fs.mkdirSync(screenshotsDir, { recursive: true });
             const file = path.join(screenshotsDir, `avatar-n${parseInt(user_id, 10) || 0}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.webp`);
             fs.writeFileSync(file, pic.buffer);
-            const slug = generateSlug();
+            const slug = await generateSlug();   // async since the PostgreSQL switch (it checks the table)
             const insert = async () => await db.run(`INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, screenshot_path, metadata, ip_address)
                     VALUES ('network', ?, ?, 'screenshot', ?, '', 'text', 'unlisted', ?, ?, NULL) RETURNING id`,
                 [slug, parseInt(user_id, 10) || null, `Avatar${username ? ' of ' + String(username).slice(0, 40) : ''}`, file,

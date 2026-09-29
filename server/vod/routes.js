@@ -122,7 +122,7 @@ router.post('/:id/ingest/rtmp', tenantAuth(), async (req, res) => {
     try {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
-        const result = recorder.startRtmp(vod, req.body?.rtmp_url);
+        const result = await recorder.startRtmp(vod, req.body?.rtmp_url);
         if (!result.ok) return res.status(result.status || 409).json({ error: result.error });
         res.status(202).json({ id: vod.id, status: 'recording' });
     } catch (err) {
@@ -137,7 +137,7 @@ router.post('/:id/ingest/rtp/start', tenantAuth(), async (req, res) => {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
         const { video, audio } = req.body || {};
-        const result = recorder.startRtp(vod, video, audio);
+        const result = await recorder.startRtp(vod, video, audio);
         if (!result.ok) return res.status(409).json({ error: result.error });
         res.json({ videoPort: result.videoPort, audioPort: result.audioPort || null });
     } catch (err) {

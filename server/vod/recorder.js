@@ -333,7 +333,7 @@ class StreamRecorder {
      * Exactly the predecessor's RTMP path — no re-encode, always real-time,
      * live-seekable, kill-tolerant, its own lossless master.
      */
-    startRtmp(vod, rtmpUrl) {
+    async startRtmp(vod, rtmpUrl) {
         const guard = this._guardCanRecord(vod);
         if (!guard.ok) return guard;
         // SSRF guard: ffmpeg connects only to an allow-listed RTMP server (config.rtmpPull.allow).
@@ -368,8 +368,12 @@ class StreamRecorder {
             return { ok: false, error: `ffmpeg spawn failed: ${err.message}` };
         }
 
-        const recording = this._registerCommon(vod, proc, filePath, null, { protocol: 'rtmp' });
-        this._wireProcess(recording, 'rtmp');
+        // Listeners first, then the row: _registerCommon puts the recording in the map before its first await,
+        // so ffmpeg's exit is caught even if it comes while the row is being written. (Unawaited, this left every
+        // recording "in progress" forever after ffmpeg ended, and nothing finalized it.)
+        const persisted = this._registerCommon(vod, proc, filePath, null, { protocol: 'rtmp' });
+        this._wireProcess(this.activeRecordings.get(vod.id), 'rtmp');
+        await persisted;
 
         console.log(`[VOD] Recording started: vod ${vod.id} → ${filename} (rtmp pull)`);
         return { ok: true, filePath };
@@ -384,7 +388,7 @@ class StreamRecorder {
      * @param {object} [audio]   same shape (codec e.g. 'opus')
      * @returns {ok, videoPort, audioPort} — caller points PlainRtpTransports at 127.0.0.1
      */
-    startRtp(vod, video, audio) {
+    async startRtp(vod, video, audio) {
         const guard = this._guardCanRecord(vod);
         if (!guard.ok) return guard;
         if (!video || video.payloadType == null || !video.codec) {
@@ -514,13 +518,14 @@ class StreamRecorder {
             return { ok: false, error: `ffmpeg spawn failed: ${err.message}` };
         }
 
-        const recording = this._registerCommon(vod, proc, filePath, masterPath, {
+        const persisted = this._registerCommon(vod, proc, filePath, masterPath, {
             protocol: 'rtp',
             sdpPath,
             rtpVideoPort: videoPort,
             rtpAudioPort: audioPort,
         });
-        this._wireProcess(recording, 'rtp');
+        this._wireProcess(this.activeRecordings.get(vod.id), 'rtp');   // before the row write (see startRtmp)
+        await persisted;
 
         const recMode = passthrough ? `passthrough ${isH264 ? 'H.264→mp4' : 'VP8/9→webm'} copy` : 'libvpx re-encode';
         console.log(`[VOD] RTP recording started: vod ${vod.id} → ${filename} [${recMode}] (video:${videoPort}${audioPort ? ` audio:${audioPort}` : ''})`);

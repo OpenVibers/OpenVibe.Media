@@ -59,7 +59,7 @@ const express = require('express');
         const db = require('../server/db/database');
         await db.upsertApp({ app_id: 'live', api_key: 'live-key-rtmp-test' });
         const vodId = Number((await db.createVod({ app_id: 'live', title: 'x' })).lastInsertRowid);
-        const r = recorder.startRtmp(await db.getVodById(vodId), 'rtmp://10.0.0.5:1935/live/k');
+        const r = await recorder.startRtmp(await db.getVodById(vodId), 'rtmp://10.0.0.5:1935/live/k');
         assert.deepStrictEqual([r.ok, r.status], [false, 400]);
         assert.strictEqual(recorder.activeCount(), 0, 'no ffmpeg was started');
         assert.strictEqual((await db.getVodById(vodId)).is_recording, 0);
