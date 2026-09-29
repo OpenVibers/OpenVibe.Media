@@ -24,10 +24,11 @@ const crypto = require('crypto');
 
 const GATES_FILE = (dataDir) => path.join(dataDir, 'drills', 'r2-gates-closed-at');
 
-/** When openvibe-media.service last started (ms), or null when systemd cannot say. */
+/** When openvibe-media.service last started (ms, from systemd's microseconds: whole seconds would put a restart
+ * in the same second as the gates before them), or null when systemd cannot say. */
 function mediaStartedAt() {
     try {
-        const out = require('child_process').execFileSync('systemctl', ['show', 'openvibe-media.service', '-p', 'ActiveEnterTimestamp', '--value'], { encoding: 'utf8' }).trim();
+        const out = require('child_process').execFileSync('systemctl', ['show', '--timestamp=us+utc', 'openvibe-media.service', '-p', 'ActiveEnterTimestamp', '--value'], { encoding: 'utf8' }).trim();
         const t = Date.parse(out);
         return Number.isFinite(t) ? t : null;
     } catch { return null; }
