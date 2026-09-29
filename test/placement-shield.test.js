@@ -29,6 +29,12 @@ const assert = require('assert');
     assert.strictEqual(shield.onEdge(req({ 'x-media-shield-host': 'edge.openvibe.media' })), true);
     assert.strictEqual(shield.onEdge(req({ host: 'edge.openvibe.media', 'x-forwarded-host': 'edge.openvibe.media' })), false, 'a client-chosen Host or X-Forwarded-Host is not the edge');
     assert.strictEqual(shield.onEdge(req({ 'x-media-shield-host': 'openvibe.media' })), false);
+    // A read on the proxied host is sent to the same path on the edge; on the edge it is served, never redirected again.
+    const on = (h, url) => ({ ...req(h), originalUrl: url });
+    assert.strictEqual(shield.toEdge(on({}, '/v/abc.mp4?t=1'), 'b2'), 'https://edge.openvibe.media/v/abc.mp4?t=1');
+    assert.strictEqual(shield.toEdge(on({ 'x-media-shield-host': 'edge.openvibe.media' }, '/v/abc.mp4'), 'b2'), null, 'no redirect loop on the edge');
+    assert.strictEqual(shield.toEdge(on({}, '/v/abc.mp4'), 'r2'), null, 'R2 is not shielded');
+    assert.strictEqual(shield.toEdge(on({}, '//evil.example/x'), 'b2'), null, 'never a scheme-relative target');
 
     // The nginx side of the same rules (the config is what enforces them on the host).
     const fs = require('fs'), path = require('path');

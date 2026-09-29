@@ -26,6 +26,10 @@
  * response fetches later slices with it), the viewer-facing 302 keeps its short TTL.
  *
  *   onEdge(req)                                     → true on the edge host (check it before presigning anything)
+ *   toEdge(req, provider)                           → 'https://<edge><same path>' for a shield-eligible read that came in
+ *                                                     on openvibe.media, else null: viewers keep requesting the one
+ *                                                     public URL and a tiny 302 through Cloudflare moves them to the
+ *                                                     edge, where the bytes come from the shield
  *   target({ provider, url, visibility, sandbox, edge })  → '/_media_shield/b2/<bucket>/<key>?<signed query>' | null
  *   send(res, target, headers)                      → the 200 + X-Accel-Redirect answer
  *   await purge({ provider, key, size, presign })   → refreshes every cached slice of a deleted or replaced object
@@ -49,6 +53,14 @@ function edgeHost() { return String(process.env.MEDIA_SHIELD_HOST || '').trim().
 function edgeOf(req) { const v = req && typeof req.get === 'function' ? req.get(EDGE_HEADER) : null; return v ? String(v).trim().toLowerCase() : null; }
 /** True when this request came in on the edge host: routes check it before presigning anything for the shield. */
 function onEdge(req) { const want = edgeHost(); return !!want && edgeOf(req) === want; }
+
+/** Where to send a shield-eligible read that arrived on the proxied host (callers check visibility and sandbox). */
+function toEdge(req, provider) {
+    const edge = edgeHost();
+    if (!edge || !enabled(provider) || onEdge(req)) return null;
+    const p = String((req && (req.originalUrl || req.url)) || '');
+    return p.startsWith('/') && !p.startsWith('//') ? `https://${edge}${p}` : null;
+}
 
 /** The internal location for one presigned URL, or null when this read must not go through the shield. `edge` is
  *  edgeOf(req): the shield answers only on MEDIA_SHIELD_HOST (a DNS-only edge name), never through Cloudflare. */
@@ -101,4 +113,4 @@ async function purge({ provider, key, size, presign, fetchImpl = globalThis.fetc
     return { purged, failed, slices };
 }
 
-module.exports = { target, send, purge, enabled, providers, onEdge, edgeOf, SLICE_BYTES, SHIELD_TTL_SECONDS, B2_UPSTREAM_HOST, EDGE_HEADER };
+module.exports = { target, send, purge, enabled, providers, onEdge, edgeOf, toEdge, SLICE_BYTES, SHIELD_TTL_SECONDS, B2_UPSTREAM_HOST, EDGE_HEADER };

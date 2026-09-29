@@ -776,6 +776,10 @@ publicRouter.get('/:id', async (req, res) => {
             // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through its
             // slice cache, with a long internal presign that never reaches the viewer (only on the DNS-only edge host).
             const shield = require('../placement/shield');
+            if (shield.enabled(provider) && !sandbox && obj.visibility !== 'private' && !shield.onEdge(req)) {
+                const edge = shield.toEdge(req, provider);
+                if (edge) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, edge); }
+            }
             if (shield.enabled(provider) && shield.onEdge(req) && !sandbox && obj.visibility !== 'private') {
                 const inner = await require('../vod/vod-storage').presignGet(provider, loc.key, shield.SHIELD_TTL_SECONDS, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
                 const t = inner && shield.target({ provider, url: inner, visibility: obj.visibility, sandbox, edge: shield.edgeOf(req) });
