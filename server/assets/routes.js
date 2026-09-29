@@ -36,7 +36,7 @@ function assetPublic(a) {
     };
 }
 
-router.post('/', tenantAuth(), upload.single('file'), async (req, res) => {
+router.post('/', tenantAuth({ verb: 'write' }), upload.single('file'), async (req, res) => {
     try {
         const { kind, name } = req.body || {};
         if (!['emote', 'sound'].includes(kind)) return res.status(400).json({ error: "kind must be 'emote' or 'sound'" });
@@ -69,7 +69,7 @@ router.post('/', tenantAuth(), upload.single('file'), async (req, res) => {
     }
 });
 
-router.get('/', tenantAuth(), async (req, res) => {
+router.get('/', tenantAuth({ verb: 'list' }), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '200', 10), 1), 1000);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -81,7 +81,7 @@ router.get('/', tenantAuth(), async (req, res) => {
     }
 });
 
-router.delete('/:id', tenantAuth(), async (req, res) => {
+router.delete('/:id', tenantAuth({ verb: 'delete' }), async (req, res) => {
     try {
         const a = await db.getAssetById(parseInt(req.params.id, 10));
         if (!a || a.app_id !== req.appId) return res.status(404).json({ error: 'Not found' });

@@ -168,7 +168,7 @@ const ready = (async () => {
     }
 
     // Per-app media stats (app-key only) — hero/dashboard counters in the owning app.
-    app.get('/api/v1/:app/stats', auth.tenantAuth(), async (req, res) => {
+    app.get('/api/v1/:app/stats', auth.tenantAuth({ verb: 'read' }), async (req, res) => {
         try {
             res.json(await db.getAppStats(req.appId));
         } catch (err) {
@@ -178,7 +178,7 @@ const ready = (async () => {
     });
 
     // Daily series behind a stat (vods, clips, pastes, hours) — "over time" charts in the owning app.
-    app.get('/api/v1/:app/stats/series/:metric', auth.tenantAuth(), async (req, res) => {
+    app.get('/api/v1/:app/stats/series/:metric', auth.tenantAuth({ verb: 'read' }), async (req, res) => {
         try {
             const series = await db.getAppStatSeries(req.appId, String(req.params.metric), req.query.days);
             if (!series) return res.status(404).json({ error: 'Unknown metric' });

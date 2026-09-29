@@ -27,9 +27,9 @@ const db = require('../db/database');
 const { tenantAuth, tenantCors, namespaceGrant } = require('../auth');
 const { limits } = require('../actor-limits');
 
-const transform = tenantAuth({ verb: 'transform', namespaced: true });
-const read = tenantAuth({ verb: 'read' });
-const list = tenantAuth({ verb: 'list' });
+const transform = tenantAuth({ verb: 'transform', namespaced: true, project: true });
+const read = tenantAuth({ verb: 'read', project: true });
+const list = tenantAuth({ verb: 'list', project: true });
 // Per-actor limits (server/actor-limits.js): reads take the defaults. A job runs sharp or ffmpeg on a
 // worker with one or two slots, so a caller queues or approves at most one every six seconds.
 const QUEUE = { minute: 10, hour: 200 };

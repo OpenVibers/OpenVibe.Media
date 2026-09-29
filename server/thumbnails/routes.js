@@ -39,7 +39,7 @@ function _imageFromRequest(req) {
     return null;
 }
 
-router.post('/:kind/:id', tenantAuth({ allowUser: true }), upload.single('thumbnail'), async (req, res) => {
+router.post('/:kind/:id', tenantAuth({ verb: 'write', allowUser: true }), upload.single('thumbnail'), async (req, res) => {
     try {
         const kind = String(req.params.kind || '').toLowerCase();
         const id = String(req.params.id);

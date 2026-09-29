@@ -300,8 +300,12 @@ function actingUserId(req) {
  * @param {boolean} [opts.namespaced=false]  with `verb`: the route checks each namespace it touches
  *        (namespaceGrant); a token holding the verb for any namespace of the tenant gets through
  * @param {string} [opts.capability]  instead of a verb: one capability, for the root namespace
+ * @param {boolean} [opts.project=false]  the route also serves developer-project tenants, so a
+ *        /<project_id>/ `:app` segment resolves to that project's tenant — app tokens and their
+ *        sandbox twins are accepted there. Without it a project id is no more than an unknown app
+ *        (naming a verb must not open a first-party route, like the v1 VOD/clip API, to app tokens).
  */
-function tenantAuth({ allowUser = false, capability = null, verb = null, namespaced = false } = {}) {
+function tenantAuth({ allowUser = false, capability = null, verb = null, namespaced = false, project = false } = {}) {
     if (verb && !VERBS[verb]) throw new Error(`tenantAuth: unknown verb ${verb}`);
     const named = verb ? VERBS[verb][0] : capability;
     const grant = { capability, verb, namespaced };
@@ -310,9 +314,9 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
         const token = bearerToken(req);
 
         // 0) Principal tokens first, so a sandbox token is refused as such (never a 404 that hints
-        //    at which tenants exist). Only developer-project tenant routes (a route that names its
-        //    verb or capability, under /<project_id>/) opt in to sandbox tokens.
-        const appRoute = !!named && PROJECT_ID_RE.test(appId);
+        //    at which tenants exist). Only a route that opts in (`project: true`) treats a
+        //    /<project_id>/ segment as that project's tenant and accepts an app token (or sandbox twin).
+        const appRoute = project && !!named && PROJECT_ID_RE.test(appId);
         let svc = null;
         if (token && token.split('.').length === 3) {
             const r = verifyServiceTokenResult(token, { acceptSandbox: appRoute });
@@ -358,7 +362,7 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
         // 1b) A service-principal token from OpenVibe.Network (roadmap Wave 1, ADR-003). Accepted only on
         //     routes that name the verb (or capability) they perform, and only for the namespaces of this
         //     tenant the token was granted (the root is the :app id). It carries the app's authority for
-        //     that one action — no acting user.
+        //     that one action.
         if (svc) {
             if (!named) return problem(res, 403, 'capability.denied', 'service tokens are not accepted on this route');
             const c = await tenantGrant(svc, grant, appId, db.rootNamespace(app));
@@ -366,6 +370,15 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
             req.authType = 'app';
             req.principal = { sub: svc.sub, cap: svc.cap, jti: svc.jti };
             req.grant = svc;
+            // X-OV-User-Id, exactly as under the app key above: a service token is issued to this app's
+            // own backend for this tenant and never reaches a browser — the same reasoning. The tenant
+            // was granted just above, so a token can never borrow another tenant's user-id space.
+            // First-party service principals only (svc:…): a developer app's token never names a user this way.
+            const onBehalf = String(svc.sub || '').startsWith('svc:') ? actingUserId(req) : null;
+            if (onBehalf != null) {
+                req.authType = 'user';
+                req.userId = onBehalf;
+            }
             return next();
         }
 

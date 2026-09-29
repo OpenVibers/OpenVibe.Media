@@ -88,7 +88,7 @@ function sha256File(filePath) {
 // ── Upload ───────────────────────────────────────────────────
 // Per-actor limits (server/actor-limits.js) sit after the credential and before multer reads the body.
 // An upload stores up to MAX_FILE_SIZE_MB and counts against the quota: one every two seconds at most.
-router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), limits('media.file.upload', { minute: 30, hour: 600 }), upload.single('file'), async (req, res) => {
+router.post('/', tenantAuth({ allowUser: true, verb: 'write', project: true }), limits('media.file.upload', { minute: 30, hour: 600 }), upload.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No file uploaded (multipart field: file)' });
 
@@ -161,7 +161,7 @@ router.post('/', tenantAuth({ allowUser: true, verb: 'write' }), limits('media.f
 });
 
 // ── List ─────────────────────────────────────────────────────
-router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), limits('media.file.list'), async (req, res) => {
+router.get('/', tenantAuth({ allowUser: true, verb: 'list', project: true }), limits('media.file.list'), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '100', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -178,7 +178,7 @@ router.get('/', tenantAuth({ allowUser: true, verb: 'list' }), limits('media.fil
 });
 
 // ── Meta ─────────────────────────────────────────────────────
-router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), limits('media.file.read'), async (req, res) => {
+router.get('/:key', tenantAuth({ allowUser: true, verb: 'read', project: true }), limits('media.file.read'), async (req, res) => {
     try {
         const row = await db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });
@@ -190,7 +190,7 @@ router.get('/:key', tenantAuth({ allowUser: true, verb: 'read' }), limits('media
 
 // ── Delete ───────────────────────────────────────────────────
 // A delete removes bytes and frees quota: a write, tighter than reads.
-router.delete('/:key', tenantAuth({ allowUser: true, verb: 'delete' }), limits('media.file.delete', { minute: 60, hour: 1200 }), async (req, res) => {
+router.delete('/:key', tenantAuth({ allowUser: true, verb: 'delete', project: true }), limits('media.file.delete', { minute: 60, hour: 1200 }), async (req, res) => {
     try {
         const row = await db.getFileByKey(String(req.params.key), req.appId);
         if (!row) return res.status(404).json({ error: 'File not found' });

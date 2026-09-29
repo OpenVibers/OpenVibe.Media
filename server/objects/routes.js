@@ -58,10 +58,10 @@ const { limits } = require('../actor-limits');
 
 const MB = 1024 * 1024;
 // Each route checks its verb for the namespace it works in (the object's, or the one init names).
-const upload = tenantAuth({ verb: 'write', namespaced: true });
-const read = tenantAuth({ verb: 'read', namespaced: true });
-const list = tenantAuth({ verb: 'list', namespaced: true });
-const remove = tenantAuth({ verb: 'delete', namespaced: true });
+const upload = tenantAuth({ verb: 'write', namespaced: true, project: true });
+const read = tenantAuth({ verb: 'read', namespaced: true, project: true });
+const list = tenantAuth({ verb: 'list', namespaced: true, project: true });
+const remove = tenantAuth({ verb: 'delete', namespaced: true, project: true });
 const appOnly = tenantAuth();
 // Per-actor limits (server/actor-limits.js), after the credential and before the work. Reads take the
 // defaults (MEDIA_LIMITS_MINUTE / _HOUR). An init reserves quota and makes a row, and each upload step
@@ -126,7 +126,7 @@ async function contentAuth(req, res, next) {
 
 /** Multipart session token (from POST /:id/multipart) or the usual tenant credential with `verb`. */
 function multipartAuth(verb) {
-    const fallback = tenantAuth({ verb, namespaced: true });
+    const fallback = tenantAuth({ verb, namespaced: true, project: true });
     return async (req, res, next) => {
         const token = req.query.token || req.headers['x-upload-token'];
         if (!token) return fallback(req, res, next);

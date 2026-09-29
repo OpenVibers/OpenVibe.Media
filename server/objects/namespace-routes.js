@@ -31,7 +31,7 @@ async function shape(req, row) {
 }
 
 // Reads, with the default per-actor limits (server/actor-limits.js).
-router.get('/', tenantAuth({ verb: 'list', namespaced: true }), limits('media.namespace.list'), async (req, res) => {
+router.get('/', tenantAuth({ verb: 'list', namespaced: true, project: true }), limits('media.namespace.list'), async (req, res) => {
     try {
         const rows = [];
         for (const r of await namespaces.listForTenant(req.appId)) if ((await namespaceGrant(req, 'list', r.namespace)).allowed) rows.push(r);
@@ -42,7 +42,7 @@ router.get('/', tenantAuth({ verb: 'list', namespaced: true }), limits('media.na
     }
 });
 
-router.get('/:namespace', tenantAuth({ verb: 'read', namespaced: true }), limits('media.namespace.read'), async (req, res) => {
+router.get('/:namespace', tenantAuth({ verb: 'read', namespaced: true, project: true }), limits('media.namespace.read'), async (req, res) => {
     try {
         const named = namespaces.resolveName(req.appRow, req.params.namespace);
         if (named.error) return problem(res, 400, 'media.namespace.invalid', named.error);

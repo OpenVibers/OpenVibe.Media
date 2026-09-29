@@ -135,7 +135,7 @@ const flag = (v) => (['1', 'true'].includes(String(v)) ? 1 : ['0', 'false'].incl
 // JSON body: cut a window out of a VOD (202, background cut + webhook).
 // Multipart `video`: direct upload of an already-cut blob (201, ready) —
 // inherited browser-MediaRecorder clip path.
-router.post('/', tenantAuth({ allowUser: true }), clipUpload.single('video'), async (req, res) => {
+router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.single('video'), async (req, res) => {
     try {
         const body = req.body || {};
         if (req.file) return await _createUploadedClip(req, res);
@@ -299,7 +299,7 @@ async function _createUploadedClip(req, res) {
 //   auto_generated=1|0   clips the app's automation cut (1) or a person made (0)
 //   status=ready         playable clips only (no processing / failed rows)
 //   since=<datetime>     created at or after (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC)
-router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
+router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -329,7 +329,7 @@ router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
 
 // ── Get clip ─────────────────────────────────────────────────
 // A short-lived URL of a clip's bytes for a reader with no key (OpenVibe.AI transcribing it); the owning app only.
-router.get('/:id/signed-url', tenantAuth(), async (req, res) => {
+router.get('/:id/signed-url', tenantAuth({ verb: 'read' }), async (req, res) => {
     if (req.authType !== 'app') return res.status(403).json({ error: 'only the owning app signs a playback URL' });
     const clip = await _getClipScoped(req, res);
     if (!clip) return;
@@ -337,7 +337,7 @@ router.get('/:id/signed-url', tenantAuth(), async (req, res) => {
     res.json(require('../objects/signing').signedMediaUrl('clip', clip.id, req.query.ttl));
 });
 
-router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
+router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, res) => {
     try {
         const clip = await _getClipScoped(req, res);
         if (!clip) return;
@@ -360,7 +360,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
  * permanent — previously a failed clip stayed broken forever with no retry path,
  * and the viewer was shown "the server is cutting your clip" indefinitely.
  */
-router.post('/:id/recut', tenantAuth(), async (req, res) => {
+router.post('/:id/recut', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const clip = await _getClipForWrite(req, res);
         if (!clip) return;
@@ -377,7 +377,7 @@ router.post('/:id/recut', tenantAuth(), async (req, res) => {
     }
 });
 
-router.put('/:id', tenantAuth(), async (req, res) => {
+router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const clip = await _getClipForWrite(req, res);
         if (!clip) return;
@@ -400,7 +400,7 @@ router.put('/:id', tenantAuth(), async (req, res) => {
 });
 
 // ── Delete ───────────────────────────────────────────────────
-router.delete('/:id', tenantAuth(), async (req, res) => {
+router.delete('/:id', tenantAuth({ verb: 'delete' }), async (req, res) => {
     try {
         const clip = await _getClipForWrite(req, res);
         if (!clip) return;

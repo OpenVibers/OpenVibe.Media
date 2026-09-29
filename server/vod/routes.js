@@ -95,7 +95,7 @@ async function _getVodForWrite(req, res) {
 }
 
 // ── Create VOD ───────────────────────────────────────────────
-router.post('/', tenantAuth(), async (req, res) => {
+router.post('/', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const { title, stream_id, stream_key, managed_stream_id, user_id, meta, visibility, clips_only } = req.body || {};
         const result = await db.createVod({
@@ -118,7 +118,7 @@ router.post('/', tenantAuth(), async (req, res) => {
 });
 
 // ── RTMP ingest ──────────────────────────────────────────────
-router.post('/:id/ingest/rtmp', tenantAuth(), async (req, res) => {
+router.post('/:id/ingest/rtmp', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
@@ -132,7 +132,7 @@ router.post('/:id/ingest/rtmp', tenantAuth(), async (req, res) => {
 });
 
 // ── RTP ingest ───────────────────────────────────────────────
-router.post('/:id/ingest/rtp/start', tenantAuth(), async (req, res) => {
+router.post('/:id/ingest/rtp/start', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
@@ -146,7 +146,7 @@ router.post('/:id/ingest/rtp/start', tenantAuth(), async (req, res) => {
     }
 });
 
-router.post('/:id/ingest/rtp/stop', tenantAuth(), async (req, res) => {
+router.post('/:id/ingest/rtp/stop', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
@@ -161,7 +161,7 @@ router.post('/:id/ingest/rtp/stop', tenantAuth(), async (req, res) => {
 });
 
 // ── Chunked upload (browser MediaRecorder; user JWT ok) ──────
-router.post('/:id/chunks', tenantAuth({ allowUser: true }), chunkUpload.single('chunk'), async (req, res) => {
+router.post('/:id/chunks', tenantAuth({ verb: 'write', allowUser: true }), chunkUpload.single('chunk'), async (req, res) => {
     try {
         const vod = await _getVodForWrite(req, res);
         if (!vod) { if (req.file) tools.cleanupTempFile(req.file.path); return; }
@@ -263,14 +263,14 @@ async function _finalizeHandler(req, res) {
     }
 }
 
-router.post('/:id/complete', tenantAuth({ allowUser: true }), _finalizeHandler);
-router.post('/:id/finalize', tenantAuth(), _finalizeHandler);
+router.post('/:id/complete', tenantAuth({ verb: 'write', allowUser: true }), _finalizeHandler);
+router.post('/:id/finalize', tenantAuth({ verb: 'write' }), _finalizeHandler);
 
 // ── List ─────────────────────────────────────────────────────
 // Filters follow the inherited query shapes: user_id, stream_id,
 // managed_stream_id, include_private (private+unlisted too), order
 // (newest|oldest|views|peak_viewers), since (created at or after), limit/offset.
-router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
+router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) => {
     try {
         const limit = Math.min(Math.max(parseInt(req.query.limit || '50', 10), 1), 500);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);
@@ -300,7 +300,7 @@ router.get('/', tenantAuth({ allowUser: true }), async (req, res) => {
 
 // ── Latest VOD thumbnail per managed stream (batch) ──────────
 // GET /latest-thumbs?managed_stream_ids=1,2,3 → { "<msid>": { vod_id, thumbnail_url } }
-router.get('/latest-thumbs', tenantAuth({ allowUser: true }), async (req, res) => {
+router.get('/latest-thumbs', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) => {
     try {
         const ids = String(req.query.managed_stream_ids || '').split(',').filter(Boolean);
         res.json({ thumbs: await db.latestVodThumbsByManagedStreams(req.appId, ids) });
@@ -314,7 +314,7 @@ router.get('/latest-thumbs', tenantAuth({ allowUser: true }), async (req, res) =
 // The owning app (its key alone, not a call acting for one of its users) asks for a short-lived URL of a VOD's bytes
 // to hand to a reader that holds no key: OpenVibe.AI transcribing it (roadmap WS-O task 2). ttl in seconds, 30 s to
 // 6 h (default 1 h). Public VODs get the same kind of URL; it works for any visibility.
-router.get('/:id/signed-url', tenantAuth(), async (req, res) => {
+router.get('/:id/signed-url', tenantAuth({ verb: 'read' }), async (req, res) => {
     if (req.authType !== 'app') return res.status(403).json({ error: 'only the owning app signs a playback URL' });
     const vod = await _getVodScoped(req, res);
     if (!vod) return;
@@ -323,7 +323,7 @@ router.get('/:id/signed-url', tenantAuth(), async (req, res) => {
 });
 
 // ── Get VOD meta ─────────────────────────────────────────────
-router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
+router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, res) => {
     try {
         const vod = await _getVodScoped(req, res);
         if (!vod) return;
@@ -355,7 +355,7 @@ router.get('/:id', tenantAuth({ allowUser: true }), async (req, res) => {
 });
 
 // ── Update ───────────────────────────────────────────────────
-router.put('/:id', tenantAuth(), async (req, res) => {
+router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
@@ -380,7 +380,7 @@ router.put('/:id', tenantAuth(), async (req, res) => {
 });
 
 // ── Delete ───────────────────────────────────────────────────
-router.delete('/:id', tenantAuth(), async (req, res) => {
+router.delete('/:id', tenantAuth({ verb: 'delete' }), async (req, res) => {
     try {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
