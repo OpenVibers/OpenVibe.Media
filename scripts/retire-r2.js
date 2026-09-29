@@ -165,8 +165,8 @@ if (require.main === module) {
         const policy = require('../server/objects/tier-policy');
         await policy.init();
         if (opts.gates) {
-            await storage.setSettings({ r2Enabled: false }, { actor: 'retire-r2', reason: 'R2 tier retired (plan T4)' });
-            await policy.set({ active: false }, { actor: 'retire-r2', reason: 'R2 tier retired (plan T4)' });
+            await storage.setSettings({ r2Enabled: false }, { reason: 'R2 tier retired (plan T4)' });
+            await policy.set({ active: false }, { reason: 'R2 tier retired (plan T4)' });
             fs.mkdirSync(path.dirname(GATES_FILE(config.dataDir)), { recursive: true });
             fs.writeFileSync(GATES_FILE(config.dataDir), new Date().toISOString());
             console.log('R2 promotion closed (storage_tier.r2Enabled=false, object_tier.active=false). Restart Media so it loads them.');
