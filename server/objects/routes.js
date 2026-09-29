@@ -774,11 +774,11 @@ publicRouter.get('/:id', async (req, res) => {
                 continue;
             }
             // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through its
-            // slice cache, with an hour-long internal presign that never reaches the viewer.
+            // slice cache, with a long internal presign that never reaches the viewer (only on the DNS-only edge host).
             const shield = require('../placement/shield');
-            if (shield.enabled(provider) && !sandbox && obj.visibility !== 'private') {
+            if (shield.enabled(provider) && shield.onEdge(req) && !sandbox && obj.visibility !== 'private') {
                 const inner = await require('../vod/vod-storage').presignGet(provider, loc.key, shield.SHIELD_TTL_SECONDS, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
-                const t = inner && shield.target({ provider, url: inner, visibility: obj.visibility, sandbox, host: req.hostname });
+                const t = inner && shield.target({ provider, url: inner, visibility: obj.visibility, sandbox, edge: shield.edgeOf(req) });
                 if (t) return shield.send(res, t, headers);
             }
             // The router already signed its first choice; a fallback copy is signed here.

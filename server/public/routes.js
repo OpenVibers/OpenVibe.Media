@@ -175,11 +175,12 @@ async function serveMediaRecord(kind, record, req, res) {
         const plan = await vodStorage.resolvePlayback(record, { session: router.sessionFor(req, `${kind}:${record.id}`) });
         if (plan?.kind === 'redirect') {
             // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through
-            // its slice cache with an hour-long internal presign; everything else keeps the short-lived 302.
+            // its slice cache with a long internal presign (only on the DNS-only edge host); everything else keeps the
+            // short-lived 302.
             const shield = require('../placement/shield');
-            if (shield.enabled(plan.provider) && visibility !== 'private' && !record.is_recording) {
+            if (shield.enabled(plan.provider) && shield.onEdge(req) && visibility !== 'private' && !record.is_recording) {
                 const url = await vodStorage.presignGet(plan.provider, vodStorage.keyForVod(record), shield.SHIELD_TTL_SECONDS).catch(() => null);
-                const t = url && shield.target({ provider: plan.provider, url, visibility, host: req.hostname });
+                const t = url && shield.target({ provider: plan.provider, url, visibility, edge: shield.edgeOf(req) });
                 if (t) return shield.send(res, t, { 'Cache-Control': visibility === 'public' ? 'public, max-age=300' : 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
             }
             res.set('Cache-Control', 'private, max-age=0');

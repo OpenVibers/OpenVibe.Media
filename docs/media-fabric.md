@@ -194,14 +194,26 @@ metric. Budgets per class and provider with a forecast; `provider.cost.threshold
   until F2's engine can enforce the 70 %-of-port rule (an R2 read through the shield spends the same host bandwidth).
 - **A DNS-only edge host.** openvibe.media is behind Cloudflare's proxy and its terms for video are not verified, so
   the shield answers only on `edge.openvibe.media` (grey cloud; `MEDIA_SHIELD_HOST`). Bytes that went viewer → B2 never
-  start flowing through Cloudflare.
+  start flowing through Cloudflare. Node knows the edge from `X-Media-Shield-Host`, which only the edge server block sets
+  (from its own server name) and `openvibe.media` clears; never from Host or `X-Forwarded-Host`, which a client chooses.
+- **One B2 host.** nginx proxies to one B2 endpoint and SigV4 signs the Host, so a URL signed for any other host (a
+  changed `MEDIA_B2_ENDPOINT`) is never shielded and keeps its 302 (`shield.js` `B2_UPSTREAM_HOST` = the nginx snippet;
+  a test pins both).
 - **Cache key:** `b2|<bucket>/<key>|<slice range>`: the object path and the 10 MB slice, never the signature. The
-  shield's presign lives an hour (it stays inside nginx and a long response fetches later slices with it); the
-  viewer-facing 302 keeps its short TTL.
+  shield's presign lives six hours (it stays inside nginx and a long response fetches later slices with it; a single
+  response longer than that gets an uncached 403 on its next slice); the viewer-facing 302 keeps its short TTL.
+- **Headers:** Node's answer owns Content-Type, Content-Disposition and Cache-Control (they survive the X-Accel
+  redirect; B2's copies are hidden); the shield location adds `nosniff` and `noindex` itself. Unlisted objects are served
+  through the shared cache (anyone with the link may read them; `/o` answers `public, max-age=3600` for them), unlisted
+  VODs answer `private, max-age=0`.
 - **Private and sandbox bytes never enter the shield.**
 - **Sizing:** one disk with recordings: `max_size=5g`, `min_free=20g` (the recording guardian warns at 15 GB), `inactive=24h`.
-- **Purge:** deleting a shielded object refreshes each of its slices through a loopback-only listener
-  (`127.0.0.1:8479`, `proxy_cache_bypass`), so the provider's 404 replaces the cached bytes at once.
+- **Purge:** deleting a shielded object refreshes each of its slices (four at a time) through a loopback-only listener
+  (`127.0.0.1:8479`, `allow 127.0.0.1; deny all`, `proxy_cache_bypass`), so the provider's 404 replaces the cached bytes
+  at once. Overwriting a shielded key (a repair re-upload, or a re-upload within ten minutes of a delete) refreshes it
+  after the upload, so the shield never serves the old bytes.
 - **Logs:** shield logs carry the path only: the signed query is a bearer token.
 - Config: `deploy/nginx/media-shield.http.conf` (conf.d), `media-shield-b2-upstream.conf` (snippets),
-  `edge.openvibe.media.conf` (sites-enabled). Switch on with `MEDIA_SHIELD=b2` and `MEDIA_SHIELD_HOST` after nginx has them.
+  `edge.openvibe.media.conf` (sites-enabled), and `openvibe.media.conf` clearing `X-Media-Shield-Host`. Switch on with
+  `MEDIA_SHIELD=b2` and `MEDIA_SHIELD_HOST` after nginx has them, and check a real slice with `curl -I` on the edge
+  (one Content-Type, Node's Content-Disposition, `X-Cache-Status`, no `x-amz-*`).

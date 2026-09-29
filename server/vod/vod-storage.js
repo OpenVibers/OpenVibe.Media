@@ -310,6 +310,10 @@ async function uploadFile(provider, key, filePath, contentType = 'video/webm') {
     if (!client) throw new Error(`Provider ${provider} not configured`);
     loadSdk();
     const size = fs.statSync(filePath).size;
+    // A shielded key that already exists (a repair re-upload) or was deleted moments ago may have slices in the shield:
+    // they are refreshed after the upload, or the shield would serve the old bytes for up to a day.
+    const shield = require('../placement/shield');
+    const before = shield.enabled(provider) ? await headObject(provider, key).catch(() => null) : null;
     // A hung multipart upload used to hold the sweep lock indefinitely (nothing else
     // could drain). Abort past the deadline so the sweep moves on to the next VOD;
     // leavePartsOnError cleans the partial multipart up on the bucket.
@@ -335,6 +339,12 @@ async function uploadFile(provider, key, filePath, contentType = 'video/webm') {
         throw err;
     } finally {
         clearTimeout(deadline);
+    }
+    const deletedSize = recentlyDeleted.get(`${provider}:${key}`);
+    if (before || deletedSize != null) {
+        recentlyDeleted.delete(`${provider}:${key}`);
+        const r = await shield.purge({ provider, key, size: Math.max(size, (before && before.size) || 0, deletedSize || 0), presign: presignGet });
+        if (r.failed) console.warn(`[VodStorage] shield refresh ${provider}:${key}: ${r.failed} of ${r.slices} slices not refreshed`);
     }
     // Verify size before anything destructive happens
     const localSize = fs.statSync(filePath).size;
@@ -393,6 +403,14 @@ async function sha256Object(provider, key) {
     return { sha256: hash.digest('hex'), size };
 }
 
+// Shielded keys deleted in the last ten minutes, with their size: a re-upload of the same key refreshes the shield
+// even though its HEAD finds nothing (the delete's own refresh may still be running and cache a 404 for a minute).
+const recentlyDeleted = new Map();
+function rememberDeleted(id, size) {
+    recentlyDeleted.set(id, size);
+    setTimeout(() => { if (recentlyDeleted.get(id) === size) recentlyDeleted.delete(id); }, 10 * 60e3).unref?.();
+}
+
 async function deleteObject(provider, key) {
     const client = clientFor(provider);
     if (!client) return;
@@ -406,6 +424,7 @@ async function deleteObject(provider, key) {
         console.warn(`[VodStorage] Delete ${provider}:${key} failed:`, err.message);
         return;
     }
+    if (head) rememberDeleted(`${provider}:${key}`, head.size);
     if (head) shield.purge({ provider, key, size: head.size, presign: presignGet })
         .then((r) => { if (r.failed) console.warn(`[VodStorage] shield purge ${provider}:${key}: ${r.failed} of ${r.slices} slices not refreshed`); })
         .catch(() => { /* purge never throws */ });
