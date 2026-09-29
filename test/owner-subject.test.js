@@ -1,9 +1,9 @@
 'use strict';
 // Owner subjects (server/objects/owner-subject.js, server/objects/owner-subject-job.js) against an
 // in-process Network stand-in that answers /oauth/token and /internal/identity/resolve-batch like Network
-// does: the service token is preferred and the internal key is the fallback; and new objects get their
-// subject (X-OV-Subject at creation, the reconcile job for everything else), with a re-projection to
-// another owner dropping it.
+// does: the service token is the only credential (the X-Internal-Key fallback is gone and must never be
+// sent); and new objects get their subject (X-OV-Subject at creation, the reconcile job for everything
+// else), with a re-projection to another owner dropping it.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -29,6 +29,7 @@ const { ids } = require('openvibe-contracts');
         map: new Map(),                  // 'live:<id>' -> usr_…
         calls: [],                       // { via, system, n }
         tokens: 0,
+        keySeen: false,                  // did any resolve-batch call carry X-Internal-Key? (it must not)
         down: false,
     };
     const network = http.createServer((req, res) => {
@@ -47,7 +48,8 @@ const { ids } = require('openvibe-contracts');
             }
             if (req.method === 'POST' && req.url === '/internal/identity/resolve-batch') {
                 const bearer = String(req.headers.authorization || '');
-                const via = req.headers['x-internal-key'] === env.INTERNAL_API_KEY ? 'internal-key' : (bearer === 'Bearer svc-media-token' && net.grant ? 'service-token' : null);
+                if (req.headers['x-internal-key'] !== undefined) net.keySeen = true;   // the key fallback is gone: it must never be sent
+                const via = bearer === 'Bearer svc-media-token' && net.grant ? 'service-token' : null;
                 if (!via) return send(403, { error: 'Invalid or missing internal key' });
                 const b = JSON.parse(raw || '{}');
                 if (!Array.isArray(b.ids) || !b.ids.length || !b.system) return send(400, { code: 'identity.bad_request' });
@@ -98,17 +100,18 @@ const { ids } = require('openvibe-contracts');
         const TO_FILL = 3 + many.length;
 
         // (The one-off backfill script is retired: the reconcile job below fills what is left.)
-        // A token Network refuses at resolve-batch: the key answers instead.
+        // The service token is the only credential: there is no INTERNAL_API_KEY fallback.
         const resolver = ownerSubject.createResolver({ networkUrl: NET });
         net.grant = true;
         let got = await resolver.resolve('live', ['12', '99', 12]);
         assert.deepStrictEqual([...got.entries()], [['12', s12], ['99', null]]);
         assert.strictEqual(resolver.state.via, 'service-token');
-        const tokenOnly = ownerSubject.createResolver({ networkUrl: NET, internalKey: '' });
+        // Network has not granted the scope: no token can be minted, and no key is tried.
+        const noGrant = ownerSubject.createResolver({ networkUrl: NET });
         net.grant = false;
-        await assert.rejects(tokenOnly.resolve('live', ['12']), /no service token/);
+        await assert.rejects(noGrant.resolve('live', ['12']), /no service token/);
         net.grant = true;
-        console.log('✅ Network auth: service token first, INTERNAL_API_KEY when Network has not granted it; failures are errors');
+        console.log('✅ Network auth: service token only (a refused grant is an error, never INTERNAL_API_KEY)');
 
         // ── New objects: X-OV-Subject at creation ──
         const express = require('express');
@@ -179,6 +182,8 @@ const { ids } = require('openvibe-contracts');
         console.log = said;
         config.ownerSubject.enabled = true;
         console.log('✅ new objects: X-OV-Subject stored at creation; the reconcile job fills the rest, re-projection keeps or drops it');
+
+        assert.strictEqual(net.keySeen, false, 'X-Internal-Key is never sent to Network');
 
         server.close(); network.close();
         await db.close();

@@ -178,9 +178,9 @@ Rules for both job and backfill:
   `server/objects/owner-subject.js`: `live` -> `live`). Others are reported and left alone.
 - A re-projection keeps the subject, unless it changes the owner (`owner_app`/`owner_user_id`). Then
   the subject is dropped until the job resolves the new owner.
-- Network is asked with a service token (`OV_OAUTH_CLIENT_ID`/`OV_OAUTH_CLIENT_SECRET`, capability
-  `identity.subject.resolve`, audience `openvibe.network`). When Network has not granted it, the
-  request uses `INTERNAL_API_KEY`.
+- Network is asked with a service token only (`OV_OAUTH_CLIENT_ID`/`OV_OAUTH_CLIENT_SECRET`, capability
+  `identity.subject.resolve`, audience `openvibe.network`). There is no fallback credential: when Network
+  has not granted it, the pass fails and the job retries.
 
 ```
 node scripts/backfill-owner-subject.js [--batch 500] [--json]                        # dry run: counts per tenant

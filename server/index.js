@@ -104,16 +104,12 @@ const ready = (async () => {
     app.get('/manifest.webmanifest', (_req, res) => res.type('application/manifest+json').sendFile(require('path').join(__dirname, 'brand', 'manifest.webmanifest')));
     // ── Internal: avatar ingestion (the Network asks; see server/avatars/ingest.js) ──
     {
-        const crypto = require('crypto');
-        const internalOnly = (req, res, next) => {
-            const want = String(config.network.internalApiKey || ''), got = String(req.headers['x-internal-key'] || '');
-            const viaProxy = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || req.headers['cf-connecting-ip'];
-            const local = /^(::1|::ffff:127\.|127\.)/.test(String(req.socket.remoteAddress || ''));
-            if (viaProxy || !local || want.length < 16 || got.length !== want.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(want))) return res.status(404).json({ error: 'Not found' });
-            next();
-        };
         const pastes = require('./pastes/routes');
-        app.post('/internal/avatar-ingest', internalOnly, require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config, screenshotsDir: pastes.SCREENSHOTS_DIR, generateSlug: pastes.generateSlug }));
+        // Loopback only. A Network service token holding media.avatar.ingest (audience openvibe.media);
+        // while Network moves to tokens, a request with no Bearer still passes with INTERNAL_API_KEY
+        // (server/service-guard.js). A Bearer is judged on the token alone (401 bad, 403 no capability).
+        app.post('/internal/avatar-ingest', require('./service-guard').guardOrKey('media.avatar.ingest'),
+            require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config, screenshotsDir: pastes.SCREENSHOTS_DIR, generateSlug: pastes.generateSlug }));
     }
     const userAuth = require('./user-auth');
     const userAuthConfig = {

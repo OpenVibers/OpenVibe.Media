@@ -20,9 +20,9 @@
  *   - an id Network does not know stays NULL and is reported; nothing is guessed;
  *   - only the tenants in SOURCE_SYSTEMS are resolved, because the system names the user-id space.
  *
- * Network is asked with a service token (capability identity.subject.resolve, audience
- * openvibe.network; OV_OAUTH_CLIENT_ID / OV_OAUTH_CLIENT_SECRET). When no token can be had
- * (a Network that has not granted it yet), it falls back to INTERNAL_API_KEY.
+ * Network is asked with a service token only (capability identity.subject.resolve, audience
+ * openvibe.network; OV_OAUTH_CLIENT_ID / OV_OAUTH_CLIENT_SECRET). There is no fallback credential: when
+ * no token can be had (a Network that has not granted it yet), the call fails and the job retries.
  */
 const { ids, serviceAuth } = require('openvibe-contracts');
 const config = require('../config');
@@ -45,7 +45,6 @@ const ownerKey = (app, userId) => `${app}\u0000${userId}`;
  */
 function createResolver({
     networkUrl = config.network.internalUrl,
-    internalKey = config.network.internalApiKey,
     clientId = process.env.OV_OAUTH_CLIENT_ID || 'media',
     clientSecret = process.env.OV_OAUTH_CLIENT_SECRET || '',
     fetchImpl = globalThis.fetch,
@@ -66,10 +65,9 @@ function createResolver({
                 tokenRetryAt = Date.now() + TOKEN_RETRY_MS;
             }
         }
-        if (internalKey) return { via: 'internal-key', headers: { 'X-Internal-Key': internalKey } };
         throw new Error(tokens
-            ? `no service token for identity.subject.resolve (${state.token_error}) and no INTERNAL_API_KEY`
-            : 'set OV_OAUTH_CLIENT_SECRET (service token) or INTERNAL_API_KEY to ask Network');
+            ? `no service token for identity.subject.resolve (${state.token_error})`
+            : `set OV_OAUTH_CLIENT_SECRET so ${clientId} can mint the identity.subject.resolve service token`);
     }
 
     async function send(cred, payload) {
@@ -91,12 +89,11 @@ function createResolver({
     async function post(payload) {
         let cred = await credential();
         let res = await send(cred, payload);
-        if ((res.status === 401 || res.status === 403) && cred.via === 'service-token' && internalKey) {
-            // A token Network refuses here (grant withdrawn, key rotated): the key, and no token for a while.
+        if (res.status === 401) {
+            // A token Network refuses (a key rotation, a withdrawn grant): mint a fresh one and try once more.
             tokens.invalidate();
-            tokenRetryAt = Date.now() + TOKEN_RETRY_MS;
-            state.token_error = `resolve-batch refused the token (${res.status})`;
-            cred = { via: 'internal-key', headers: { 'X-Internal-Key': internalKey } };
+            state.token_error = 'resolve-batch refused the token (401)';
+            cred = await credential();
             res = await send(cred, payload);
         }
         const body = await res.json().catch(() => null);
