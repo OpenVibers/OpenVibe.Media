@@ -118,7 +118,7 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
         let probeData = '';
         probe.stdout.on('data', (d) => (probeData += d));
 
-        probe.on('close', async (probeCode) => {
+        const onProbeClose = async (probeCode) => {
             let seekTime = opts.seekSeconds || 1;
 
             if (!opts.seekSeconds) {
@@ -175,7 +175,9 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
                 }
             });
             ff.on('error', () => { clearTimeout(killTimer); resolve(null); });
-        });
+        };
+        // A throw inside the handler (e.g. spawn failing) must resolve the request, not hang it.
+        probe.on('close', (probeCode) => { onProbeClose(probeCode).catch(() => resolve(null)); });
 
         probe.on('error', () => resolve(null));
     }).finally(() => _activeThumbJobs.delete(jobKey));

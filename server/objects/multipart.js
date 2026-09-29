@@ -126,10 +126,10 @@ function receivePart(req, session, n, { expectSha256 = null } = {}) {
             const sha = hash.digest('hex');
             if (got !== want) { drop(); return await finish({ status: 400, code: 'media.upload.part_size_mismatch', error: `Part ${n} must be ${want} bytes, received ${got}` }); }
             if (expectSha256 && String(expectSha256).toLowerCase() !== sha) { drop(); return await finish({ status: 400, code: 'media.upload.part_hash_mismatch', error: `Part ${n} does not match X-Content-SHA256` }); }
-            // The session may have been completed or aborted while this part streamed in.
-            const now = await getSession(session.id);
-            if (!now || now.status !== 'active') { drop(); return await finish({ status: 409, code: 'media.upload.not_active', error: `The upload is ${now ? now.status : 'gone'}` }); }
             try {
+                // The session may have been completed or aborted while this part streamed in.
+                const now = await getSession(session.id);
+                if (!now || now.status !== 'active') { drop(); return await finish({ status: 409, code: 'media.upload.not_active', error: `The upload is ${now ? now.status : 'gone'}` }); }
                 fs.renameSync(tmp, partFile(session.id, n));
                 await db.run(`INSERT INTO media_upload_parts (upload_id, part_number, size_bytes, sha256) VALUES (?, ?, ?, ?)
                         ON CONFLICT(upload_id, part_number) DO UPDATE SET size_bytes = excluded.size_bytes, sha256 = excluded.sha256, received_at = ov_now()`,
