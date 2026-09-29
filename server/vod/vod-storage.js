@@ -396,11 +396,19 @@ async function sha256Object(provider, key) {
 async function deleteObject(provider, key) {
     const client = clientFor(provider);
     if (!client) return;
+    // A shielded provider's cached slices leave the shield with the object (placement/shield.js): the size decides
+    // how many slices to refresh, so it is read before the delete.
+    const shield = require('../placement/shield');
+    const head = shield.enabled(provider) ? await headObject(provider, key).catch(() => null) : null;
     try {
         await client.send(new S3.DeleteObjectCommand({ Bucket: PROVIDER_ENV[provider].bucket, Key: key }));
     } catch (err) {
         console.warn(`[VodStorage] Delete ${provider}:${key} failed:`, err.message);
+        return;
     }
+    if (head) shield.purge({ provider, key, size: head.size, presign: presignGet })
+        .then((r) => { if (r.failed) console.warn(`[VodStorage] shield purge ${provider}:${key}: ${r.failed} of ${r.slices} slices not refreshed`); })
+        .catch(() => { /* purge never throws */ });
 }
 
 /**

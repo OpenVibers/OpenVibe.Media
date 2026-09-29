@@ -773,6 +773,14 @@ publicRouter.get('/:id', async (req, res) => {
                 if (fs.existsSync(loc.key)) return require('../public/routes').streamFileWithRange(req, res, loc.key, headers);
                 continue;
             }
+            // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through its
+            // slice cache, with an hour-long internal presign that never reaches the viewer.
+            const shield = require('../placement/shield');
+            if (shield.enabled(provider) && !sandbox && obj.visibility !== 'private') {
+                const inner = await require('../vod/vod-storage').presignGet(provider, loc.key, shield.SHIELD_TTL_SECONDS, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
+                const t = inner && shield.target({ provider, url: inner, visibility: obj.visibility, sandbox, host: req.hostname });
+                if (t) return shield.send(res, t, headers);
+            }
             // The router already signed its first choice; a fallback copy is signed here.
             const url = (provider === decision.provider && decision.url) || await require('../vod/vod-storage').presignGet(provider, loc.key, 300, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
             if (url) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, url); }

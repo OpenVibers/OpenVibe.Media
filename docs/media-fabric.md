@@ -187,3 +187,21 @@ metric. Budgets per class and provider with a forecast; `provider.cost.threshold
   epochs, canary shifts with auto-revert, player QoE beacons, seek SLOs.
 - **F6 cost truth:** bill imports, forecasts, budget guards, the owner dashboard.
 - **Archive fabric:** backups and snapshots to B2; optional deep archive with restore drills; never online.
+
+## F1b decisions (2026-09-29)
+
+- **Shield B2 only.** B2 is the canonical copy whose ~500 req/s ceiling is worth shielding; R2 reads keep their 302
+  until F2's engine can enforce the 70 %-of-port rule (an R2 read through the shield spends the same host bandwidth).
+- **A DNS-only edge host.** openvibe.media is behind Cloudflare's proxy and its terms for video are not verified, so
+  the shield answers only on `edge.openvibe.media` (grey cloud; `MEDIA_SHIELD_HOST`). Bytes that went viewer → B2 never
+  start flowing through Cloudflare.
+- **Cache key:** `b2|<bucket>/<key>|<slice range>`: the object path and the 10 MB slice, never the signature. The
+  shield's presign lives an hour (it stays inside nginx and a long response fetches later slices with it); the
+  viewer-facing 302 keeps its short TTL.
+- **Private and sandbox bytes never enter the shield.**
+- **Sizing:** one disk with recordings: `max_size=5g`, `min_free=20g` (the recording guardian warns at 15 GB), `inactive=24h`.
+- **Purge:** deleting a shielded object refreshes each of its slices through a loopback-only listener
+  (`127.0.0.1:8479`, `proxy_cache_bypass`), so the provider's 404 replaces the cached bytes at once.
+- **Logs:** shield logs carry the path only: the signed query is a bearer token.
+- Config: `deploy/nginx/media-shield.http.conf` (conf.d), `media-shield-b2-upstream.conf` (snippets),
+  `edge.openvibe.media.conf` (sites-enabled). Switch on with `MEDIA_SHIELD=b2` and `MEDIA_SHIELD_HOST` after nginx has them.
