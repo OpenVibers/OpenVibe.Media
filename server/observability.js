@@ -111,6 +111,13 @@ function domainMetrics(registry, { db, recorder, events }) {
             return [{ labels: { status: 'pending' }, value: s.pending }, { labels: { status: 'rejected' }, value: s.rejected }];
         },
     });
+
+    // ── Placement (F1 part A) ───────────────────────────────────────────
+    // The router / signals / presign-cache / providers modules expose bindMetric hooks; collect()'s
+    // by-name lookup lets each module emit its own increments while keeping the registry as the single
+    // source of truth (one HELP/TYPE per metric name across the whole process).
+    const placement = require('./placement/metrics-binding');
+    placement.bind(registry);
 }
 
 function createMediaReadiness({ release, db, config, auth, recorder, events, remote, drill = false }) {
@@ -131,7 +138,7 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
         }
     }
     checks.push({ name: 'network_jwks', required: false, description: 'user sign-in and service tokens (app keys work without it)', check: () => auth.jwksLoaded() || 'Network public key not loaded yet' });
-    for (const name of ['b2', 'r2']) {
+    for (const name of require('./vod/vod-storage').REMOTE_PROVIDERS) {
         if (drill) continue;
         // Not configured: listed as skipped (never a pretend pass), so the status shows the tier is not in use.
         if (!remote.configured(name)) { checks.push({ name: `remote_${name}`, required: false, check: () => skip('not configured') }); continue; }

@@ -61,9 +61,12 @@ function existing(p) {
 /**
  * Something ffmpeg can read for this object: a local path, or a presigned R2/B2 URL.
  * Projected vods/clips resolve the way playback does; native objects through their locations.
+ *
+ * All provider choice is the placement router (server/placement/router.js); no hard-coded order.
  */
 async function resolveSource(obj) {
     const vodStorage = require('../vod/vod-storage');
+    const router = require('../placement/router');
     const ref = model.parseLegacyRef(obj.legacy_ref);
     if (ref && (ref.kind === 'vod' || ref.kind === 'clip')) {
         const row = await db.get(`SELECT * FROM ${ref.kind === 'vod' ? 'vods' : 'clips'} WHERE id = ?`, [Number(ref.id)]);
@@ -76,13 +79,17 @@ async function resolveSource(obj) {
         return src ? { input: src.value, name: row.file_path, remote: src.kind === 'url' } : null;
     }
     const locs = await model.listLocations(obj.id);
-    const local = locs.find(l => l.provider === 'local' && l.state !== 'missing' && existing(l.key));
-    if (local) return { input: local.key, name: obj.canonical_key || local.key };
-    for (const p of ['r2', 'b2']) {
-        const l = locs.find(x => x.provider === p && !['missing', 'corrupt'].includes(x.state));
-        if (!l || !vodStorage.providerConfigured(p)) continue;
-        const url = await vodStorage.presignGet(p, l.key, 6 * 3600).catch(() => null);
-        if (url) return { input: url, name: l.key, remote: true };
+    const decision = await router.route({ locations: locs, purpose: 'derive', expiresIn: 6 * 3600 });
+    // The router ranks the copies (local first, then R2/B2) and presigns the chosen remote one;
+    // walk its chain so a stale local row or a failed presign still finds a readable source.
+    for (const loc of decision.candidates || []) {
+        const provider = loc.provider;
+        if (provider === 'local') {
+            if (existing(loc.key)) return { input: loc.key, name: obj.canonical_key || loc.key };
+            continue;
+        }
+        const url = await vodStorage.presignGet(provider, loc.key, 6 * 3600).catch(() => null);
+        if (url) return { input: url, name: loc.key, remote: true };
     }
     return null;
 }

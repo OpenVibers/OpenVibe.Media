@@ -51,6 +51,13 @@ const ready = (async () => {
     if (!drill.enabled) await require('./revocations').load();
     await require('./vod/tier-config').init(require('./vod/vod-storage').DEFAULTS);
     await require('./objects/tier-policy').init();
+    await require('./placement/cost-tiers').init();
+    // Placement core (F1 part A): the provider registry, signals + router. Boot the cheap live
+    // health loop after the DB is open (it reads memory only) and the router is wired in.
+    if (!drill.enabled) {
+        try { await require('./placement/providers').probeAll(); } catch (err) { console.warn('[Placement] initial probe failed:', err.message); }
+        try { require('./placement/providers').startHealthLoop(); } catch (err) { console.warn('[Placement] health loop did not start:', err.message); }
+    }
     if (!drill.enabled) {
         await auth.seedApps();     // upsert MEDIA_APPS_SEED / MEDIA_APP_KEYS
         await auth.ensureTokenOnlyApps();  // tenants reached only with Network service tokens (community)

@@ -155,7 +155,9 @@ async function serveMediaRecord(kind, record, req, res) {
     }
 
     // Resolve the local file. Clips keep their own absolute path; VODs resolve
-    // by basename under VOD_PATH (legacy rows carry old absolute paths).
+    // by basename under VOD_PATH (legacy rows carry old absolute paths). A local copy is served from
+    // disk without asking the router: promoting a VOD to R2 frees its local copy, so a VOD still on disk
+    // has not been promoted, and a growing recording exists only here.
     let filePath = null;
     if (record.file_path) {
         const candidates = kind === 'vod'
@@ -169,7 +171,8 @@ async function serveMediaRecord(kind, record, req, res) {
     // Offloaded (B2/R2) — redirect to a presigned object-store URL. Range
     // requests are handled natively by the object store.
     if (!filePath && vodStorage.isRemote(record)) {
-        const plan = await vodStorage.resolvePlayback(record);
+        const router = require('../placement/router');
+        const plan = await vodStorage.resolvePlayback(record, { session: router.sessionFor(req, `${kind}:${record.id}`) });
         if (plan?.kind === 'redirect') {
             res.set('Cache-Control', 'private, max-age=0');
             res.set('X-Robots-Tag', 'noindex');

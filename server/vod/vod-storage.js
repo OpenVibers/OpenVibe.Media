@@ -66,7 +66,8 @@ const PROVIDER_ENV = {
     },
 };
 
-const REMOTE_PROVIDERS = ['b2', 'r2'];
+// Every remote the S3 engine knows: a membership set, never a read order (reads rank through the placement router).
+const REMOTE_PROVIDERS = Object.freeze(Object.keys(PROVIDER_ENV));
 const KEY_PREFIX = 'vods/';
 
 // ── Settings (media_settings, JSON values under storage_tier.*) ──
@@ -115,7 +116,7 @@ const DEFAULTS = {
 let sweepTimer = null;
 let sweepRunning = false;
 const clients = {};          // providerName → S3Client
-const providerHealthy = {};  // providerName → bool
+const providerHealthy = {};  // providerName → bool (kept for legacy readers; placement/signals is the source of truth for routing)
 
 // The policy is revisioned configuration (server/vod/tier-config.js, openvibe-shared/config): read from
 // memory, changed only through a validated revision (setSettings, the admin config routes).
@@ -220,9 +221,16 @@ function clientFor(name) {
     return clients[name];
 }
 
-/** Configured, and not known to be down (the last HeadBucket or readiness probe did not fail). */
+/** Configured, and not known to be down. The placement/signals circuit breaker is the source of truth now:
+ *  if it has opened for this provider, we skip the provider. The boot-time `providerHealthy` map is kept
+ *  for legacy readers and as the initial state until the first probe runs. */
 function providerAvailable(name) {
-    return providerConfigured(name) && providerHealthy[name] !== false;
+    if (!providerConfigured(name)) return false;
+    if (providerHealthy[name] === false) return false;
+    // Continuous health, not boot-only: the placement circuit breaker (fed by every presign, HEAD
+    // and the per-minute probe) decides whether a provider is served from right now.
+    try { if (!require('../placement/signals').providerHealthy(name)) return false; } catch { /* signals not booted yet */ }
+    return true;
 }
 
 function bucketFor(name) {
@@ -268,13 +276,26 @@ function isRemote(vod) {
 async function headObject(provider, key) {
     const client = clientFor(provider);
     if (!client) return null;
+    const started = Date.now();
     try {
         const res = await client.send(new S3.HeadObjectCommand({ Bucket: PROVIDER_ENV[provider].bucket, Key: key }));
+        observeProvider(provider, 'head', true, Date.now() - started);
         return { size: Number(res.ContentLength || 0), etag: res.ETag || null };
     } catch (err) {
         if (err?.$metadata?.httpStatusCode === 404 || err?.name === 'NotFound' || err?.name === 'NoSuchKey') return null;
+        observeProvider(provider, 'head', false, Date.now() - started);
         throw err;
     }
+}
+
+/** One provider round-trip into the rolling signals (placement/signals.js) and the Prometheus
+ *  histogram/counter (placement/metrics-binding.js). Lazy requires: neither is loaded in every context. */
+function observeProvider(provider, op, ok, ms) {
+    try { const s = require('../placement/signals'); ok ? s.recordSuccess(provider, op, ms) : s.recordFailure(provider, op, ms); } catch { /* placement not loaded */ }
+    try {
+        const mb = require('../placement/metrics-binding');
+        ok ? mb.observeLatency(provider, op, ms) : mb.observeError(provider, op);
+    } catch { /* */ }
 }
 
 /** Deadline for one upload: a floor plus the time the file takes at the minimum acceptable throughput. */
@@ -447,21 +468,42 @@ async function listMultipartUploads(provider, prefix = '') {
 /**
  * A presigned GET URL. `overrides` { contentType, contentDisposition } become the response headers the store
  * answers with (the object tiering passes what /o/:id would have sent, so an attachment stays one).
+ *
+ * Wraps the LRU (server/placement/presign-cache.js): the URL is short-lived but the cache hit rate is
+ * high in steady state (one presign per object per minute), and dropping it cuts R2 Class B costs.
  */
 async function presignGet(provider, key, expiresInSeconds = 900, overrides = {}) {
     const client = clientFor(provider);
     if (!client) return null;
+    // LRU in front: a hit short-circuits the SDK call entirely.
+    try {
+        const cache = require('../placement/presign-cache');
+        const hit = cache.get(provider, key, overrides.contentType || '', overrides.contentDisposition || '', expiresInSeconds);
+        if (hit) return hit.url;
+    } catch { /* cache not loaded */ }
     loadSdk();
+    const started = Date.now();
     // Force the response MIME so the browser plays the media even when the stored
     // object metadata is generic (legacy clips were uploaded as octet-stream).
     const ext = path.extname(key || '').toLowerCase();
     const mime = overrides.contentType || { '.webm': 'video/webm', '.mp4': 'video/mp4', '.mkv': 'video/x-matroska', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }[ext];
-    return Presigner.getSignedUrl(client, new S3.GetObjectCommand({
-        Bucket: PROVIDER_ENV[provider].bucket,
-        Key: key,
-        ...(mime ? { ResponseContentType: mime } : {}),
-        ...(overrides.contentDisposition ? { ResponseContentDisposition: overrides.contentDisposition } : {}),
-    }), { expiresIn: expiresInSeconds });
+    let url;
+    try {
+        url = await Presigner.getSignedUrl(client, new S3.GetObjectCommand({
+            Bucket: PROVIDER_ENV[provider].bucket,
+            Key: key,
+            ...(mime ? { ResponseContentType: mime } : {}),
+            ...(overrides.contentDisposition ? { ResponseContentDisposition: overrides.contentDisposition } : {}),
+        }), { expiresIn: expiresInSeconds });
+    } catch (err) {
+        observeProvider(provider, 'presign', false, Date.now() - started);
+        throw err;
+    }
+    observeProvider(provider, 'presign', true, Date.now() - started);
+    try {
+        require('../placement/presign-cache').put(provider, key, overrides.contentType || '', overrides.contentDisposition || '', expiresInSeconds, url);
+    } catch { /* cache not loaded */ }
+    return url;
 }
 
 // ── Playback resolution ──────────────────────────────────────
@@ -469,27 +511,30 @@ async function presignGet(provider, key, expiresInSeconds = 900, overrides = {})
 /**
  * Returns { kind: 'file', path } for local VODs or
  * { kind: 'redirect', url, provider } for offloaded ones.
- * Falls back through r2 → b2 → local if an object is missing.
+ *
+ * Routes through the placement router (server/placement/router.js): the choice of provider is no
+ * longer a property of `storage_provider` alone — it is the fastest healthy copy, with local
+ * preferred when the file is on disk, R2 over B2 for playback when both are present, and B2
+ * as the canonical fallback. The router returns the chosen provider; we presign it and answer.
  */
-async function resolvePlayback(vod) {
-    const provider = providerOf(vod);
-    const key = keyForVod(vod);
-
-    if (provider !== 'local') {
-        const order = provider === 'r2' ? ['r2', 'b2'] : ['b2', 'r2'];
-        for (const p of order) {
-            if (!providerConfigured(p) || providerHealthy[p] === false) continue;
+async function resolvePlayback(vod, { session = null, range = null } = {}) {
+    const router = require('../placement/router');
+    const decision = await router.route({ vod, purpose: 'playback', session, range });
+    if (decision.provider && decision.provider !== 'local') {
+        if (decision.url) return { kind: 'redirect', url: decision.url, provider: decision.provider, fallbacks: decision.fallbacks };
+        // The router met a provider it could not rank-presign (the client is unavailable). Try the
+        // ranked copies anyway so the caller still gets whichever one answers.
+        const key = keyForVod(vod);
+        for (const p of [decision.provider, ...(decision.fallbacks || [])]) {
             try {
                 const url = await presignGet(p, key);
-                if (url) return { kind: 'redirect', url, provider: p };
-            } catch (err) {
-                console.warn(`[VodStorage] Presign failed for ${p}:${key}:`, err.message);
-            }
+                if (url) return { kind: 'redirect', url, provider: p, fallbacks: [decision.provider, ...(decision.fallbacks || [])].filter((x) => x !== p) };
+            } catch (err) { console.warn(`[VodStorage] Presign failed for ${p}:${key}:`, err.message); }
         }
     }
 
     const local = localPathForVod(vod);
-    if (fs.existsSync(local)) return { kind: 'file', path: local };
+    if (fs.existsSync(local)) return { kind: 'file', path: local, fallbacks: decision.fallbacks || [] };
     return null;
 }
 
@@ -497,6 +542,8 @@ async function resolvePlayback(vod) {
  * A source ffmpeg/ffprobe can consume: local path, or a presigned https URL.
  */
 async function resolveMediaSource(vod) {
+    // The provider choice is the placement router's, whether the copy is on disk or in the cloud:
+    // `resolvePlayback` asks it (clip cutting, thumbnails and derive all resolve a source this way).
     const local = localPathForVod(vod);
     if (fs.existsSync(local)) return { kind: 'file', value: local };
     if (isRemote(vod)) {
@@ -598,16 +645,23 @@ async function _moveToHot(vodId) {
         return { ok: true, already: true };
     }
 
-    const srcProvider = ['b2', 'r2'].find(p => providerConfigured(p));
-    if (!srcProvider) return { ok: false, error: 'No remote provider configured' };
+    // Which remote copy to pull down is the router's call (purpose `download`): B2 first (free ops,
+    // no request ceiling spent), R2 when that is the only copy, health and breaker respected.
+    const decision = await require('../placement/router').route({ vod, purpose: 'download' });
+    // No early refusal when the router finds no present copy: a stale location row is exactly the case the walk
+    // below exists for (it HEADs every configured remote).
+    if (!REMOTE_PROVIDERS.some((p) => providerConfigured(p))) return { ok: false, error: 'No remote provider configured' };
 
     try {
         loadSdk();
-        let provider = providerOf(vod) === 'r2' ? 'r2' : 'b2';
-        let head = await headObject(provider, key);
-        if (!head) {
-            provider = provider === 'r2' ? 'b2' : 'r2';
-            head = providerConfigured(provider) ? await headObject(provider, key) : null;
+        // Walk the router's ranked copies, then any other configured remote (the row's
+        // `storage_provider` is not proof that this is the copy that still exists): the first one
+        // that actually answers with the object wins.
+        let provider = null, head = null;
+        for (const p of [...new Set([decision.provider, ...(decision.fallbacks || []), ...REMOTE_PROVIDERS])]) {
+            if (!p || !providerConfigured(p)) continue;
+            head = await headObject(p, key);
+            if (head) { provider = p; break; }
         }
         if (!head) return { ok: false, error: 'Object missing from remote storage' };
 
@@ -668,7 +722,7 @@ async function _promoteToR2(vodId) {
     if (!vod || !vod.file_path) return { ok: false, error: 'VOD not found' };
     if (vod.is_recording) return { ok: false, error: 'VOD is currently recording' };
     if (await _held(vod)) return { ok: false, held: true, error: 'VOD is under a retention hold' };
-    if (!providerConfigured('r2') || providerHealthy.r2 === false) return { ok: false, error: 'R2 not available' };
+    if (!providerAvailable('r2')) return { ok: false, error: 'R2 not available' };
     if (!providerConfigured('b2')) return { ok: false, error: 'B2 not configured' };
 
     const key = keyForVod(vod);
@@ -690,7 +744,7 @@ async function _promoteToR2(vodId) {
             else await copyBetweenProviders('b2', 'r2', key);
         }
 
-        await _moved(vodId, ['b2', 'r2'], async () => await db.run("UPDATE vods SET storage_provider = 'r2', storage_key = ? WHERE id = ?", [key, vodId]));
+        await _moved(vodId, REMOTE_PROVIDERS, async () => await db.run("UPDATE vods SET storage_provider = 'r2', storage_key = ? WHERE id = ?", [key, vodId]));
 
         // Popular VODs live in R2+B2; free the local copy
         let freed = 0;
@@ -919,6 +973,9 @@ async function emitStorageEvent(event, kind, data, settings = getSettings()) {
     const last = alertLastSentAt.get(cooldownKey) || 0;
     if (event === 'storage.alert' && Date.now() - last < settings.alertCooldownMs) return false;
     alertLastSentAt.set(cooldownKey, Date.now());
+    if (event === 'storage.alert') {
+        try { require('../placement/metrics-binding').alert(kind); } catch { /* */ }
+    }
     const payload = { kind, ...data, at: new Date().toISOString() };
     (event === 'storage.alert' ? console.error : console.warn)(`[VodStorage] ${event} (${kind}): ${JSON.stringify(data)}`);
     // No database state changes here (the cooldown is in memory): the outbox row is the whole
@@ -1067,7 +1124,7 @@ async function runSweep() {
         }
 
         // 2) R2 promotion for popular VODs
-        if (settings.r2Enabled && providerConfigured('r2') && providerHealthy.r2 !== false) {
+        if (settings.r2Enabled && providerAvailable('r2')) {
             const popular = await db.all(`
                 SELECT id, view_count, last_accessed_at FROM vods
                 WHERE COALESCE(storage_provider, 'local') IN ('local', 'b2')
@@ -1251,11 +1308,26 @@ function stop() {
 
 // ── Status ───────────────────────────────────────────────────
 
-// List prices used for the admin cost estimate (storage only; egress noted).
-const CLOUD_PRICING = {
-    b2: { storagePerGbMonth: 0.006, egressPerGb: 0.01, freeGb: 0, egressNote: 'First 3× storage free/day, then $0.01/GB' },
-    r2: { storagePerGbMonth: 0.015, egressPerGb: 0,    freeGb: 10, egressNote: 'Egress is free' },
-};
+// The cost table is the revisioned config `media.cost_tiers` (server/placement/cost-tiers.js).
+// Read through this helper so a price change is one revision, not a code change. The legacy
+// `CLOUD_PRICING` shape is kept as a derivation for the admin /metrics endpoint.
+function _readPricing() {
+    try {
+        const s = require('../placement/cost-tiers').settings();
+        return {
+            b2: { storagePerGbMonth: s.b2.storagePerGbMonth, egressPerGb: s.b2.egressPerGb, freeGb: s.b2.freeGb, egressNote: `First ${s.b2.egressFreeMultiplier}× storage free/month, then $${s.b2.egressPerGb}/GB` },
+            r2: { storagePerGbMonth: s.r2.standard.storagePerGbMonth, egressPerGb: s.r2.standard.egressPerGb, freeGb: s.r2.standard.freeGb, egressNote: 'Egress is free' },
+            local: { storagePerGbMonth: 0, egressPerGb: 0, freeGb: 0, egressNote: 'Prepaid bandwidth on the Media host' },
+        };
+    } catch {
+        // Fallback for the rare path where the cost-tiers config has not loaded yet (tests, drills).
+        return {
+            b2: { storagePerGbMonth: 0.00695, egressPerGb: 0.01, freeGb: 10, egressNote: 'First 3× storage free/month, then $0.01/GB' },
+            r2: { storagePerGbMonth: 0.015, egressPerGb: 0, freeGb: 10, egressNote: 'Egress is free' },
+            local: { storagePerGbMonth: 0, egressPerGb: 0, freeGb: 0, egressNote: 'Prepaid bandwidth on the Media host' },
+        };
+    }
+}
 
 let _bucketUsageCache = null;
 
@@ -1300,11 +1372,12 @@ async function getBucketUsage(force = false) {
 
 /** Estimate monthly storage cost from bucket usage using list prices. */
 function estimateCloudCosts(usage) {
-    const costs = { pricing: CLOUD_PRICING };
+    const pricing = _readPricing();
+    const costs = { pricing };
     let totalStorage = 0;
     for (const provider of REMOTE_PROVIDERS) {
         const u = usage?.[provider];
-        const price = CLOUD_PRICING[provider];
+        const price = pricing[provider];
         if (!u || !u.configured || u.error) { costs[provider] = null; continue; }
         const gb = u.bytes / 1e9;
         const billableGb = Math.max(0, gb - price.freeGb);
@@ -1451,6 +1524,7 @@ async function getStatus() {
 module.exports = {
     cleanupStaleDownloads,
     DEFAULTS,
+    REMOTE_PROVIDERS,
     OFFLOADABLE_WHERE,
     needsDrain,
     drainSatisfied,
@@ -1462,6 +1536,7 @@ module.exports = {
     providerConfigured,
     providerAvailable,
     bucketFor,
+    clientFor,
     endpointFor,
     headObject,
     uploadFile,

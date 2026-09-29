@@ -161,6 +161,16 @@ async function tiering(appId, limit) {
     const nativeObjects = await require('../objects/tiering').report({ appId, limit: Math.min(limit, 20) });
     return {
         providers: { b2: vodStorage.providerConfigured('b2'), r2: vodStorage.providerConfigured('r2') },
+        // Placement (F1): the rolling per-provider signals the read router decides with — breaker
+        // state, EWMA latency and error/p50/p95 per window — plus the probed capabilities.
+        placement: (() => {
+            try {
+                return {
+                    ...require('../placement/signals').snapshot(),
+                    health: require('../placement/providers').healthStatus(),
+                };
+            } catch { return null; }
+        })(),
         policy: { enabled: !!settings.enabled, r2_enabled: !!settings.r2Enabled, min_age_days: settings.minAgeDays, max_views_for_cold: settings.maxViewsForCold, min_last_access_days: settings.minLastAccessDays },
         vods: await providers('vods', true),
         clips: await providers('clips', false),

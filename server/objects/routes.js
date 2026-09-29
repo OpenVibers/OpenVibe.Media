@@ -754,21 +754,27 @@ publicRouter.get('/:id', async (req, res) => {
         // A viewer of a native object, counted once a day without being identified (objects/popularity.js); the
         // object tiering reads these counts. Sandbox objects are never tiered, so they are not counted.
         if (!obj.legacy_ref && !sandbox) await require('./popularity').record(obj, req);
-        const locs = await model.listLocations(obj.id);
-        const vodStorage = require('../vod/vod-storage');
-        // A native object promoted to the R2 popularity cache (objects/tiering.js) plays from its verified R2 copy
-        // while R2 is available, with the headers this route would send; the canonical copy is the fallback.
-        const cached = !obj.legacy_ref && locs.find(l => l.provider === 'r2' && l.state === 'present' && l.verified_at);
-        if (cached && vodStorage.providerAvailable('r2')) {
-            const url = await vodStorage.presignGet('r2', cached.key, 300, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
-            if (url) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, url); }
-        }
-        const local = locs.find(l => l.provider === 'local' && l.state !== 'missing' && fs.existsSync(l.key));
-        if (local) return require('../public/routes').streamFileWithRange(req, res, local.key, headers);
-        for (const p of ['r2', 'b2']) {
-            const l = locs.find(x => x.provider === p && x.state !== 'missing' && x.state !== 'corrupt');
-            if (!l || !vodStorage.providerConfigured(p)) continue;
-            const url = await vodStorage.presignGet(p, l.key, 300).catch(() => null);
+        // Placement router (server/placement/router.js) is the only function that picks a provider.
+        // The router ignores locations not in state='present', skips open breakers and unprobed
+        // providers, and ranks by preference tier with the measured 5-minute EWMA latency and the
+        // design's ±15 % tie band: a verified R2 copy (the hot cache) for playback, then local, R2, B2.
+        const router = require('../placement/router');
+        const decision = await router.route({
+            object: obj, purpose: 'playback', session: router.sessionFor(req, obj.id),
+            contentType: mime, contentDisposition: headers['Content-Disposition'], expiresIn: 300,
+        });
+        // Walk the router's ranked copies: stream a local one, redirect to a presigned remote one.
+        // A stale `present` local row whose file is gone falls through to the next copy.
+        // The router's candidates carry their keys: a copy it resolved without a media_locations row (the object's
+        // own canonical copy) is served too.
+        for (const loc of decision.candidates || []) {
+            const provider = loc.provider;
+            if (provider === 'local') {
+                if (fs.existsSync(loc.key)) return require('../public/routes').streamFileWithRange(req, res, loc.key, headers);
+                continue;
+            }
+            // The router already signed its first choice; a fallback copy is signed here.
+            const url = (provider === decision.provider && decision.url) || await require('../vod/vod-storage').presignGet(provider, loc.key, 300, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
             if (url) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, url); }
         }
         res.status(404).json({ error: 'Object bytes unavailable' });

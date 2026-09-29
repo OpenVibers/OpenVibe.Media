@@ -26,7 +26,9 @@ const config = require('../config');
 const copyReport = require('./copy-report');
 
 const MB = 1024 * 1024;
-const REMOTE = ['b2', 'r2'];
+// Every remote tier the fabric knows — the canonical list lives in vod-storage (REMOTE_PROVIDERS);
+// this is an enumeration for verification, never a read-path preference order.
+const REMOTE = () => require('../vod/vod-storage').REMOTE_PROVIDERS;
 
 let _timer = null, _startTimer = null, _busy = false;
 
@@ -117,7 +119,7 @@ async function verifyObject(obj, opts) {
     const reuploads = [];
     if (goodLocal) {
         for (const loc of locs) {
-            if (!REMOTE.includes(loc.provider)) continue;
+            if (!REMOTE().includes(loc.provider)) continue;
             const r = results.find(x => x.provider === loc.provider);
             const want = r.state === 'missing' || (repairCorrupt && r.state === 'corrupt');
             if (!want) continue;

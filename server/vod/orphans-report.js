@@ -338,7 +338,7 @@ async function remoteHint(provider, key, refs) {
  */
 async function buildStorageReport({ providers = null, list = null, listUploads = null, limit = 2000, now = Date.now() } = {}) {
     const vs = vodStorage();
-    const provs = providers || ['b2', 'r2'].filter(p => vs.providerConfigured(p));
+    const provs = providers || vs.REMOTE_PROVIDERS.filter(p => vs.providerConfigured(p));
     const lister = list || (async (p) => await vs.listObjects(p, ''));
     const uploadLister = listUploads || (async (p) => await vs.listMultipartUploads(p));
     const cap = Math.max(1, Number(limit) || 2000);
@@ -395,7 +395,9 @@ async function buildStorageReport({ providers = null, list = null, listUploads =
         entry.bytes = keys.reduce((n, k) => n + (Number(k.size) || 0), 0);
         listed.set(p, new Map(keys.map(k => [k.key, k])));
         const rrefs = await remoteReferences(p);
-        const orphans = keys.filter(k => !rrefs.wanted.has(k.key)).sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0));
+        // The placement capability probe keeps one small object per bucket (placement/providers.js PROBE_PREFIX).
+        const PROBE = require('../placement/providers').PROBE_PREFIX;
+        const orphans = keys.filter(k => !rrefs.wanted.has(k.key) && !String(k.key).startsWith(PROBE)).sort((a, b) => (Number(b.size) || 0) - (Number(a.size) || 0));
         report.totals.unreferenced_remote[p] = { keys: orphans.length, bytes: orphans.reduce((n, k) => n + (Number(k.size) || 0), 0) };
         for (const k of orphans.slice(0, cap)) push('unreferenced_remote', { provider: p, key: k.key, size: Number(k.size) || 0, last_modified: k.last_modified || null, hint: await remoteHint(p, k.key, rrefs) });
         if (orphans.length > cap) report.truncated.unreferenced_remote = true;
