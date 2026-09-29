@@ -108,7 +108,7 @@ async function measure(vod, { confirm = false, confirmRemote = false, probeTimeo
 }
 
 function reportsDir() {
-    return path.join(path.dirname(config.db.path), 'reports');
+    return path.join(config.dataDir, 'reports');
 }
 
 function writeReport(report, file = null) {

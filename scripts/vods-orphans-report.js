@@ -70,7 +70,7 @@ const path = require('path');
         if (has('storage')) { await storageReport(); await db.close(); process.exit(0); }
         if (!vodStorage.providerConfigured(provider)) usage(`${provider} is not configured (MEDIA_${provider.toUpperCase()}_* not in the environment)`);
         const report = await orphans.buildReport({ provider, prefix: arg('prefix') || orphans.PREFIX });
-        const file = arg('out') ? path.resolve(arg('out')) : path.join(path.dirname(config.db.path), 'reports', `vods-orphans-${report.generated_at.replace(/[:.]/g, '-')}.json`);
+        const file = arg('out') ? path.resolve(arg('out')) : path.join(config.dataDir, 'reports', `vods-orphans-${report.generated_at.replace(/[:.]/g, '-')}.json`);
         fs.mkdirSync(path.dirname(file), { recursive: true });
         fs.writeFileSync(file, JSON.stringify(report, null, 1));
         log(`${report.provider}://${report.bucket}/${report.prefix}: ${report.totals.objects} object(s), ${report.totals.gb} GB (read-only report)`);

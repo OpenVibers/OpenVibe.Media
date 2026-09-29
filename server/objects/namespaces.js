@@ -177,7 +177,7 @@ function limitsOf(app, row) {
  */
 /**
  * Inside a transaction, the tenant's quota lock (held to commit): a check and the row it admits commit before the next
- * check of the same tenant reads usage, as SQLite's one writer made them (ADR-035).
+ * check of the same tenant reads usage, as the tenant's quota lock makes them (ADR-035).
  */
 async function lockQuota(appId) {
     if (db.getDb().inTransaction()) await db.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [`media.quota:${appId}`]);

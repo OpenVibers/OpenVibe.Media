@@ -77,11 +77,11 @@ async function check(name, fn) {
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     fs.mkdirSync(dataDir, { recursive: true });
     let server = null;
-    // This release on PostgreSQL (ADR-035) and N-1 on SQLite: they never share a database (the switch stops the
-    // service, imports, then starts this release), so N-1's SQL has no schema of this release to run on. The client
-    // half still runs, on a freshly migrated and seeded database. Both on PostgreSQL: N keeps every migration N-1 ran.
+    // This release on PostgreSQL (ADR-035) and a recorded N-1 that still ran on SQLite: they never share a database,
+    // so N-1's SQL has no schema of this release to run on. The client half still runs, on a freshly migrated and
+    // seeded database. Once the N-1 fixture is recorded from a PostgreSQL release: N keeps every migration N-1 ran.
     const pg = fs.existsSync(path.join(ROOT, 'migrations'));
-    const sqlSkip = pg && worker.engine !== 'postgresql' ? 'N-1 SQL: skipped (N-1 runs on SQLite and this release on PostgreSQL: no shared database, so no N-1 statement runs on this schema; scripts/migrate-to-postgres.js moves the data and was rehearsed)' : null;
+    const sqlSkip = pg && worker.engine !== 'postgresql' ? 'N-1 SQL: skipped (the recorded N-1 release runs on SQLite and this release on PostgreSQL: no shared database, so no N-1 statement runs on this schema)' : null;
     if (pg && worker.engine === 'postgresql') {
         await check(`N-1's ${worker.migrations.length} migration file(s) are all here, unchanged`, () => {
             const dir = path.join(ROOT, 'migrations');

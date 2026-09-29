@@ -56,7 +56,7 @@ function sha256File(p) {
     });
 }
 
-/** SQLite 'YYYY-MM-DD HH:MM:SS' (UTC) or ISO → epoch ms (NaN when unreadable). */
+/** Epoch ms from a `YYYY-MM-DD HH:MM:SS` (UTC) text timestamp, as the migrations store them, or ISO (NaN when unreadable). */
 function msOf(t) {
     const s = String(t || '');
     return Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(s) ? s : `${s.replace(' ', 'T')}Z`);

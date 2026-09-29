@@ -12,7 +12,6 @@ const path = require('path');
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-dbopen-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     for (const [k, n] of [['VOD_PATH', 'vods'], ['CLIPS_PATH', 'clips'], ['FILES_PATH', 'files'], ['THUMBNAILS_PATH', 'thumbnails'], ['PASTES_PATH', 'pastes'], ['OBJECTS_PATH', 'objects']]) process.env[k] = dir(n);
     process.env.MEDIA_PUBLIC_URL = 'https://media.test';
     console.log = () => {};

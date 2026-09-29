@@ -18,7 +18,6 @@ const crypto = require('crypto');
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-namespaces-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.VOD_PATH = dir('vods');
     process.env.FILES_PATH = dir('files');
     process.env.OBJECTS_PATH = dir('objects');
@@ -51,8 +50,8 @@ const crypto = require('crypto');
         iss: 'https://openvibe.network', sub: `app:${APP_A}`, actor_type: 'app', aud: ['openvibe.media'], cap, ns, project_id: project, env, iat: now, exp: now + 300, jti: jti(),
     }, keys.privateKey);
 
-    // Tenants: Live, and developer project PA in production and in its sandbox. (The SQLite release moved older rows
-    // into namespaces at boot; on PostgreSQL the schema starts with them, and writes keep them.)
+    // Tenants: Live, and developer project PA in production and in its sandbox. (On PostgreSQL the schema starts
+    // with the namespaces in place, and writes keep them.)
     await db.upsertApp({ app_id: 'live', api_key: 'live-key' });
     await db.ensureProjectTenant(PA, 'production', 1000000);
     await db.ensureProjectTenant(PA, 'sandbox', 1000000);

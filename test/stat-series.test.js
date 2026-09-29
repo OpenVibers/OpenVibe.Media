@@ -7,7 +7,6 @@ const path = require('path');
 
 (async () => {
     const tmp = path.join(os.tmpdir(), `ov-media-series-${process.pid}.db`);
-    process.env.DB_PATH = tmp;
     const db = require('../server/db/database');
     const raw = db.getDb();
 

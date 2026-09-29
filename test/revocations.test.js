@@ -10,7 +10,6 @@ const http = require('http');
 
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-revoke-'));
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.MEDIA_INBOUND_EVENTS_SECRET = 'm'.repeat(40);
     const express = require('express');
     const { signDeliveryHeaders } = require('openvibe-sdk/events');

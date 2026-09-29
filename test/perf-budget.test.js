@@ -32,7 +32,7 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
         const port = await freePort();
         const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
             cwd: path.join(__dirname, '..'),
-            env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test', DB_PATH: path.join(dir, 'media.db'), MEDIA_PGLITE_DIR: path.join(dir, 'pglite'), DATABASE_URL: '', DATABASE_DIRECT_URL: '', VALKEY_URL: '', VOD_PATH: path.join(dir, 'vods'), CLIPS_PATH: path.join(dir, 'clips'), FILES_PATH: path.join(dir, 'files'), THUMBNAILS_PATH: path.join(dir, 'thumbnails'), PASTES_PATH: path.join(dir, 'pastes'), OBJECTS_PATH: path.join(dir, 'objects'), MEDIA_JOBS_ENABLED: 'off' },
+            env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test', MEDIA_PGLITE_DIR: path.join(dir, 'pglite'), DATABASE_URL: '', DATABASE_DIRECT_URL: '', VALKEY_URL: '', VOD_PATH: path.join(dir, 'vods'), CLIPS_PATH: path.join(dir, 'clips'), FILES_PATH: path.join(dir, 'files'), THUMBNAILS_PATH: path.join(dir, 'thumbnails'), PASTES_PATH: path.join(dir, 'pastes'), OBJECTS_PATH: path.join(dir, 'objects'), MEDIA_JOBS_ENABLED: 'off' },
             stdio: ['ignore', 'ignore', 'pipe'],
         });
         let stderr = '';

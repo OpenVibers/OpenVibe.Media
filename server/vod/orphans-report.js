@@ -438,7 +438,7 @@ async function buildStorageReport({ providers = null, list = null, listUploads =
 }
 
 function reportsDir() {
-    return path.join(path.dirname(config.db.path), 'reports');
+    return path.join(config.dataDir, 'reports');
 }
 
 /** Write a storage report as JSON (default <data>/reports/storage-orphans-<time>.json). Returns the path. */

@@ -37,7 +37,7 @@ function expectedFields(p) {
     };
 }
 
-// SQLite hands integers back as numbers and TEXT as strings; an app-local user id may be either.
+// The store hands bigint back as a number or a string and TEXT as a string; an app-local user id may be either.
 const same = (a, b) => (a == null ? '' : String(a)) === (b == null ? '' : String(b));
 
 /** Every row of `table` (optionally one tenant's) in key order, a page at a time. */

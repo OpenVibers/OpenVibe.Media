@@ -1,5 +1,5 @@
 'use strict';
-// Roadmap Wave 3 (audit item 7): Media's outbox row is written in the SAME SQLite transaction as
+// Roadmap Wave 3 (audit item 7): Media's outbox row is written in the SAME PostgreSQL transaction as
 // the state change it describes. An outcome is never lost (the change committed, the event did
 // not) and never a phantom (the event exists, the change rolled back). The webhook for the same
 // outcome follows the commit and carries the event's id, so a consumer reading both paths
@@ -15,7 +15,6 @@ const crypto = require('crypto');
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-outbox-tx-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.VOD_PATH = dir('vods');
     process.env.CLIPS_PATH = dir('clips');
     process.env.FILES_PATH = dir('files');

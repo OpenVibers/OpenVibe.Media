@@ -113,8 +113,9 @@ router.get('/', async (req, res) => {
         ];
         const breakdown = directories.map(d => ({ name: d.name, ...dirStatsRecursive(d.path) }));
 
+        // The store's size (PostgreSQL; the server answers 0 when it does not report one).
         let dbBytes = 0;
-        try { dbBytes = fs.statSync(config.db.path).size; } catch { /* */ }
+        try { dbBytes = Number((await db.get('SELECT pg_database_size(current_database()) AS bytes')).bytes) || 0; } catch { /* */ }
 
         // App-scoped DB stats
         const vodStats = await db.get(`

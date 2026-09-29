@@ -21,13 +21,13 @@ const config = {
     publicUrl: (process.env.MEDIA_PUBLIC_URL || 'https://openvibe.media').replace(/\/$/, ''),
 
     // PostgreSQL (ADR-035): DATABASE_URL serves (PgBouncer), DATABASE_DIRECT_URL migrates (owner). Without them,
-    // development uses an embedded PGlite database in data/pglite. path: the SQLite file of releases before
-    // PostgreSQL, read once by scripts/migrate-to-postgres.js.
+    // development uses an embedded PGlite database in data/pglite (MEDIA_PGLITE_DIR overrides it).
     db: {
         url: process.env.DATABASE_URL || '',
         directUrl: process.env.DATABASE_DIRECT_URL || '',
-        path: process.env.DB_PATH || './data/media.db',
     },
+    // The service's data directory (MEDIA_DATA_DIR): reports and drills are written under it.
+    dataDir: process.env.MEDIA_DATA_DIR || './data',
     // Valkey (ADR-035): per-actor limit counters shared across processes; without it they count in this process.
     valkey: { url: process.env.VALKEY_URL || '', prefix: process.env.VALKEY_PREFIX || 'ov:media:' },
 
@@ -155,6 +155,6 @@ config.assets.path = path.resolve(config.assets.path);
 config.thumbnails.path = path.resolve(config.thumbnails.path);
 config.files.path = path.resolve(config.files.path);
 config.objects.path = path.resolve(config.objects.path);
-config.db.path = path.resolve(config.db.path);
+config.dataDir = path.resolve(config.dataDir);
 
 module.exports = config;

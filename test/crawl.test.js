@@ -13,7 +13,7 @@ const express = require('express');
 
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-crawl-'));
-    Object.assign(process.env, { DB_PATH: path.join(tmp, 'media.db'), MEDIA_PUBLIC_URL: 'https://media.test', VOD_PATH: path.join(tmp, 'vods'), CLIPS_PATH: path.join(tmp, 'clips') });
+    Object.assign(process.env, { MEDIA_PUBLIC_URL: 'https://media.test', VOD_PATH: path.join(tmp, 'vods'), CLIPS_PATH: path.join(tmp, 'clips') });
 
     const db = require('../server/db/database');
     const pages = require('../server/public/pages');

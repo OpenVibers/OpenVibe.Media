@@ -86,7 +86,7 @@ const crypto = require('crypto');
         const NET = `http://127.0.0.1:${network.address().port}`;
         Object.assign(process.env, SECRET_ENV, {
             PORT: '0', HOST: '127.0.0.1', NODE_ENV: 'test',
-            DB_PATH: path.join(tmp, 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), PASTES_PATH: dir('pastes'),
+            VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), PASTES_PATH: dir('pastes'),
             THUMBNAILS_PATH: dir('thumbnails'), FILES_PATH: dir('files'), OBJECTS_PATH: dir('objects'), ASSETS_PATH: dir('assets'),
             MEDIA_PUBLIC_URL: 'https://media.test', OV_NETWORK_URL: NET, OV_NETWORK_INTERNAL_URL: NET, EVENTS_URL: NET,
             OV_LIVE_INTERNAL_URL: CLOSED, LIVE_APP_INTERNAL_URL: CLOSED, APP_INTERNAL_URLS: JSON.stringify({ live: CLOSED }),

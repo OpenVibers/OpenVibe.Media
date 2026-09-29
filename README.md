@@ -71,13 +71,15 @@ reads events.
 ```
 server/
   index.js               boot, route mounts, background jobs, graceful shutdown
-  config.js              env config (PORT, DB_PATH, *_PATH, MEDIA_B2_*/R2_*, RTP pool, OV_NETWORK_URL)
+  config.js              env config (PORT, MEDIA_DATA_DIR, *_PATH, DATABASE_URL/DATABASE_DIRECT_URL, MEDIA_B2_*/R2_*,
+                         RTP pool, OV_NETWORK_URL)
   auth.js                tenancy + auth middleware, JWKS fetch, app seeding
   webhooks.js            HMAC-signed outbound webhooks
   drill.js               MEDIA_DRILL: restore-drill mode (reads only, no bytes, no jobs, nothing leaves)
-  db/schema.sql          apps, vods, clips, pastes(+likes/comments), files, content_views, media_settings,
-                         media_objects/locations/relationships/variants/jobs/holds/invariant_violations
   db/database.js         PostgreSQL helpers (openvibe-sdk/db, async), all app_id-scoped
+  db/init.js             applies migrations/ (DATABASE_URL/DATABASE_DIRECT_URL, or embedded PGlite)
+  migrations/NNNN_*.sql  apps, vods, clips, pastes(+likes/comments), files, content_views, media_settings,
+                         media_objects/locations/relationships/variants/jobs/holds/invariant_violations
   vod/recorder.js        ffmpeg recording: RTMP pull + RTP (SDP) ingest, codec passthrough
   vod/media-tools.js     probes, seekable remux, DVR sidecar, chunk-segment concat
   vod/finalize.js        finalize pipeline (remux → probe → master recovery → thumbnail → webhook)
@@ -381,9 +383,8 @@ that is deleted; none for sandbox tenants. `test/object-events.test.js`.
 ## Restore drills (`MEDIA_DRILL=1`)
 
 A restore drill starts a second Media from this checkout on 127.0.0.1:14100 with `MEDIA_DRILL=1` and
-`DATABASE_URL` naming a restored copy of the database (pgBackRest restores the cluster on a spare port; the Host's
-`ovhost drill media` still restores the SQLite backups of the releases before PostgreSQL and needs that step before
-it drills this one). In that mode (`server/drill.js`) Media:
+`DATABASE_URL` naming a restored copy of the database (pgBackRest restores the cluster on a spare port). In that
+mode (`server/drill.js`) Media:
 
 - refuses to start unless `DATABASE_URL` is set and does not name production's database (`ov_media` on 5432, or
   PgBouncer's 6432), `DATABASE_DIRECT_URL` is unset (a drill never migrates), `HOST` is loopback and `PORT` is not
@@ -573,16 +574,6 @@ guardian (refuses new recordings when free space is critical), stale live-thumb
 cleanup, and an on-boot sweep that finalizes recordings orphaned by an unclean
 shutdown.
 
-## Moving to PostgreSQL
-
-`scripts/migrate-to-postgres.js` is the one-time import of the SQLite `media.db` (`DB_PATH`) into `ov_media`
-(openvibe-sdk `runSqliteMigration`: migrations as the owner, every table copied into emptied tables, counts and
-checksums verified; `--pglite` rehearses it in memory). It runs while the service is stopped (OpenVibe.Host
-`roles/data/switch-service.sh media /opt/openvibe.media/data/media.db`); the SQLite file stays read-only for 7 days as
-the rollback. Timestamps stay SQLite's text (`ov_now()`, `datetime()`, `julianday()` in the migration); the retention
-hold guards and the object-change triggers are PL/pgSQL. (The predecessor-DB importer and its bulk-copy recipe were
-retired with the move.)
-
 ## Not ported
 
 - **Song-request media queue** (`media/` yt-dlp downloader/queue): deeply
@@ -610,8 +601,9 @@ Run `npm test` for the policy regression tests.
 
 ## Acceptance
 
-`npm test` runs every `test/*.test.js` in turn (temp databases, local stubs, no network). What they
-prove includes: tenancy and developer-project tenants (`app-tenants`, `app-tenant-abuse`); the object
+`npm test` runs every `test/*.test.js` in turn (each process gets a migrated PGlite database, or the
+PostgreSQL containers under `npm run test:pg`; local stubs, no network). What they prove includes: tenancy
+and developer-project tenants (`app-tenants`, `app-tenant-abuse`); the object
 model, multipart, reconcile, verification and tiering (`objects-*`, `object-tiering`, `tier-*`); jobs
 with leases and fencing (`jobs*`); VOD finalize, durations and storage policy (`vod-*`); private items
 stay private and nobody acts on another's ids (`security-private`, `security-idor`,
@@ -656,5 +648,4 @@ writes its settings); the release migrates it at boot; nginx serves `openvibe.me
 fixtures (`npm run n-1:record`).
 
 Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the
-restart; afterwards `sudo ovhost rollback media --to <sha>`. A release from before PostgreSQL reads the SQLite
-`media.db` it left (read-only for 7 days after the switch); anything written since would need moving back first.
+restart; afterwards `sudo ovhost rollback media --to <sha>`.

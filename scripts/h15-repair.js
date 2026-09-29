@@ -134,7 +134,7 @@ const { execFile } = require('child_process');
             }
             const record = { generated_at: new Date().toISOString(), applied: false, objects: report.count, plan: steps.map(({ file, ...s }) => s) };
             if (!APPLY) {
-                const out = arg('out') ? path.resolve(arg('out')) : path.join(path.dirname(path.resolve(config.db.path)), 'reports', `h15-repair-${record.generated_at.replace(/[:.]/g, '-')}.json`);
+                const out = arg('out') ? path.resolve(arg('out')) : path.join(config.dataDir, 'reports', `h15-repair-${record.generated_at.replace(/[:.]/g, '-')}.json`);
                 fs.mkdirSync(path.dirname(out), { recursive: true });
                 fs.writeFileSync(out, JSON.stringify(record, null, 2));
                 console.log(`\nDry run: nothing changed. Plan written to ${out}`);

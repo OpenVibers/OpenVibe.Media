@@ -14,7 +14,7 @@ const crypto = require('crypto');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-hash-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
     Object.assign(process.env, {
-        DB_PATH: path.join(tmp, 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
+        VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
         THUMBNAILS_PATH: dir('thumbnails'), PASTES_PATH: dir('pastes'), OBJECTS_PATH: dir('objects'),
         MEDIA_INVARIANT_SCAN_HOURS: '0', MEDIA_HASH_SETTLE_S: '60', MEDIA_HASH_INTERVAL_MIN: '15',
     });

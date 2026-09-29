@@ -10,7 +10,7 @@
 
 // Restore-drill mode (MEDIA_DRILL=1, `ovhost drill media`): refuse an unsafe environment before the
 // database is opened, then cut every way out of the process but its own HTTP port. The instance
-// serves reads from a restored copy of media.db, never opens a stored file and starts nothing else
+// serves reads from a restored copy of the database, never opens a stored file and starts nothing else
 // (server/drill.js).
 require('dotenv').config();
 const drill = require('./drill');
@@ -309,7 +309,7 @@ const ready = (async () => {
         }
         if (drill.enabled) { console.log(`[Drill] Ready: http://${config.host}:${config.port} (reads only)`); return; }
         console.log(`[Media] OpenVibe.Media listening on ${config.host}:${config.port} (${config.nodeEnv})`);
-        console.log(`[Media] Data: db=${config.db.path} vods=${config.vod.path} clips=${config.vod.clipsPath}`);
+        console.log(`[Media] Data: db=${config.db.url ? 'postgresql' : 'pglite'} vods=${config.vod.path} clips=${config.vod.clipsPath}`);
         console.log(`[Media] RTP ingest pool: udp ${config.rtp.portMin}-${config.rtp.portMax} (127.0.0.1)`);
         // Durable events (roadmap Wave 3): webhook outcomes also go to OpenVibe.Events. Off without EVENTS_URL.
         try { require('./events').init(); } catch (err) { console.warn('[Events] not started:', err.message); }

@@ -5,7 +5,7 @@
  *   GET /metrics     Prometheus text; direct loopback callers only (404 through nginx)
  *   GET /api/ready   named checks; 503 only when a required one fails, optional failures → degraded
  *
- * Required (Media cannot serve without them): the SQLite database answers a real query, and every
+ * Required (Media cannot serve without them): the PostgreSQL database answers a real query, and every
  * local storage directory accepts a write. Optional (one capability degrades, the rest keeps
  * working): the Network public key (user-JWT and service-token routes; app-key tenants are
  * unaffected), each CONFIGURED remote tier (B2 cold storage, R2 cache; a HeadBucket at most once a

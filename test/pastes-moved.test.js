@@ -10,7 +10,6 @@ const express = require('express');
 
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-moved-'));
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     const db = require('../server/db/database');
     await db.upsertApp({ app_id: 'live', api_key: 'live-key' });
     const shot = path.join(tmp, 'shot.png');

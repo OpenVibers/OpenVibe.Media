@@ -10,7 +10,6 @@ const crypto = require('crypto');
 
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-svc-'));
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.FILES_PATH = path.join(tmp, 'files');
     process.env.OV_NETWORK_URL = 'https://openvibe.network';
     process.env.MEDIA_PUBLIC_URL = 'https://media.test';

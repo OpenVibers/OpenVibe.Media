@@ -22,7 +22,8 @@ let database = null;
  * The serving handle (ADR-035): DATABASE_URL through PgBouncer; in development without it, an embedded PGlite database
  * in data/pglite (MEDIA_PGLITE_DIR overrides it). Migrations run first, as the owner (DATABASE_DIRECT_URL), or on the
  * embedded handle. The schema, its triggers (retention holds, object deletes, object change events) and the default
- * settings are migrations/NNNN_*.sql; timestamps stay SQLite's text (ov_now(), datetime() in the migration).
+ * settings are migrations/NNNN_*.sql; timestamps stay text in the `YYYY-MM-DD HH:MM:SS` UTC shape (ov_now(), datetime()
+ * in the migration).
  */
 async function openDb(cfg = config, { log = console, registry } = {}) {
     if (!cfg.db.url) {
@@ -265,7 +266,7 @@ const LIST_ORDERS = {
 function _listOrder(order) { return LIST_ORDERS[order] || LIST_ORDERS.newest; }
 
 /**
- * A list's `since` filter as an SQLite datetime ('YYYY-MM-DD HH:MM:SS', UTC), or null. Accepts that
+ * A list's `since` filter as a text datetime ('YYYY-MM-DD HH:MM:SS', UTC), or null. Accepts that
  * form or anything Date.parse reads (ISO 8601); anything else is ignored rather than refused.
  */
 function sinceParam(value) {

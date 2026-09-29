@@ -57,7 +57,7 @@ const express = require('express');
         assert.ok(!/set\('trust proxy',\s*true\)/.test(src), 'no trust-everyone left');
         const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-trust-'));
         const freePort = await new Promise((resolve) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
-        const env = { ...process.env, DB_PATH: path.join(tmp, 'media.db'), MEDIA_PGLITE_DIR: path.join(tmp, 'pglite'), DATABASE_URL: '', DATABASE_DIRECT_URL: '', VALKEY_URL: '', VOD_PATH: path.join(tmp, 'vods'), CLIPS_PATH: path.join(tmp, 'clips'), PASTES_PATH: path.join(tmp, 'pastes'),
+        const env = { ...process.env, MEDIA_PGLITE_DIR: path.join(tmp, 'pglite'), DATABASE_URL: '', DATABASE_DIRECT_URL: '', VALKEY_URL: '', VOD_PATH: path.join(tmp, 'vods'), CLIPS_PATH: path.join(tmp, 'clips'), PASTES_PATH: path.join(tmp, 'pastes'),
             THUMBNAILS_PATH: path.join(tmp, 'thumbs'), FILES_PATH: path.join(tmp, 'files'), OBJECTS_PATH: path.join(tmp, 'objects'), PORT: String(freePort), HOST: ext ? '0.0.0.0' : '127.0.0.1',
             NODE_ENV: 'test', MEDIA_JOBS_ENABLED: '0', MEDIA_VERIFY_ENABLED: '0', MEDIA_OWNER_SUBJECT_SYNC: '0', EVENTS_URL: '', MEDIA_APP_KEYS: 'live:live-key-for-trust-test' };
         const child = spawn(process.execPath, [path.join(__dirname, '../server/index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });

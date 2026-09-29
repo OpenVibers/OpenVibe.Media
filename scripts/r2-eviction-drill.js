@@ -221,7 +221,7 @@ if (require.main === module) {
         await db.initDb();   // PostgreSQL (DATABASE_URL), as the service
         await storage.tierConfig.init(storage.DEFAULTS, { log: { info() {}, warn: (m) => console.error(`[Tiers] ${m}`), error: (m) => console.error(`[Tiers] ${m}`) } });
         const art = await runDrill(opts, { storage, db, model });
-        const out = opts.out || path.join(path.dirname(config.db.path), 'drills', `r2-eviction-${art.vod_id ?? 'none'}-${art.started_at.replace(/[:.]/g, '-')}.json`);
+        const out = opts.out || path.join(config.dataDir, 'drills', `r2-eviction-${art.vod_id ?? 'none'}-${art.started_at.replace(/[:.]/g, '-')}.json`);
         fs.mkdirSync(path.dirname(out), { recursive: true });
         fs.writeFileSync(out, JSON.stringify(art, null, 2));
         console.log(opts.json ? JSON.stringify(art, null, 2) : `${summarize(art)}\nartifact: ${out}`);

@@ -1,6 +1,6 @@
 'use strict';
 // Object-first writes (WS-G task 1, retiring compatibility shim C-75): every write to an inherited
-// vods/clips/files/pastes row makes or updates its media_object in the SAME SQLite transaction
+// vods/clips/files/pastes row makes or updates its media_object in the SAME PostgreSQL transaction
 // (objects/model.js withObject). For each main write path the object is there, linked and agreeing
 // with the row, as soon as the write returns; when the object cannot be written, the row write
 // rolls back with it (neither row); and the drift report (server/objects/drift.js,
@@ -18,7 +18,7 @@ const sharp = require('sharp');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-object-first-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
     Object.assign(process.env, {
-        DB_PATH: path.join(tmp, 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
+        VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
         THUMBNAILS_PATH: dir('thumbnails'), PASTES_PATH: dir('pastes'), OBJECTS_PATH: dir('objects'), MEDIA_PUBLIC_URL: 'https://media.test',
     });
 

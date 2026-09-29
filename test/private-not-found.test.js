@@ -13,7 +13,6 @@ const http = require('http');
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-private404-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.VOD_PATH = dir('vods');
     process.env.CLIPS_PATH = dir('clips');
     process.env.FILES_PATH = dir('files');

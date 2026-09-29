@@ -9,7 +9,6 @@ const http = require('http');
 
 (async () => {
     const tmp = path.join(os.tmpdir(), `ov-media-pages-${process.pid}.db`);
-    process.env.DB_PATH = tmp;
     process.env.MEDIA_PUBLIC_URL = 'https://media.test';
 
     const db = require('../server/db/database');

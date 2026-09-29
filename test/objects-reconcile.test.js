@@ -13,7 +13,7 @@ const crypto = require('crypto');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-reconcile-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
     const env = {
-        DB_PATH: path.join(tmp, 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
+        VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
         THUMBNAILS_PATH: dir('thumbnails'), PASTES_PATH: dir('pastes'), OBJECTS_PATH: dir('objects'), MEDIA_PUBLIC_URL: 'https://media.test',
         MEDIA_PUBLIC_OBJECT_TARGET_MB: '1', MEDIA_PUBLIC_OBJECT_WARN_MB: '2', MEDIA_PUBLIC_OBJECT_MAX_MB: '3',
     };

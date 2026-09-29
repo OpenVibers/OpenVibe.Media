@@ -61,7 +61,7 @@ const { spawnSync, execFile } = require('child_process');
         await new Promise((r) => s3.listen(0, '127.0.0.1', r));
         const endpoint = `http://127.0.0.1:${s3.address().port}`;
         Object.assign(process.env, {
-            DB_PATH: path.join(tmp, 'data', 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
+            MEDIA_DATA_DIR: path.join(tmp, 'data'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
             THUMBNAILS_PATH: dir('thumbnails'), PASTES_PATH: dir('pastes'), OBJECTS_PATH: dir('objects'),
             MEDIA_B2_ENDPOINT: endpoint, MEDIA_B2_BUCKET: 'b2-bucket', MEDIA_B2_KEY_ID: 'k', MEDIA_B2_APP_KEY: 's', MEDIA_B2_REGION: 'us-west-004',
             MEDIA_INVARIANT_SCAN_HOURS: '0', MEDIA_JOBS_ENABLED: '0',
@@ -146,7 +146,7 @@ const { spawnSync, execFile } = require('child_process');
             assert.strictEqual(j.status, 'succeeded', j.error);
             let res = JSON.parse(j.result);
             assert.deepStrictEqual([res.mode, res.counts.checked, res.counts.repaired, res.next_after_id], ['apply', 4, 3, ids.missing]);
-            assert.ok(fs.existsSync(path.join(path.dirname(process.env.DB_PATH), 'reports', res.report)), 'the report is written');
+            assert.ok(fs.existsSync(path.join(process.env.MEDIA_DATA_DIR, 'reports', res.report)), 'the report is written');
             assert.deepStrictEqual([(await vod(ids.wallClock)).duration_seconds, (await vod(ids.wallClock)).duration_source], [6, 'probe']);
             assert.deepStrictEqual([(await vod(ids.remote)).duration_seconds, (await vod(ids.remote)).duration_source], [8, 'probe']);
             assert.deepStrictEqual([(await vod(ids.missing)).duration_seconds, (await vod(ids.missing)).duration_source], [6, 'probe']);
@@ -156,7 +156,7 @@ const { spawnSync, execFile } = require('child_process');
             j = (await queue.enqueue({ appId: 'live', type: 'vod.duration.reconcile', params: spec.validate({ obj: null, params: { limit: 4, apply: true } }), createdBy: 'test2' })).job;
             res = JSON.parse((await worker.runNow(j.id)).result);
             assert.deepStrictEqual([res.range.after_id, res.counts.checked, res.range.done, res.next_after_id], [ids.missing, 3, true, 0], 'continues, reaches the end, wraps');
-            const report = JSON.parse(fs.readFileSync(path.join(path.dirname(process.env.DB_PATH), 'reports', JSON.parse((await queue.list('live', { type: 'vod.duration.reconcile' })).jobs.slice(-1)[0].result).report), 'utf8'));
+            const report = JSON.parse(fs.readFileSync(path.join(process.env.MEDIA_DATA_DIR, 'reports', JSON.parse((await queue.list('live', { type: 'vod.duration.reconcile' })).jobs.slice(-1)[0].result).report), 'utf8'));
             const rb0 = await reconcile.rollback(report.rows);
             assert.deepStrictEqual(rb0, { restored: 0, would_restore: 3, changed_since: 0 });
             const rb = await reconcile.rollback(report.rows, { apply: true });

@@ -16,7 +16,7 @@
  *                                             (subject object <id>; Events only; payload object id, tenant,
  *                                             kind, legacy_ref and the times/visibilities, nothing else)
  *
- * The outbox row is written INSIDE the SQLite transaction that makes the state change it describes
+ * The outbox row is written INSIDE the PostgreSQL transaction that makes the state change it describes
  * (record(), called from webhooks.announce()): the event exists if and only if the change committed,
  * so a crash can neither lose an outcome nor announce one that rolled back. The webhook for the same
  * outcome is sent after the commit and carries the envelope's event_id, so a consumer receiving it by

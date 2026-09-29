@@ -49,7 +49,7 @@ function parseJson(s, fallback) {
     try { return JSON.parse(s); } catch { return fallback; }
 }
 
-/** SQLite 'YYYY-MM-DD HH:MM:SS' (UTC) → epoch ms, so backfilled ids sort by original creation time. */
+/** Epoch ms from a `YYYY-MM-DD HH:MM:SS` (UTC) text timestamp, as the migrations store them, so backfilled ids sort by original creation time. */
 function toMs(createdAt) {
     const ms = Date.parse(String(createdAt || '').replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(createdAt || '')) ? '' : 'Z'));
     return Number.isFinite(ms) ? ms : Date.now();

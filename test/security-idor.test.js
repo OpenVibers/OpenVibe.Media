@@ -23,7 +23,7 @@ const crypto = require('crypto');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-idor-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
     Object.assign(process.env, {
-        DB_PATH: path.join(tmp, 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'), OBJECTS_PATH: dir('objects'),
+        VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'), OBJECTS_PATH: dir('objects'),
         THUMBNAILS_PATH: dir('thumbnails'), PASTES_PATH: dir('pastes'), ASSETS_PATH: dir('assets'),
         OV_NETWORK_URL: 'https://openvibe.network', MEDIA_PUBLIC_URL: 'https://media.test', MEDIA_SIGNING_SECRET: 'test-signing-secret',
         MEDIA_UPLOAD_MIN_FREE_MB: '0', MEDIA_MULTIPART_MIN_PART_MB: '1', MEDIA_JOBS_ENABLED: '0',

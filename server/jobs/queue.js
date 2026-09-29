@@ -8,7 +8,7 @@
  *   running    held by the worker (lease_until renewed while it runs; lease_token names the claim)
  *   succeeded | failed | cancelled   finished
  *
- * Every state change and its media.job.<transition> event commit in ONE SQLite transaction (the same
+ * Every state change and its media.job.<transition> event commit in ONE PostgreSQL transaction (the same
  * rule as webhooks.announce(), see events.js): an event exists if and only if its change committed.
  * The relay is woken after the commit. Job events go to OpenVibe.Events only (no app webhook).
  *
@@ -133,7 +133,7 @@ function jobPublic(row) {
     };
 }
 
-/** A SQLite UTC time ('YYYY-MM-DD HH:MM:SS') as ISO 8601 UTC ('…T…Z'), or null. */
+/** An ISO 8601 UTC ('…T…Z') time from a `YYYY-MM-DD HH:MM:SS` (UTC) text timestamp, as the migrations store them, or null. */
 function isoTime(v) {
     if (v == null || v === '') return null;
     const s = String(v);
@@ -247,7 +247,7 @@ async function enqueue({ appId, type, objectId = null, params = {}, status = 'qu
     let out = null;
     const id = `mjob_${ids.ulid()}`;
     await db.getDb().tx(async () => {
-        // One enqueue per tenant at a time (SQLite's one writer did this): the key, the identical active job and the
+        // One enqueue per tenant at a time (an advisory lock per tenant serialises them): the key, the identical active job and the
         // active count below are read with every earlier enqueue of the tenant committed.
         await db.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [`media.jobs:${appId}`]);
         if (key) {

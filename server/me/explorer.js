@@ -31,7 +31,7 @@ const STATUS_FILTERS = [...model.LIFECYCLES, 'all'];
 /** Relations whose `from` object was made out of the `to` object (a clip is its own work, not a derivative). */
 const DERIVED_RELATIONS = ['derived_from', 'thumbnail_of'];
 
-/** SQLite's "YYYY-MM-DD HH:MM:SS" (UTC) or ISO → ISO 8601, or null. */
+/** ISO 8601 from a "YYYY-MM-DD HH:MM:SS" (UTC) text timestamp, as the migrations store them, or from ISO, or null. */
 function iso(v) {
     if (!v) return null;
     const s = String(v);

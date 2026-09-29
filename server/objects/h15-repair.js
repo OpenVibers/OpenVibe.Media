@@ -77,7 +77,7 @@ function plan(item, probes = {}, facts = {}) {
 }
 
 /**
- * Apply one planned change. h = better-sqlite3 handle. facts: { size, sha256 } of the good bytes (rebaseline,
+ * Apply one planned change. h = database handle. facts: { size, sha256 } of the good bytes (rebaseline,
  * regenerate). → the change with old values, or { skipped } when the row moved on.
  */
 async function apply(h, step, facts = {}) {

@@ -128,8 +128,8 @@ function createResolver({
 // ── Reads ────────────────────────────────────────────────────
 
 /** Per-tenant ownership counts (read-only). */
-async function summary(sqlite) {
-    const rows = await sqlite.prepare(`
+async function summary(db) {
+    const rows = await db.prepare(`
         SELECT app_id, count(*) AS objects,
                sum(owner_subject IS NOT NULL) AS already_set,
                sum(owner_subject IS NULL AND owner_user_id IS NOT NULL) AS missing,
@@ -141,8 +141,8 @@ async function summary(sqlite) {
 }
 
 /** Distinct (owner_app, owner_user_id) pairs that still lack a subject, with their object counts. */
-async function pendingOwners(sqlite) {
-    return await sqlite.prepare(`
+async function pendingOwners(db) {
+    return await db.prepare(`
         SELECT COALESCE(owner_app, app_id) AS owner_app, owner_user_id, count(*) AS objects
         FROM media_objects WHERE owner_subject IS NULL AND owner_user_id IS NOT NULL
         GROUP BY COALESCE(owner_app, app_id), owner_user_id ORDER BY 1, 2`).all();
@@ -177,8 +177,8 @@ async function resolveOwners(owners, { resolver }) {
  * The rows the resolved subjects fill, read in id order `batch` at a time.
  * -> [{ id, app_id, owner_app, owner_user_id, owner_subject }]
  */
-async function planChanges(sqlite, subjects, { batch = DEFAULT_BATCH } = {}) {
-    const page = sqlite.prepare(`
+async function planChanges(db, subjects, { batch = DEFAULT_BATCH } = {}) {
+    const page = db.prepare(`
         SELECT id, app_id, COALESCE(owner_app, app_id) AS owner_app, owner_user_id FROM media_objects
         WHERE owner_subject IS NULL AND owner_user_id IS NOT NULL AND id > ? ORDER BY id LIMIT ?`);
     const changes = [];
@@ -201,15 +201,15 @@ async function planChanges(sqlite, subjects, { batch = DEFAULT_BATCH } = {}) {
  * Fill owner_subject on the planned rows, one transaction per `batch` rows. A row is written only if
  * it still has no subject and the same owner. -> { applied: [change], skipped: [change], batches }
  */
-async function applyChanges(sqlite, changes, { batch = DEFAULT_BATCH, onBatch = null } = {}) {
-    const set = sqlite.prepare(`
+async function applyChanges(db, changes, { batch = DEFAULT_BATCH, onBatch = null } = {}) {
+    const set = db.prepare(`
         UPDATE media_objects SET owner_subject = ?, updated_at = ov_now()
         WHERE id = ? AND owner_subject IS NULL AND COALESCE(owner_app, app_id) = ? AND owner_user_id = ?`);
     const applied = [], skipped = [];
     let batches = 0;
     for (let i = 0; i < changes.length; i += batch) {
         const slice = changes.slice(i, i + batch);
-        await sqlite.tx(async () => {
+        await db.tx(async () => {
             for (const c of slice) ((await set.run(c.owner_subject, c.id, c.owner_app, c.owner_user_id)).changes ? applied : skipped).push(c);
         });
         batches++;
@@ -224,16 +224,16 @@ async function applyChanges(sqlite, changes, { batch = DEFAULT_BATCH, onBatch = 
  * alone and counted. With apply=false nothing is written.
  * -> { restored, changed_since, missing, rows: { restored: [id], changed_since: [id], missing: [id] } }
  */
-async function rollbackChanges(sqlite, entries, { apply = false, batch = DEFAULT_BATCH } = {}) {
-    const get = sqlite.prepare('SELECT id, owner_subject, COALESCE(owner_app, app_id) AS owner_app, owner_user_id FROM media_objects WHERE id = ?');
-    const clear = sqlite.prepare(`
+async function rollbackChanges(db, entries, { apply = false, batch = DEFAULT_BATCH } = {}) {
+    const get = db.prepare('SELECT id, owner_subject, COALESCE(owner_app, app_id) AS owner_app, owner_user_id FROM media_objects WHERE id = ?');
+    const clear = db.prepare(`
         UPDATE media_objects SET owner_subject = NULL, updated_at = ov_now()
         WHERE id = ? AND owner_subject = ? AND COALESCE(owner_app, app_id) = ? AND owner_user_id = ?`);
     const rows = { restored: [], changed_since: [], missing: [] };
     const unchanged = (row, e) => row.owner_subject === e.owner_subject && row.owner_app === e.owner_app && Number(row.owner_user_id) === Number(e.owner_user_id);
     for (let i = 0; i < entries.length; i += batch) {
         const slice = entries.slice(i, i + batch);
-        await sqlite.tx(async () => {
+        await db.tx(async () => {
             for (const e of slice) {
                 const row = await get.get(e.id);
                 if (!row) { rows.missing.push(e.id); continue; }
@@ -250,8 +250,8 @@ async function rollbackChanges(sqlite, entries, { apply = false, batch = DEFAULT
  * One reconcile pass (the service's job): resolve every owner still lacking a subject and fill their
  * objects. -> { owners, filled, skipped, unresolvable, unsupported, via }
  */
-async function reconcileOnce(sqlite, { resolver, batch = DEFAULT_BATCH } = {}) {
-    const owners = await pendingOwners(sqlite);
+async function reconcileOnce(db, { resolver, batch = DEFAULT_BATCH } = {}) {
+    const owners = await pendingOwners(db);
     const out = { owners: owners.length, filled: 0, skipped: 0, unresolvable: 0, unsupported: 0, via: null };
     if (!owners.length) return out;
     const callsBefore = resolver.state ? resolver.state.calls : 0;
@@ -260,7 +260,7 @@ async function reconcileOnce(sqlite, { resolver, batch = DEFAULT_BATCH } = {}) {
     out.unsupported = r.unsupported.reduce((n, o) => n + o.objects, 0);
     out.via = resolver.state && resolver.state.calls > callsBefore ? resolver.state.via : null;
     if (!r.subjects.size) return out;
-    const applied = await applyChanges(sqlite, await planChanges(sqlite, r.subjects, { batch }), { batch });
+    const applied = await applyChanges(db, await planChanges(db, r.subjects, { batch }), { batch });
     out.filled = applied.applied.length;
     out.skipped = applied.skipped.length;
     return out;

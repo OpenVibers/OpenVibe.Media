@@ -76,7 +76,7 @@ the same functions.
 ## Backfill
 
 ```
-node scripts/backfill-objects.js [--dry-run] [--only-missing] [--json] [--out report.json] [--db ./data/media.db]
+node scripts/backfill-objects.js [--dry-run] [--only-missing] [--json] [--out report.json]
 ```
 
 The backfill creates one object per vod, clip, file, screenshot/avatar paste and thumbnail, with
@@ -90,12 +90,12 @@ relationships and thumbnail variants.
 
 Skip reasons today: `clips-only recording (ephemeral, never published)`, `screenshot paste without a file path`, `external thumbnail url`.
 
-The run holds SQLite's write lock for its duration, typically seconds. Prefer the boot backfill, or
+The backfill's own transaction holds row and table locks for its duration, typically seconds. Prefer the boot backfill, or
 run the script while traffic is quiet.
 
 ### Keeping the model current: object-first writes
 
-Every write to a projected row writes its object in the same SQLite transaction
+Every write to a projected row writes its object in the same PostgreSQL transaction
 (`model.withObject(kind, ids, write)`; roadmap WS-G task 1, which retires compatibility shim C-75,
 "write the row, then sync the object"). The row change and the re-projection commit together or
 not at all, so a crash or an error between them can no longer leave the object behind its row. A
@@ -119,7 +119,7 @@ after the outcome event.
 | avatar ingest | `avatars/ingest` |
 | tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep, `migrateLegacy`: the copy the move verified is marked `present` in the same transaction |
 
-**Deletes need nothing more.** A SQLite trigger on `vods`, `clips`, `files` and `pastes` marks the
+**Deletes need nothing more.** A PostgreSQL trigger (defined in `migrations/`, PL/pgSQL) on `vods`, `clips`, `files` and `pastes` marks the
 object `deleted` in the same statement whenever its row is deleted, which covers all of the
 inherited delete paths.
 
@@ -137,7 +137,7 @@ projects what it inserts.
 ### Drift report
 
 ```
-node scripts/object-drift-report.js [--app live] [--limit 20] [--json] [--out report.json] [--db ./data/media.db]
+node scripts/object-drift-report.js [--app live] [--limit 20] [--json] [--out report.json]
 ```
 
 For every projected row, and each vod/clip thumbnail, the report derives what the object must say
@@ -183,17 +183,18 @@ Rules for both job and backfill:
   request uses `INTERNAL_API_KEY`.
 
 ```
-node scripts/backfill-owner-subject.js [--db media.db] [--batch 500] [--json]        # dry run: counts per tenant
+node scripts/backfill-owner-subject.js [--batch 500] [--json]                        # dry run: counts per tenant
 node scripts/backfill-owner-subject.js --apply --backup <file.json> [--batch 500]     # fill
 node scripts/backfill-owner-subject.js --rollback <file.json> [--apply]               # undo (dry without --apply)
 ```
 
 - **The dry run** (the default) opens the database read-only and prints per tenant: objects, already
   set, to fill, unresolvable, unsupported tenant and no owner.
-- **`--apply --backup <file.json>`** first takes an online backup to `<file>.media.db` and requires
-  `PRAGMA integrity_check` = `ok` on it. It then writes `<file.json>` (0600), the rows it is about to
-  change, and fills them in `--batch` transactions. Finally it rewrites the file to list exactly the
-  rows it changed. It refuses an existing backup name, and a re-run fills only what is still missing.
+- **`--apply --backup <file.json>`** writes the rollback file `<file.json>` (0600) with the rows it is
+  about to change, and fills them in `--batch` transactions. The database's own safety net is
+  PostgreSQL's point-in-time recovery (pgBackRest), not an online copy. Finally it rewrites the file to
+  list exactly the rows it changed. It refuses an existing backup name, and a re-run fills only what is
+  still missing.
 - **`--rollback <file.json> --apply`** sets `owner_subject` back to `NULL` on each listed row that
   still carries the subject the backfill wrote for the same owner. Rows changed since are counted and
   left alone. Without `--apply` it only reports, which also verifies an applied backfill. Stop the job
@@ -539,7 +540,7 @@ admin routes' log), with who, the object, the kind and the reason.
 ## Reconciliation
 
 ```
-node scripts/reconcile-objects.js [--verify] [--hash] [--app live] [--json] [--out report.json] [--db ./data/media.db]
+node scripts/reconcile-objects.js [--verify] [--hash] [--app live] [--json] [--out report.json]
 ```
 
 **Modes.**
@@ -599,7 +600,7 @@ and nothing is concluded about its keys.
 restore drill. On demand:
 
 ```
-node scripts/vods-orphans-report.js --storage [--no-remote] [--limit 2000] [--out report.json] [--json] [--db ./data/media.db]
+node scripts/vods-orphans-report.js --storage [--no-remote] [--limit 2000] [--out report.json] [--json]
 ```
 
 `--no-remote` lists no bucket. The detailed per-object recommendations for the `vods-orphans/` prefix
@@ -639,7 +640,7 @@ that only moved to B2/R2 keeps it. Test: `test/content-hash.test.js`.
 - The report, which lists each one for an operator to decide on:
 
   ```
-  node scripts/no-good-copy-report.js [--app live] [--json] [--out report.json] [--db ./data/media.db]
+  node scripts/no-good-copy-report.js [--app live] [--json] [--out report.json]
   ```
 
   For each object it prints the owner (app, `owner_user_id`, `owner_subject`), `legacy_ref`, the `vods`/`clips`/`files`/`pastes` rows that point at it, its relationships, variants and holds, every location with its state and `verified_at`, and the last verification. The report opens the database read-only. It exits 1 when there are any.
@@ -662,7 +663,7 @@ A *public playback object* is a `ready` vod or clip whose visibility is `public`
 - **Report.**
 
   ```
-  node scripts/object-invariant.js [--dry-run] [--app live] [--json] [--db ./data/media.db]
+  node scripts/object-invariant.js [--dry-run] [--app live] [--json]
   ```
 
   Lists every public playback object above target, largest first, records the rows, and resolves rows that no longer apply. `--dry-run` writes nothing.
@@ -690,7 +691,7 @@ Code: `server/jobs/`. Tests: `test/jobs.test.js`, `test/jobs-invariant.test.js`,
 30 s, 2 min, 8 min, …, at most 1 h) until `max_attempts`; a handler can mark a failure permanent.
 
 **Events.** Every state change and its `media.job.<transition>` event (`proposed`, `queued`,
-`started`, `retrying`, `succeeded`, `failed`, `cancelled`; subject `job <id>`) commit in one SQLite
+`started`, `retrying`, `succeeded`, `failed`, `cancelled`; subject `job <id>`) commit in one PostgreSQL
 transaction through Media's outbox, the same rule as the outcome events (`webhooks.announce()`): no
 change without its event, no event for a change that rolled back. Progress events are `low`
 priority; outcomes and proposals are `important`. Job events go to OpenVibe.Events only, not to app
@@ -809,7 +810,7 @@ still holds the value that was read, and re-projects the object. Every run write
 
 ```
 node scripts/vod-duration-reconcile.js [--app live] [--batch 50] [--after <id>] [--all] [--ids 1,2] [--confirm-remote]   # dry run
-node scripts/vod-duration-reconcile.js --apply --backup <file.json> [same selection]   # checked DB backup first; file = rollback
+node scripts/vod-duration-reconcile.js --apply --backup <file.json> [same selection]   # file = the rollback file (every repair's old values)
 node scripts/vod-duration-reconcile.js --rollback <file.json> [--apply]
 ```
 

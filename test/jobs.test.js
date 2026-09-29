@@ -15,7 +15,6 @@ const http = require('http');
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-jobs-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.VOD_PATH = dir('vods');
     process.env.CLIPS_PATH = dir('clips');
     process.env.FILES_PATH = dir('files');
@@ -238,7 +237,7 @@ const http = require('http');
         assert.deepStrictEqual(r.body.jobs.map((j) => j.id), [scanId]);
         r = await call('GET', `/api/v2/live/jobs/${scanId}`);
         assert.deepStrictEqual([r.status, r.body.job.idempotency_key, r.body.job.params, r.body.job.created_by, r.body.job.created_at.includes('T')], [200, 'scan-1', {}, 'app:live', false],
-            'GET the job answers as before (queue.jobPublic: params, idempotency key, creator, SQLite times)');
+            "GET the job answers as before (queue.jobPublic: params, idempotency key, creator, the store's `YYYY-MM-DD HH:MM:SS` UTC text timestamps)");
         r = await call('GET', `/api/v2/games/jobs/${scanId}`, { key: 'games-key' });
         assert.strictEqual(r.status, 404, 'tenants are isolated');
         r = await call('GET', `/api/v2/live/jobs?status=bogus`);

@@ -14,7 +14,7 @@ const { spawn } = require('child_process');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-obs-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
     const ENV = {
-        DB_PATH: path.join(tmp, 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), PASTES_PATH: dir('pastes'),
+        VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), PASTES_PATH: dir('pastes'),
         THUMBNAILS_PATH: dir('thumbnails'), FILES_PATH: dir('files'), OBJECTS_PATH: dir('objects'), ASSETS_PATH: dir('assets'),
         MEDIA_PUBLIC_URL: 'https://media.test', OV_NETWORK_URL: 'http://127.0.0.1:9', RELEASE_COMMIT: 'abcdef1234567',
     };
@@ -132,13 +132,13 @@ const { spawn } = require('child_process');
         // ── The real index.js boots with both routes ──
         const port = await new Promise((resolve) => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); }); });
         const bootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-obs-boot-'));
-        const env = { ...process.env, ...ENV, DB_PATH: path.join(bootDir, 'media.db'), MEDIA_PGLITE_DIR: path.join(bootDir, 'pglite'), DATABASE_URL: '', DATABASE_DIRECT_URL: '', VALKEY_URL: '', PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test' };
+        const env = { ...process.env, ...ENV, MEDIA_PGLITE_DIR: path.join(bootDir, 'pglite'), DATABASE_URL: '', DATABASE_DIRECT_URL: '', VALKEY_URL: '', PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test' };
         for (const k of ['VOD_PATH', 'CLIPS_PATH', 'PASTES_PATH', 'THUMBNAILS_PATH', 'FILES_PATH', 'OBJECTS_PATH', 'ASSETS_PATH']) env[k] = path.join(bootDir, k.toLowerCase());
         const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
         let log = ''; child.stdout.on('data', (d) => { log += d; }); child.stderr.on('data', (d) => { log += d; });
         const b2 = `http://127.0.0.1:${port}`;
         let up = null;
-        for (let i = 0; i < 100 && !up; i++) {
+        for (let i = 0; i < 300 && !up; i++) {   // 30 s: a cold PGlite boot plus migrations is slow on a loaded machine
             await new Promise((res) => setTimeout(res, 100));
             try { up = await request(b2, '/api/ready'); } catch { /* not listening yet */ }
         }

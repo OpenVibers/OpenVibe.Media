@@ -9,7 +9,7 @@
  *         storage.alert | storage.recovered
  *
  * Outcomes go through announce(): the state change and its durable OpenVibe.Events outbox row
- * commit in one SQLite transaction, then the webhook is sent with `event_id` = that event's id
+ * commit in one PostgreSQL transaction, then the webhook is sent with `event_id` = that event's id
  * (absent when the outbox is off), so a consumer that also reads Events dedupes the pair.
  */
 'use strict';
@@ -79,7 +79,7 @@ async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
 
 /**
  * Commit an outcome and announce it. `change()` (synchronous DB writes, optional) and the outbox
- * row for `event` run in ONE SQLite transaction, so the durable event exists if and only if the
+ * row for `event` run in ONE PostgreSQL transaction, so the durable event exists if and only if the
  * change committed: never lost after a commit, never announced for a rollback. `payload()` is read
  * inside that transaction (the row as committed). After the commit the relay is woken and the
  * app's webhook is sent with the same event_id. Returns { data, eventId }; throws (nothing changed,

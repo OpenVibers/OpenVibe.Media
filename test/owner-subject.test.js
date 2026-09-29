@@ -15,7 +15,7 @@ const { ids } = require('openvibe-contracts');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-owner-subject-'));
     const dir = (n) => { const d = path.join(tmp, n); fs.mkdirSync(d, { recursive: true }); return d; };
     const env = {
-        DB_PATH: path.join(tmp, 'media.db'), VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
+        VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'),
         THUMBNAILS_PATH: dir('thumbnails'), PASTES_PATH: dir('pastes'), OBJECTS_PATH: dir('objects'), ASSETS_PATH: dir('assets'),
         MEDIA_PUBLIC_URL: 'https://media.test', OV_NETWORK_URL: 'http://127.0.0.1:9', MEDIA_SIGNING_SECRET: 'test-signing-secret',
         INTERNAL_API_KEY: 'internal-key-0123456789abcdef', OV_OAUTH_CLIENT_ID: 'media', OV_OAUTH_CLIENT_SECRET: 'media-secret',
@@ -97,7 +97,7 @@ const { ids } = require('openvibe-contracts');
         for (let uid = 1000; uid < 1520; uid++) { subjectOf(uid); many.push(await obj({ owner_user_id: uid, kind: 'clip' })); }
         const TO_FILL = 3 + many.length;
 
-        // (The one-off backfill script ran in production on SQLite and is retired: the reconcile job below fills what is left.)
+        // (The one-off backfill script is retired: the reconcile job below fills what is left.)
         // A token Network refuses at resolve-batch: the key answers instead.
         const resolver = ownerSubject.createResolver({ networkUrl: NET });
         net.grant = true;

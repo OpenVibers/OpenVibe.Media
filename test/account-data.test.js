@@ -13,7 +13,6 @@ const path = require('path');
 
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-account-data-'));
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.MEDIA_INBOUND_EVENTS_SECRET = 'm'.repeat(40);
     const log = console.log;
     console.log = (...a) => { if (!/^\[/.test(String(a[0]))) log(...a); };

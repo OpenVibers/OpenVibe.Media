@@ -21,7 +21,6 @@ const https = require('https');
 (async () => {
     const ROOT = path.join(__dirname, '..');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-ssrf-'));
-    process.env.DB_PATH = path.join(tmp, 'media.db');
     process.env.PASTES_PATH = path.join(tmp, 'pastes');
     process.env.MEDIA_PUBLIC_URL = 'https://media.test';
     delete process.env.MEDIA_RTMP_PULL_ALLOW;

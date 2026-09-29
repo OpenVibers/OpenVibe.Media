@@ -40,7 +40,7 @@ function parse(value) {
 const enabled = parse(process.env.MEDIA_DRILL);
 
 const REPO_ROOT = path.resolve(__dirname, '..');
-/** Where production runs (OpenVibe.Host inventory: repo /opt/openvibe.media, database data/media.db). */
+/** Where production runs (OpenVibe.Host inventory: repo /opt/openvibe.media, database ov_media). */
 const PRODUCTION_ROOT = '/opt/openvibe.media';
 const PRODUCTION_PORT = 4100;
 // Production's database: ov_media on the host's PostgreSQL (5432) or through PgBouncer (6432).

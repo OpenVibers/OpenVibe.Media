@@ -37,7 +37,7 @@ ffmpeg -y -f lavfi -i "testsrc=duration=5:size=640x360:rate=30" \
 echo "-- booting server on :$PORT (temp data dir)"
 SEED="[{\"app_id\":\"live\",\"name\":\"Live\",\"api_key\":\"$LIVE_KEY\",\"allowed_origins\":[\"http://localhost:3000\"]},{\"app_id\":\"games\",\"name\":\"Games\",\"api_key\":\"$GAMES_KEY\",\"quota_bytes\":10485760}]"
 env PORT="$PORT" HOST=127.0.0.1 \
-    DB_PATH="$WORK/data/media.db" \
+    MEDIA_DATA_DIR="$WORK/data" \
     VOD_PATH="$WORK/data/vods" CLIPS_PATH="$WORK/data/clips" \
     PASTES_PATH="$WORK/data/pastes" THUMBNAILS_PATH="$WORK/data/thumbnails" \
     FILES_PATH="$WORK/data/files" \

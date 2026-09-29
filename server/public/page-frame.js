@@ -39,7 +39,7 @@ const snip = (s, n = 200) => { const t = String(s || '').replace(/\s+/g, ' ').tr
 /** JSON that is safe inside a <script>: no `</` can end the element early. */
 const jsonForScript = (v) => JSON.stringify(v).replace(/</g, '\\u003c');
 
-/** SQLite's "YYYY-MM-DD HH:MM:SS" (UTC) → ISO 8601, or null. */
+/** ISO 8601 from a "YYYY-MM-DD HH:MM:SS" (UTC) text timestamp, as the migrations store them, or null. */
 function isoDate(dt) {
     if (!dt) return null;
     const d = new Date(String(dt).includes('T') ? dt : `${dt}Z`.replace(' ', 'T'));
