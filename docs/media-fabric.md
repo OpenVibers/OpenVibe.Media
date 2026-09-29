@@ -190,6 +190,11 @@ metric. Budgets per class and provider with a forecast; `provider.cost.threshold
 
 ## F1b decisions (2026-09-29)
 
+**On in production since 2026-09-29 11:5x UTC:** `edge.openvibe.media` (DNS-only A record, Let's Encrypt via DNS-01), the
+shield config in nginx, `MEDIA_SHIELD=b2` and `MEDIA_SHIELD_HOST=edge.openvibe.media` in `media.env`. Probe: a public B2 VOD on
+openvibe.media answers 302 → the edge answers 206 with the exact range, MISS then HIT, one Content-Type, Node's
+Cache-Control, nosniff and noindex, and no B2 header. VOD bytes carry no CORS header, as when Node serves them itself.
+
 - **Shield B2 only.** B2 is the canonical copy whose ~500 req/s ceiling is worth shielding; R2 reads keep their 302
   until F2's engine can enforce the 70 %-of-port rule (an R2 read through the shield spends the same host bandwidth).
 - **A DNS-only edge host.** openvibe.media is behind Cloudflare's proxy and its terms for video are not verified, so
