@@ -113,7 +113,7 @@ server/
   client-ip.js           trust proxy = loopback; req.ip is the only client address
 (openvibe-shared v1.25.0, openvibe-contracts v0.71.0, openvibe-sdk v0.12.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
-scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
+scripts/object-drift-report.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
 scripts/r2-eviction-drill.js   evict one VOD's R2 copy, prove B2 serves it, re-warm R2; JSON artifact (dry run by default)
 scripts/vod-duration-reconcile.js   stored VOD durations vs the real files (dry run by default; --apply --backup; --rollback)
@@ -507,10 +507,16 @@ Every stored blob is a **media object** (`med_<ULID>`, `media_objects`) with one
 existing route and response is unchanged, and the old write paths keep the
 model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
 
-- **Backfill** — `node scripts/backfill-objects.js [--dry-run]`: one object per
-  vod, clip, file, screenshot, avatar and thumbnail; idempotent; never moves
-  bytes or calls B2/R2 (remote copies stay `pending`). The service runs the
-  `--only-missing` form 15 s after boot.
+- **Backfill** — the row→object projection (`server/objects/backfill.js`), not a
+  CLI script: one object per vod, clip, file, screenshot, avatar and thumbnail;
+  idempotent; never moves bytes or calls B2/R2 (remote copies stay `pending`). The
+  service runs the only-missing form 15 s after boot, for rows with no `object_id`
+  yet, and stores its report in `media_settings.objects.backfill.last_report`
+  (also surfaced by `/me/ops`). To see whether any row still lacks an object — or
+  disagrees with the object on record — run the read-only drift report:
+  `node scripts/object-drift-report.js [--app live] [--limit 20] [--json]
+  [--out report.json]`. Zero drift across a release is the signal to drop the boot
+  backfill ([details](docs/object-model.md#backfill)).
 - **API** — `/api/v2/:app/objects`: init → `PUT /:id/content` (sha256, size,
   quota) → `/:id/complete`; `GET /:id`, cursor `GET /`, soft `DELETE /:id`
   (bytes kept `MEDIA_DELETE_RETENTION_DAYS`), `/:id/restore`, `/:id/download`

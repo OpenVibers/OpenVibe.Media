@@ -10,7 +10,7 @@ Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`,
 `signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`, `readiness.js`, `namespaces.js`,
 `namespace-routes.js`, `popularity.js`, `tier-policy.js`, `tiering.js`) and the job system in
 `server/jobs/` (`queue.js`, `worker.js`, `routes.js`, `types.js`, `thumbnail.js`, `invariant-scan.js`,
-`derive.js`). Schema: the bottom of `server/db/schema.sql`. Tests: `test/objects-*.test.js`, `test/jobs*.test.js`,
+`derive.js`). Schema: `migrations/0001_initial.sql`. Tests: `test/objects-*.test.js`, `test/jobs*.test.js`,
 `test/r2-eviction-drill.test.js`, `test/object-tiering.test.js`.
 
 ## Tables
@@ -75,23 +75,23 @@ the same functions.
 
 ## Backfill
 
-```
-node scripts/backfill-objects.js [--dry-run] [--only-missing] [--json] [--out report.json]
-```
+There is no CLI: the backfill is `server/objects/backfill.js` (`backfill({ dryRun, onlyMissing })`),
+run by the service at boot and by the tests. Read-only questions about it are answered by the
+[drift report](#drift-report).
 
 The backfill creates one object per vod, clip, file, screenshot/avatar paste and thumbnail, with
 relationships and thumbnail variants.
 
 - **Idempotent.** Objects are keyed by `legacy_ref`, so a second run updates them in place and creates nothing.
 - **Never moves or deletes bytes, and never calls B2/R2.** A local copy is `present` when the file exists and `missing` when it does not. Remote copies stay `pending` until `reconcile-objects.js --verify` checks them.
-- **One transaction,** with one savepoint per row: a failing row is reported and leaves nothing half-written. `--dry-run` rolls everything back and only reports.
-- **Report:** counts per kind (seen, created, updated, skipped), location states, skipped rows with a reason, and errors. A real run stores the report in `media_settings` under `objects.backfill.last_report`.
-- **At boot:** the service runs the `--only-missing` form itself 15 s after start, for rows with no `object_id`. The first boot after the upgrade therefore projects everything. With object-first writes it should find nothing; it stays until the [drift report](#drift-report) shows zero drift across a release.
+- **One transaction,** with one savepoint per row: a failing row is reported and leaves nothing half-written. `{ dryRun: true }` rolls everything back and only reports.
+- **Report:** counts per kind (seen, created, updated, skipped), location states, skipped rows with a reason, and errors. A real run stores the report in `media_settings` under `objects.backfill.last_report`; `lastReport()` reads it back and `/me/ops` shows it.
+- **At boot:** the service runs the `onlyMissing` form itself 15 s after start, for rows with no `object_id`. The first boot after the upgrade therefore projects everything. With object-first writes it should find nothing; it stays until the [drift report](#drift-report) shows zero drift across a release.
 
 Skip reasons today: `clips-only recording (ephemeral, never published)`, `screenshot paste without a file path`, `external thumbnail url`.
 
-The backfill's own transaction holds row and table locks for its duration, typically seconds. Prefer the boot backfill, or
-run the script while traffic is quiet.
+The backfill's own transaction holds row and table locks for its duration, typically seconds, so it runs only
+where the service controls it: the boot backfill.
 
 ### Keeping the model current: object-first writes
 
@@ -167,10 +167,10 @@ user ids. An object gets it in one of three ways:
   fills their objects. Upload and projection paths never wait on Network. When nothing is missing, a
   run asks Network nothing. An owner Network does not know (a Live account not linked to Network) stays
   `NULL` until a later run finds it.
-- **From the one-off backfill** `scripts/backfill-owner-subject.js`, for everything that existed before
-  the job.
+- **From the one-off backfill** that existed before the job. That script is retired; the job above fills
+  what is left of it, so nothing needs running by hand.
 
-Rules for both job and backfill:
+Rules for both job and historical backfill:
 
 - A non-null `owner_subject` is never overwritten. Every write is guarded by `owner_subject IS NULL`
   and by the owner it was resolved for.
@@ -182,26 +182,9 @@ Rules for both job and backfill:
   `identity.subject.resolve`, audience `openvibe.network`). There is no fallback credential: when Network
   has not granted it, the pass fails and the job retries.
 
-```
-node scripts/backfill-owner-subject.js [--batch 500] [--json]                        # dry run: counts per tenant
-node scripts/backfill-owner-subject.js --apply --backup <file.json> [--batch 500]     # fill
-node scripts/backfill-owner-subject.js --rollback <file.json> [--apply]               # undo (dry without --apply)
-```
-
-- **The dry run** (the default) opens the database read-only and prints per tenant: objects, already
-  set, to fill, unresolvable, unsupported tenant and no owner.
-- **`--apply --backup <file.json>`** writes the rollback file `<file.json>` (0600) with the rows it is
-  about to change, and fills them in `--batch` transactions. The database's own safety net is
-  PostgreSQL's point-in-time recovery (pgBackRest), not an online copy. Finally it rewrites the file to
-  list exactly the rows it changed. It refuses an existing backup name, and a re-run fills only what is
-  still missing.
-- **`--rollback <file.json> --apply`** sets `owner_subject` back to `NULL` on each listed row that
-  still carries the subject the backfill wrote for the same owner. Rows changed since are counted and
-  left alone. Without `--apply` it only reports, which also verifies an applied backfill. Stop the job
-  first (`MEDIA_OWNER_SUBJECT_SYNC=0`, restart), or its next run fills the rows again.
-
-The script opens the database directly, not through `server/db/database.js`, so none of the service's
-boot work runs (for example, marking in-progress clip cuts failed).
+To stop or pace the job: `MEDIA_OWNER_SUBJECT_SYNC=0` turns it off, `MEDIA_OWNER_SUBJECT_INTERVAL_MIN`
+(10) sets the interval. There is no rollback command; PostgreSQL's point-in-time recovery (pgBackRest) is
+the safety net.
 
 ## Object API v2
 
