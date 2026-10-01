@@ -64,9 +64,13 @@ const express = require('express');
         let log = '';
         child.stdout.on('data', (d) => { log += d; });
         child.stderr.on('data', (d) => { log += d; });
+        let exited = false;
+        child.on('exit', () => { exited = true; });
+        // A cold PGlite boot under a loaded machine (the suite beside test:pg) takes well over 10 s.
         let up = false;
-        for (let i = 0; i < 100 && !up; i++) {
-            try { up = (await get('127.0.0.1', freePort, '/healthz')).status === 200; } catch { await new Promise((res) => setTimeout(res, 100)); }
+        for (const deadline = Date.now() + 60000; !up && !exited && Date.now() < deadline;) {
+            try { up = (await get('127.0.0.1', freePort, '/healthz')).status === 200; } catch { /* not listening yet */ }
+            if (!up) await new Promise((res) => setTimeout(res, 200));
         }
         assert.ok(up, `the server booted: ${log.slice(-500)}`);
         // /metrics answers loopback callers only and refuses anything that came through a proxy; with
