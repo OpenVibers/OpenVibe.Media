@@ -122,8 +122,10 @@ router.post('/', transform, limits('media.job.create', QUEUE), async (req, res) 
 });
 
 router.get('/:jobId', read, limits('media.job.read'), async (req, res) => {
-    const job = await load(req, res);
-    if (job) res.json({ job: queue.jobPublic(job) });
+    try {
+        const job = await load(req, res);
+        if (job) res.json({ job: queue.jobPublic(job) });
+    } catch (err) { sendJobError(res, err); }
 });
 
 router.post('/:jobId/approve', transform, limits('media.job.approve', QUEUE), async (req, res) => {

@@ -443,7 +443,12 @@ async function waitFor(id, timeoutMs = 60000) {
     if (!now || FINISHED.includes(now.status)) return Promise.resolve(now);
     return new Promise((resolve) => {
         const ev = `finished:${id}`;
-        const done = async (row) => { clearTimeout(t); bus.removeListener(ev, done); resolve(row || await get(id)); };
+        const done = async (row) => {
+            clearTimeout(t);
+            bus.removeListener(ev, done);
+            try { resolve(row || await get(id)); }
+            catch (err) { console.warn(`[Jobs] wait for ${id}: reading its final state failed: ${err.message}`); resolve(row || null); }
+        };
         const t = setTimeout(async () => await done(null), timeoutMs);
         if (t.unref) t.unref();
         bus.on(ev, done);
