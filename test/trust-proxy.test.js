@@ -64,8 +64,11 @@ const express = require('express');
         let log = '';
         child.stdout.on('data', (d) => { log += d; });
         child.stderr.on('data', (d) => { log += d; });
+        let exited = false;
+        child.on('exit', () => { exited = true; });
         let up = false;
-        for (let i = 0; i < 100 && !up; i++) {
+        // PGlite creates and migrates its database on first boot; under a loaded suite run that takes well over 10 s.
+        for (let i = 0; i < 600 && !up && !exited; i++) {
             try { up = (await get('127.0.0.1', freePort, '/healthz')).status === 200; } catch { await new Promise((res) => setTimeout(res, 100)); }
         }
         assert.ok(up, `the server booted: ${log.slice(-500)}`);
