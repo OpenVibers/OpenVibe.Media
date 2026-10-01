@@ -34,12 +34,10 @@
 
 const express = require('express');
 const crypto = require('crypto');
-const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const sharp = require('sharp');
 const db = require('../db/database');
-const config = require('../config');
 const { tenantAuth, tenantCors } = require('../auth');
 
 const router = express.Router({ mergeParams: true });
@@ -54,9 +52,8 @@ router.use((req, res, next) => {
     next();
 });
 
-// ── Screenshot upload storage ───────────────────────────────
-const SCREENSHOTS_DIR = path.join(config.pastes.path, 'screenshots');
-if (!require('../drill').enabled && !fs.existsSync(SCREENSHOTS_DIR)) fs.mkdirSync(SCREENSHOTS_DIR, { recursive: true });   // a restore drill writes nothing
+// ── Screenshot upload storage (shared with the avatar ingest: server/pastes/storage.js) ──
+const { SCREENSHOTS_DIR, generateSlug } = require('./storage');
 
 const MIME_TO_EXT = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
 const screenshotStorage = multer.diskStorage({
@@ -76,55 +73,6 @@ const screenshotUpload = multer({
 });
 
 // ── Helpers ─────────────────────────────────────────────────
-
-// Word pools for readable paste slugs (adj-noun-number)
-const SLUG_ADJECTIVES = [
-    'amber', 'blue', 'bold', 'brave', 'bright', 'calm', 'clean', 'clever',
-    'cold', 'cool', 'coral', 'crisp', 'dark', 'dawn', 'deep', 'dry',
-    'dusk', 'dusty', 'fair', 'fast', 'fierce', 'fine', 'foggy', 'free',
-    'fresh', 'frost', 'glad', 'gold', 'grand', 'gray', 'green', 'grim',
-    'hazy', 'heavy', 'hidden', 'hollow', 'honey', 'hot', 'icy', 'iron',
-    'jade', 'keen', 'kind', 'late', 'lazy', 'light', 'lime', 'lit',
-    'lone', 'lost', 'loud', 'lucky', 'lush', 'mild', 'misty', 'mossy',
-    'muddy', 'neon', 'new', 'noble', 'odd', 'old', 'opal', 'open',
-    'pale', 'pink', 'plain', 'plum', 'prime', 'proud', 'pure', 'quick',
-    'quiet', 'rare', 'raw', 'red', 'rich', 'rocky', 'rosy', 'rough',
-    'ruby', 'rusty', 'safe', 'sage', 'sandy', 'sharp', 'shy', 'silver',
-    'slim', 'slow', 'smoky', 'snowy', 'soft', 'sour', 'steep', 'still',
-    'stone', 'sunny', 'sweet', 'swift', 'tall', 'tame', 'teal', 'thin',
-    'tidy', 'tiny', 'torn', 'vast', 'vivid', 'warm', 'wavy', 'west',
-    'wet', 'white', 'wide', 'wild', 'windy', 'wise', 'worn', 'young',
-];
-const SLUG_NOUNS = [
-    'acorn', 'arch', 'arrow', 'aspen', 'badger', 'basil', 'bay', 'bear',
-    'birch', 'blade', 'bloom', 'bolt', 'brook', 'brush', 'cairn', 'cave',
-    'cedar', 'cliff', 'cloud', 'clover', 'coast', 'coral', 'crane', 'creek',
-    'crow', 'dale', 'deer', 'delta', 'dew', 'dock', 'dove', 'drift',
-    'drum', 'dune', 'eagle', 'echo', 'edge', 'elm', 'ember', 'fawn',
-    'fern', 'field', 'finch', 'flame', 'flare', 'flint', 'fog', 'ford',
-    'forge', 'fox', 'frost', 'gale', 'gate', 'gem', 'glen', 'goat',
-    'grove', 'gull', 'hawk', 'haze', 'heath', 'hedge', 'heron', 'hill',
-    'holly', 'horse', 'hound', 'isle', 'ivy', 'jade', 'jay', 'kelp',
-    'lake', 'lark', 'leaf', 'ledge', 'lily', 'lion', 'lodge', 'lynx',
-    'maple', 'marsh', 'mesa', 'mill', 'mint', 'mist', 'moon', 'moss',
-    'moth', 'mule', 'nest', 'oak', 'orca', 'otter', 'owl', 'palm',
-    'path', 'peak', 'pearl', 'petal', 'pike', 'pine', 'plum', 'pond',
-    'quail', 'rain', 'raven', 'reed', 'reef', 'ridge', 'river', 'robin',
-    'root', 'rose', 'sage', 'seal', 'shade', 'shell', 'shore', 'slate',
-    'snail', 'spark', 'stone', 'storm', 'stork', 'thorn', 'tide', 'trail',
-    'trout', 'tulip', 'vale', 'vine', 'viper', 'wave', 'wren', 'wolf',
-];
-
-async function generateSlug(attempts = 0) {
-    if (attempts >= 10) throw new Error('Could not generate a unique paste slug after 10 attempts');
-    const adj = SLUG_ADJECTIVES[crypto.randomInt(SLUG_ADJECTIVES.length)];
-    const noun = SLUG_NOUNS[crypto.randomInt(SLUG_NOUNS.length)];
-    const num = crypto.randomInt(10, 100); // 10–99
-    const slug = `${adj}-${noun}-${num}`;
-    const existing = await db.get('SELECT 1 FROM pastes WHERE slug = ?', [slug]);
-    if (existing) return await generateSlug(attempts + 1);
-    return slug;
-}
 
 function sanitizeTitle(title) {
     return String(title || '').trim().slice(0, 200) || 'Untitled';
