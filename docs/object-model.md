@@ -75,23 +75,20 @@ the same functions.
 
 ## Backfill
 
-```
-node scripts/backfill-objects.js [--dry-run] [--only-missing] [--json] [--out report.json]
-```
-
-The backfill creates one object per vod, clip, file, screenshot/avatar paste and thumbnail, with
-relationships and thumbnail variants.
+`backfill()` in `server/objects/backfill.js` is a module, not a CLI: it is called from code, and the service calls it
+itself with `{ onlyMissing: true }` 15 s after boot. It creates one object per vod, clip, file, screenshot/avatar paste
+and thumbnail, with relationships and thumbnail variants.
 
 - **Idempotent.** Objects are keyed by `legacy_ref`, so a second run updates them in place and creates nothing.
 - **Never moves or deletes bytes, and never calls B2/R2.** A local copy is `present` when the file exists and `missing` when it does not. Remote copies stay `pending` until `reconcile-objects.js --verify` checks them.
-- **One transaction,** with one savepoint per row: a failing row is reported and leaves nothing half-written. `--dry-run` rolls everything back and only reports.
+- **One transaction,** with one savepoint per row: a failing row is reported and leaves nothing half-written. A dry run (`{ dryRun: true }`) rolls everything back and only reports.
 - **Report:** counts per kind (seen, created, updated, skipped), location states, skipped rows with a reason, and errors. A real run stores the report in `media_settings` under `objects.backfill.last_report`.
-- **At boot:** the service runs the `--only-missing` form itself 15 s after start, for rows with no `object_id`. The first boot after the upgrade therefore projects everything. With object-first writes it should find nothing; it stays until the [drift report](#drift-report) shows zero drift across a release.
+- **At boot:** the service runs the `onlyMissing` form itself 15 s after start, for rows with no `object_id`. The first boot after the upgrade therefore projects everything. With object-first writes it should find nothing; it stays until the [drift report](#drift-report) shows zero drift across a release.
 
 Skip reasons today: `clips-only recording (ephemeral, never published)`, `screenshot paste without a file path`, `external thumbnail url`.
 
-The backfill's own transaction holds row and table locks for its duration, typically seconds. Prefer the boot backfill, or
-run the script while traffic is quiet.
+The backfill's own transaction holds row and table locks for its duration, typically seconds. Prefer the boot backfill; a
+manual call should wait until traffic is quiet.
 
 ### Keeping the model current: object-first writes
 

@@ -10,8 +10,9 @@
  *      Browser endpoints additionally check the Origin header against the
  *      app's allowed_origins list.
  *
- * App seeding: MEDIA_APPS_SEED (JSON array) and/or MEDIA_APP_KEYS ("id:key,…")
- * are upserted on boot; keys are stored as sha256 hashes.
+ * App seeding: MEDIA_APPS_SEED (JSON array) and/or the deprecated MEDIA_APP_KEYS
+ * ("id:key,…") short form are upserted on boot; keys are stored as sha256 hashes.
+ * MEDIA_APP_KEYS is deprecated — move each app to MEDIA_APPS_SEED.
  *
  * Network principal tokens (service and developer app tokens) are checked per namespace for one of
  * five verbs: read, list, write, delete, transform (VERBS below; objects/namespaces.js has the rows).
@@ -469,6 +470,7 @@ async function seedApps() {
     }
 
     if (config.apps.seedKeys) {
+        console.warn('[Auth] MEDIA_APP_KEYS is deprecated: move each app to MEDIA_APPS_SEED (JSON with app_id, api_key, webhook_url, allowed_origins)');
         for (const pair of config.apps.seedKeys.split(',')) {
             const idx = pair.indexOf(':');
             if (idx < 1) continue;

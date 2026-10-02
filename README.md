@@ -113,7 +113,7 @@ server/
   client-ip.js           trust proxy = loopback; req.ip is the only client address
 (openvibe-shared v1.25.0, openvibe-contracts v0.71.0, openvibe-sdk v0.12.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
-scripts/backfill-objects.js / reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
+scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
 scripts/r2-eviction-drill.js   evict one VOD's R2 copy, prove B2 serves it, re-warm R2; JSON artifact (dry run by default)
 scripts/vod-duration-reconcile.js   stored VOD durations vs the real files (dry run by default; --apply --backup; --rollback)
@@ -212,7 +212,7 @@ On every boot the service upserts apps from env (keys are hashed):
 
 ```bash
 MEDIA_APPS_SEED='[{"app_id":"live","name":"OpenVibe.Live","api_key":"…","webhook_url":"http://127.0.0.1:3000/internal/media-webhook","webhook_secret":"…","allowed_origins":["https://openvibe.live"],"quota_bytes":0}]'
-# fallback short form (no webhooks/origins):
+# deprecated: use MEDIA_APPS_SEED (fallback short form, no webhooks/origins)
 MEDIA_APP_KEYS="live:key1,games:key2"
 ```
 
@@ -494,10 +494,10 @@ Every stored blob is a **media object** (`med_<ULID>`, `media_objects`) with one
 existing route and response is unchanged, and the old write paths keep the
 model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
 
-- **Backfill** — `node scripts/backfill-objects.js [--dry-run]`: one object per
+- **Backfill** — `backfill()` in `server/objects/backfill.js`: one object per
   vod, clip, file, screenshot, avatar and thumbnail; idempotent; never moves
-  bytes or calls B2/R2 (remote copies stay `pending`). The service runs the
-  `--only-missing` form 15 s after boot.
+  bytes or calls B2/R2 (remote copies stay `pending`). It is a module, not a
+  CLI: the service calls it itself with `onlyMissing: true` 15 s after boot.
 - **API** — `/api/v2/:app/objects`: init → `PUT /:id/content` (sha256, size,
   quota) → `/:id/complete`; `GET /:id`, cursor `GET /`, soft `DELETE /:id`
   (bytes kept `MEDIA_DELETE_RETENTION_DAYS`), `/:id/restore`, `/:id/download`
@@ -618,8 +618,9 @@ Reporting a vulnerability: [SECURITY.md](SECURITY.md). The rules the code keeps:
   `test/rtmp-allowlist.test.js`); avatar
   ingestion fetches through the SSRF guard; other calls go to the configured Network, Live, Events, B2
   and R2 endpoints.
-- **Secrets.** `OV_OAUTH_CLIENT_SECRET`, `MEDIA_SIGNING_SECRET`, `MEDIA_SECRET`, `MEDIA_APPS_SEED` /
-  `MEDIA_APP_KEYS`, `MEDIA_B2_*`, `MEDIA_R2_*`, `MEDIA_INBOUND_EVENTS_SECRET` and `VIEW_HASH_SECRET` (the
+- **Secrets.** `OV_OAUTH_CLIENT_SECRET`, `MEDIA_SIGNING_SECRET`, `MEDIA_SECRET`, `MEDIA_APPS_SEED`
+  (and the deprecated `MEDIA_APP_KEYS`), `MEDIA_B2_*`, `MEDIA_R2_*`, `MEDIA_INBOUND_EVENTS_SECRET` and
+  `VIEW_HASH_SECRET` (the
   secret visitor hashes are derived from; it falls back to `MEDIA_SECRET`) live in
   `/etc/openvibe/media.env` (0600), by name only.
 
