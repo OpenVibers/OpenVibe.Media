@@ -7,7 +7,7 @@ OpenVibe.Live predecessor. Owns VOD ingest/recording, storage tiering
 (local → Backblaze B2 → Cloudflare R2), clips, generic files, the canonical
 object model and thumbnails, for all OpenVibe apps (`live`, `games`, `tools`,
 `network`, `community`) and developer projects. Pastes moved to OpenVibe.Community
-on 2026-09-22; Media's paste routes stay as the rollback path ([Pastes](#pastes)).
+on 2026-09-22; Media's paste API is read-only and writes answer 410 ([Pastes](#pastes)).
 
 Implements **Media API v1** from `../CONTRACTS.md`.
 
@@ -89,7 +89,7 @@ server/
   vod/vod-storage.js     local/B2/R2 tiering, presigned playback, sweep, CLI
   vod/health-scanner.js  probe/decode/master-recovery primitives
   vod/health-job.js      background health scan + quarantine cleanup + master sweep
-  pastes/routes.js       /api/v1/:app/pastes (+ admin: stats/forks/bulk/censor)
+  pastes/routes.js       /api/v1/:app/pastes (read-only; writes answer 410 pastes.moved)
   files/routes.js        /api/v1/:app/files
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
@@ -274,41 +274,21 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 
 ### Pastes
 
-**Production (since 2026-09-22):** OpenVibe.Community is the paste authority.
-With `PASTES_FROZEN_APPS=live`, paste writes for app `live` answer 410, and
+**Read-only since the move:** OpenVibe.Community owns pastes (since
+2026-09-22). The paste API here answers reads only: every other method
+(POST, PUT, DELETE, …) answers 410 `{ "code": "pastes.moved" }` for every app.
 `PASTES_MOVED_TO=https://openvibe.community` turns `/p/:slug` and its text
 `/raw` into 301s to Community. Screenshot bytes are still served from here, and
-new screenshots are uploaded to the token-only `community` tenant. The routes
-below stay as the rollback path.
+new screenshots are uploaded to the token-only `community` tenant.
 
 | method | path | notes |
 |---|---|---|
-| POST | `/pastes` | `{ title?, content?, language?, user_id?, visibility?, burn_after_read?, is_nsfw? }` or multipart with `screenshot` image (EXIF-stripped via sharp) → `{ id, slug, url }` |
 | GET | `/pastes?limit&offset&type&search&user_id` | public list |
 | GET | `/pastes/config` | paste limits (`maxSizeKb`, `cooldownSeconds`, `maxPerUserPerDay`, `todayCount`, …) |
 | GET | `/pastes/:slug` | full paste (private: owner/app only) |
-| PUT | `/pastes/:slug` | update (owner/app) |
-| DELETE | `/pastes/:slug` | delete + screenshot (local & legacy B2 object) |
-| POST | `/pastes/:slug/fork` | fork a text paste |
-| POST | `/pastes/:slug/like` | toggle like (needs a user identity) |
-| POST | `/pastes/:slug/copy` | track a copy event |
-| GET/POST | `/pastes/:slug/comments` | threaded comments (anon supported) |
-| DELETE | `/pastes/:slug/comments/:id` | author/paste-owner/app |
+| GET | `/pastes/:slug/comments` | threaded comments |
 
-**Paste admin** (app-key auth only — the app's server fronts its admins):
-
-| method | path | notes |
-|---|---|---|
-| GET | `/pastes/admin/stats` | app-scoped `{ total, textPastes, screenshots, forks, totalViews, totalCopies, totalLikes }` |
-| GET | `/pastes/admin/forks?limit&offset` | list forked pastes |
-| DELETE | `/pastes/admin/forks` | delete ALL forks (screenshots unlinked too) → `{ deleted }` |
-| POST | `/pastes/bulk` | `{ slugs: [...], action: delete\|public\|unlisted\|private }` (max 500) → `{ done, skipped }` |
-| POST | `/pastes/:slug/censor` | multipart `screenshot` (PNG/JPEG/WebP ≤ 16 MB) replaces a screenshot paste's image (old file deleted); `:slug` also accepts a numeric paste id |
-
-Cooldowns and daily limits (`media_settings`: `paste_cooldown_seconds`,
-`paste_max_per_user_per_day`, sizes) apply to user-JWT callers; app-key callers
-are trusted server-to-server. AI summary/tags generation was **dropped** (Live
-owns AI) but the columns remain for imported rows.
+AI summary/tags columns remain for imported rows.
 
 ### Files
 
