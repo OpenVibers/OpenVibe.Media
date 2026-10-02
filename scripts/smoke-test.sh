@@ -105,37 +105,15 @@ echo "$HDRS" | head -1 | grep -q ' 206 ' && ok "Range request → 206 Partial Co
 echo "$HDRS" | grep -qi '^content-range: bytes 0-99/' && ok "Content-Range header present" || bad "Content-Range header"
 echo "$HDRS" | grep -qi '^x-robots-tag: noindex' && ok "/v is noindex" || bad "/v noindex header"
 
-echo "-- pastes: create + public page + raw"
+echo "-- pastes: read-only (OpenVibe.Community owns pastes)"
 R=$(curl -s -X POST "$BASE/api/v1/live/pastes" -H "$AUTH" -H 'Content-Type: application/json' \
-    -d '{"title":"Smoke paste","content":"hello from the smoke test\nline two","user_id":7}')
-SLUG=$(jsonget "$R" slug)
-[ -n "$SLUG" ] && ok "paste created slug=$SLUG" || bad "paste create ($R)"
-PAGE=$(curl -s "$BASE/p/$SLUG")
-echo "$PAGE" | grep -q 'Smoke paste' && ok "/p/$SLUG HTML page renders title" || bad "/p page content"
-echo "$PAGE" | grep -q 'OpenVibe' && ok "/p page carries OpenVibe branding" || bad "/p page branding"
-RAW=$(curl -s "$BASE/p/$SLUG/raw")
-check "/p/$SLUG/raw returns content" "hello from the smoke test
-line two" "$RAW"
-
-echo "-- pastes admin: screenshot + censor + stats"
-R=$(curl -s -X POST "$BASE/api/v1/live/pastes" -H "$AUTH" \
+    -d '{"title":"Smoke paste","content":"hello from the smoke test"}')
+check "paste create → pastes.moved" "pastes.moved" "$(jsonget "$R" code)"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/live/pastes" -H "$AUTH" \
     -F "screenshot=@$WORK/thumb.jpg;type=image/jpeg" -F "title=Smoke screenshot")
-SSLUG=$(jsonget "$R" slug)
-[ -n "$SSLUG" ] && ok "screenshot paste created slug=$SSLUG" || bad "screenshot paste ($R)"
-R=$(curl -s -X POST "$BASE/api/v1/live/pastes/$SSLUG/censor" -H "$AUTH" \
-    -F "screenshot=@$WORK/thumb.jpg;type=image/jpeg")
-check "censor replaces screenshot" "$SSLUG" "$(jsonget "$R" paste.slug)"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/p/$SSLUG/screenshot")
-check "censored screenshot serves" "200" "$CODE"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/live/pastes/$SLUG/censor" -H "$AUTH" \
-    -F "screenshot=@$WORK/thumb.jpg;type=image/jpeg")
-check "censor on text paste → 400" "400" "$CODE"
-R=$(curl -s "$BASE/api/v1/live/pastes/admin/stats" -H "$AUTH")
-PT=$(jsonget "$R" stats.total); PS=$(jsonget "$R" stats.screenshots)
-[ "${PT:-0}" -ge 2 ] && ok "paste stats total=$PT" || bad "paste stats total (got '$PT')"
-[ "${PS:-0}" -ge 1 ] && ok "paste stats screenshots=$PS" || bad "paste stats screenshots (got '$PS')"
-CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/live/pastes/admin/stats")
-check "paste admin without key → 401" "401" "$CODE"
+check "screenshot paste create → 410" "410" "$CODE"
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/live/pastes" -H "$AUTH")
+check "paste list still reads" "200" "$CODE"
 
 echo "-- admin storage: overview + vod listing"
 R=$(curl -s "$BASE/api/v1/live/admin/storage" -H "$AUTH")

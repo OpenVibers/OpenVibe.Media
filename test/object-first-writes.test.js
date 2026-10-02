@@ -203,20 +203,19 @@ const sharp = require('sharp');
         assert.strictEqual((await call('DELETE', `/files/${encodeURIComponent(spare.body.key)}`)).status, 200);
         assert.strictEqual((await model.getObject(spareObj)).lifecycle_status, 'deleted');
 
+        // Paste writes moved to OpenVibe.Community: POST /pastes answers 410 and writes nothing.
+        const pastesBefore = [await count('pastes'), await count('media_objects')];
         r = await call('POST', '/pastes', form('screenshot', png, 'image/png', 'shot.png', { title: 'Shot', visibility: 'unlisted' }));
-        assert.strictEqual(r.status, 201);
-        const slug = r.body.slug;
+        assert.deepStrictEqual([r.status, r.body.code], [410, 'pastes.moved']);
+        assert.deepStrictEqual([await count('pastes'), await count('media_objects')], pastesBefore, 'a refused paste write creates neither a row nor an object');
+        // A screenshot paste row (imported before the move) still commits with its object.
+        const slug = 'shot1';
+        const shotFile = path.join(process.env.PASTES_PATH, 'shot1.png');
+        fs.writeFileSync(shotFile, png);
+        await db.withObject('paste', (x) => x.lastInsertRowid, async () => await db.run(`INSERT INTO pastes (app_id, slug, type, title, content, language, visibility, screenshot_path)
+            VALUES ('live', ?, 'screenshot', 'Shot', '', 'text', 'unlisted', ?) RETURNING id`, [slug, shotFile]));
         ({ obj } = await linked('pastes', 'slug', slug, 'screenshot paste'));
         assert.deepStrictEqual([obj.kind, obj.visibility, obj.legacy_ref], ['screenshot', 'unlisted', `legacy:live:paste:${slug}`]);
-        assert.strictEqual((await call('PUT', `/pastes/${slug}`, { title: 'Shot 2', visibility: 'private' })).status, 200);
-        assert.strictEqual((await linked('pastes', 'slug', slug, 'paste update')).obj.visibility, 'private');
-        assert.strictEqual((await call('POST', '/pastes/bulk', { slugs: [slug], action: 'public' })).status, 200);
-        assert.strictEqual((await linked('pastes', 'slug', slug, 'paste bulk')).obj.visibility, 'public');
-        const censor = await call('POST', `/pastes/${slug}/censor`, form('screenshot', png, 'image/png', 'censored.png'));
-        assert.strictEqual(censor.status, 200);
-        assert.strictEqual((await linked('pastes', 'slug', slug, 'paste censor')).obj.size_bytes, png.length);
-        const text = await call('POST', '/pastes', { content: 'just text' });
-        assert.strictEqual((await db.get('SELECT object_id FROM pastes WHERE slug = ?', [text.body.slug])).object_id, null, 'a text paste has no bytes and no object');
 
         // Avatar ingest's write (server/avatars/ingest.js): the avatar row and its object together.
         const avatarFile = path.join(process.env.PASTES_PATH, 'avatar.webp');
@@ -247,8 +246,6 @@ const sharp = require('sharp');
         await unchanged('createClip: neither row');
         assert.strictEqual((await call('POST', '/files', form('file', Buffer.from('never stored'), 'text/plain', 'never.txt'))).status, 500);
         await unchanged('POST /files: neither row');
-        assert.strictEqual((await call('POST', '/pastes', form('screenshot', png, 'image/png', 'never.png'))).status, 500);
-        await unchanged('POST /pastes screenshot: neither row');
 
         // Updates: the row keeps its old values when its object cannot follow.
         await assert.rejects(async () => await db.setVodVisibility(vodId, 'public'), /object write refused/);

@@ -21,7 +21,6 @@ const http = require('http');
         MEDIA_PUBLIC_URL: 'https://media.test', OV_NETWORK_URL: 'https://openvibe.network',
     });
     for (const k of Object.keys(process.env)) if (/^MEDIA_(B2|R2)_/.test(k)) delete process.env[k];
-    delete process.env.PASTES_FROZEN_APPS;
 
     const db = require('../server/db/database');
     const model = require('../server/objects/model');
@@ -174,15 +173,17 @@ const http = require('http');
         assert.strictEqual(await vod(24), undefined, 'and still removes an unheld one');
         console.log('✅ finalize and the junk sweep settle held empty recordings instead of deleting them');
 
-        // ── A held screenshot paste ──
+        // ── A held screenshot paste: paste writes moved to OpenVibe.Community, so deletes answer 410 ──
         const shot = await db.get("SELECT * FROM pastes WHERE slug = 'shot1'");
         await model.placeHold({ object_id: shot.object_id, kind: 'evidence', reason: 'x' });
         r = await call('DELETE', '/api/v1/live/pastes/shot1');
-        assert.deepStrictEqual([r.status, r.body.code], [409, 'media.object.held']);
+        assert.deepStrictEqual([r.status, r.body.code], [410, 'pastes.moved']);
         r = await call('POST', '/api/v1/live/pastes/bulk', { slugs: ['shot1'], action: 'delete' });
-        assert.deepStrictEqual([r.status, r.body.done, r.body.skipped], [200, 0, 1], 'bulk delete skips it');
+        assert.deepStrictEqual([r.status, r.body.code], [410, 'pastes.moved'], 'bulk delete is gone too');
         assert.ok(fs.existsSync(shot.screenshot_path) && await db.get("SELECT 1 AS x FROM pastes WHERE slug = 'shot1'"));
-        console.log('✅ a held screenshot paste: DELETE answers 409, bulk delete skips it');
+        const shotObj = await model.getObject(shot.object_id);
+        assert.ok(shotObj && shotObj.lifecycle_status !== 'deleted', 'the paste keeps its object');
+        console.log('✅ a held screenshot paste: DELETE and bulk delete answer 410 pastes.moved; row, bytes and object stay');
 
         // ── Listing and release ──
         r = await call('GET', H);

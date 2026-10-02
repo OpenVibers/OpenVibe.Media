@@ -630,7 +630,7 @@ router.delete('/:id', remove, limits('media.object.delete', { minute: 60, hour: 
         const obj = await load(req, res, 'delete');
         if (!obj) return;
         if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
-        if (obj.legacy_ref) return problem(res, 409, 'media.object.legacy_managed', 'Delete this object through its v1 route (vods, clips, files, pastes)');
+        if (obj.legacy_ref) return problem(res, 409, 'media.object.legacy_managed', 'Delete this object through its v1 route (vods, clips, files); paste screenshots and avatars are frozen since pastes moved to OpenVibe.Community');
         if (await model.isHeld(obj.id)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
         if (obj.lifecycle_status === 'deleted') return res.json(await model.objectPublic(obj));
         const gone = await model.softDelete(obj, { by: req.principal ? req.principal.sub : `app:${req.appId}` });

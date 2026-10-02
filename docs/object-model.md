@@ -115,7 +115,7 @@ after the outcome event.
 | clip cut / re-cut result | clips routes and `clip-jobs`, inside the clip.ready / clip.failed transaction |
 | file upload | `db.createFile` |
 | thumbnail generate / upload | `thumbnail-service`, `POST /thumbnails` |
-| screenshot upload / update / censor | pastes routes |
+| screenshot upload / update / censor | none since pastes moved to OpenVibe.Community (2026-09-22): the paste API is read-only and writes answer 410 `pastes.moved` |
 | avatar ingest | `avatars/ingest` |
 | tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep, `migrateLegacy`: the copy the move verified is marked `present` in the same transaction |
 
@@ -518,11 +518,11 @@ While any hold applies:
 
 - **No delete path works.**
   - v2 `DELETE` answers 409.
-  - The v1 deletes for vods, clips, files and pastes, and the admin bulk delete, answer 409 or report `held`; the paste bulk delete skips it.
+  - The v1 deletes for vods, clips and files, and the admin bulk delete, answer 409 or report `held` (paste deletes answer 410 `pastes.moved` for every paste since the move).
   - Quarantine cleanup and the boot junk sweep skip the object.
   - Finalize never deletes a held recording that turned out empty (no file, or zero bytes): it keeps the row and the file and settles it as failed (`missing_file` / `zero_byte`, quarantined, `vod.failed`).
   - `deleteVodObjects` keeps the bytes.
-  - Paste screenshot removal keeps the file, and censor answers 409.
+  - Paste screenshot removal keeps the file.
   - A `BEFORE DELETE` trigger on each projected table, plus a trigger on `media_objects.lifecycle_status`, refuses the change, so paths nobody has hooked are still covered. The triggers are the `_v2` ones (clip-aware); an older database has its first-version guards replaced at start.
 - **No tier move.** `moveToCold`, `moveToHot`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }` (the admin moves answer it, R2 moves are logged as `refused`), and the sweep counts these as `skippedHeld` instead of errors. A held native object is never promoted to or demoted from the R2 cache either (logged as `refused`; a hold placed while its bytes were being copied wins, and the unrecorded copy is removed). A hold freezes an object's placement: `moveToHot` is refused too, because restoring flips the row to local and drops an R2 copy. A clip cut from a held VOD in B2/R2 is cut from the cloud copy instead of fetching the VOD home. Row updates that only record where the bytes already are (the sweep finding a local file gone while B2 has the copy, the legacy-tier migration) still happen: they move nothing.
 

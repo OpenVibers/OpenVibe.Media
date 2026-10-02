@@ -1,6 +1,6 @@
 'use strict';
-// After the Wave 5 cutover: paste writes for a frozen app answer 410, the paste page and its text 301 to
-// OpenVibe.Community, and screenshot bytes are still served from here. Unset, nothing changes.
+// Pastes moved to OpenVibe.Community: paste writes always answer 410 pastes.moved and reads keep working.
+// With PASTES_MOVED_TO set, the paste page and its text 301 to Community; screenshot bytes are still served here.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -28,14 +28,22 @@ const express = require('express');
         const get = (p) => fetch(base + p, { redirect: 'manual' });
         const post = () => fetch(`${base}/api/v1/live/pastes`, { method: 'POST', headers: { authorization: 'Bearer live-key', 'content-type': 'application/json' }, body: JSON.stringify({ content: 'x' }) });
 
-        // Before the switch: business as usual.
+        // Writes answer 410 for every app, with or without PASTES_MOVED_TO, and create nothing.
+        const pasteCount = async () => (await db.get('SELECT COUNT(*) AS n FROM pastes')).n;
+        const rows = await pasteCount();
+        let r = await post();
+        assert.strictEqual(r.status, 410); assert.strictEqual((await r.json()).code, 'pastes.moved');
+        assert.strictEqual(await pasteCount(), rows, 'a refused write creates no paste');
+        // The caller is authenticated before the 410: an anonymous write answers 401, like the reads.
+        r = await fetch(`${base}/api/v1/live/pastes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: 'x' }) });
+        assert.strictEqual(r.status, 401);
+
+        // Before the redirect switch: the pages are served here.
         assert.strictEqual((await get('/p/text-1')).status, 200);
         assert.strictEqual(await (await get('/p/text-1/raw')).text(), 'hello');
-        assert.strictEqual((await post()).status, 201);
 
         process.env.PASTES_MOVED_TO = 'https://openvibe.community/';
-        process.env.PASTES_FROZEN_APPS = 'live';
-        let r = await post();
+        r = await post();
         assert.strictEqual(r.status, 410); assert.strictEqual((await r.json()).code, 'pastes.moved');
         r = await fetch(`${base}/api/v1/live/pastes/text-1`, { headers: { authorization: 'Bearer live-key' } });
         assert.strictEqual(r.status, 200, 'reads still work');
