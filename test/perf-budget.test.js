@@ -33,18 +33,23 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
         const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
             cwd: path.join(__dirname, '..'),
             env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', NODE_ENV: 'test', MEDIA_PGLITE_DIR: path.join(dir, 'pglite'), DATABASE_URL: '', DATABASE_DIRECT_URL: '', VALKEY_URL: '', VOD_PATH: path.join(dir, 'vods'), CLIPS_PATH: path.join(dir, 'clips'), FILES_PATH: path.join(dir, 'files'), THUMBNAILS_PATH: path.join(dir, 'thumbnails'), PASTES_PATH: path.join(dir, 'pastes'), OBJECTS_PATH: path.join(dir, 'objects'), MEDIA_JOBS_ENABLED: 'off' },
-            stdio: ['ignore', 'ignore', 'pipe'],
+            stdio: ['ignore', 'pipe', 'pipe'],
         });
-        let stderr = '';
-        child.stderr.on('data', (d) => { stderr = (stderr + d).slice(-2000); });
+        let tail = '';
+        const keep = (d) => { tail = (tail + d).slice(-2000); };
+        child.stdout.on('data', keep);
+        child.stderr.on('data', keep);
         const base = `http://127.0.0.1:${port}`;
         try {
             let up = false;
-            for (let i = 0; i < 600 && !up; i++) {   // 60 s: a cold PGlite boot plus migrations is slow on a loaded machine
+            let exited = false;
+            child.on('exit', () => { exited = true; });
+            // 60 s: a cold PGlite boot plus migrations is slow on a loaded machine (the suite beside test:pg).
+            for (let i = 0; i < 600 && !up && !exited; i++) {
                 up = await fetch(`${base}/healthz`).then((r) => r.ok).catch(() => false);
                 if (!up) await new Promise((r) => setTimeout(r, 100));
             }
-            assert.ok(up, `the server did not start:\n${stderr}`);
+            assert.ok(up, `the server did not start (${exited ? 'the child exited' : 'timed out after 60 s'}):\n${tail}`);
             const m = await measure({ base });
             const over = check(m, BUDGETS);
             assert.deepStrictEqual(over, [], format(m, over));
