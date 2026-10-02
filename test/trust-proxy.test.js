@@ -65,8 +65,9 @@ const express = require('express');
         child.stdout.on('data', (d) => { log += d; });
         child.stderr.on('data', (d) => { log += d; });
         let up = false;
-        for (let i = 0; i < 100 && !up; i++) {
-            try { up = (await get('127.0.0.1', freePort, '/healthz')).status === 200; } catch { await new Promise((res) => setTimeout(res, 100)); }
+        for (let i = 0; i < 600 && !up; i++) {   // 60 s: a cold PGlite boot plus migrations is slow on a loaded machine
+            try { up = (await get('127.0.0.1', freePort, '/healthz')).status === 200; } catch { /* not listening yet */ }
+            if (!up) await new Promise((res) => setTimeout(res, 100));
         }
         assert.ok(up, `the server booted: ${log.slice(-500)}`);
         // /metrics answers loopback callers only and refuses anything that came through a proxy; with

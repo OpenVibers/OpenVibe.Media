@@ -104,12 +104,12 @@ const ready = (async () => {
     app.get('/manifest.webmanifest', (_req, res) => res.type('application/manifest+json').sendFile(require('path').join(__dirname, 'brand', 'manifest.webmanifest')));
     // ── Internal: avatar ingestion (the Network asks; see server/avatars/ingest.js) ──
     {
-        const pastes = require('./pastes/routes');
         // Loopback only. A Network service token holding media.avatar.ingest (audience openvibe.media);
         // a Bearer is judged on the token alone (401 bad, 403 no capability) and nothing else opens the
-        // route (server/service-guard.js).
+        // route (server/service-guard.js). The handler takes its storage (screenshots dir, slug minting)
+        // from server/pastes/storage.js itself — nothing from the paste router is passed in.
         app.post('/internal/avatar-ingest', require('./service-guard').guard('media.avatar.ingest'),
-            require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config, screenshotsDir: pastes.SCREENSHOTS_DIR, generateSlug: pastes.generateSlug }));
+            require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config }));
     }
     const userAuth = require('./user-auth');
     const userAuthConfig = {
