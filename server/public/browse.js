@@ -305,7 +305,9 @@ async function handle(req, res) {
         const tab = TABS.some(([k]) => k === req.query.tab) ? req.query.tab : 'all';
         const page = Math.max(1, parseInt(req.query.page, 10) || 1);
         const data = await fetchTab(tab, page);
-        res.set({ 'Cache-Control': cache.htmlHeaders({ maxAge: 30 }), 'Content-Type': 'text/html; charset=utf-8' });
+        // The listing names media that can become private at any moment: no stale serving, or a cache
+        // could still hand out the old listing afterwards.
+        res.set({ 'Cache-Control': cache.htmlHeaders({ maxAge: 30, swr: 0 }), 'Content-Type': 'text/html; charset=utf-8' });
         res.send(renderPage(tab, page, data, await tabCounts()));
     } catch (err) {
         console.error('[Browse] render error:', err.message);

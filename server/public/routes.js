@@ -143,7 +143,9 @@ async function serveMediaRecord(kind, record, req, res) {
     // verified); otherwise it says why. The bytes route below is unchanged: Live's DVR player reads a
     // recording's sidecar through it while the stream is still being recorded.
     if (pages.wantsHtmlPage(req)) {
-        res.set('Cache-Control', cache.htmlHeaders(visibility === 'public' ? { maxAge: 60 } : { private: true }));
+        // A watch page names media that can become private at any moment: no stale serving, or a cache
+        // could still hand out its title and description afterwards.
+        res.set('Cache-Control', cache.htmlHeaders(visibility === 'public' ? { maxAge: 60, swr: 0 } : { private: true }));
         return res.type('html').send(pages.renderWatchPage(kind, record, await require('../objects/readiness').forRow(record)));
     }
     if (drill.refuseBytes(res)) return;
@@ -415,7 +417,9 @@ router.get('/api/thumbnails/:name', async (req, res) => {
         // Never for a private row: the redirect would hand out the current thumbnail URL of any
         // private recording to whoever guesses vod-<id>-0.jpg. The exact file name still serves.
         if (row && row.thumbnail_url && recordVisibility(row) !== 'private' && !row.thumbnail_url.endsWith(`/${name}`)) {
-            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
+            // A regenerated thumbnail keeps its old URL until the row is updated: no stale serving, or the
+            // redirect could point at the stale thumbnail for another hour.
+            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600, swr: 0 }));
             return res.redirect(302, row.thumbnail_url);
         }
     }
