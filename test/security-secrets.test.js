@@ -95,11 +95,20 @@ const crypto = require('crypto');
         });
         for (const k of ['MEDIA_DRILL', 'PASTES_MOVED_TO', 'EVENTS_PUBLISH']) delete process.env[k];
 
+        // MEDIA_APP_KEYS is deprecated (T4): it still seeds, but must warn once per boot and never name the key.
+        const warnLines = [];
+        const realWarn = console.warn;
+        console.warn = (...args) => { warnLines.push(args.join(' ')); return realWarn.apply(console, args); };
         const { app, server } = await require('../server/index.js').ready;
         if (!server.listening) await new Promise((r) => server.once('listening', r));
+        console.warn = realWarn;
+        const depr = warnLines.filter((l) => l.includes('MEDIA_APP_KEYS is deprecated'));
+        assert.strictEqual(depr.length, 1, `MEDIA_APP_KEYS warns once per boot (saw ${depr.length})`);
+        assert.ok(depr[0].includes('MEDIA_APPS_SEED') && !depr[0].includes(LIVE_KEY), 'the warning points at MEDIA_APPS_SEED and never names a key');
         const auth = require('../server/auth');
         auth._setNetworkPublicKeyForTests(keys.publicKey);
         const db = require('../server/db/database');
+        assert.strictEqual((await db.getApp('live')).app_id, 'live', 'MEDIA_APP_KEYS still seeds its app (deprecated, not removed)');
         const base = `http://127.0.0.1:${server.address().port}`;
 
         // ── Credentials ──
