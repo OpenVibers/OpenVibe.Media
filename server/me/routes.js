@@ -28,6 +28,7 @@
 
 const express = require('express');
 const { http, ids, staff } = require('openvibe-contracts');
+const cache = require('openvibe-shared/cache-policy');
 const config = require('../config');
 const drill = require('../drill');
 const { extractToken } = require('../user-auth');
@@ -43,7 +44,7 @@ function problem(res, status, code, detail) {
 }
 
 function privateHeaders(_req, res, next) {
-    res.set('Cache-Control', 'private, no-store');
+    res.set('Cache-Control', cache.htmlHeaders({ private: true }));
     res.set('X-Robots-Tag', 'noindex, nofollow');
     res.set('X-Content-Type-Options', 'nosniff');
     next();
@@ -187,7 +188,7 @@ function createMeRoutes({ auth }) {
 
     // The enhancement script (client.js). Versioned by content: a matching ?v= is cached for a year.
     site.get('/app.js', (req, res) => {
-        res.set('Cache-Control', req.query.v === pages.CLIENT_VERSION ? 'public, max-age=31536000, immutable' : 'public, max-age=300');
+        res.set('Cache-Control', cache.assetHeaders('app.js', { hashed: req.query.v === pages.CLIENT_VERSION }));
         res.set('X-Content-Type-Options', 'nosniff');
         res.type('application/javascript').send(pages.CLIENT_SOURCE);
     });

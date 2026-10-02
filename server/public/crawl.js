@@ -14,6 +14,7 @@ const express = require('express');
 const config = require('../config');
 const db = require('../db/database');
 const seo = require('openvibe-shared/seo');
+const cache = require('openvibe-shared/cache-policy');
 const pages = require('./pages');
 const readiness = require('../objects/readiness');
 
@@ -104,7 +105,7 @@ function llmsTxt() {
 }
 
 function send(res, type, body) {
-    res.set('Cache-Control', 'public, max-age=3600');
+    res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
     res.type(type).send(body);
 }
 
