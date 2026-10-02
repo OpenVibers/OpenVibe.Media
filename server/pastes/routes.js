@@ -21,12 +21,12 @@ const { tenantAuth, tenantCors } = require('../auth');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
-// Pastes moved to OpenVibe.Community: no writes here, for any app.
+// Pastes moved to OpenVibe.Community: no writes here, for any app. The caller is
+// authenticated first, so an anonymous write still answers 401 like the reads.
+const writeAuth = tenantAuth({ allowUser: true });
 router.use((req, res, next) => {
-    if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
-        return res.status(410).json({ error: 'Pastes moved to OpenVibe.Community', code: 'pastes.moved' });
-    }
-    next();
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+    writeAuth(req, res, () => res.status(410).json({ error: 'Pastes moved to OpenVibe.Community', code: 'pastes.moved' }));
 });
 
 // Screenshot directory, shared with the avatar ingest (server/pastes/storage.js).

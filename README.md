@@ -280,6 +280,12 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 `PASTES_MOVED_TO=https://openvibe.community` turns `/p/:slug` and its text
 `/raw` into 301s to Community. Screenshot bytes are still served from here, and
 new screenshots are uploaded to the token-only `community` tenant.
+Paste screenshot and avatar objects (`legacy:<app>:paste:<slug>`,
+`legacy:<app>:avatar:<slug>`) are frozen with them: their v1 route is gone and
+`DELETE /api/v2/:app/objects/:id` answers 409 `media.object.legacy_managed`, so
+Media has no API that deletes them.
+An unauthenticated write still answers 401 before the 410. `GET /pastes/config`
+reports the old limits for information only.
 
 | method | path | notes |
 |---|---|---|

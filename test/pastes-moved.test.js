@@ -34,6 +34,9 @@ const express = require('express');
         let r = await post();
         assert.strictEqual(r.status, 410); assert.strictEqual((await r.json()).code, 'pastes.moved');
         assert.strictEqual(await pasteCount(), rows, 'a refused write creates no paste');
+        // The caller is authenticated before the 410: an anonymous write answers 401, like the reads.
+        r = await fetch(`${base}/api/v1/live/pastes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: 'x' }) });
+        assert.strictEqual(r.status, 401);
 
         // Before the redirect switch: the pages are served here.
         assert.strictEqual((await get('/p/text-1')).status, 200);
