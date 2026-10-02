@@ -389,14 +389,18 @@ const http = require('http');
                 const hooks = require('../server/webhooks');
                 hooks._resetStats();
                 await db.run("UPDATE apps SET webhook_url = 'https://hooks-down.example.test/never' WHERE app_id = 'tools'");
-                const realFetch = global.fetch, realSetTimeout = global.setTimeout;
-                global.setTimeout = (fn) => realSetTimeout(fn, 0);   // retries must not slow the suite
-                global.fetch = async (url) => ({ ok: String(url).includes('hooks.example.test'), status: String(url).includes('hooks.example.test') ? 200 : 500 });
+                const realFetch = global.fetch;
+                hooks._setRetryBaseMs(0);   // retries must not slow the suite (never a global setTimeout patch: the pg pool's timers use it)
+                global.fetch = async (url, opts) => {
+                    const u = String(url);
+                    if (!u.includes('hooks.example.test') && !u.includes('hooks-down.example.test')) return realFetch(url, opts);
+                    return { ok: u.includes('hooks.example.test'), status: u.includes('hooks.example.test') ? 200 : 500 };
+                };
                 try {
                     assert.strictEqual(await hooks.sendWebhook('live', 'vod.ready', { id: 1 }), true);
                     assert.strictEqual(await hooks.sendWebhook('tools', 'clip.ready', { id: 2 }), false);
                 } finally {
-                    global.fetch = realFetch; global.setTimeout = realSetTimeout;
+                    global.fetch = realFetch; hooks._setRetryBaseMs(null);
                     await db.run("UPDATE apps SET webhook_url = NULL, webhook_secret = NULL WHERE app_id = 'tools'");
                 }
                 const st = hooks.stats();

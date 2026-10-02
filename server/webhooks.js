@@ -42,6 +42,11 @@ function stats() {
 /** Test-only: forget every tally. */
 function _resetStats() { tallies.clear(); }
 
+// Test-only: the base of the retry wait (null restores RETRY_BASE_MS), so a test never patches the
+// global setTimeout the database pool's own timers use.
+let retryBaseMs = RETRY_BASE_MS;
+function _setRetryBaseMs(ms) { retryBaseMs = ms == null ? RETRY_BASE_MS : ms; }
+
 function sign(secret, rawBody) {
     return 'sha256=' + crypto.createHmac('sha256', String(secret || '')).update(rawBody).digest('hex');
 }
@@ -99,7 +104,7 @@ async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
                 console.warn(`[Webhooks] ${event} → ${app.app_id} failed after ${MAX_ATTEMPTS} attempts: ${err.message}`);
                 return false;
             }
-            await new Promise(r => setTimeout(r, RETRY_BASE_MS * attempt));
+            await new Promise(r => setTimeout(r, retryBaseMs * attempt));
         }
     }
     return false;
@@ -129,4 +134,4 @@ async function announce(appId, event, { change = null, payload }) {
     return { data, eventId };
 }
 
-module.exports = { sendWebhook, announce, sign, stats, _resetStats };
+module.exports = { sendWebhook, announce, sign, stats, _resetStats, _setRetryBaseMs };
