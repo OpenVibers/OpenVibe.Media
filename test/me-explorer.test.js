@@ -37,6 +37,11 @@ const http = require('http');
 
     await db.upsertApp({ app_id: 'live', name: 'OpenVibe.Live', api_key: 'live-key' });
     await db.upsertApp({ app_id: 'tools', name: 'OpenVibe.Tools', api_key: 'tools-key' });
+    // The `live` app has an outbound webhook (tools has none): the operator report must show the host
+    // only and never the URL or the secret.
+    const HOOK_URL = 'https://hooks.example.test/ov-private-hook-path';
+    const HOOK_SECRET = 'whsec_TESTONLY-MUST-NOT-LEAK';
+    await db.run("UPDATE apps SET webhook_url = ?, webhook_secret = ? WHERE app_id = 'live'", [HOOK_URL, HOOK_SECRET]);
     for (const a of ['live', 'tools']) await db.ensureRootNamespace(await db.getApp(a));
     await namespaces.ensure(await db.getApp('live'), 'live.avatars');
 
@@ -334,8 +339,15 @@ const http = require('http');
             assert.ok(rep.backfill.unprojected && rep.backfill.owner_subject.missing >= 1);
             assert.ok(rep.tiering.objects.some(o => o.origin === 'native') && rep.tiering.sweep && 'pending_offload' in rep.tiering);
             assert.ok(rep.namespaces.some(n => n.namespace === 'live.avatars'));
+            // Webhooks section: host only, no URL path and no secret anywhere in the payload; counts are
+            // this process's own (none of these calls sends one).
+            assert.deepStrictEqual(rep.webhooks.configured, [{ app_id: 'live', host: 'hooks.example.test' }], 'configured webhooks, host only');
+            assert.ok(rep.webhooks.sends.since && !Object.keys(rep.webhooks.sends.by_app).length, 'no sends from the explorer itself');
+            assert.ok(rep.webhooks.note.includes('OpenVibe.Events') && rep.webhooks.note.includes('reset on restart'));
+            assert.ok(!r.text.includes(HOOK_URL) && !r.text.includes('ov-private-hook-path') && !r.text.includes(HOOK_SECRET), 'the report never carries the webhook URL or secret');
             r = await call('GET', '/api/v2/me/ops?app=tools', { token: 'admin' });
             assert.deepStrictEqual([r.json.scope, r.json.jobs.failed.total, r.json.namespaces.map(n => n.namespace)], ['tools', 0, ['tools']]);
+            assert.deepStrictEqual(r.json.webhooks.configured, [], 'tools has no webhook');
             r = await call('GET', '/me/ops', { cookie: 'admin' });
             assert.ok(r.status === 200 && r.text.includes('mjob_TESTFAILED') && r.text.includes('action="/me/ops/recompute"') && r.text.includes('noindex'));
             console.log('✅ operator views: staff.site.view only (not users, not global mods); failed jobs, missing media, backfill, tiering, namespaces');
@@ -364,11 +376,39 @@ const http = require('http');
             assert.strictEqual(r.status, 200, r.text);
             assert.strictEqual(r.json.scope, 'live');
             assert.ok(r.json.namespaces.every(n => n.app_id === 'live'));
+            assert.deepStrictEqual(r.json.webhooks.configured, [{ app_id: 'live', host: 'hooks.example.test' }], 'the app-key twin shows its own webhook');
+            assert.ok(r.json.webhooks.sends.by_app === undefined || Object.keys(r.json.webhooks.sends.by_app).every(a => a === 'live'), 'sends narrowed to the app');
             assert.strictEqual((await call('GET', '/api/v1/live/admin/storage/ops', { token: 'live-key', headers: { 'x-ov-user-id': '5' } })).status, 403, 'never acting for a user');
             assert.strictEqual((await call('GET', '/api/v1/live/admin/storage/ops', { token: 'ana' })).status, 401);
             r = await call('POST', '/api/v1/tools/admin/storage/ops/recompute', { token: 'tools-key' });
             assert.deepStrictEqual([r.status, r.json.scope, r.json.namespaces], [200, 'tools', 1]);
             console.log('✅ /api/v1/:app/admin/storage/ops: the same report for the app key, scoped to its tenant');
+
+            // ── Webhook tallies: one success, one failure ──
+            {
+                const hooks = require('../server/webhooks');
+                hooks._resetStats();
+                await db.run("UPDATE apps SET webhook_url = 'https://hooks-down.example.test/never' WHERE app_id = 'tools'");
+                const realFetch = global.fetch, realSetTimeout = global.setTimeout;
+                global.setTimeout = (fn) => realSetTimeout(fn, 0);   // retries must not slow the suite
+                global.fetch = async (url) => ({ ok: String(url).includes('hooks.example.test'), status: String(url).includes('hooks.example.test') ? 200 : 500 });
+                try {
+                    assert.strictEqual(await hooks.sendWebhook('live', 'vod.ready', { id: 1 }), true);
+                    assert.strictEqual(await hooks.sendWebhook('tools', 'clip.ready', { id: 2 }), false);
+                } finally {
+                    global.fetch = realFetch; global.setTimeout = realSetTimeout;
+                    await db.run("UPDATE apps SET webhook_url = NULL, webhook_secret = NULL WHERE app_id = 'tools'");
+                }
+                const st = hooks.stats();
+                assert.deepStrictEqual([st.by_app.live.sent, st.by_app.live.failed, st.by_app.live.last_event], [1, 0, 'vod.ready']);
+                assert.ok(st.by_app.live.last_ok_at && st.by_app.live.last_attempt_at && !st.by_app.live.last_error);
+                assert.deepStrictEqual([st.by_app.tools.sent, st.by_app.tools.failed, st.by_app.tools.last_error, st.by_app.tools.last_event], [0, 1, 'HTTP 500', 'clip.ready']);
+                st.by_app.live.sent = 999;
+                assert.strictEqual(hooks.stats().by_app.live.sent, 1, 'stats() is a fresh copy');
+                hooks._resetStats();
+                assert.deepStrictEqual(hooks.stats().by_app, {});
+                console.log('✅ webhook tallies: a 200 counts sent, a 500 after retries counts failed with its error; stats() copies');
+            }
 
             // ── Routes under /api/v2/me are the explorer's only ──
             r = await call('GET', '/api/v2/me/namespaces', { token: 'ana' });
