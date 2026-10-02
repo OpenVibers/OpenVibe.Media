@@ -44,8 +44,8 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.76.0, `openvibe-sdk` v0.21.2 (tokens, events outbox, per-actor limits),
-  `openvibe-shared` v1.28.0, pinned by release tarball
+- `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.21.2 (tokens, events outbox, per-actor limits),
+  `openvibe-shared` v2.3.1, pinned by release tarball
 
 ## Capabilities
 
@@ -111,7 +111,7 @@ server/
                          vod.duration.reconcile (stored vs measured durations, local and B2/R2),
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v1.25.0, openvibe-contracts v0.71.0, openvibe-sdk v0.12.0: pinned release tarballs, installed by npm)
+(openvibe-shared v2.3.1, openvibe-contracts v0.79.0, openvibe-sdk v0.21.2: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
