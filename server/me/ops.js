@@ -2,9 +2,10 @@
  * OpenVibe.Media — operator views over the object platform (roadmap WS-G task 12;
  * docs/object-model.md#operator-views).
  *
- *   report({ appId, limit })   failed jobs, missing media, backfill status, tiering diagnostics and the
- *                              namespaces' usage snapshot; appId narrows everything that has a tenant
- *                              (the tiering sweep and the provider switches are service-wide)
+ *   report({ appId, limit })   failed jobs, missing media, backfill status, tiering diagnostics, the
+ *                              namespaces' usage snapshot and the outbound-webhooks section; appId
+ *                              narrows everything that has a tenant (the tiering sweep and the provider
+ *                              switches are service-wide)
  *   recompute({ appId })       refresh the namespaces' usage snapshot from the rows (namespaces.reconcile),
  *                              the one write here
  *
@@ -18,6 +19,7 @@
 const db = require('../db/database');
 const namespaces = require('../objects/namespaces');
 const copyReport = require('../objects/copy-report');
+const webhookStats = require('../webhooks');
 
 const iso = require('./explorer').iso;
 const clip = (s, n) => (s == null ? null : String(s).slice(0, n));
@@ -204,6 +206,29 @@ async function namespaceSnapshot(appId) {
     })));
 }
 
+// ── Webhooks ─────────────────────────────────────────────────
+
+/** Who is configured to receive outbound webhooks (host only, never the URL or secret) and what this
+ *  process has sent them since it loaded. */
+async function webhooks(appId) {
+    const s = scoped(appId);
+    const configured = (await db.all(`SELECT app_id, webhook_url FROM apps WHERE COALESCE(webhook_url, '') != ''${s.sql} ORDER BY app_id`, s.params))
+        .map((r) => {
+            let host = null;
+            try { host = new URL(r.webhook_url).host; } catch { /* an unparseable URL shows as null */ }
+            return { app_id: r.app_id, host };
+        });
+    const all = webhookStats.stats();
+    const sends = appId
+        ? { since: all.since, by_app: all.by_app[appId] ? { [appId]: all.by_app[appId] } : {} }
+        : all;
+    return {
+        configured,
+        sends,
+        note: 'Outbound webhooks (C-83) retire when every configured app reads OpenVibe.Events; sends counts reset on restart.',
+    };
+}
+
 /** The whole operator report (see the header). `limit` bounds each list (1-200, default 50). */
 async function report({ appId = null, limit = 50 } = {}) {
     const n = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
@@ -216,6 +241,7 @@ async function report({ appId = null, limit = 50 } = {}) {
         backfill: await backfill(appId),
         tiering: await tiering(appId, n),
         namespaces: await namespaceSnapshot(appId),
+        webhooks: await webhooks(appId),
     };
 }
 

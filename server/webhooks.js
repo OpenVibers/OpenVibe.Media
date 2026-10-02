@@ -21,6 +21,32 @@ const MAX_ATTEMPTS = 3;
 const RETRY_BASE_MS = 3000;
 const TIMEOUT_MS = 10000;
 
+// In-memory tally of what this process actually tried to send, per app (C-83: who still gets webhooks
+// is what decides when the outbound path can retire). Never holds the URL, secret, body or signature.
+const SINCE = new Date().toISOString();
+const tallies = new Map();
+
+function tallyFor(appId) {
+    let t = tallies.get(appId);
+    if (!t) { t = { sent: 0, failed: 0, last_event: null, last_attempt_at: null, last_ok_at: null, last_error: null }; tallies.set(appId, t); }
+    return t;
+}
+
+/** Fresh copy of the in-process tallies: { since, by_app: { [app_id]: {...} } }. */
+function stats() {
+    const by_app = {};
+    for (const [appId, t] of tallies) by_app[appId] = { ...t };
+    return { since: SINCE, by_app };
+}
+
+/** Test-only: forget every tally. */
+function _resetStats() { tallies.clear(); }
+
+// Test-only: the base of the retry wait (null restores RETRY_BASE_MS), so a test never patches the
+// global setTimeout the database pool's own timers use.
+let retryBaseMs = RETRY_BASE_MS;
+function _setRetryBaseMs(ms) { retryBaseMs = ms == null ? RETRY_BASE_MS : ms; }
+
 function sign(secret, rawBody) {
     return 'sha256=' + crypto.createHmac('sha256', String(secret || '')).update(rawBody).digest('hex');
 }
@@ -62,16 +88,24 @@ async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
     const rawBody = JSON.stringify(body);
     const signature = sign(app.webhook_secret, rawBody);
 
+    const t = tallyFor(app.app_id);
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        t.last_event = event;
+        t.last_attempt_at = new Date().toISOString();
         try {
             await _post(app.webhook_url, rawBody, signature);
+            t.sent++;
+            t.last_ok_at = new Date().toISOString();
+            t.last_error = null;
             return true;
         } catch (err) {
             if (attempt === MAX_ATTEMPTS) {
+                t.failed++;
+                t.last_error = String((err && err.message) || err).slice(0, 200);
                 console.warn(`[Webhooks] ${event} → ${app.app_id} failed after ${MAX_ATTEMPTS} attempts: ${err.message}`);
                 return false;
             }
-            await new Promise(r => setTimeout(r, RETRY_BASE_MS * attempt));
+            await new Promise(r => setTimeout(r, retryBaseMs * attempt));
         }
     }
     return false;
@@ -101,4 +135,4 @@ async function announce(appId, event, { change = null, payload }) {
     return { data, eventId };
 }
 
-module.exports = { sendWebhook, announce, sign };
+module.exports = { sendWebhook, announce, sign, stats, _resetStats, _setRetryBaseMs };

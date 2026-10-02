@@ -461,6 +461,7 @@ cheap and renders in a drill.
 - `backfill`: the last object backfill that changed something; rows with no object yet; objects whose owner subject is unresolved; whether upload reservations were seeded.
 - `tiering`: providers and policy; VODs and clips per provider; objects per canonical copy (native or projected); VODs eligible to offload; R2 decisions of the last 24 h and recent refusals and failures; the sweep's state in this process; and `native_objects`: the [object tiering](#tiering-of-native-objects)'s activation gate and policy, native objects in R2, how many are eligible to promote now, its decisions of the last 24 h (dry runs included) and the most recent ones, and its last sweep.
 - `namespaces`: every namespace with quota and usage snapshot.
+- `webhooks`: the apps with a configured outbound webhook (app id and host only — never the URL or secret) and, per app, what this process has sent since it loaded (`sent`, `failed`, the last event and attempt/ok times, the last error). In-memory: counts reset on restart and scope to the app when the report is scoped.
 
 ## Readiness
 

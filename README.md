@@ -134,7 +134,8 @@ other OpenVibe services call the API.
 subject, in every tenant: uploads in progress, copies, derivatives, visibility, lifecycle and their own
 usage per tenant and namespace (`GET /api/v2/me/objects`, `/objects/:id`, `/usage`). Read-only: changes
 stay with the apps. Network staff with `staff.site.view` get the operator views at `/me/ops` (failed
-jobs, missing media, backfill, tiering, usage recompute with `staff.site.configure`). Details in
+jobs, missing media, backfill, tiering, outbound webhooks — who is configured and what this process
+has sent — and usage recompute with `staff.site.configure`). Details in
 [docs/object-model.md](docs/object-model.md#object-explorer).
 
 ## Tenancy & auth
