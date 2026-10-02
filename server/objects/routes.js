@@ -44,6 +44,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { ids, http } = require('openvibe-contracts');
+const cache = require('openvibe-shared/cache-policy');
 const db = require('../db/database');
 const config = require('../config');
 const model = require('./model');
@@ -664,7 +665,7 @@ router.get('/:id/download', read, limits('media.object.download'), async (req, r
     if (obj.lifecycle_status === 'deleted') return problem(res, 410, 'media.object.deleted', 'Object was deleted');
     if (obj.lifecycle_status !== 'ready') return problem(res, 409, 'media.object.not_ready', `Object is ${obj.lifecycle_status}`);
     const json = req.query.format === 'json';
-    res.set('Cache-Control', 'private, no-store');
+    res.set('Cache-Control', cache.htmlHeaders({ private: true }));
     // Developer-project sandbox objects are never public, whatever their visibility: always signed.
     if (obj.visibility !== 'private' && !await db.isSandboxTenant(obj.app_id)) {
         const url = model.legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`;

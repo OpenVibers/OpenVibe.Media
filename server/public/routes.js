@@ -24,6 +24,7 @@
 
 const express = require('express');
 const ovServe = require('openvibe-shared/serve');
+const cache = require('openvibe-shared/cache-policy');
 const path = require('path');
 const fs = require('fs');
 const db = require('../db/database');
@@ -142,7 +143,7 @@ async function serveMediaRecord(kind, record, req, res) {
     // verified); otherwise it says why. The bytes route below is unchanged: Live's DVR player reads a
     // recording's sidecar through it while the stream is still being recorded.
     if (pages.wantsHtmlPage(req)) {
-        res.set('Cache-Control', visibility === 'public' ? 'public, max-age=60' : 'private, no-store');
+        res.set('Cache-Control', cache.htmlHeaders(visibility === 'public' ? { maxAge: 60 } : { private: true }));
         return res.type('html').send(pages.renderWatchPage(kind, record, await require('../objects/readiness').forRow(record)));
     }
     if (drill.refuseBytes(res)) return;
@@ -359,7 +360,7 @@ router.get('/', async (req, res) => await require('./browse').handle(req, res));
 router.get('/updates', (req, res) => {
     const pf = require('./page-frame');
     const frame = require('openvibe-shared/frame');
-    res.set('Cache-Control', 'public, max-age=60').type('html').send(pf.page({
+    res.set('Cache-Control', cache.htmlHeaders({ maxAge: 60 })).type('html').send(pf.page({
         seo: { title: 'What shipped on OpenVibe.Media', description: 'Every change deployed to OpenVibe.Media, newest first, with the Patch notes that gather them.', canonical: pf.abs('/updates') },
         body: frame.updatesBody({ service: 'media', siteName: 'OpenVibe.Media' }) + `<script src="${ovServe.url('shipped.js')}" defer></script>`,
         footer: { variant: 'full' },
@@ -414,7 +415,7 @@ router.get('/api/thumbnails/:name', async (req, res) => {
         // Never for a private row: the redirect would hand out the current thumbnail URL of any
         // private recording to whoever guesses vod-<id>-0.jpg. The exact file name still serves.
         if (row && row.thumbnail_url && recordVisibility(row) !== 'private' && !row.thumbnail_url.endsWith(`/${name}`)) {
-            res.set('Cache-Control', 'public, max-age=3600');
+            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
             return res.redirect(302, row.thumbnail_url);
         }
     }
@@ -534,7 +535,7 @@ router.get('/p/:slug', optionalIdentity, async (req, res) => {
             return res.status(410).send('This paste has been burned after reading.');
         }
 
-        res.set('Cache-Control', 'private, no-store');
+        res.set('Cache-Control', cache.htmlHeaders({ private: true }));
         res.type('html').send(pages.renderPastePage(paste));
     } catch (err) {
         console.error('[Public] /p error:', err.message);
@@ -550,7 +551,7 @@ router.get('/p/:slug/raw', async (req, res) => {
         // Image pastes have no raw text — bounce to the screenshot (stale
         // consumers stored /raw URLs for hero-moment images).
         if (paste && paste.type === 'screenshot') {
-            res.set('Cache-Control', 'public, max-age=3600');
+            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
             return res.redirect(302, `/p/${encodeURIComponent(paste.slug)}/screenshot`);
         }
         // Moved: every slug goes to Community, found or not, like /p/:slug.
@@ -579,7 +580,7 @@ router.get('/p/:slug/screenshot', async (req, res) => {
         // /p/:slug and /p/:slug/raw (Community answers with the image, or its own 404). Stored
         // hero-moment thumbnails pointed here and showed broken images.
         if ((!paste || paste.visibility === 'private') && movedTo()) {   // private answers like missing
-            res.set('Cache-Control', 'public, max-age=3600');
+            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
             return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(String(req.params.slug))}/screenshot`);
         }
         if (!paste || !paste.screenshot_path) return res.status(404).send('Not found');

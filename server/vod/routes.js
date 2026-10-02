@@ -25,6 +25,7 @@ const recorder = require('./recorder');
 const tools = require('./media-tools');
 const { finalizeVod, vodPublic } = require('./finalize');
 const { tenantAuth, tenantCors } = require('../auth');
+const cache = require('openvibe-shared/cache-policy');
 const objects = require('../objects/model');
 
 const router = express.Router({ mergeParams: true });
@@ -318,7 +319,7 @@ router.get('/:id/signed-url', tenantAuth({ verb: 'read' }), async (req, res) => 
     if (req.authType !== 'app') return res.status(403).json({ error: 'only the owning app signs a playback URL' });
     const vod = await _getVodScoped(req, res);
     if (!vod) return;
-    res.set('Cache-Control', 'private, no-store');
+    res.set('Cache-Control', cache.htmlHeaders({ private: true }));
     res.json(require('../objects/signing').signedMediaUrl('vod', vod.id, req.query.ttl));
 });
 

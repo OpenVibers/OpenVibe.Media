@@ -19,6 +19,7 @@ const THUMB_DIR = path.resolve(config.thumbnails.path);
 
 // Public base URL per app for "source" links — shared with the watch/paste pages.
 const { appUrl, DEFAULT_THEME_CSS } = require('./page-frame');
+const cache = require('openvibe-shared/cache-policy');
 const frame = require('openvibe-shared/frame');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -304,7 +305,7 @@ async function handle(req, res) {
         const tab = TABS.some(([k]) => k === req.query.tab) ? req.query.tab : 'all';
         const page = Math.max(1, parseInt(req.query.page, 10) || 1);
         const data = await fetchTab(tab, page);
-        res.set({ 'Cache-Control': 'public, max-age=30', 'Content-Type': 'text/html; charset=utf-8' });
+        res.set({ 'Cache-Control': cache.htmlHeaders({ maxAge: 30 }), 'Content-Type': 'text/html; charset=utf-8' });
         res.send(renderPage(tab, page, data, await tabCounts()));
     } catch (err) {
         console.error('[Browse] render error:', err.message);
