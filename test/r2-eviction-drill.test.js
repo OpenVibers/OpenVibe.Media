@@ -129,7 +129,7 @@ const crypto = require('crypto');
         const key2 = await addVod(2);
         buckets['b2-bucket'].set(key2, bytes.subarray(0, 100));
         assert.match((await runDrill(opts({ vodId: 2, execute: true }), deps)).reason, /differ in size/);
-        buckets['b2-bucket'].set(key2, Buffer.concat([Buffer.from('X'), bytes.subarray(1)]));
+        buckets['b2-bucket'].set(key2, Buffer.concat([Buffer.from([bytes[0] ^ 0xff]), bytes.subarray(1)]));   // always differs (a fixed 'X' matched random bytes 1 run in 256)
         assert.match((await runDrill(opts({ vodId: 2, execute: true }), deps)).reason, /first MiB/);
         buckets['b2-bucket'].delete(key2);
         assert.match((await runDrill(opts({ vodId: 2, execute: true }), deps)).reason, /B2 canonical copy is missing/);
