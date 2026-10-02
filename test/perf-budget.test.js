@@ -40,7 +40,7 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
         const base = `http://127.0.0.1:${port}`;
         try {
             let up = false;
-            for (let i = 0; i < 150 && !up; i++) {
+            for (let i = 0; i < 600 && !up; i++) {   // 60 s: a cold PGlite boot plus migrations is slow on a loaded machine
                 up = await fetch(`${base}/healthz`).then((r) => r.ok).catch(() => false);
                 if (!up) await new Promise((r) => setTimeout(r, 100));
             }
