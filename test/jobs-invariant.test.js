@@ -183,8 +183,9 @@ const { spawnSync } = require('child_process');
             config.objects.publicMaxMb = 500;
             config.objects.publicTargetMb = 256;
 
-            // A retry resumes after the parts its checkpoint names.
-            const resumed = await queue.enqueue({ appId: 'live', type: 'object.split', objectId: vodObj, params: { parts: 3 }, createdBy: 'test' });
+            // A retry resumes after the parts its checkpoint names. `runAfterS` keeps the worker
+            // (50 ms poll) from claiming the job before the checkpoint below is saved.
+            const resumed = await queue.enqueue({ appId: 'live', type: 'object.split', objectId: vodObj, params: { parts: 3 }, createdBy: 'test', runAfterS: 1 });
             await queue.saveCheckpoint(resumed.job.id, { parts: [{ part: 1, object_id: 'med_done_before', start_seconds: 0, duration_seconds: 2, size_bytes: 10 }] });
             assert.ok(await waitFor(async () => (await queue.get(resumed.job.id)).status === 'succeeded'));
             const rr = queue.jobPublic(await queue.get(resumed.job.id)).result;

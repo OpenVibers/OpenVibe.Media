@@ -124,9 +124,11 @@ function isHealthy(provider, { purpose = 'playback' } = {}) {
     return providers.eligibleClasses(provider).length > 0;
 }
 
-/** Measured 5-minute EWMA (ms), or null when the provider has no samples. */
+/** Measured 5-minute EWMA (ms) of a network round-trip op (head, then get), or null when the
+ *  provider has no such samples. Presign is excluded: it is a local SigV4 operation, so its
+ *  EWMA is host CPU noise, not a network signal, and must not rank providers. */
 function measuredMs(provider) {
-    const ms = signals.latencyEWMA(provider, 'presign') || signals.latencyEWMA(provider);
+    const ms = signals.latencyEWMA(provider, 'head') || signals.latencyEWMA(provider, 'get');
     return ms > 0 ? ms : null;
 }
 
