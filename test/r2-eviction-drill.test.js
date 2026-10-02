@@ -86,6 +86,10 @@ const crypto = require('crypto');
         await storage.tierConfig.init(storage.DEFAULTS);
         await require('../server/objects/tier-policy').init();
         const { runDrill, providerOfUrl } = require('../scripts/r2-eviction-drill');
+        // Both buckets live on one local endpoint, so their measured latencies are noise: pin them equal so the
+        // router ranks the copies by tier alone (a few ms of jitter could otherwise promote B2 over R2).
+        const signals = require('../server/placement/signals');
+        signals.latencyEWMA = () => 50;
         const conn = db.getDb();
 
         // Media serving /v/:id, as production does.
