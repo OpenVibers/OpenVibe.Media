@@ -33,6 +33,11 @@ const MAX_BYTES = 8 * 1024 * 1024, DEADLINE_MS = 10_000, MAX_REDIRECTS = 3, SIZE
 const egress = require('openvibe-shared/egress');
 const isPublicAddress = (ip) => egress.isPublicAddress(ip);
 
+// Where avatars land and how their slug is minted: the paste storage module
+// (server/pastes/storage.js), not the paste router. The defaults keep the exact
+// persisted path and slug behavior; tests may inject their own.
+const pasteStorage = require('../pastes/storage');
+
 async function resolvePublic(hostname) {
     const host = egress.normalizeHost(hostname);
     if (net.isIP(host)) { if (!isPublicAddress(host)) throw new Error('That address is not on the public internet'); return { address: host, family: net.isIPv6(host) ? 6 : 4 }; }
@@ -93,7 +98,7 @@ async function toAvatar(buf) {
     return { buffer: out, width: SIZE, height: SIZE };
 }
 
-function createIngestHandler({ db, config, screenshotsDir, generateSlug, log = console }) {
+function createIngestHandler({ db, config, screenshotsDir = pasteStorage.SCREENSHOTS_DIR, generateSlug = pasteStorage.generateSlug, log = console }) {
     return async function avatarIngest(req, res) {
         try {
             const { url, user_id, username } = req.body || {};

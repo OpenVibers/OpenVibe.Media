@@ -1,6 +1,20 @@
 'use strict';
 const assert = require('assert');
 const sharp = require('sharp');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const dns = require('dns');
+const https = require('https');
+const http = require('http');
+const express = require('express');
+
+// The end-to-end check below writes where the service writes: point the paste
+// storage at scratch before anything loads the config.
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-avatar-'));
+process.env.PASTES_PATH = path.join(tmp, 'pastes');
+process.env.MEDIA_PUBLIC_URL = 'https://media.test';
+
 (async () => {
     const { isPublicAddress, safeFetchImage, toAvatar, resolvePublic } = require('../server/avatars/ingest');
 
@@ -33,6 +47,66 @@ const sharp = require('sharp');
         assert.ok(!meta.exif && !meta.icc || true);
         await rejects(toAvatar(Buffer.from('<svg onload=alert(1)>not a picture</svg><script>')), /./, 'non-image bytes are refused');
         await rejects(toAvatar(await sharp({ create: { width: 8, height: 8, channels: 3, background: '#000' } }).png().toBuffer()), /too small/, 'tiny images are refused');
+
+        // ── Shared paste storage: the screenshots dir and the slug have one source ──
+        // (server/pastes/storage.js — the avatar ingest no longer takes them from the paste router)
+        assert.ok(!require.cache[require.resolve('../server/pastes/routes')], 'requiring the avatar ingest does not load the paste routes');
+        const storage = require('../server/pastes/storage');
+        const config = require('../server/config');
+        assert.strictEqual(storage.SCREENSHOTS_DIR, path.join(config.pastes.path, 'screenshots'), 'avatars keep landing in the paste screenshots directory');
+        assert.strictEqual(storage.SCREENSHOTS_DIR, require('../server/pastes/routes').SCREENSHOTS_DIR, 'the paste routes share that one directory');
+        const slugA = await storage.generateSlug();
+        const slugB = await storage.generateSlug();
+        for (const s of [slugA, slugB]) assert.match(s, /^[a-z]+-[a-z]+-[0-9]{2}$/, `slug shape: ${s}`);
+        assert.notStrictEqual(slugA, slugB, 'two minted slugs differ (uniqueness is checked against the pastes table)');
+
+        // ── Through the route, wired the way server/index.js wires it: { db, config } only ──
+        const db = require('../server/db/database');
+        const ingest = require('../server/avatars/ingest');
+        // DNS and the socket are stubbed: nothing leaves the host.
+        const realLookup = dns.promises.lookup;
+        const realGet = https.get;
+        dns.promises.lookup = async () => [{ address: '93.184.216.34', family: 4 }];
+        https.get = (_opts, cb) => {
+            const res = new (require('events').EventEmitter)();
+            res.statusCode = 200;
+            res.headers = { 'content-type': 'image/png' };
+            res.resume = () => {};
+            setImmediate(() => { cb(res); res.emit('data', png); res.emit('end'); });
+            return { on: () => {}, destroy: () => {} };
+        };
+        try {
+            const app = express();
+            app.use(express.json());
+            app.post('/internal/avatar-ingest', ingest.createIngestHandler({ db, config }));
+            const server = http.createServer(app);
+            await new Promise((r) => server.listen(0, '127.0.0.1', r));
+            const post = (body) => fetch(`http://127.0.0.1:${server.address().port}/internal/avatar-ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(async (r) => ({ status: r.status, body: await r.json() }));
+            const first = await post({ url: 'https://pics.example/me.png', user_id: 7, username: 'ada' });
+            assert.strictEqual(first.status, 200, JSON.stringify(first.body));
+            assert.strictEqual(first.body.ok, true);
+            assert.match(first.body.slug, /^[a-z]+-[a-z]+-[0-9]{2}$/);
+            assert.strictEqual(first.body.url, `${config.publicUrl}/p/${first.body.slug}/screenshot`);
+            assert.deepStrictEqual([first.body.width, first.body.height], [512, 512]);
+            assert.ok(first.body.bytes > 0);
+            const row = await db.get('SELECT * FROM pastes WHERE slug = ?', [first.body.slug]);
+            assert.ok(row, 'the avatar row was inserted');
+            assert.deepStrictEqual([row.app_id, row.user_id, row.type, row.visibility], ['network', 7, 'screenshot', 'unlisted']);
+            assert.strictEqual(row.title, 'Avatar of ada');
+            assert.ok(row.screenshot_path.startsWith(storage.SCREENSHOTS_DIR), `the file lands in the shared screenshots dir (${row.screenshot_path})`);
+            assert.deepStrictEqual((await sharp(fs.readFileSync(row.screenshot_path)).metadata()).format, 'webp', 'the bytes on disk are the re-encoded WebP');
+            assert.strictEqual(JSON.parse(row.metadata).kind, 'avatar');
+            assert.ok(row.object_id, 'the avatar row carries its media object');
+            assert.ok(await db.get('SELECT id FROM media_objects WHERE id = ?', [row.object_id]), 'and that object exists');
+            const second = await post({ url: 'https://pics.example/me2.png', user_id: 8 });
+            assert.strictEqual(second.status, 200, JSON.stringify(second.body));
+            assert.notStrictEqual(second.body.slug, first.body.slug, 'a second avatar gets its own slug');
+            server.close();
+        } finally {
+            dns.promises.lookup = realLookup;
+            https.get = realGet;
+        }
+        fs.rmSync(tmp, { recursive: true, force: true });
         console.log('avatar ingest: all checks passed');
     })().catch(e => { console.error(e); process.exit(1); });
 })().catch((err) => { console.error(err); process.exit(1); });

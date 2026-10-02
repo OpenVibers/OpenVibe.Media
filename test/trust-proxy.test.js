@@ -66,7 +66,7 @@ const express = require('express');
         child.stderr.on('data', (d) => { log += d; });
         let exited = false;
         child.on('exit', () => { exited = true; });
-        // A cold PGlite boot under a loaded machine (the suite beside test:pg) takes well over 10 s.
+        // 60 s: a cold PGlite boot plus migrations is slow on a loaded machine (the suite beside test:pg).
         let up = false;
         for (const deadline = Date.now() + 60000; !up && !exited && Date.now() < deadline;) {
             try { up = (await get('127.0.0.1', freePort, '/healthz')).status === 200; } catch { /* not listening yet */ }

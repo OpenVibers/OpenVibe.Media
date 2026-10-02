@@ -44,7 +44,7 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
             let up = false;
             let exited = false;
             child.on('exit', () => { exited = true; });
-            // A cold PGlite boot under a loaded machine (the suite beside test:pg) takes well over 10 s.
+            // 60 s: a cold PGlite boot plus migrations is slow on a loaded machine (the suite beside test:pg).
             for (let i = 0; i < 600 && !up && !exited; i++) {
                 up = await fetch(`${base}/healthz`).then((r) => r.ok).catch(() => false);
                 if (!up) await new Promise((r) => setTimeout(r, 100));
