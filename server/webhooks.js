@@ -96,6 +96,7 @@ async function sendWebhook(appOrId, event, data, { eventId = null } = {}) {
             await _post(app.webhook_url, rawBody, signature);
             t.sent++;
             t.last_ok_at = new Date().toISOString();
+            t.last_error = null;
             return true;
         } catch (err) {
             if (attempt === MAX_ATTEMPTS) {

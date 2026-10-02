@@ -430,8 +430,18 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
         esc(fmtWhen(d.decided_at)), esc(d.app_id || ''), `<code class="id">${esc(d.object_id)}</code>`, esc(d.action), esc(d.outcome.replace('_', ' ')), esc(d.error || d.reason || ''),
     ])) || '<p class="empty">None.</p>'}` : ''}
   </section>
+
+  <section aria-labelledby="webhooks-h">
+    <h2 id="webhooks-h">Outbound webhooks</h2>
+    <p class="hint">${esc(r.webhooks.note)}</p>
+    <p class="hint">Sends counted since ${esc(fmtWhen(r.webhooks.sends.since))} in this process.</p>
+    ${table('Apps configured to receive webhooks, host only', ['Tenant', 'Host', 'Sent', 'Failed', 'Last success', 'Last error'], r.webhooks.configured.map(c => {
+        const s = r.webhooks.sends.by_app[c.app_id] || {};
+        return [esc(c.app_id), esc(c.host || 'unparseable URL'), num(s.sent || 0), num(s.failed || 0), esc(fmtWhen(s.last_ok_at) || 'never'), s.last_error ? `<pre class="err">${esc(s.last_error)}</pre>` : ''];
+    }), { numeric: [2, 3] }) || '<p class="empty">No app is configured to receive webhooks.</p>'}
+  </section>
   <p class="hint">JSON: <a href="/api/v2/me/ops${scopeQs}">/api/v2/me/ops</a>.</p>`;
-    return doc({ title: 'Media operations', description: 'Operator views of OpenVibe.Media: failed jobs, usage, missing media, backfill and tiering.', body });
+    return doc({ title: 'Media operations', description: 'Operator views of OpenVibe.Media: failed jobs, usage, missing media, backfill, tiering and webhooks.', body });
 }
 
 module.exports = {

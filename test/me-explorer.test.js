@@ -350,6 +350,8 @@ const http = require('http');
             assert.deepStrictEqual(r.json.webhooks.configured, [], 'tools has no webhook');
             r = await call('GET', '/me/ops', { cookie: 'admin' });
             assert.ok(r.status === 200 && r.text.includes('mjob_TESTFAILED') && r.text.includes('action="/me/ops/recompute"') && r.text.includes('noindex'));
+            assert.ok(r.text.includes('webhooks-h') && r.text.includes('hooks.example.test'), 'the page shows the webhooks section and the configured host');
+            assert.ok(!r.text.includes(HOOK_URL) && !r.text.includes('ov-private-hook-path') && !r.text.includes(HOOK_SECRET), 'the page never shows the webhook URL path or secret');
             console.log('✅ operator views: staff.site.view only (not users, not global mods); failed jobs, missing media, backfill, tiering, namespaces');
 
             // ── Recompute: staff.site.configure, same-origin ──
@@ -391,14 +393,23 @@ const http = require('http');
                 await db.run("UPDATE apps SET webhook_url = 'https://hooks-down.example.test/never' WHERE app_id = 'tools'");
                 const realFetch = global.fetch;
                 hooks._setRetryBaseMs(0);   // retries must not slow the suite (never a global setTimeout patch: the pg pool's timers use it)
+                let down = true;
                 global.fetch = async (url, opts) => {
                     const u = String(url);
                     if (!u.includes('hooks.example.test') && !u.includes('hooks-down.example.test')) return realFetch(url, opts);
-                    return { ok: u.includes('hooks.example.test'), status: u.includes('hooks.example.test') ? 200 : 500 };
+                    const ok = u.includes('hooks.example.test') || !down;
+                    return { ok, status: ok ? 200 : 500 };
                 };
                 try {
                     assert.strictEqual(await hooks.sendWebhook('live', 'vod.ready', { id: 1 }), true);
                     assert.strictEqual(await hooks.sendWebhook('tools', 'clip.ready', { id: 2 }), false);
+                    // The same app answers 200 on a later send: the recorded error must be cleared.
+                    const ghost = { app_id: 'ghost', webhook_url: 'https://hooks-down.example.test/x', webhook_secret: 's' };
+                    assert.strictEqual(await hooks.sendWebhook(ghost, 'clip.ready', { id: 3 }), false);
+                    assert.strictEqual(hooks.stats().by_app.ghost.last_error, 'HTTP 500');
+                    down = false;
+                    assert.strictEqual(await hooks.sendWebhook(ghost, 'clip.ready', { id: 4 }), true);
+                    assert.strictEqual(hooks.stats().by_app.ghost.last_error, null, 'a later success clears the previous error');
                 } finally {
                     global.fetch = realFetch; hooks._setRetryBaseMs(null);
                     await db.run("UPDATE apps SET webhook_url = NULL, webhook_secret = NULL WHERE app_id = 'tools'");
