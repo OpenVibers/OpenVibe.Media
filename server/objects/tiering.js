@@ -35,6 +35,7 @@ const crypto = require('crypto');
 const db = require('../db/database');
 const drill = require('../drill');
 const policy = require('./tier-policy');
+const storagePolicy = require('../placement/storage-policy');
 const popularity = require('./popularity');
 
 const MB = 1024 * 1024;
@@ -127,7 +128,7 @@ async function inputsOf(obj, { locs, pop, held, settings }) {
         unique_viewers_7d: pop ? pop.unique_viewers : 0,
         last_viewed_day: pop ? pop.last_viewed_day : await popularity.lastViewedDay(obj.id),
         size_bytes: Number(obj.size_bytes) || 0,
-        kind: obj.kind, visibility: obj.visibility, lifecycle_status: obj.lifecycle_status,
+        kind: obj.kind, class: storagePolicy.classOf(obj), visibility: obj.visibility, lifecycle_status: obj.lifecycle_status,
         content_hash: !!obj.content_hash,
         canonical: canon ? { provider: canon.provider, state: canon.state, verified_at: canon.verified_at || null,
             checksum_matches: !!(canon.checksum && obj.content_hash && canon.checksum === obj.content_hash) } : null,
@@ -207,6 +208,7 @@ async function promote(objectId, ctx = {}) {
     const f = await frame(objectId, 'promote', ctx);
     if (f.missing) return { ok: false, outcome: 'refused', error: 'object not found' };
     const { obj, locs, canon, held, settings, why, log } = f;
+    if (ctx.residency) return await log('refused', `${why}; refused: ${ctx.residency}`, { error: ctx.residency });
     if (held) return await log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
     const r2Now = locs.find((l) => l.provider === 'r2');
     if (r2Now && r2Now.state === 'present' && r2Now.verified_at) return await log('already', `${why}; the R2 copy is already present`);
@@ -259,6 +261,7 @@ async function demote(objectId, ctx = {}) {
     const f = await frame(objectId, 'demote', ctx);
     if (f.missing) return { ok: false, outcome: 'refused', error: 'object not found' };
     const { obj, locs, canon, held, settings, why, log } = f;
+    if (ctx.residency) return await log('refused', `${why}; refused: ${ctx.residency}`, { error: ctx.residency });
     if (held) return await log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
     const r2 = locs.find((l) => l.provider === 'r2');
     if (!r2) return await log('already', `${why}; there is no R2 copy`);
@@ -346,6 +349,21 @@ function tally(out, r) {
     if (r.outcome === 'failed') out.errors.push({ object_id: r.object_id, action: r.action, error: r.error });
 }
 
+/** When the object last moved: its latest completed promotion or demotion, else null. */
+async function lastMovedAt(objectId) {
+    const r = await db.get(`SELECT MAX(decided_at) AS at FROM media_object_tier_decisions WHERE object_id = ? AND outcome = 'done'`, [objectId]);
+    return r && r.at ? r.at : null;
+}
+
+/** Why the class's minimum residency (media.storage_policy) holds this object where it is, or null. */
+async function residencyRefusal(obj, cls, action, now) {
+    const { minResidencyMs } = storagePolicy.settings().classes[cls];
+    if (!minResidencyMs) return null;
+    const lastAt = await lastMovedAt(obj.id);
+    if (storagePolicy.mayMove({ class: cls, lastMovedAt: lastAt, now })) return null;
+    return `minimum residency of ${minResidencyMs} ms for class ${cls} (media.storage_policy) not reached since the last move at ${lastAt}; ${action} suppressed`;
+}
+
 /**
  * One pass over native objects. → { gate, promoted, demoted, would_promote, would_demote, already, refused, failed,
  * repeats, skipped_backoff, candidates: { promote, demote }, rotated, errors }
@@ -362,26 +380,33 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
         // Demotions first: they free the R2 cache, and a deleted object's copy should not wait behind promotions.
         const demote_ = await demotionCandidates(settings, { now });
         out.candidates.demote = demote_.length;
-        let budget = settings.maxDemotionsPerSweep;
+        // Budgets and residency are per class (media.storage_policy); a class spends only its own budget.
+        const spent = { promote: {}, demote: {} };
+        const room = (action, cls) => (spent[action][cls] || 0) < storagePolicy.budgetFor(cls)[action === 'promote' ? 'maxPromotionsPerSweep' : 'maxDemotionsPerSweep'];
         for (const { row, reason } of demote_) {
-            if (budget <= 0) break;
+            const cls = storagePolicy.classOf(row);
+            if (!room('demote', cls)) continue;
             if (await inBackoff(row.id, 'demote')) { out.skipped_backoff++; continue; }
-            const r = await demote(row.id, { trigger, reason, settings, now });
+            // A copy of an object that is no longer ready is removed regardless of residency.
+            const residency = row.lifecycle_status === 'ready' ? await residencyRefusal(row, cls, 'demote', now) : null;
+            const r = await demote(row.id, { trigger, reason, settings, now, residency });
             tally(out, { ...r, action: 'demote' });
-            if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) budget--;
+            if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.demote[cls] = (spent.demote[cls] || 0) + 1;
         }
 
         const promote_ = [];
-        for (const c of await promotionCandidates(settings, { now, limit: Math.max(50, settings.maxPromotionsPerSweep * 10) })) if (!await db.isSandboxTenant(c.app_id)) promote_.push(c);
+        const promoteLimit = Math.max(...storagePolicy.CLASSES.map((c) => storagePolicy.budgetFor(c).maxPromotionsPerSweep));
+        for (const c of await promotionCandidates(settings, { now, limit: Math.max(50, promoteLimit * 10) })) if (!await db.isSandboxTenant(c.app_id)) promote_.push(c);
         out.candidates.promote = promote_.length;
-        budget = settings.maxPromotionsPerSweep;
         for (const c of promote_) {
-            if (budget <= 0) break;
+            const cls = storagePolicy.classOf(c);
+            if (!room('promote', cls)) continue;
             if (await inBackoff(c.id, 'promote')) { out.skipped_backoff++; continue; }
-            const r = await promote(c.id, { trigger, reason: promoteReason(c, settings), settings, now,
+            const residency = await residencyRefusal(c, cls, 'promote', now);
+            const r = await promote(c.id, { trigger, reason: promoteReason(c, settings), settings, now, residency,
                 pop: { unique_viewers: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day } });
             tally(out, { ...r, action: 'promote' });
-            if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) budget--;
+            if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.promote[cls] = (spent.promote[cls] || 0) + 1;
         }
 
         if (out.promoted || out.demoted || out.failed) {

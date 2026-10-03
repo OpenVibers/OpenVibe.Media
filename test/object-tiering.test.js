@@ -81,6 +81,7 @@ const crypto = require('crypto');
         // The revisioned tier policies load once the database is open (server/index.js does this at boot).
         await storage.tierConfig.init(storage.DEFAULTS);
         await require('../server/objects/tier-policy').init();
+        await require('../server/placement/storage-policy').init();
         const popularity = require('../server/objects/popularity');
         const policy = require('../server/objects/tier-policy');
         const tiering = require('../server/objects/tiering');
@@ -222,6 +223,7 @@ const crypto = require('crypto');
         assert.ok(/^gate off \(active = false\): would promote: 600 unique viewers in 7 days >= promoteMinUniqueViewers7d 500/.test(d.reason), d.reason);
         const din = JSON.parse(d.inputs);
         assert.deepStrictEqual([din.unique_viewers_7d, din.last_viewed_day, din.gate_active, din.held, din.canonical.provider, din.canonical.checksum_matches], [600, today, false, false, 'local', true]);
+        assert.strictEqual(din.class, 'download', 'every decision row records the class that set its budget');
         assert.deepStrictEqual(JSON.parse(d.thresholds).active, { value: false, source: 'default' });
         assert.deepStrictEqual([(await last(cached.id)).action, (await last(cached.id)).outcome], ['demote', 'dry_run']);
         s = await tiering.runSweep();
@@ -362,7 +364,7 @@ const crypto = require('crypto');
         assert.ok(/still there/.test(m.error));
         // Seven hours ago: past the back-off, so the sweep below tries again (and still within the 24-hour counts).
         await db.run("UPDATE media_object_tier_decisions SET decided_at = ov_now_iso('-7 hours') WHERE object_id = ? AND outcome = 'failed'", [sticky.id]);
-        await policy.set({ maxDemotionsPerSweep: 20 }, { reason: 'test: room for every demotion' });
+        await require('../server/placement/storage-policy').set({ classes: { download: { maxDemotionsPerSweep: 20 } } }, { reason: 'test: room for every demotion' });
         s = await tiering.runSweep();
         assert.ok(!await r2Row(hot.id) && !buckets['r2-bucket'].has(`objects/live/${hot.id}`), 'an idle object leaves R2');
         assert.ok(fs.existsSync(hot.file) && (await db.get("SELECT state FROM media_locations WHERE object_id = ? AND provider = 'local'", [hot.id])).state === 'present');
@@ -421,7 +423,7 @@ const crypto = require('crypto');
         const ns = a.body.namespaces.find((n) => n.namespace === 'media.object_tier');
         assert.ok(ns && ns.values.active === true && ns.values.promoteMinUniqueViewers7d === 500, 'the policy is in the config routes');
         a = await call('/api/v1/live/admin/storage/config/media.object_tier/history');
-        assert.deepStrictEqual(a.body.snapshots.map((x) => x.state), ['active', 'superseded', 'superseded', 'superseded']);
+        assert.deepStrictEqual(a.body.snapshots.map((x) => x.state), ['active', 'superseded', 'superseded']);
         const post = (p, body) => new Promise((resolve, reject) => {
             const data = JSON.stringify(body);
             const rq = http.request(base + p, { method: 'POST', headers: { Authorization: 'Bearer live-key-objtier', 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } },
@@ -455,6 +457,35 @@ const crypto = require('crypto');
         const html = require('../server/me/pages').renderOps({ person: { subject: 'usr_01J8Z3Q4X5Y6Z7A8B9C0D1E2F3' }, report, canRecompute: false });
         assert.ok(/Native objects/.test(html) && /Activation gate/.test(html) && html.includes(bad.id), 'the /me/ops page shows the gate and the recent decisions');
         console.log('✅ decisions: /tiers/objects/policy and /decisions (filters, pages, app-scoped), the config routes, media_tier_decisions_24h{target}, and the operator views');
+
+        // ── 9b. Per-class budgets and residency come from media.storage_policy ──
+        const sp = require('../server/placement/storage-policy');
+        await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
+        const vids = [await addObject({ mime: 'video/mp4' }), await addObject({ mime: 'video/mp4' })];
+        const imgs = [await addObject({ mime: 'image/png' }), await addObject({ mime: 'image/png' })];
+        const dl = await addObject();
+        for (const o of [...vids, ...imgs, dl]) await setViews(o.id, [[0, 900]]);
+        await sp.set({ classes: { video: { maxPromotionsPerSweep: 1 }, image: { maxPromotionsPerSweep: 2, minResidencyMs: 86400000 }, download: { maxPromotionsPerSweep: 0 } } },
+            { reason: 'test: per-class budgets' });
+        s = await tiering.runSweep();
+        const promotedOf = async (list) => (await Promise.all(list.map(async (o) => !!await r2Row(o.id)))).filter(Boolean).length;
+        assert.deepStrictEqual([await promotedOf(vids), await promotedOf(imgs), await promotedOf([dl])], [1, 2, 0], 'each class spends its own promotion budget');
+        assert.strictEqual((await decisions(dl.id)).length, 0, 'a class with a zero budget is not tried');
+        const r2Done = new Set((await Promise.all(vids.map(async (o) => (await r2Row(o.id)) ? o.id : null))).filter(Boolean));
+        assert.strictEqual(JSON.parse((await last(imgs[0].id)).inputs).class, 'image');
+        assert.strictEqual(JSON.parse((await last(vids.find((o) => r2Done.has(o.id)).id)).inputs).class, 'video');
+        // Residency: the images were just promoted, so an idle demotion is suppressed and logged as refused.
+        await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
+        for (const o of imgs) await ageR2(o.id, 30);
+        s = await tiering.runSweep();
+        assert.ok(await r2Row(imgs[0].id) && await r2Row(imgs[1].id), 'residency keeps the fresh copies');
+        d = await last(imgs[0].id);
+        assert.deepStrictEqual([d.action, d.outcome, JSON.parse(d.inputs).class], ['demote', 'refused', 'image']);
+        assert.ok(/minimum residency of 86400000 ms for class image/.test(d.reason), d.reason);
+        await sp.set({ classes: { image: { minResidencyMs: 0 }, download: { maxPromotionsPerSweep: 3 } } }, { reason: 'test: residency off, budgets back' });
+        s = await tiering.runSweep();
+        assert.ok(!await r2Row(imgs[0].id) && !await r2Row(imgs[1].id), 'with no residency the idle copies leave');
+        console.log('✅ per-class budgets and residency from media.storage_policy; every decision row shows its class; a residency-suppressed demotion logs refused');
 
         // ── 10. The storage sweep runs it (step 4); a restore drill never does ──
         const vodSweep = await storage.runSweep();

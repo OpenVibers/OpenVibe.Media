@@ -24,6 +24,10 @@ const path = require('path');
     }
     assert.strictEqual(policy.mayMove({ class: 'video', lastMovedAt: 1000, now: 1000 }), true, 'zero residency is off');
     assert.throws(() => policy.budgetFor('unknown'), RangeError);
+    const cls = (kind, mime_type) => policy.classOf({ kind, mime_type });
+    assert.deepStrictEqual([cls('vod'), cls('clip'), cls('file', 'audio/mpeg'), cls('file', 'Video/MP4'), cls('asset', 'video/webm')], Array(5).fill('video'));
+    assert.deepStrictEqual([cls('thumbnail'), cls('screenshot'), cls('avatar'), cls('file', 'image/png')], Array(4).fill('image'));
+    assert.deepStrictEqual([cls('file', 'application/zip'), cls('file'), cls('asset', null), policy.classOf(null)], Array(4).fill('download'));
 
     await policy.set({ classes: { image: { maxPromotionsPerSweep: 2, maxDemotionsPerSweep: 4, minResidencyMs: 60_000 } } },
         { actor: { type: 'service', id: 'media-test' }, reason: 'test image placement policy' });

@@ -52,6 +52,7 @@ const ready = (async () => {
     await require('./vod/tier-config').init(require('./vod/vod-storage').DEFAULTS);
     await require('./objects/tier-policy').init();
     await require('./placement/cost-tiers').init();
+    await require('./placement/storage-policy').init();   // per-class sweep budgets and residency; before the tiering sweep starts
     // Placement core (F1 part A): the provider registry, signals + router. Boot the cheap live
     // health loop after the DB is open (it reads memory only) and the router is wired in.
     if (!drill.enabled) {
