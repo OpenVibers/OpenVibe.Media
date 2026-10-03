@@ -14,7 +14,7 @@ presentation; they ask Media for an object and a delivery URL and never know whe
 **Online (the Media Fabric).** Every object a viewer can ask for has an immediately retrievable copy:
 
 ```
-viewer → media.openvibe.network → delivery router
+viewer → openvibe.media → delivery router
             ├─ OpenVibe edge (the Media host's NVMe cache; later edge nodes)   capacity-bounded, prepaid bandwidth
             ├─ global CDN (Bunny in front of B2; Cloudflare only in front of R2)
             └─ hot object tier: R2 Standard
