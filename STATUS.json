@@ -33,7 +33,8 @@
     "the object explorer (/me) and operator views",
     "media.* events through the SDK outbox, webhooks during the transition",
     "restore-drill mode and N-1 compatibility tests",
-    "per-actor limits (openvibe-sdk/limits)"
+    "per-actor limits (openvibe-sdk/limits)",
+    "placement demand rollups on Valkey (F2.4): reads per object × region × 5-minute bucket, hotness over the hour, media.object.hot once per object per hour"
   ],
-  "updated": "2026-09-28"
+  "updated": "2026-10-03"
 }

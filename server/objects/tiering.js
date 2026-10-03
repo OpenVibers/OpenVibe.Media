@@ -511,6 +511,10 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
             if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.promote[cls] = (spent.promote[cls] || 0) + 1;
         }
 
+        // Demand (F2.4): stage media.object.hot for objects over the hourly read threshold. Eligibility above
+        // still reads the daily PostgreSQL counts; moving it to hotness() is F2.5.
+        out.demand = await require('../placement/demand').rollup({ now });
+
         if (out.promoted || out.demoted || out.failed) {
             console.log(`[ObjectTiers] Sweep: ${out.promoted} promoted to R2, ${out.demoted} demoted, ${out.failed} failed, ${out.refused} refused`);
         }

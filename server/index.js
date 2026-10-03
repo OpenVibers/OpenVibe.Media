@@ -48,6 +48,8 @@ const ready = (async () => {
     // Valkey (ADR-035): per-actor limit counters shared across processes (not in a drill: it connects nowhere).
     const valkey = !drill.enabled && config.valkey.url ? require('openvibe-sdk/valkey').createValkey({ url: config.valkey.url, prefix: config.valkey.prefix }) : null;
     require('./actor-limits').useValkey(valkey);
+    // Demand rollups (F2.4, placement/demand.js): reads per object × region × 5-minute bucket on the same handle.
+    require('./placement/demand').useValkey(valkey);
     if (!drill.enabled) await require('./revocations').load();
     await require('./vod/tier-config').init(require('./vod/vod-storage').DEFAULTS);
     await require('./objects/tier-policy').init();
