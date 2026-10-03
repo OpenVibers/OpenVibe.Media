@@ -15,6 +15,7 @@
  *   media_router_decisions_total{provider,purpose,reason} counter
  *   media_presign_cache_total{result}                    counter
  *   media_storage_alerts_total{kind}                     counter
+ *   media_sweep_demand_source_total{source}              counter (valkey | pg: the object sweep's demand signal)
  */
 'use strict';
 
@@ -28,6 +29,7 @@ let breakerGauge = null; // gauge (collect)
 let decisions = null;   // counter
 let presign = null;     // counter
 let alerts = null;      // counter
+let demandSource = null; // counter
 
 function bind(registry) {
     if (latency) return;   // idempotent
@@ -69,6 +71,13 @@ function bind(registry) {
         labelNames: ['kind'],
     });
 
+    demandSource = registry.counter({
+        name: 'media_sweep_demand_source_total',
+        help: 'Object tiering sweeps by the demand signal their eligibility read: valkey (hourly reads) or pg (daily view counts, the fallback)',
+        labelNames: ['source'],
+    });
+    for (const source of ['valkey', 'pg']) demandSource.inc({ source }, 0);
+
     // Bind every hook the placement modules use.
     router.bindMetric((name, labels) => inc(name, labels));
     presignCache.bindMetric((name, labels) => inc(name, labels));
@@ -80,6 +89,7 @@ function inc(name, labels) {
     else if (name === 'media_presign_cache_total') presign && presign.inc(labels || {}, 1);
     else if (name === 'media_storage_alerts_total') alerts && alerts.inc(labels || {}, 1);
     else if (name === 'media_provider_errors_total') errors && errors.inc(labels || {}, 1);
+    else if (name === 'media_sweep_demand_source_total') demandSource && demandSource.inc(labels || {}, 1);
 }
 
 /** Hook the signals module's recordSuccess/recordFailure to fill the histogram/counter. */
@@ -87,4 +97,4 @@ function observeLatency(provider, op, ms) { if (latency && ms > 0) latency.obser
 function observeError(provider, op) { errors && errors.inc({ provider, op }, 1); }
 function alert(kind) { alerts && alerts.inc({ kind }, 1); }
 
-module.exports = { bind, inc, observeLatency, observeError, alert, _reset: () => { latency = errors = breakerGauge = decisions = presign = alerts = null; } };
+module.exports = { bind, inc, observeLatency, observeError, alert, _reset: () => { latency = errors = breakerGauge = decisions = presign = alerts = demandSource = null; } };

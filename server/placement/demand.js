@@ -12,8 +12,8 @@
  * <bucket> = floor(epoch_ms / BUCKET_MS). The region is one per deployment (MEDIA_DEMAND_REGION, default 'local');
  * a per-viewer region needs an edge-provided header that does not exist yet.
  *
- * Not yet read by the sweep's eligibility (that stays on the daily PostgreSQL counts, objects/popularity.js, until
- * F2.5): the sweep only calls rollup(), which stages media.object.hot for objects over HOT_READS in the window.
+ * The tiering sweep (objects/tiering.js, F2.5) reads hotness() with `strict` for its promote/demote eligibility, one
+ * MGET per page of objects, and calls rollup(), which stages media.object.hot for objects over HOT_READS in the window.
  */
 const config = require('../config');
 
@@ -32,6 +32,8 @@ const sets = new Map();             // fallback: hot key -> { members: Map(objec
 const announced = new Map();        // fallback: announce key -> expiresAt
 
 function useValkey(handle) { vk = handle && handle.client ? handle : null; }
+/** Valkey is configured: counts are shared across processes (the in-process fallback only sees this one). */
+function available() { return !!vk; }
 function region() { return String((config.demand && config.demand.region) || 'local').replace(/[^A-Za-z0-9_.-]/g, '_') || 'local'; }
 function bucketOf(now = Date.now()) { return Math.floor(now / BUCKET_MS); }
 const name = (...parts) => (vk ? vk.key(...parts) : parts.join(':'));
@@ -80,9 +82,11 @@ function record({ objectId, region: r = region(), now = Date.now() } = {}) {
 /**
  * Reads per object over the last `buckets` buckets (summed), newest bucket included. With `objectIds`, the counters
  * of those objects (all of them, zero when unread); without, every object in the region's hot sets.
- * A Valkey error answers an empty map: demand is a hint. → Map(object_id -> reads)
+ * A Valkey error answers an empty map: demand is a hint. With `strict`, an error, a timeout or no Valkey at all throws
+ * instead (a caller that would act on zeros falls back to another signal). → Map(object_id -> reads)
  */
-async function hotness({ region: r = region(), now = Date.now(), buckets = WINDOW_BUCKETS, objectIds = null } = {}) {
+async function hotness({ region: r = region(), now = Date.now(), buckets = WINDOW_BUCKETS, objectIds = null, strict = false } = {}) {
+    if (strict && !vk) throw new Error('Valkey is not configured');
     const out = new Map();
     const window = windowOf(now, buckets);
     const ids = objectIds ? [...new Set(objectIds.filter((x) => x != null).map(String))] : null;
@@ -121,6 +125,7 @@ async function hotness({ region: r = region(), now = Date.now(), buckets = WINDO
         }
         return out;
     } catch (err) {
+        if (strict) throw err;
         console.warn('[Demand] hotness not read:', err.message);
         return ids ? new Map(ids.map((id) => [id, 0])) : new Map();
     }
@@ -200,5 +205,5 @@ function _reset() { counters.clear(); sets.clear(); announced.clear(); }
 
 module.exports = {
     BUCKET_MS, WINDOW_BUCKETS, KEY_TTL_S, TOP_N, HOT_READS, ANNOUNCE_S,
-    useValkey, region, bucketOf, counterKey, hotKey, announceKey, record, hotness, top, rollup, _reset,
+    useValkey, available, region, bucketOf, counterKey, hotKey, announceKey, record, hotness, top, rollup, _reset,
 };

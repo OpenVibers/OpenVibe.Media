@@ -10,6 +10,12 @@
  * The thresholds say who may move; value per dollar (../placement/value.js, R2 Standard prices from
  * ../placement/cost-tiers.js) says who moves first: each class spends its per-sweep budget
  * (../placement/storage-policy.js) on its highest-scoring promotions and its lowest-scoring demotions.
+ * Demand (F2.5): the sweep's eligibility reads each object's reads in the last hour for this deployment's region
+ * (../placement/demand.js hotness(), one MGET per page of objects) against its class's hysteresis band
+ * (promoteReadsPerHour / demoteReadsPerHour, media.storage_policy): at or above the first it may promote, below the
+ * second it may demote, in between nothing moves. Without Valkey, or when a read fails or times out, the whole sweep
+ * reads the daily PostgreSQL counts instead (the thresholds above), logged once and counted in
+ * media_sweep_demand_source_total{source}. Each decision's inputs.demand says which source and value drove it.
  *
  *   runSweep({ trigger })   one pass: rotate the popularity counts, then promote and demote by the policy.
  *                           Step 4 of the storage sweep (server/vod/vod-storage.js runSweep), which a restore
@@ -187,6 +193,7 @@ async function frame(objectId, action, ctx) {
     const held = await model().isHeld(obj.id);
     const inputs = await inputsOf(obj, { locs, pop, held, settings });
     if (ctx.valuePerDollar != null) inputs.value_per_dollar = ctx.valuePerDollar;
+    if (ctx.demand) inputs.demand = ctx.demand;
     const canon = canonicalLocation(obj, locs);
     const trigger = ctx.trigger || 'manual';
     const why = ctx.reason || 'requested';
@@ -232,7 +239,7 @@ async function promote(objectId, ctx = {}) {
     await db.getDb().tx(async () => {
         await events().recordPlacement('media.replica.requested', obj.app_id, subjectOf(obj), {
             object_id: obj.id, app_id: obj.app_id || null, class: storagePolicy.classOf(obj), action: 'promote',
-            from: canon ? canon.provider : null, to: 'r2', provider: 'r2',
+            from: canon ? canon.provider : null, to: 'r2', provider: 'r2', ...(ctx.demand ? { demand: ctx.demand } : {}),
         });
     });
     events().kick();
@@ -299,7 +306,7 @@ async function demote(objectId, ctx = {}) {
     await db.getDb().tx(async () => {
         await events().recordPlacement('media.replica.draining', obj.app_id, subjectOf(obj), {
             object_id: obj.id, app_id: obj.app_id || null, class: storagePolicy.classOf(obj), action: 'demote',
-            provider: 'r2', key: r2.key,
+            provider: 'r2', key: r2.key, ...(ctx.demand ? { demand: ctx.demand } : {}),
         });
     });
     events().kick();
@@ -326,8 +333,8 @@ async function demote(objectId, ctx = {}) {
 // ── Candidates ───────────────────────────────────────────────
 
 /**
- * Value per dollar of an R2 copy of this row (../placement/value.js): its 7-day unique viewers scaled to a month
- * of requests, against R2 Standard's storage, read and retrieval prices (media.cost_tiers) and, for a promotion,
+ * Value per dollar of an R2 copy of this row (../placement/value.js): its reads in the last hour (Valkey demand)
+ * or else its 7-day unique viewers, scaled to a month of requests, against R2 Standard's storage, read and retrieval prices (media.cost_tiers) and, for a promotion,
  * the class's minimum residency beyond that month (media.storage_policy), which the copy commits to. Free
  * allowances are not counted: a promotion is priced at the margin.
  */
@@ -338,7 +345,8 @@ function scoreOf(row, cls, { committing = false } = {}) {
     return value.score({
         // A row that carries a month of counts (the demotion scan) is read as is: an idle copy has no viewer in the
         // 7-day window, so only the longer count tells a copy last viewed 20 days ago from one never viewed.
-        requests: row.unique_viewers_30d != null ? Number(row.unique_viewers_30d) || 0
+        requests: row.reads_1h != null ? (Number(row.reads_1h) || 0) * 24 * MONTH_DAYS
+            : row.unique_viewers_30d != null ? Number(row.unique_viewers_30d) || 0
             : (Number(row.unique_viewers_7d) || 0) * MONTH_DAYS / popularity.WINDOW_DAYS,
         bytes: Number(row.size_bytes) || 0,
         storageCost: storage,
@@ -360,8 +368,10 @@ const SWEEP_KEEP = 500;              // top-ranked promotion candidates a sweep 
  * before the limit applies (a most-viewed prefix would drop smaller objects that are worth more per dollar), but
  * the scan reads SCAN_PAGE rows at a time and holds only the best `limit`, so memory stays bounded.
  * excludeSandbox drops developer-sandbox tenants in the query (their objects are never tiered).
+ * With `demand` (the sweep's Valkey reader), the hourly reads replace the daily counts: see hotPromotionCandidates.
  */
-async function promotionCandidates(settings, { now = Date.now(), appId = null, limit = 200, excludeSandbox = false } = {}) {
+async function promotionCandidates(settings, { now = Date.now(), appId = null, limit = 200, excludeSandbox = false, demand = null } = {}) {
+    if (demand) return await hotPromotionCandidates(settings, demand, { appId, limit, excludeSandbox });
     const today = popularity.dayOf(now);
     const args = [popularity.windowStart(today, popularity.WINDOW_DAYS)];
     const rank = (a, b) => b.value_per_dollar - a.value_per_dollar || Number(b.unique_viewers_7d) - Number(a.unique_viewers_7d) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -381,8 +391,46 @@ async function promotionCandidates(settings, { now = Date.now(), appId = null, l
         for (const r of rows) {
             r.class = storagePolicy.classOf(r);
             r.value_per_dollar = scoreOf(r, r.class, { committing: true });
+            r.demand = { source: 'pg', metric: 'unique_viewers_7d', value: Number(r.unique_viewers_7d) || 0, threshold: settings.promoteMinUniqueViewers7d };
         }
         best = best.concat(rows).sort(rank).slice(0, limit);
+        if (rows.length < SCAN_PAGE) return best;
+        after = rows[rows.length - 1].id;
+    }
+}
+
+/** The demand fields a decision records for a Valkey reading: source, the hourly reads and the class's threshold. */
+function hotDemand(demand, reads, threshold) {
+    return { source: 'valkey', metric: 'reads_1h', value: reads, threshold, region: demand.region, window_s: demand.window_s };
+}
+
+/**
+ * The Valkey form of promotionCandidates: ready native objects in the size bounds with no R2 copy, paged by id
+ * (SCAN_PAGE rows, one hotness MGET per page), kept when their reads in the last hour reach their class's
+ * promoteReadsPerHour; ranked by value per dollar at that rate, then reads. A failed read throws (the sweep falls back).
+ */
+async function hotPromotionCandidates(settings, demand, { appId = null, limit = 200, excludeSandbox = false } = {}) {
+    const rank = (a, b) => b.value_per_dollar - a.value_per_dollar || b.reads_1h - a.reads_1h || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    let best = [];
+    for (let after = ''; ;) {
+        const rows = await db.all(`SELECT o.* FROM media_objects o
+        WHERE o.id > ? AND o.legacy_ref IS NULL AND o.lifecycle_status = 'ready' AND o.size_bytes >= ? AND o.size_bytes <= ?
+          AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.provider = 'r2' AND l.state = 'present')${appId ? ' AND o.app_id = ?' : ''}${excludeSandbox
+        ? " AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.app_id = o.app_id AND a.env = 'sandbox')" : ''}
+        ORDER BY o.id LIMIT ?`,
+        [after, Math.ceil(settings.promoteMinSizeMb * MB), Math.floor(settings.promoteMaxSizeMb * MB), ...(appId ? [appId] : []), SCAN_PAGE]);
+        const heat = rows.length ? await demand.read(rows.map((r) => r.id)) : new Map();
+        const hot = [];
+        for (const r of rows) {
+            r.class = storagePolicy.classOf(r);
+            r.reads_1h = heat.get(String(r.id)) || 0;
+            const { promoteReadsPerHour } = storagePolicy.bandFor(r.class);
+            if (r.reads_1h < promoteReadsPerHour) continue;
+            r.value_per_dollar = scoreOf(r, r.class, { committing: true });
+            r.demand = hotDemand(demand, r.reads_1h, promoteReadsPerHour);
+            hot.push(r);
+        }
+        best = best.concat(hot).sort(rank).slice(0, limit);
         if (rows.length < SCAN_PAGE) return best;
         after = rows[rows.length - 1].id;
     }
@@ -391,9 +439,11 @@ async function promotionCandidates(settings, { now = Date.now(), appId = null, l
 /**
  * Native objects with an R2 copy that should lose it: not ready any more (first, whatever their score), or idle,
  * lowest value per dollar of keeping the copy first (its viewers over the kept month, since an idle copy has none
- * in the last 7 days), then the largest. → [{ row, reason, class, value_per_dollar }]
+ * in the last 7 days), then the largest. With `demand` (the sweep's Valkey reader, one MGET per SCAN_PAGE copies), a
+ * ready object is cold when its reads in the last hour fall below its class's demoteReadsPerHour instead of idle by
+ * the daily counts (still in R2 at least demoteIdleDays either way). → [{ row, reason, class, value_per_dollar, demand }]
  */
-async function demotionCandidates(settings, { now = Date.now(), appId = null } = {}) {
+async function demotionCandidates(settings, { now = Date.now(), appId = null, demand = null } = {}) {
     const idleFrom = popularity.windowStart(popularity.dayOf(now), settings.demoteIdleDays);
     const monthFrom = popularity.windowStart(popularity.dayOf(now), popularity.KEEP_DAYS);
     const rows = await db.all(`SELECT o.*, l.created_at AS r2_since,
@@ -402,15 +452,29 @@ async function demotionCandidates(settings, { now = Date.now(), appId = null } =
             FROM media_locations l JOIN media_objects o ON o.id = l.object_id
             WHERE l.provider = 'r2' AND o.legacy_ref IS NULL${appId ? ' AND o.app_id = ?' : ''}
             ORDER BY (o.lifecycle_status = 'ready'), o.id`, appId ? [monthFrom, appId] : [monthFrom]);
+    if (demand) {
+        for (let i = 0; i < rows.length; i += SCAN_PAGE) {
+            const page = rows.slice(i, i + SCAN_PAGE);
+            const heat = await demand.read(page.map((r) => r.id));
+            for (const r of page) r.reads_1h = heat.get(String(r.id)) || 0;
+        }
+    }
     const out = [];
     for (const r of rows) {
         const cls = storagePolicy.classOf(r);
-        const scored = { row: r, class: cls, value_per_dollar: scoreOf(r, cls) };
+        const { demoteReadsPerHour } = storagePolicy.bandFor(cls);
+        const scored = { row: r, class: cls, value_per_dollar: scoreOf(r, cls),
+            demand: demand ? hotDemand(demand, r.reads_1h, demoteReadsPerHour) : { source: 'pg', metric: 'last_viewed_day', value: r.last_viewed_day || null, threshold: idleFrom } };
         if (r.lifecycle_status !== 'ready') { out.push({ ...scored, reason: `the object is ${r.lifecycle_status}` }); continue; }
-        const idle = !r.last_viewed_day || r.last_viewed_day < idleFrom;
         const since = msOf(r.r2_since);
         const settled = !Number.isFinite(since) || now - since >= settings.demoteIdleDays * DAY_MS;
-        if (idle && settled) {
+        if (!settled) continue;
+        if (demand) {
+            if (r.reads_1h < demoteReadsPerHour) {
+                out.push({ ...scored, reason: `${r.reads_1h} reads in the last hour (demand valkey, region ${demand.region}) < demoteReadsPerHour ${demoteReadsPerHour} (class ${cls}); `
+                    + `in R2 since ${r.r2_since || 'unknown'} (at least demoteIdleDays ${settings.demoteIdleDays})` });
+            }
+        } else if (!r.last_viewed_day || r.last_viewed_day < idleFrom) {
             out.push({ ...scored, reason: `no viewer since ${r.last_viewed_day || 'the kept counts began'} (idle for demoteIdleDays ${settings.demoteIdleDays}); in R2 since ${r.r2_since || 'unknown'}` });
         }
     }
@@ -426,6 +490,11 @@ function rankNote(cls, score, slot, budgetKey) {
 }
 
 function promoteReason(c, s, slot) {
+    if (c.demand && c.demand.source === 'valkey') {
+        return `${c.reads_1h} reads in the last hour (demand valkey, region ${c.demand.region}) >= promoteReadsPerHour ${c.demand.threshold} (class ${c.class}); `
+            + `${(Number(c.size_bytes) / MB).toFixed(1)} MB (promoteMinSizeMb ${s.promoteMinSizeMb} to promoteMaxSizeMb ${s.promoteMaxSizeMb}); `
+            + rankNote(c.class, c.value_per_dollar, slot, 'maxPromotionsPerSweep');
+    }
     return `${c.unique_viewers_7d} unique viewers in 7 days >= promoteMinUniqueViewers7d ${s.promoteMinUniqueViewers7d}; last viewed ${c.last_viewed_day} `
         + `(within promoteRecentAccessDays ${s.promoteRecentAccessDays}); ${(Number(c.size_bytes) / MB).toFixed(1)} MB (promoteMinSizeMb ${s.promoteMinSizeMb} to promoteMaxSizeMb ${s.promoteMaxSizeMb}); `
         + rankNote(c.class, c.value_per_dollar, slot, 'maxPromotionsPerSweep');
@@ -465,8 +534,36 @@ async function residencyRefusal(obj, cls, action, now) {
     return `minimum residency of ${minResidencyMs} ms for class ${cls} (media.storage_policy) not reached since the last move at ${lastAt}; ${action} suppressed`;
 }
 
+/** The sweep's Valkey demand reader, or null when Valkey is not configured. read(ids) throws on any failure. */
+function valkeyDemand(now) {
+    const demand = require('../placement/demand');
+    if (!demand.available()) return null;
+    return { region: demand.region(), window_s: (demand.WINDOW_BUCKETS * demand.BUCKET_MS) / 1000,
+        read: (ids) => demand.hotness({ objectIds: ids, now, strict: true }) };
+}
+
 /**
- * One pass over native objects. → { gate, promoted, demoted, would_promote, would_demote, already, refused, failed,
+ * Both candidate lists, from one demand source for the whole sweep: Valkey's hourly reads, or (Valkey absent, or a
+ * read failed or timed out anywhere in the scan) the daily PostgreSQL counts. Read before anything moves, so a
+ * failure part-way never leaves a sweep acting on two signals. → { source, fallback, demote, promote }
+ */
+async function sweepCandidates(settings, now) {
+    const heat = valkeyDemand(now);
+    let fallback = heat ? null : 'Valkey is not configured';
+    if (heat) {
+        try {
+            return { source: 'valkey', fallback, demote: await demotionCandidates(settings, { now, demand: heat }),
+                promote: await promotionCandidates(settings, { now, limit: SWEEP_KEEP, excludeSandbox: true, demand: heat }) };
+        } catch (err) {
+            fallback = `Valkey read failed: ${err.message}`;
+        }
+    }
+    return { source: 'pg', fallback, demote: await demotionCandidates(settings, { now }),
+        promote: await promotionCandidates(settings, { now, limit: SWEEP_KEEP, excludeSandbox: true }) };
+}
+
+/**
+ * One pass over native objects. → { gate, demand_source, demand_fallback?, promoted, demoted, would_promote, would_demote, already, refused, failed,
  * repeats, skipped_backoff, candidates: { promote, demote }, rotated, errors }
  */
 async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
@@ -478,27 +575,35 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
         const out = { gate: !!settings.active, promoted: 0, demoted: 0, would_promote: 0, would_demote: 0, already: 0, refused: 0, failed: 0,
             repeats: 0, skipped_backoff: 0, candidates: { promote: 0, demote: 0 }, rotated: await popularity.rotate({ now }), errors: [] };
 
+        const picked = await sweepCandidates(settings, now);
+        out.demand_source = picked.source;
+        if (picked.fallback) {
+            out.demand_fallback = picked.fallback;
+            console.warn(`[ObjectTiers] Sweep eligibility reads the daily PostgreSQL counts: ${picked.fallback}`);
+        }
+        require('../placement/metrics-binding').inc('media_sweep_demand_source_total', { source: picked.source });
+
         // Demotions first: they free the R2 cache, and a deleted object's copy should not wait behind promotions.
-        const demote_ = await demotionCandidates(settings, { now });
+        const demote_ = picked.demote;
         out.candidates.demote = demote_.length;
         // Budgets and residency are per class (media.storage_policy); a class spends only its own budget, in the
         // candidates' value-per-dollar order. A refusal (residency, hold) or a back-off spends nothing, so the next
         // in line takes the slot.
         const spent = { promote: {}, demote: {} };
         const room = (action, cls) => (spent[action][cls] || 0) < storagePolicy.budgetFor(cls)[action === 'promote' ? 'maxPromotionsPerSweep' : 'maxDemotionsPerSweep'];
-        for (const { row, reason, class: cls, value_per_dollar: score } of demote_) {
+        for (const { row, reason, class: cls, value_per_dollar: score, demand } of demote_) {
             if (!room('demote', cls)) continue;
             if (await inBackoff(row.id, 'demote')) { out.skipped_backoff++; continue; }
             // A copy of an object that is no longer ready is removed regardless of residency.
             const residency = row.lifecycle_status === 'ready' ? await residencyRefusal(row, cls, 'demote', now) : null;
-            const r = await demote(row.id, { trigger, settings, now, residency, valuePerDollar: score,
+            const r = await demote(row.id, { trigger, settings, now, residency, valuePerDollar: score, demand,
                 reason: `${reason}; ${rankNote(cls, score, (spent.demote[cls] || 0) + 1, 'maxDemotionsPerSweep')}` });
             tally(out, { ...r, action: 'demote' });
             if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.demote[cls] = (spent.demote[cls] || 0) + 1;
         }
 
         // Every eligible candidate is ranked (not a most-viewed prefix); the best SWEEP_KEEP are kept, so no class is crowded out of its budget.
-        const promote_ = await promotionCandidates(settings, { now, limit: SWEEP_KEEP, excludeSandbox: true });
+        const promote_ = picked.promote;
         out.candidates.promote = promote_.length;
         for (const c of promote_) {
             const cls = c.class;
@@ -506,13 +611,12 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
             if (await inBackoff(c.id, 'promote')) { out.skipped_backoff++; continue; }
             const residency = await residencyRefusal(c, cls, 'promote', now);
             const r = await promote(c.id, { trigger, reason: promoteReason(c, settings, (spent.promote[cls] || 0) + 1), settings, now, residency, valuePerDollar: c.value_per_dollar,
-                pop: { unique_viewers: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day } });
+                demand: c.demand, pop: picked.source === 'pg' ? { unique_viewers: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day } : undefined });
             tally(out, { ...r, action: 'promote' });
             if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.promote[cls] = (spent.promote[cls] || 0) + 1;
         }
 
-        // Demand (F2.4): stage media.object.hot for objects over the hourly read threshold. Eligibility above
-        // still reads the daily PostgreSQL counts; moving it to hotness() is F2.5.
+        // Demand (F2.4): stage media.object.hot for objects over the hourly read threshold.
         out.demand = await require('../placement/demand').rollup({ now });
 
         if (out.promoted || out.demoted || out.failed) {
