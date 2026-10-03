@@ -42,6 +42,13 @@ const TYPES = {
     'storage.recovered': ['media.storage.recovered', 'storage'],
 };
 
+// Placement decisions have no webhook twin; callers record them in the outbox transaction.
+const PLACEMENT_TYPES = new Set([
+    'media.replica.requested', 'media.replica.ready', 'media.replica.draining', 'media.replica.evicted',
+    'media.object.hot', 'media.region.hot', 'media.delivery.surge', 'media.delivery.degraded',
+    'provider.health.degraded', 'provider.capacity.warning', 'provider.cost.threshold',
+]);
+
 // media.job.<transition>: progress is low priority, the outcome (and a proposal waiting for its owner) important.
 const JOB_TRANSITIONS = {
     proposed: 'important', queued: 'low', started: 'low', retrying: 'low',
@@ -115,6 +122,12 @@ async function record(webhookEvent, appId, data) {
         ? { type: 'storage', id: String((data && data.kind) || 'storage') }
         : { type: subjectType, id: String(id == null ? 'unknown' : id) };
     return await enqueue(eventType, appId, subject, data, eventType === 'media.storage.recovered' ? 'low' : 'important');
+}
+
+/** Queue one placement decision inside its transaction; disabled and sandbox outboxes return null. */
+async function recordPlacement(eventType, appId, subject, payload, { priority = 'low' } = {}) {
+    if (!PLACEMENT_TYPES.has(eventType)) throw new Error(`unknown placement event ${eventType}`);
+    return await enqueue(eventType, appId, subject, payload, priority);
 }
 
 /**
@@ -274,4 +287,4 @@ function _reset() {
     stats.queued = 0; stats.lastError = null;
 }
 
-module.exports = { init, initWriter, record, recordIndexDocument, recordModeration, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, JOB_TRANSITIONS, _reset };
+module.exports = { init, initWriter, record, recordPlacement, recordIndexDocument, recordModeration, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, PLACEMENT_TYPES, JOB_TRANSITIONS, _reset };
