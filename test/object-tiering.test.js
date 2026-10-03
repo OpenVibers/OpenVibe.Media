@@ -541,6 +541,105 @@ const crypto = require('crypto');
         await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
         console.log('✅ gate off: residency- or hold-blocked moves are logged as refused and spend no slot');
 
+        // ── 9e. Demand from Valkey (F2.5): hourly reads against each class's band; the daily counts when Valkey fails ──
+        const demand = require('../server/placement/demand');
+        const sweepWarns = [];
+        const warn0 = console.warn;
+        const vkReads = new Map();
+        const mgets = [];
+        let vkMode = 'up';
+        demand.useValkey({ key: (...p) => 'ov:media:' + p.join(':'), client: {
+            async mget(...keys) {
+                mgets.push(keys.length);
+                if (vkMode === 'down') throw new Error('ECONNREFUSED');
+                if (vkMode === 'hung') return await new Promise(() => {});
+                return keys.map((k) => (vkReads.has(k) ? String(vkReads.get(k)) : null));
+            },
+            async zrange() { return []; },
+            async set() { return 'OK'; },
+            async del() { return 1; },
+        } });
+        const setReads = (id, n) => vkReads.set(demand.counterKey(demand.region(), demand.bucketOf(Date.now()), id), n);
+        const inR2 = async (o, days) => {
+            buckets['r2-bucket'].set(`objects/live/${o.id}`, o.bytes);
+            await model.upsertLocation(o.id, { provider: 'r2', bucket: 'r2-bucket', key: `objects/live/${o.id}`, storage_class: 'cache', state: 'present', size_bytes: o.bytes.length, checksum: o.sum, verified: true });
+            await ageR2(o.id, days);
+        };
+        const candViews = await db.all('SELECT object_id, day, unique_viewers, last_viewed_at FROM media_object_views_daily WHERE object_id = ?', [cand.id]);
+        await db.run('DELETE FROM media_object_views_daily');          // no daily counts: only Valkey can move anything
+        const hotVid = await addObject({ mime: 'video/mp4' }); setReads(hotVid.id, 75);              // >= video promoteReadsPerHour 60
+        const warmVid = await addObject({ mime: 'video/mp4' }); setReads(warmVid.id, 30);            // in the band: stays local
+        const warmR2 = await addObject({ mime: 'video/mp4' }); setReads(warmR2.id, 30); await inR2(warmR2, 30);   // in the band: keeps R2
+        const coldVid = await addObject({ mime: 'video/mp4' }); setReads(coldVid.id, 2); await inR2(coldVid, 30); // < video demoteReadsPerHour 6
+        const sz = policy.settings();
+        const scanned = Number((await db.get(`SELECT COUNT(*) AS n FROM media_objects o WHERE o.legacy_ref IS NULL AND o.lifecycle_status = 'ready' AND o.size_bytes >= ? AND o.size_bytes <= ?
+            AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.provider = 'r2' AND l.state = 'present')
+            AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.app_id = o.app_id AND a.env = 'sandbox')`, [Math.ceil(sz.promoteMinSizeMb * 1048576), Math.floor(sz.promoteMaxSizeMb * 1048576)])).n);
+        const copies = Number((await db.get("SELECT COUNT(*) AS n FROM media_locations l JOIN media_objects o ON o.id = l.object_id WHERE l.provider = 'r2' AND o.legacy_ref IS NULL")).n);
+        console.warn = (...a) => { sweepWarns.push(a.join(' ')); };
+        s = await tiering.runSweep();
+        console.warn = warn0;
+        assert.deepStrictEqual([s.demand_source, s.demand_fallback], ['valkey', undefined], JSON.stringify(s));
+        assert.ok(scanned > 1000, `the scan spans several pages (${scanned} objects)`);
+        assert.strictEqual(mgets.length, Math.ceil(copies / 500) + Math.ceil(scanned / 500), `one MGET per page, never one per object: ${mgets}`);
+        assert.ok(mgets.every((n) => n <= 500 * demand.WINDOW_BUCKETS), 'a page reads its objects\' hour of buckets in one MGET');
+        assert.ok(!sweepWarns.some((w) => /PostgreSQL counts/.test(w)), sweepWarns.join('\n'));
+        assert.ok(await r2Row(hotVid.id), 'hot in Valkey: promoted');
+        d = await last(hotVid.id);
+        assert.deepStrictEqual([d.action, d.outcome], ['promote', 'done']);
+        assert.ok(/^75 reads in the last hour \(demand valkey, region local\) >= promoteReadsPerHour 60 \(class video\); .*1 of budget 3 \(maxPromotionsPerSweep/.test(d.reason), d.reason);
+        assert.deepStrictEqual(JSON.parse(d.inputs).demand, { source: 'valkey', metric: 'reads_1h', value: 75, threshold: 60, region: 'local', window_s: 3600 });
+        assert.ok(!await r2Row(coldVid.id), 'cold in Valkey: demoted');
+        d = await last(coldVid.id);
+        assert.deepStrictEqual([d.action, d.outcome], ['demote', 'done']);
+        assert.ok(/^2 reads in the last hour \(demand valkey, region local\) < demoteReadsPerHour 6 \(class video\)/.test(d.reason), d.reason);
+        assert.deepStrictEqual(JSON.parse(d.inputs).demand, { source: 'valkey', metric: 'reads_1h', value: 2, threshold: 6, region: 'local', window_s: 3600 });
+        assert.ok(!await r2Row(warmVid.id) && await r2Row(warmR2.id), 'between the thresholds nothing moves (hysteresis)');
+        assert.deepStrictEqual([(await decisions(warmVid.id)).length, (await decisions(warmR2.id)).length], [0, 0]);
+        let mtext = await registry.metricsAsync();
+        assert.ok(/media_sweep_demand_source_total\{source="valkey"\} 1\b/.test(mtext), mtext.split('\n').filter((l) => /demand_source/.test(l)).join('\n'));
+        const pgSweeps = () => Number((/media_sweep_demand_source_total\{source="pg"\} (\d+)/.exec(mtext) || [])[1]);
+        const pgBefore = pgSweeps();
+
+        // Valkey refuses: the whole sweep reads the daily counts, exactly today's candidates and reasons, logged once.
+        const pgHot = await addObject(); await setViews(pgHot.id, [[0, 900]]);
+        const pgPromote = (await tiering.promotionCandidates(policy.settings(), { limit: 500, excludeSandbox: true })).map((c) => c.id);
+        const pgDemote = (await tiering.demotionCandidates(policy.settings())).map((c) => c.row.id);
+        assert.ok(pgPromote.includes(pgHot.id) && pgDemote.includes(warmR2.id), 'by the daily counts pgHot is popular and warmR2 idle');
+        vkMode = 'down';
+        mgets.length = 0;
+        console.warn = (...a) => { sweepWarns.push(a.join(' ')); };
+        s = await tiering.runSweep();
+        console.warn = warn0;
+        assert.deepStrictEqual([s.demand_source, s.demand_fallback], ['pg', 'Valkey read failed: ECONNREFUSED'], JSON.stringify(s));
+        assert.strictEqual(mgets.length, 1, 'the first failed read ends the Valkey scan');
+        assert.deepStrictEqual([s.candidates.promote, s.candidates.demote], [pgPromote.length, pgDemote.length], 'the same candidates as the daily counts give');
+        assert.strictEqual(sweepWarns.filter((w) => /Sweep eligibility reads the daily PostgreSQL counts: Valkey read failed: ECONNREFUSED/.test(w)).length, 1, 'logged once per sweep');
+        assert.ok(await r2Row(pgHot.id) && !await r2Row(warmR2.id), 'the daily counts decide: pgHot promoted, idle warmR2 demoted');
+        d = await last(pgHot.id);
+        assert.ok(/^900 unique viewers in 7 days >= promoteMinUniqueViewers7d 500/.test(d.reason), d.reason);
+        assert.deepStrictEqual(JSON.parse(d.inputs).demand, { source: 'pg', metric: 'unique_viewers_7d', value: 900, threshold: 500 });
+        d = await last(warmR2.id);
+        assert.ok(/^no viewer since the kept counts began \(idle for demoteIdleDays 14\)/.test(d.reason), d.reason);
+        assert.deepStrictEqual([JSON.parse(d.inputs).demand.source, JSON.parse(d.inputs).demand.metric], ['pg', 'last_viewed_day']);
+        mtext = await registry.metricsAsync();
+        assert.strictEqual(pgSweeps(), pgBefore + 1, 'counted as a pg sweep');
+
+        // Valkey hangs: the read times out and the sweep still finishes on the daily counts.
+        vkMode = 'hung';
+        console.warn = () => {};
+        const t0 = Date.now();
+        s = await tiering.runSweep();
+        console.warn = warn0;
+        assert.deepStrictEqual([s.demand_source, s.demand_fallback], ['pg', 'Valkey read failed: valkey read timeout'], JSON.stringify(s));
+        assert.ok(Date.now() - t0 < 10000, 'a stuck Valkey never stalls the sweep');
+        demand.useValkey(null);
+        s = await tiering.runSweep();
+        assert.deepStrictEqual([s.demand_source, s.demand_fallback], ['pg', 'Valkey is not configured']);
+        await db.run('DELETE FROM media_object_views_daily');
+        for (const v of candViews) await db.run('INSERT INTO media_object_views_daily (object_id, day, unique_viewers, last_viewed_at) VALUES (?, ?, ?, ?)', [v.object_id, v.day, v.unique_viewers, v.last_viewed_at]);
+        console.log('✅ demand from Valkey: hot promotes, cold demotes, the band holds; one MGET per page; a failed or stuck Valkey falls back to the daily counts for the whole sweep');
+
         // ── 10. The storage sweep runs it (step 4); a restore drill never does ──
         const vodSweep = await storage.runSweep();
         assert.ok(vodSweep.objects && vodSweep.objects.gate === true && typeof vodSweep.objects.promoted === 'number', JSON.stringify(vodSweep));

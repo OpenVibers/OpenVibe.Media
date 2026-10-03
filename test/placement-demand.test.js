@@ -121,13 +121,18 @@ const path = require('path');
     assert.strictEqual((await demand.hotness()).size, 0);            // the hung read times out
     assert.ok(Date.now() - before < 5000);
     assert.strictEqual((await demand.rollup()).announced, 0);
+    // strict (the tiering sweep): a failure throws instead of answering zeros, so the caller can fall back.
+    assert.strictEqual(demand.available(), true);
+    await assert.rejects(demand.hotness({ objectIds: ['obj-a'], strict: true }), /ECONNREFUSED/);
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepStrictEqual(unhandled, []);
-    console.log('✅ a Valkey failure never throws into a read; reads answer no demand');
+    console.log('✅ a Valkey failure never throws into a read; reads answer no demand; a strict read throws');
 
     // 6. rollup(): media.object.hot through the placement outbox, at most once per object per hour.
     demand.useValkey(null);
     demand._reset();
+    assert.strictEqual(demand.available(), false);
+    await assert.rejects(demand.hotness({ objectIds: ['obj-a'], strict: true }), /Valkey is not configured/);
     const stub = http.createServer((req, res) => {
         req.resume();
         req.on('end', () => {
