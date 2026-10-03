@@ -7,6 +7,9 @@
  * is available; the canonical copy is the fallback), and loses it when it goes idle or stops being ready.
  * Popularity is ./popularity.js (unique viewers per UTC day, no identifiers); the thresholds and the
  * site-level activation gate are the revisioned policy media.object_tier (./tier-policy.js).
+ * The thresholds say who may move; value per dollar (../placement/value.js, R2 Standard prices from
+ * ../placement/cost-tiers.js) says who moves first: each class spends its per-sweep budget
+ * (../placement/storage-policy.js) on its highest-scoring promotions and its lowest-scoring demotions.
  *
  *   runSweep({ trigger })   one pass: rotate the popularity counts, then promote and demote by the policy.
  *                           Step 4 of the storage sweep (server/vod/vod-storage.js runSweep), which a restore
@@ -36,11 +39,16 @@ const db = require('../db/database');
 const drill = require('../drill');
 const policy = require('./tier-policy');
 const storagePolicy = require('../placement/storage-policy');
+const costTiers = require('../placement/cost-tiers');
+const value = require('../placement/value');
 const popularity = require('./popularity');
 
 const MB = 1024 * 1024;
 const FAILED_BACKOFF_H = 6;
 const OUTCOMES = ['done', 'already', 'refused', 'failed', 'dry_run'];
+const DAY_MS = 864e5;
+const MONTH_DAYS = 30;               // value.js prices a month
+const LATENCY_VALUE = 1;             // $ a request served from R2 is worth: no revisioned figure yet, so the score is requests per dollar
 
 const vodStorage = () => require('../vod/vod-storage');
 const model = () => require('./model');
@@ -176,12 +184,18 @@ async function frame(objectId, action, ctx) {
     const pop = ctx.pop !== undefined ? ctx.pop : ((await popularity.stats({ ids: [obj.id], now: ctx.now })).get(obj.id) || null);
     const held = await model().isHeld(obj.id);
     const inputs = await inputsOf(obj, { locs, pop, held, settings });
+    if (ctx.valuePerDollar != null) inputs.value_per_dollar = ctx.valuePerDollar;
     const canon = canonicalLocation(obj, locs);
     const trigger = ctx.trigger || 'manual';
     const why = ctx.reason || 'requested';
     const from = action === 'promote' ? (canon ? canon.provider : null) : 'r2';
     const to = action === 'promote' ? 'r2' : (canon ? canon.provider : null);
     const log = async (outcome, reason, extra = {}) => {
+        // Gate off, only proposals are written: a refusal (residency, hold, canonical copy) or a copy already in
+        // place is answered but not logged, so the decision log holds dry_run rows and nothing else.
+        if (!settings.active && outcome !== 'dry_run') {
+            return { ok: outcome === 'already', outcome, object_id: obj.id, repeat: false, logged: false, reason, ...extra };
+        }
         const repeat = trigger === 'sweep' && (outcome === 'refused' || outcome === 'dry_run') && await loggedToday(obj.id, action, outcome);
         if (!repeat) await recordDecision({ obj, action, from, to, outcome, trigger, reason, inputs, settings, error: extra.error });
         return { ok: outcome === 'done' || outcome === 'already', outcome, object_id: obj.id, repeat, ...extra };
@@ -290,51 +304,102 @@ async function demote(objectId, ctx = {}) {
 
 // ── Candidates ───────────────────────────────────────────────
 
-/** Ready native objects that pass the popularity, recency and size thresholds and have no R2 copy yet, most viewed first. */
+/**
+ * Value per dollar of an R2 copy of this row (../placement/value.js): its 7-day unique viewers scaled to a month
+ * of requests, against R2 Standard's storage, read and retrieval prices (media.cost_tiers) and, for a promotion,
+ * the class's minimum residency beyond that month (media.storage_policy), which the copy commits to. Free
+ * allowances are not counted: a promotion is priced at the margin.
+ */
+function scoreOf(row, cls, { committing = false } = {}) {
+    const p = costTiers.settings().r2.standard;
+    const storage = Number(p.storagePerGbMonth) || 0;
+    const residencyDays = committing ? Math.max(storagePolicy.settings().classes[cls].minResidencyMs / DAY_MS, Number(p.minResidencyDays) || 0) : 0;
+    return value.score({
+        requests: (Number(row.unique_viewers_7d) || 0) * MONTH_DAYS / popularity.WINDOW_DAYS,
+        bytes: Number(row.size_bytes) || 0,
+        storageCost: storage,
+        requestCost: (Number(p.classBPerMillion) || 0) / 1e6,
+        retrievalCost: Number(p.retrievalPerGb) || 0,
+        residencyCost: storage * Math.max(0, residencyDays - MONTH_DAYS) / MONTH_DAYS,
+        latencyValue: LATENCY_VALUE,
+    });
+}
+
+const fmtScore = (v) => (Number.isFinite(v) ? Number(v.toPrecision(4)).toString() : String(v));
+
+/**
+ * Ready native objects that pass the popularity, recency and size thresholds and have no R2 copy yet, each with
+ * its class and value_per_dollar, highest value per dollar first (then most viewed). limit: Infinity for all.
+ * Every eligible row is scored before the limit applies: a most-viewed prefix would drop smaller objects that
+ * are worth more per dollar (the thresholds keep the eligible set small).
+ */
 async function promotionCandidates(settings, { now = Date.now(), appId = null, limit = 200 } = {}) {
     const today = popularity.dayOf(now);
-    return await db.all(`SELECT o.*, p.viewers AS unique_viewers_7d, p.last_day AS last_viewed_day
+    const rows = await db.all(`SELECT o.*, p.viewers AS unique_viewers_7d, p.last_day AS last_viewed_day
         FROM (SELECT object_id, SUM(unique_viewers)::bigint AS viewers, MAX(day) AS last_day FROM media_object_views_daily
               WHERE day >= ? AND unique_viewers > 0 GROUP BY object_id) p
         JOIN media_objects o ON o.id = p.object_id
         WHERE o.legacy_ref IS NULL AND o.lifecycle_status = 'ready'
           AND p.viewers >= ? AND p.last_day >= ? AND o.size_bytes >= ? AND o.size_bytes <= ?
           AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.provider = 'r2' AND l.state = 'present')${appId ? ' AND o.app_id = ?' : ''}
-        ORDER BY p.viewers DESC, o.id LIMIT ?`,
+        ORDER BY p.viewers DESC, o.id`,
     [popularity.windowStart(today, popularity.WINDOW_DAYS), settings.promoteMinUniqueViewers7d, popularity.windowStart(today, settings.promoteRecentAccessDays),
-        Math.ceil(settings.promoteMinSizeMb * MB), Math.floor(settings.promoteMaxSizeMb * MB), ...(appId ? [appId] : []), limit]);
+        Math.ceil(settings.promoteMinSizeMb * MB), Math.floor(settings.promoteMaxSizeMb * MB), ...(appId ? [appId] : [])]);
+    for (const r of rows) {
+        r.class = storagePolicy.classOf(r);
+        r.value_per_dollar = scoreOf(r, r.class, { committing: true });
+    }
+    rows.sort((a, b) => b.value_per_dollar - a.value_per_dollar || Number(b.unique_viewers_7d) - Number(a.unique_viewers_7d) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    return rows.slice(0, limit);
 }
 
-/** Native objects with an R2 copy that should lose it: not ready any more, or idle. → [{ obj row, reason }] */
+/**
+ * Native objects with an R2 copy that should lose it: not ready any more (first, whatever their score), or idle,
+ * lowest value per dollar of keeping the copy first (then the largest). → [{ row, reason, class, value_per_dollar }]
+ */
 async function demotionCandidates(settings, { now = Date.now(), appId = null } = {}) {
     const idleFrom = popularity.windowStart(popularity.dayOf(now), settings.demoteIdleDays);
+    const windowFrom = popularity.windowStart(popularity.dayOf(now), popularity.WINDOW_DAYS);
     const rows = await db.all(`SELECT o.*, l.created_at AS r2_since,
-                (SELECT MAX(d.day) FROM media_object_views_daily d WHERE d.object_id = o.id AND d.unique_viewers > 0) AS last_viewed_day
+                (SELECT MAX(d.day) FROM media_object_views_daily d WHERE d.object_id = o.id AND d.unique_viewers > 0) AS last_viewed_day,
+                (SELECT COALESCE(SUM(d.unique_viewers), 0)::bigint FROM media_object_views_daily d WHERE d.object_id = o.id AND d.day >= ?) AS unique_viewers_7d
             FROM media_locations l JOIN media_objects o ON o.id = l.object_id
             WHERE l.provider = 'r2' AND o.legacy_ref IS NULL${appId ? ' AND o.app_id = ?' : ''}
-            ORDER BY (o.lifecycle_status = 'ready'), o.id`, appId ? [appId] : []);
+            ORDER BY (o.lifecycle_status = 'ready'), o.id`, appId ? [windowFrom, appId] : [windowFrom]);
     const out = [];
     for (const r of rows) {
-        if (r.lifecycle_status !== 'ready') { out.push({ row: r, reason: `the object is ${r.lifecycle_status}` }); continue; }
+        const cls = storagePolicy.classOf(r);
+        const scored = { row: r, class: cls, value_per_dollar: scoreOf(r, cls) };
+        if (r.lifecycle_status !== 'ready') { out.push({ ...scored, reason: `the object is ${r.lifecycle_status}` }); continue; }
         const idle = !r.last_viewed_day || r.last_viewed_day < idleFrom;
         const since = msOf(r.r2_since);
-        const settled = !Number.isFinite(since) || now - since >= settings.demoteIdleDays * 864e5;
+        const settled = !Number.isFinite(since) || now - since >= settings.demoteIdleDays * DAY_MS;
         if (idle && settled) {
-            out.push({ row: r, reason: `no viewer since ${r.last_viewed_day || 'the kept counts began'} (idle for demoteIdleDays ${settings.demoteIdleDays}); in R2 since ${r.r2_since || 'unknown'}` });
+            out.push({ ...scored, reason: `no viewer since ${r.last_viewed_day || 'the kept counts began'} (idle for demoteIdleDays ${settings.demoteIdleDays}); in R2 since ${r.r2_since || 'unknown'}` });
         }
     }
+    const forced = (c) => (c.row.lifecycle_status === 'ready' ? 1 : 0);
+    out.sort((a, b) => forced(a) - forced(b) || a.value_per_dollar - b.value_per_dollar
+        || Number(b.row.size_bytes) - Number(a.row.size_bytes) || (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0));
     return out;
 }
 
-function promoteReason(c, s) {
+/** Where a move stands in its class's ranking and budget: `class video, value per dollar 1234, 1 of budget 3 (maxPromotionsPerSweep)`. */
+function rankNote(cls, score, slot, budgetKey) {
+    return `class ${cls}, value per dollar ${fmtScore(score)}, ${slot} of budget ${storagePolicy.budgetFor(cls)[budgetKey]} (${budgetKey}, media.storage_policy)`;
+}
+
+function promoteReason(c, s, slot) {
     return `${c.unique_viewers_7d} unique viewers in 7 days >= promoteMinUniqueViewers7d ${s.promoteMinUniqueViewers7d}; last viewed ${c.last_viewed_day} `
-        + `(within promoteRecentAccessDays ${s.promoteRecentAccessDays}); ${(Number(c.size_bytes) / MB).toFixed(1)} MB (promoteMinSizeMb ${s.promoteMinSizeMb} to promoteMaxSizeMb ${s.promoteMaxSizeMb})`;
+        + `(within promoteRecentAccessDays ${s.promoteRecentAccessDays}); ${(Number(c.size_bytes) / MB).toFixed(1)} MB (promoteMinSizeMb ${s.promoteMinSizeMb} to promoteMaxSizeMb ${s.promoteMaxSizeMb}); `
+        + rankNote(c.class, c.value_per_dollar, slot, 'maxPromotionsPerSweep');
 }
 
 /** What the policy would promote now, each with what (on record) would refuse it; database only. */
 async function candidates({ appId = null, limit = 20, now = Date.now(), settings = policy.settings() } = {}) {
     return (await Promise.all((await promotionCandidates(settings, { now, appId, limit: Math.min(Math.max(parseInt(limit, 10) || 20, 1), 200) })).map(async (c) => ({
-        object_id: c.id, app_id: c.app_id, kind: c.kind, size_bytes: c.size_bytes, unique_viewers_7d: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day,
+        object_id: c.id, app_id: c.app_id, kind: c.kind, class: c.class, value_per_dollar: c.value_per_dollar,
+        size_bytes: c.size_bytes, unique_viewers_7d: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day,
         blocked_by: await promoteRefusal(c, { locs: await model().listLocations(c.id), held: await model().isHeld(c.id) }),
     }))));
 }
@@ -380,30 +445,32 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
         // Demotions first: they free the R2 cache, and a deleted object's copy should not wait behind promotions.
         const demote_ = await demotionCandidates(settings, { now });
         out.candidates.demote = demote_.length;
-        // Budgets and residency are per class (media.storage_policy); a class spends only its own budget.
+        // Budgets and residency are per class (media.storage_policy); a class spends only its own budget, in the
+        // candidates' value-per-dollar order. A refusal (residency, hold) or a back-off spends nothing, so the next
+        // in line takes the slot.
         const spent = { promote: {}, demote: {} };
         const room = (action, cls) => (spent[action][cls] || 0) < storagePolicy.budgetFor(cls)[action === 'promote' ? 'maxPromotionsPerSweep' : 'maxDemotionsPerSweep'];
-        for (const { row, reason } of demote_) {
-            const cls = storagePolicy.classOf(row);
+        for (const { row, reason, class: cls, value_per_dollar: score } of demote_) {
             if (!room('demote', cls)) continue;
             if (await inBackoff(row.id, 'demote')) { out.skipped_backoff++; continue; }
             // A copy of an object that is no longer ready is removed regardless of residency.
             const residency = row.lifecycle_status === 'ready' ? await residencyRefusal(row, cls, 'demote', now) : null;
-            const r = await demote(row.id, { trigger, reason, settings, now, residency });
+            const r = await demote(row.id, { trigger, settings, now, residency, valuePerDollar: score,
+                reason: `${reason}; ${rankNote(cls, score, (spent.demote[cls] || 0) + 1, 'maxDemotionsPerSweep')}` });
             tally(out, { ...r, action: 'demote' });
             if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.demote[cls] = (spent.demote[cls] || 0) + 1;
         }
 
+        // Every eligible candidate is ranked (not a most-viewed prefix), so no class is crowded out of its budget.
         const promote_ = [];
-        const promoteLimit = Math.max(...storagePolicy.CLASSES.map((c) => storagePolicy.budgetFor(c).maxPromotionsPerSweep));
-        for (const c of await promotionCandidates(settings, { now, limit: Math.max(50, promoteLimit * 10) })) if (!await db.isSandboxTenant(c.app_id)) promote_.push(c);
+        for (const c of await promotionCandidates(settings, { now, limit: Infinity })) if (!await db.isSandboxTenant(c.app_id)) promote_.push(c);
         out.candidates.promote = promote_.length;
         for (const c of promote_) {
-            const cls = storagePolicy.classOf(c);
+            const cls = c.class;
             if (!room('promote', cls)) continue;
             if (await inBackoff(c.id, 'promote')) { out.skipped_backoff++; continue; }
             const residency = await residencyRefusal(c, cls, 'promote', now);
-            const r = await promote(c.id, { trigger, reason: promoteReason(c, settings), settings, now, residency,
+            const r = await promote(c.id, { trigger, reason: promoteReason(c, settings, (spent.promote[cls] || 0) + 1), settings, now, residency, valuePerDollar: c.value_per_dollar,
                 pop: { unique_viewers: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day } });
             tally(out, { ...r, action: 'promote' });
             if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.promote[cls] = (spent.promote[cls] || 0) + 1;
