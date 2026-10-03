@@ -52,6 +52,8 @@ const LATENCY_VALUE = 1;             // $ a request served from R2 is worth: no 
 
 const vodStorage = () => require('../vod/vod-storage');
 const model = () => require('./model');
+const events = () => require('../events');
+const subjectOf = (obj) => ({ type: 'object', id: obj.id });
 
 const sweepState = { running: false, lastRunAt: null, lastResult: null };
 
@@ -227,6 +229,13 @@ async function promote(objectId, ctx = {}) {
     if (!settings.active) return await log('dry_run', `gate off (active = false): would promote: ${why}${vs.providerAvailable('r2') ? '' : ' (R2 is not available now)'}`);
     if (!vs.providerAvailable('r2')) return await log('refused', `${why}; refused: R2 is not available`, { error: 'R2 not available' });
 
+    await db.getDb().tx(async () => {
+        await events().recordPlacement('media.replica.requested', obj.app_id, subjectOf(obj), {
+            object_id: obj.id, app_id: obj.app_id || null, class: storagePolicy.classOf(obj), action: 'promote',
+            from: canon ? canon.provider : null, to: 'r2', provider: 'r2',
+        });
+    });
+    events().kick();
     const check = await confirmCanonical(obj, canon);
     if (!check.ok) return await log('refused', `${why}; refused: ${check.why}`, { error: check.why });
     const key = r2KeyFor(obj, canon);
@@ -257,7 +266,12 @@ async function promote(objectId, ctx = {}) {
         await model().upsertLocation(obj.id, { provider: 'r2', bucket: vs.bucketFor('r2'), key, storage_class: 'cache', state: 'present',
             checksum: obj.content_hash, size_bytes: size, verified: true });
         await model().setLocationState(canon.id, { state: 'present', size_bytes: size });
+        await events().recordPlacement('media.replica.ready', obj.app_id, subjectOf(obj), {
+            object_id: obj.id, app_id: obj.app_id || null, class: storagePolicy.classOf(obj), action: 'promote',
+            provider: 'r2', key, bytes: size, replica_since: new Date().toISOString(),
+        });
     });
+    events().kick();
     console.log(`[ObjectTiers] ${obj.id} (${obj.app_id}) promoted to R2: ${key} (${(size / MB).toFixed(1)} MB)`);
     return await log('done', why, { bytes: size });
 }
@@ -282,6 +296,13 @@ async function demote(objectId, ctx = {}) {
     // The last good copy is never the one removed: the canonical copy must check out now.
     const check = await confirmCanonical(obj, canon);
     if (!check.ok) return await log('refused', `${why}; refused: ${check.why}; the R2 copy is kept (it may be the last good copy)`, { error: check.why });
+    await db.getDb().tx(async () => {
+        await events().recordPlacement('media.replica.draining', obj.app_id, subjectOf(obj), {
+            object_id: obj.id, app_id: obj.app_id || null, class: storagePolicy.classOf(obj), action: 'demote',
+            provider: 'r2', key: r2.key,
+        });
+    });
+    events().kick();
     try {
         await vs.deleteObject('r2', r2.key);
         const still = await vs.headObject('r2', r2.key);
@@ -292,7 +313,12 @@ async function demote(objectId, ctx = {}) {
     await db.getDb().tx(async () => {
         await db.run('DELETE FROM media_locations WHERE id = ?', [r2.id]);
         await model().setLocationState(canon.id, { state: 'present', size_bytes: Number(obj.size_bytes) });
+        await events().recordPlacement('media.replica.evicted', obj.app_id, subjectOf(obj), {
+            object_id: obj.id, app_id: obj.app_id || null, class: storagePolicy.classOf(obj), action: 'demote',
+            provider: 'r2', key: r2.key,
+        });
     });
+    events().kick();
     console.log(`[ObjectTiers] ${obj.id} (${obj.app_id}) demoted from R2 (${why})`);
     return await log('done', why);
 }

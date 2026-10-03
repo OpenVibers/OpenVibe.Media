@@ -57,6 +57,14 @@ const state = {
     lastHealthError: {},   // provider -> string
 };
 
+async function announceProviderEvent(eventType, provider, payload) {
+    try {
+        await require('../db/database').getDb().tx(async () =>
+            await require('../events').recordPlacement(eventType, null, { type: 'provider', id: provider }, { provider, ...payload }));
+        require('../events').kick();
+    } catch (err) { console.warn(`[Placement] ${eventType} not announced: ${err.message}`); }
+}
+
 /**
  * Capability gating. 'report' (the default) records what each provider can do and exposes it (health, the
  * admin placement view) without taking anything out of routing; 'enforce' (MEDIA_CAPABILITY_GATE=enforce) removes
@@ -105,6 +113,16 @@ function capabilities(name) {
 /** Record the latest probe result in memory. */
 function setCapabilities(name, caps) {
     if (!state.capabilities) state.capabilities = {};
+    const old = state.capabilities[name];
+    const classesOf = (snapshot) => snapshot.classes || providerClasses(name).filter((cls) =>
+        CLASS_REQUIREMENTS[cls].every((cap) => snapshot.capabilities && snapshot.capabilities[cap]));
+    if (old && old.passed && caps.passed) {
+        const prev = classesOf(old);
+        const next = classesOf(caps);
+        if (next.length < prev.length) {
+            void announceProviderEvent('provider.capacity.warning', name, { classes: next, previous_classes: prev });
+        }
+    }
     state.capabilities[name] = caps;
 }
 
@@ -228,8 +246,10 @@ async function liveHealth(name) {
         observe(name, 'head', true, ms);
         return { configured: true, healthy: true, lastCheck: state.lastHealthCheck[name], latencyMs: ms };
     } catch (err) {
+        const wasHealthy = state.lastHealthCheck[name] != null && state.lastHealthError[name] == null;
         state.lastHealthCheck[name] = Date.now();
         state.lastHealthError[name] = err.message || String(err);
+        if (wasHealthy) void announceProviderEvent('provider.health.degraded', name, { healthy: false, last_error: state.lastHealthError[name] });
         const ms = state.lastHealthCheck[name] - started;
         observe(name, 'head', false, ms);
         return { configured: true, healthy: false, lastCheck: state.lastHealthCheck[name], error: state.lastHealthError[name], latencyMs: ms };
