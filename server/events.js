@@ -46,7 +46,7 @@ const TYPES = {
 const PLACEMENT_TYPES = new Set([
     'media.replica.requested', 'media.replica.ready', 'media.replica.draining', 'media.replica.evicted',
     'media.object.hot', 'media.region.hot', 'media.delivery.surge', 'media.delivery.degraded',
-    'provider.health.degraded', 'provider.capacity.warning', 'provider.cost.threshold',
+    'media.provider.health_degraded', 'media.provider.capacity_warning', 'media.provider.cost_threshold',
 ]);
 
 // media.job.<transition>: progress is low priority, the outcome (and a proposal waiting for its owner) important.
