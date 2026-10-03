@@ -161,14 +161,14 @@ request/playback → telemetry → Events → {Hotness, Health, Cost} engines �
   (minutes–hours) ⊂ cost (hours–days). Each outer loop only constrains the inner (budgets bound placement; placement
   bounds routes); every loop uses hysteresis and rate limits.
 - **Events emitted:** `media.object.hot`, `media.replica.requested|ready|draining|evicted`, `media.variant.requested|ready`,
-  `media.region.hot`, `media.delivery.surge|degraded`, `provider.health.degraded`, `provider.capacity.warning`,
-  `provider.cost.threshold`.
+  `media.region.hot`, `media.delivery.surge|degraded`, `media.provider.health_degraded`, `media.provider.capacity_warning`,
+  `media.provider.cost_threshold`.
 
 ## 9. Cost truth
 
 `media.cost_tiers` holds list prices; estimates drive decisions; **provider bills calibrate them**: R2 analytics
 (GraphQL), B2 usage reports, Bunny statistics API are imported daily, compared with the estimate, and the gap is a
-metric. Budgets per class and provider with a forecast; `provider.cost.threshold` at 90 % shifts non-critical traffic.
+metric. Budgets per class and provider with a forecast; `media.provider.cost_threshold` at 90 % shifts non-critical traffic.
 
 ## 10. Build order
 

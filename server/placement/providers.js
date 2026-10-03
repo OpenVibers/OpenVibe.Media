@@ -120,7 +120,7 @@ function setCapabilities(name, caps) {
         const prev = classesOf(old);
         const next = classesOf(caps);
         if (next.length < prev.length) {
-            void announceProviderEvent('provider.capacity.warning', name, { classes: next, previous_classes: prev });
+            void announceProviderEvent('media.provider.capacity_warning', name, { classes: next, previous_classes: prev });
         }
     }
     state.capabilities[name] = caps;
@@ -249,7 +249,7 @@ async function liveHealth(name) {
         const wasHealthy = state.lastHealthCheck[name] != null && state.lastHealthError[name] == null;
         state.lastHealthCheck[name] = Date.now();
         state.lastHealthError[name] = err.message || String(err);
-        if (wasHealthy) void announceProviderEvent('provider.health.degraded', name, { healthy: false, last_error: state.lastHealthError[name] });
+        if (wasHealthy) void announceProviderEvent('media.provider.health_degraded', name, { healthy: false, last_error: state.lastHealthError[name] });
         const ms = state.lastHealthCheck[name] - started;
         observe(name, 'head', false, ms);
         return { configured: true, healthy: false, lastCheck: state.lastHealthCheck[name], error: state.lastHealthError[name], latencyMs: ms };
