@@ -2,8 +2,11 @@
  * OpenVibe.Media — Pastes API, read-only (mounted at /api/v1/:app/pastes)
  *
  * OpenVibe.Community owns pastes since the 2026-09-22 cutover (PASTES_MOVED_TO).
- * Media keeps the rows and answers reads for anything still pointed here; public
- * pages live at /p/:slug (HTML) and /p/:slug/raw.
+ * This read-only surface is being retired (T10 step 2): nothing calls the app
+ * API any more, so the router and its GET handlers go; the `pastes` table and
+ * the screenshot leaves below stay until Pics owns the bytes. Media keeps the
+ * rows and answers reads for anything still pointed here; public pages live at
+ * /p/:slug (HTML) and /p/:slug/raw.
  *
  * GET    /                    list (?limit&offset&type&search&user_id&include_unlisted&sort)
  * GET    /config              paste limits (+ the caller's count today)
