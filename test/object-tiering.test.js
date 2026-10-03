@@ -461,19 +461,26 @@ const crypto = require('crypto');
         // ── 9b. Per-class budgets and residency come from media.storage_policy ──
         const sp = require('../server/placement/storage-policy');
         await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
-        const vids = [await addObject({ mime: 'video/mp4' }), await addObject({ mime: 'video/mp4' })];
+        // vids[0] is the most viewed but nearly 1 MB; vids[1] has fewer viewers at 4 KB, so more value per dollar.
+        const vids = [await addObject({ mime: 'video/mp4', size: 1000000 }), await addObject({ mime: 'video/mp4' })];
         const imgs = [await addObject({ mime: 'image/png' }), await addObject({ mime: 'image/png' })];
         const dl = await addObject();
-        for (const o of [...vids, ...imgs, dl]) await setViews(o.id, [[0, 900]]);
+        for (const o of [...vids, ...imgs, dl]) await setViews(o.id, [[0, o === vids[0] ? 950 : 900]]);
+        const ranked = (await tiering.promotionCandidates(policy.settings())).filter((c) => c.class === 'video').map((c) => c.id);
+        assert.deepStrictEqual(ranked, [vids[1].id, vids[0].id], 'ranked by value per dollar, not by viewers');
         await sp.set({ classes: { video: { maxPromotionsPerSweep: 1 }, image: { maxPromotionsPerSweep: 2, minResidencyMs: 86400000 }, download: { maxPromotionsPerSweep: 0 } } },
             { reason: 'test: per-class budgets' });
         s = await tiering.runSweep();
         const promotedOf = async (list) => (await Promise.all(list.map(async (o) => !!await r2Row(o.id)))).filter(Boolean).length;
         assert.deepStrictEqual([await promotedOf(vids), await promotedOf(imgs), await promotedOf([dl])], [1, 2, 0], 'each class spends its own promotion budget');
         assert.strictEqual((await decisions(dl.id)).length, 0, 'a class with a zero budget is not tried');
-        const r2Done = new Set((await Promise.all(vids.map(async (o) => (await r2Row(o.id)) ? o.id : null))).filter(Boolean));
+        assert.ok(await r2Row(vids[1].id) && !await r2Row(vids[0].id), "the video budget of 1 goes to the higher value per dollar");
+        assert.strictEqual((await decisions(vids[0].id)).length, 0, 'the rest of the class waits for the next sweep');
         assert.strictEqual(JSON.parse((await last(imgs[0].id)).inputs).class, 'image');
-        assert.strictEqual(JSON.parse((await last(vids.find((o) => r2Done.has(o.id)).id)).inputs).class, 'video');
+        d = await last(vids[1].id);
+        assert.strictEqual(JSON.parse(d.inputs).class, 'video');
+        assert.ok(JSON.parse(d.inputs).value_per_dollar > 0, d.inputs);
+        assert.ok(/; class video, value per dollar [0-9.e+]+, 1 of budget 1 \(maxPromotionsPerSweep, media\.storage_policy\)$/.test(d.reason), d.reason);
         // Residency: the images were just promoted, so an idle demotion is suppressed and logged as refused.
         await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
         for (const o of imgs) await ageR2(o.id, 30);
@@ -482,10 +489,57 @@ const crypto = require('crypto');
         d = await last(imgs[0].id);
         assert.deepStrictEqual([d.action, d.outcome, JSON.parse(d.inputs).class], ['demote', 'refused', 'image']);
         assert.ok(/minimum residency of 86400000 ms for class image/.test(d.reason), d.reason);
+        assert.ok(/idle for demoteIdleDays 14\).*; class image, value per dollar 0, 1 of budget 10 \(maxDemotionsPerSweep/.test(d.reason), d.reason);
         await sp.set({ classes: { image: { minResidencyMs: 0 }, download: { maxPromotionsPerSweep: 3 } } }, { reason: 'test: residency off, budgets back' });
         s = await tiering.runSweep();
         assert.ok(!await r2Row(imgs[0].id) && !await r2Row(imgs[1].id), 'with no residency the idle copies leave');
         console.log('✅ per-class budgets and residency from media.storage_policy; every decision row shows its class; a residency-suppressed demotion logs refused');
+
+        // ── 9c. Every eligible object is scored, not only the 1,000 most viewed ──
+        // 1,001 larger, more viewed videos would fill a most-viewed prefix; the small one is worth more per dollar.
+        const crowd = [];
+        for (let i = 0; i < 1001; i++) {
+            const id = await model.createObject({ app_id: 'live', kind: 'file', visibility: 'public', lifecycle_status: 'ready', mime_type: 'video/mp4', size_bytes: 1000000 });
+            await setViews(id, [[0, 900]]);
+            crowd.push(id);
+        }
+        const small = await addObject({ mime: 'video/mp4' });
+        await setViews(small.id, [[0, 500]]);
+        const all = await tiering.promotionCandidates(policy.settings(), { limit: Infinity });
+        assert.ok(all.length >= 1002, `every eligible object is ranked (${all.length})`);
+        assert.strictEqual(all[0].id, small.id, 'the fewest viewers but the most value per dollar ranks first');
+        assert.strictEqual((await tiering.promotionCandidates(policy.settings(), { limit: 1 }))[0].id, small.id, 'the limit applies after scoring');
+        await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
+        console.log('✅ promotion candidates are scored in full before the class budgets and limits apply');
+
+        // ── 9d. Gate off: a move residency or a hold blocks is still logged (refused) and spends no slot ──
+        await policy.set({ active: false }, { actor: { type: 'service', id: 'live' }, reason: 'test: gate off with blocked moves' });
+        await sp.set({ classes: { video: { maxPromotionsPerSweep: 1, minResidencyMs: 86400000 } } }, { reason: 'test: video residency, budget 1' });
+        const settling = await addObject({ mime: 'video/mp4' }); await setViews(settling.id, [[0, 900]]);      // the highest score, but moved an hour ago
+        await db.run(`INSERT INTO media_object_tier_decisions (object_id, app_id, action, from_provider, to_provider, outcome, trigger, reason, inputs, thresholds)
+                      VALUES (?, 'live', 'demote', 'r2', 'local', 'done', 'manual', 'test: a recent move', '{}', '{}')`, [settling.id]);
+        const heldVid = await addObject({ mime: 'video/mp4' }); await setViews(heldVid.id, [[0, 800]]);
+        const heldVidHold = await model.placeHold({ object_id: heldVid.id, kind: 'admin', reason: 'test' });
+        const nextVid = await addObject({ mime: 'video/mp4', size: 100000 }); await setViews(nextVid.id, [[0, 700]]);
+        assert.deepStrictEqual((await tiering.promotionCandidates(policy.settings())).filter((c) => c.class === 'video').map((c) => c.id),
+            [settling.id, heldVid.id, nextVid.id], 'the blocked ones rank first');
+        const before = Number((await db.get('SELECT MAX(id) AS id FROM media_object_tier_decisions')).id);
+        s = await tiering.runSweep();
+        const written = await db.all('SELECT object_id, action, outcome FROM media_object_tier_decisions WHERE id > ? ORDER BY id', [before]);
+        assert.ok(written.some((r) => r.outcome === 'dry_run') && written.some((r) => r.outcome === 'refused'), `gate off logs proposals and refusals: ${JSON.stringify(written)}`);
+        assert.deepStrictEqual([(await last(settling.id)).outcome, (await last(heldVid.id)).outcome], ['refused', 'refused'], 'a blocked move is logged');
+        assert.deepStrictEqual([(await decisions(settling.id)).length, (await decisions(heldVid.id)).length], [2, 1]);
+        d = await last(nextVid.id);
+        assert.deepStrictEqual([d.action, d.outcome], ['promote', 'dry_run']);
+        assert.ok(/, 1 of budget 1 \(maxPromotionsPerSweep/.test(d.reason), 'the blocked ones spent no slot, so the next in line has it: ' + d.reason);
+        assert.ok(s.refused >= 2 && s.would_promote >= 1, JSON.stringify(s));
+        const direct = await tiering.promote(heldVid.id, { reason: 'asked by hand' });
+        assert.deepStrictEqual([direct.outcome, direct.logged, (await decisions(heldVid.id)).length], ['refused', undefined, 2], 'a direct call is answered and logged');
+        await model.releaseHold(heldVidHold.id, 'test');
+        await sp.set({ classes: { video: { maxPromotionsPerSweep: 3, minResidencyMs: 0 } } }, { reason: 'test: video back' });
+        await policy.set({ active: true }, { actor: { type: 'service', id: 'live' }, reason: 'test: gate on again' });
+        await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
+        console.log('✅ gate off: residency- or hold-blocked moves are logged as refused and spend no slot');
 
         // ── 10. The storage sweep runs it (step 4); a restore drill never does ──
         const vodSweep = await storage.runSweep();

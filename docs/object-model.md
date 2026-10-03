@@ -918,10 +918,15 @@ The sweep is step 4 of the storage sweep (`vod-storage.js runSweep`, every `swee
 local disk still needs a drain, never starts in a restore drill (and refuses under `MEDIA_DRILL` anyway).
 Each pass rotates the popularity counts, then:
 
-1. **Demotes** first (at most `maxDemotionsPerSweep`): R2 copies of native objects that are no longer
-   `ready`, or idle for `demoteIdleDays` and in R2 at least that long.
-2. **Promotes** (at most `maxPromotionsPerSweep`), most viewed first: ready native objects of non-sandbox
-   tenants within the thresholds and without a present R2 copy.
+1. **Demotes** first (at most `maxDemotionsPerSweep` per class): R2 copies of native objects that are no
+   longer `ready` (first), or idle for `demoteIdleDays` and in R2 at least that long, lowest value per dollar
+   of keeping the copy first (its viewers over the kept 30 days, as an idle copy has none in the last 7),
+   then the largest.
+2. **Promotes** (at most `maxPromotionsPerSweep` per class), highest value per dollar first (then most
+   viewed): ready native objects of non-sandbox tenants within the thresholds and without a present R2 copy.
+   The scan pages through every eligible object (sandbox tenants filtered in the query) and keeps the best
+   500, so no class is crowded out of its budget by a most-viewed prefix.
+   Budgets and minimum residency are per class (`media.storage_policy`); a refusal or back-off spends no slot.
 
 **Promotion** (`tiering.promote`): refused when the object is held, not ready, a sandbox object, or its
 canonical copy is not verified on record (present, checked, not contradicted, and the object has a
