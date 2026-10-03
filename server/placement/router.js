@@ -188,6 +188,9 @@ const REASONS = {
     3: 'canonical-fallback',
 };
 
+// Reads that count as demand: a viewer playing or downloading, not a job deriving from the copy.
+const DEMAND_PURPOSES = new Set(['playback', 'download']);
+
 /**
  * The only function every read path uses.
  * opts: { object | vod | clip | locations, purpose, session?, range?, presign?, expiresIn?,
@@ -242,6 +245,14 @@ async function route(opts = {}) {
     if (primary) stickyPut(session, primary.provider);
 
     incMetric('media_router_decisions_total', { provider: primary ? primary.provider : 'none', purpose, reason });
+    // Demand (F2.4): one hit per served viewer read (not a derive job), object × region × 5-minute bucket.
+    // Best-effort and fire-and-forget: a Valkey error or absence never delays or fails the read.
+    if (primary && DEMAND_PURPOSES.has(purpose)) {
+        try {
+            const id = opts.object ? opts.object.id : (opts.vod || opts.clip || {}).object_id;
+            if (id) require('./demand').record({ objectId: id });
+        } catch { /* demand is a hint */ }
+    }
     const chain = [primary, ...ordered.filter((c) => c !== primary)].filter(Boolean).map((c) => ({ provider: c.provider, key: c.key }));
     return primary
         ? { provider: primary.provider, key: primary.key, url, reason, fallbacks, candidates: chain }

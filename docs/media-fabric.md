@@ -126,6 +126,14 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   at bytes that do not exist.
 - **Dry-run and simulator:** every policy can run in dry-run mode (logs what it would do and what it would cost), and a
   simulator replays recorded telemetry against a candidate policy before it is enabled.
+- **Demand rollups (F2.4, shipped):** every served viewer read (`router.route()` for playback or download, not a derive
+  job) adds one best-effort hit in Valkey (`server/placement/demand.js`): a counter `demand:<region>:<bucket>:<object_id>`
+  and the region's hot sorted set `hot:<region>:<bucket>` (object id → reads), both under `VALKEY_PREFIX` with a 2 h TTL;
+  `<bucket>` is the 5-minute bucket number (`floor(epoch_ms / 300000)`). The region is one per deployment
+  (`MEDIA_DEMAND_REGION`, default `local`); per-viewer regions wait for an edge-provided header. `hotness()` sums the last
+  12 buckets (one hour) per object. The writes are fire-and-forget: a slow, failing or absent Valkey never delays or fails
+  a read (without Valkey the counts stay in-process). Object × region only for now; the segment bucket comes with F3.
+  The sweep's eligibility still reads the daily PostgreSQL view counts; moving it to `hotness()` is F2.5.
 
 ## 7. Delivery: sticky, measured, canaried
 
@@ -160,6 +168,11 @@ request/playback → telemetry → Events → {Hotness, Health, Cost} engines �
 - **Loops cooperate by time constant and precedence:** player ABR (seconds) ⊂ delivery routing (30 s–5 min) ⊂ placement
   (minutes–hours) ⊂ cost (hours–days). Each outer loop only constrains the inner (budgets bound placement; placement
   bounds routes); every loop uses hysteresis and rate limits.
+- **Shipped (F2.4):** the Valkey counters and per-region hot sorted sets of §6. Each tiering sweep calls
+  `demand.rollup()`, which stages `media.object.hot` (`{ object_id, app_id, region, reads, window_s, threshold, bucket,
+  since }`) through the placement outbox for objects with at least 100 reads in the last hour, at most once per object per
+  hour (`hot-announced:<region>:<object_id>`, `SET NX EX 3600`). Not yet: nginx logs, player beacons, EWMA/percentiles,
+  HyperLogLog, the PostgreSQL 5-minute rollup and `media.region.hot`.
 - **Events emitted:** `media.object.hot`, `media.replica.requested|ready|draining|evicted`, `media.variant.requested|ready`,
   `media.region.hot`, `media.delivery.surge|degraded`, `media.provider.health_degraded`, `media.provider.capacity_warning`,
   `media.provider.cost_threshold`.

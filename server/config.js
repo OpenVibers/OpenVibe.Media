@@ -30,6 +30,8 @@ const config = {
     dataDir: process.env.MEDIA_DATA_DIR || './data',
     // Valkey (ADR-035): per-actor limit counters shared across processes; without it they count in this process.
     valkey: { url: process.env.VALKEY_URL || '', prefix: process.env.VALKEY_PREFIX || 'ov:media:' },
+    // Placement demand (F2.4): the region tag on hotness counters. One Media host is one region today.
+    demand: { region: process.env.MEDIA_DEMAND_REGION || 'local' },
 
     vod: {
         path: process.env.VOD_PATH || './data/vods',
