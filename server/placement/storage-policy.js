@@ -1,13 +1,13 @@
 /**
  * Revisioned placement budgets and residency policy (docs/media-fabric.md §6, §10).
- * This namespace is additive: existing tiering sweeps do not read it yet.
+ * The object sweep (server/objects/tiering.js) takes its per-class budgets and residency from here.
  */
 'use strict';
 
 const config = require('openvibe-shared/config');
 const db = require('../db/database');
 
-// Match media.object_tier (server/objects/tier-policy.js) until placement uses this policy.
+// The defaults match media.object_tier's per-sweep limits (server/objects/tier-policy.js).
 const BASE = { maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 10, minResidencyMs: 0 };
 const CLASSES = ['video', 'image', 'download', 'game-asset', 'attachment', 'backup'];
 const DEFAULTS = {
@@ -81,6 +81,17 @@ function classPolicy(name) {
     return settings().classes[name];
 }
 
+/** The placement class of a native object: video/audio → video, image/thumbnail → image, everything else → download. */
+function classOf(obj) {
+    const kind = obj && obj.kind;
+    if (kind === 'vod' || kind === 'clip') return 'video';
+    if (kind === 'thumbnail' || kind === 'screenshot' || kind === 'avatar') return 'image';
+    const major = String((obj && obj.mime_type) || '').toLowerCase().split('/')[0];
+    if (major === 'video' || major === 'audio') return 'video';
+    if (major === 'image') return 'image';
+    return 'download';
+}
+
 function budgetFor(name) {
     const { maxPromotionsPerSweep, maxDemotionsPerSweep } = classPolicy(name);
     return { maxPromotionsPerSweep, maxDemotionsPerSweep };
@@ -102,4 +113,4 @@ function mayMove({ class: name, lastMovedAt, now = Date.now() }) {
     return Number.isFinite(last) && Number.isFinite(current) && current - last >= minResidencyMs;
 }
 
-module.exports = { DEFAULTS, SCHEMA, CLASSES, init, get, set, settings, budgetFor, mayMove, _reset: () => { store = null; } };
+module.exports = { DEFAULTS, SCHEMA, CLASSES, init, get, set, settings, classOf, budgetFor, mayMove, _reset: () => { store = null; } };
