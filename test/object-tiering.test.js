@@ -512,7 +512,7 @@ const crypto = require('crypto');
         await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
         console.log('✅ promotion candidates are scored in full before the class budgets and limits apply');
 
-        // ── 9d. Gate off: a move residency or a hold blocks writes nothing and spends no slot; only dry_run rows ──
+        // ── 9d. Gate off: a move residency or a hold blocks is still logged (refused) and spends no slot ──
         await policy.set({ active: false }, { actor: { type: 'service', id: 'live' }, reason: 'test: gate off with blocked moves' });
         await sp.set({ classes: { video: { maxPromotionsPerSweep: 1, minResidencyMs: 86400000 } } }, { reason: 'test: video residency, budget 1' });
         const settling = await addObject({ mime: 'video/mp4' }); await setViews(settling.id, [[0, 900]]);      // the highest score, but moved an hour ago
@@ -526,19 +526,20 @@ const crypto = require('crypto');
         const before = Number((await db.get('SELECT MAX(id) AS id FROM media_object_tier_decisions')).id);
         s = await tiering.runSweep();
         const written = await db.all('SELECT object_id, action, outcome FROM media_object_tier_decisions WHERE id > ? ORDER BY id', [before]);
-        assert.ok(written.length && written.every((r) => r.outcome === 'dry_run'), `gate off writes only dry_run rows: ${JSON.stringify(written)}`);
-        assert.deepStrictEqual([(await decisions(settling.id)).length, (await decisions(heldVid.id)).length], [1, 0], 'a blocked move is not logged');
+        assert.ok(written.some((r) => r.outcome === 'dry_run') && written.some((r) => r.outcome === 'refused'), `gate off logs proposals and refusals: ${JSON.stringify(written)}`);
+        assert.deepStrictEqual([(await last(settling.id)).outcome, (await last(heldVid.id)).outcome], ['refused', 'refused'], 'a blocked move is logged');
+        assert.deepStrictEqual([(await decisions(settling.id)).length, (await decisions(heldVid.id)).length], [2, 1]);
         d = await last(nextVid.id);
         assert.deepStrictEqual([d.action, d.outcome], ['promote', 'dry_run']);
         assert.ok(/, 1 of budget 1 \(maxPromotionsPerSweep/.test(d.reason), 'the blocked ones spent no slot, so the next in line has it: ' + d.reason);
         assert.ok(s.refused >= 2 && s.would_promote >= 1, JSON.stringify(s));
         const direct = await tiering.promote(heldVid.id, { reason: 'asked by hand' });
-        assert.deepStrictEqual([direct.outcome, direct.logged, (await decisions(heldVid.id)).length], ['refused', false, 0], 'a direct call is answered, not logged');
+        assert.deepStrictEqual([direct.outcome, direct.logged, (await decisions(heldVid.id)).length], ['refused', undefined, 2], 'a direct call is answered and logged');
         await model.releaseHold(heldVidHold.id, 'test');
         await sp.set({ classes: { video: { maxPromotionsPerSweep: 3, minResidencyMs: 0 } } }, { reason: 'test: video back' });
         await policy.set({ active: true }, { actor: { type: 'service', id: 'live' }, reason: 'test: gate on again' });
         await db.run('DELETE FROM media_object_views_daily WHERE object_id != ?', [cand.id]);
-        console.log('✅ gate off: residency- or hold-blocked moves write no row and spend no slot; the sweep writes only dry_run rows');
+        console.log('✅ gate off: residency- or hold-blocked moves are logged as refused and spend no slot');
 
         // ── 10. The storage sweep runs it (step 4); a restore drill never does ──
         const vodSweep = await storage.runSweep();

@@ -191,11 +191,6 @@ async function frame(objectId, action, ctx) {
     const from = action === 'promote' ? (canon ? canon.provider : null) : 'r2';
     const to = action === 'promote' ? 'r2' : (canon ? canon.provider : null);
     const log = async (outcome, reason, extra = {}) => {
-        // Gate off, only proposals are written: a refusal (residency, hold, canonical copy) or a copy already in
-        // place is answered but not logged, so the decision log holds dry_run rows and nothing else.
-        if (!settings.active && outcome !== 'dry_run') {
-            return { ok: outcome === 'already', outcome, object_id: obj.id, repeat: false, logged: false, reason, ...extra };
-        }
         const repeat = trigger === 'sweep' && (outcome === 'refused' || outcome === 'dry_run') && await loggedToday(obj.id, action, outcome);
         if (!repeat) await recordDecision({ obj, action, from, to, outcome, trigger, reason, inputs, settings, error: extra.error });
         return { ok: outcome === 'done' || outcome === 'already', outcome, object_id: obj.id, repeat, ...extra };
@@ -315,7 +310,10 @@ function scoreOf(row, cls, { committing = false } = {}) {
     const storage = Number(p.storagePerGbMonth) || 0;
     const residencyDays = committing ? Math.max(storagePolicy.settings().classes[cls].minResidencyMs / DAY_MS, Number(p.minResidencyDays) || 0) : 0;
     return value.score({
-        requests: (Number(row.unique_viewers_7d) || 0) * MONTH_DAYS / popularity.WINDOW_DAYS,
+        // A row that carries a month of counts (the demotion scan) is read as is: an idle copy has no viewer in the
+        // 7-day window, so only the longer count tells a copy last viewed 20 days ago from one never viewed.
+        requests: row.unique_viewers_30d != null ? Number(row.unique_viewers_30d) || 0
+            : (Number(row.unique_viewers_7d) || 0) * MONTH_DAYS / popularity.WINDOW_DAYS,
         bytes: Number(row.size_bytes) || 0,
         storageCost: storage,
         requestCost: (Number(p.classBPerMillion) || 0) / 1e6,
@@ -327,45 +325,57 @@ function scoreOf(row, cls, { committing = false } = {}) {
 
 const fmtScore = (v) => (Number.isFinite(v) ? Number(v.toPrecision(4)).toString() : String(v));
 
+const SCAN_PAGE = 500;               // rows read per page of the promotion scan
+const SWEEP_KEEP = 500;              // top-ranked promotion candidates a sweep keeps
+
 /**
  * Ready native objects that pass the popularity, recency and size thresholds and have no R2 copy yet, each with
- * its class and value_per_dollar, highest value per dollar first (then most viewed). limit: Infinity for all.
- * Every eligible row is scored before the limit applies: a most-viewed prefix would drop smaller objects that
- * are worth more per dollar (the thresholds keep the eligible set small).
+ * its class and value_per_dollar, highest value per dollar first (then most viewed). Every eligible row is scored
+ * before the limit applies (a most-viewed prefix would drop smaller objects that are worth more per dollar), but
+ * the scan reads SCAN_PAGE rows at a time and holds only the best `limit`, so memory stays bounded.
+ * excludeSandbox drops developer-sandbox tenants in the query (their objects are never tiered).
  */
-async function promotionCandidates(settings, { now = Date.now(), appId = null, limit = 200 } = {}) {
+async function promotionCandidates(settings, { now = Date.now(), appId = null, limit = 200, excludeSandbox = false } = {}) {
     const today = popularity.dayOf(now);
-    const rows = await db.all(`SELECT o.*, p.viewers AS unique_viewers_7d, p.last_day AS last_viewed_day
+    const args = [popularity.windowStart(today, popularity.WINDOW_DAYS)];
+    const rank = (a, b) => b.value_per_dollar - a.value_per_dollar || Number(b.unique_viewers_7d) - Number(a.unique_viewers_7d) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    let best = [];
+    for (let after = ''; ;) {
+        const rows = await db.all(`SELECT o.*, p.viewers AS unique_viewers_7d, p.last_day AS last_viewed_day
         FROM (SELECT object_id, SUM(unique_viewers)::bigint AS viewers, MAX(day) AS last_day FROM media_object_views_daily
               WHERE day >= ? AND unique_viewers > 0 GROUP BY object_id) p
         JOIN media_objects o ON o.id = p.object_id
-        WHERE o.legacy_ref IS NULL AND o.lifecycle_status = 'ready'
+        WHERE o.id > ? AND o.legacy_ref IS NULL AND o.lifecycle_status = 'ready'
           AND p.viewers >= ? AND p.last_day >= ? AND o.size_bytes >= ? AND o.size_bytes <= ?
-          AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.provider = 'r2' AND l.state = 'present')${appId ? ' AND o.app_id = ?' : ''}
-        ORDER BY p.viewers DESC, o.id`,
-    [popularity.windowStart(today, popularity.WINDOW_DAYS), settings.promoteMinUniqueViewers7d, popularity.windowStart(today, settings.promoteRecentAccessDays),
-        Math.ceil(settings.promoteMinSizeMb * MB), Math.floor(settings.promoteMaxSizeMb * MB), ...(appId ? [appId] : [])]);
-    for (const r of rows) {
-        r.class = storagePolicy.classOf(r);
-        r.value_per_dollar = scoreOf(r, r.class, { committing: true });
+          AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.provider = 'r2' AND l.state = 'present')${appId ? ' AND o.app_id = ?' : ''}${excludeSandbox
+        ? " AND NOT EXISTS (SELECT 1 FROM apps a WHERE a.app_id = o.app_id AND a.env = 'sandbox')" : ''}
+        ORDER BY o.id LIMIT ?`,
+        [...args, after, settings.promoteMinUniqueViewers7d, popularity.windowStart(today, settings.promoteRecentAccessDays),
+            Math.ceil(settings.promoteMinSizeMb * MB), Math.floor(settings.promoteMaxSizeMb * MB), ...(appId ? [appId] : []), SCAN_PAGE]);
+        for (const r of rows) {
+            r.class = storagePolicy.classOf(r);
+            r.value_per_dollar = scoreOf(r, r.class, { committing: true });
+        }
+        best = best.concat(rows).sort(rank).slice(0, limit);
+        if (rows.length < SCAN_PAGE) return best;
+        after = rows[rows.length - 1].id;
     }
-    rows.sort((a, b) => b.value_per_dollar - a.value_per_dollar || Number(b.unique_viewers_7d) - Number(a.unique_viewers_7d) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-    return rows.slice(0, limit);
 }
 
 /**
  * Native objects with an R2 copy that should lose it: not ready any more (first, whatever their score), or idle,
- * lowest value per dollar of keeping the copy first (then the largest). → [{ row, reason, class, value_per_dollar }]
+ * lowest value per dollar of keeping the copy first (its viewers over the kept month, since an idle copy has none
+ * in the last 7 days), then the largest. → [{ row, reason, class, value_per_dollar }]
  */
 async function demotionCandidates(settings, { now = Date.now(), appId = null } = {}) {
     const idleFrom = popularity.windowStart(popularity.dayOf(now), settings.demoteIdleDays);
-    const windowFrom = popularity.windowStart(popularity.dayOf(now), popularity.WINDOW_DAYS);
+    const monthFrom = popularity.windowStart(popularity.dayOf(now), popularity.KEEP_DAYS);
     const rows = await db.all(`SELECT o.*, l.created_at AS r2_since,
                 (SELECT MAX(d.day) FROM media_object_views_daily d WHERE d.object_id = o.id AND d.unique_viewers > 0) AS last_viewed_day,
-                (SELECT COALESCE(SUM(d.unique_viewers), 0)::bigint FROM media_object_views_daily d WHERE d.object_id = o.id AND d.day >= ?) AS unique_viewers_7d
+                (SELECT COALESCE(SUM(d.unique_viewers), 0)::bigint FROM media_object_views_daily d WHERE d.object_id = o.id AND d.day >= ?) AS unique_viewers_30d
             FROM media_locations l JOIN media_objects o ON o.id = l.object_id
             WHERE l.provider = 'r2' AND o.legacy_ref IS NULL${appId ? ' AND o.app_id = ?' : ''}
-            ORDER BY (o.lifecycle_status = 'ready'), o.id`, appId ? [windowFrom, appId] : [windowFrom]);
+            ORDER BY (o.lifecycle_status = 'ready'), o.id`, appId ? [monthFrom, appId] : [monthFrom]);
     const out = [];
     for (const r of rows) {
         const cls = storagePolicy.classOf(r);
@@ -461,9 +471,8 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
             if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.demote[cls] = (spent.demote[cls] || 0) + 1;
         }
 
-        // Every eligible candidate is ranked (not a most-viewed prefix), so no class is crowded out of its budget.
-        const promote_ = [];
-        for (const c of await promotionCandidates(settings, { now, limit: Infinity })) if (!await db.isSandboxTenant(c.app_id)) promote_.push(c);
+        // Every eligible candidate is ranked (not a most-viewed prefix); the best SWEEP_KEEP are kept, so no class is crowded out of its budget.
+        const promote_ = await promotionCandidates(settings, { now, limit: SWEEP_KEEP, excludeSandbox: true });
         out.candidates.promote = promote_.length;
         for (const c of promote_) {
             const cls = c.class;
