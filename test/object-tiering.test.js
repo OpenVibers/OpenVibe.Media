@@ -727,6 +727,31 @@ const crypto = require('crypto');
         const hv = s.constraints.hot_usd_per_month.video;
         assert.ok(Math.abs(hv.spend - spend1) < 1e-12 && Math.abs(hv.spend - (await tiering.hotSpend()).video) < 1e-12, `a dry run spends nothing: ${JSON.stringify(hv)}`);
         assert.ok(Math.abs(hv.projected - (spend1 + one)) < 1e-12, `the projected spend counts the dry run: ${JSON.stringify(hv)}`);
+        // A second dry-run sweep the same day logs nothing new but still counts the repeated dry run, so the ceiling holds as before.
+        s = await tiering.runSweep();
+        assert.deepStrictEqual([(await decisions(gE[0].id)).length, (await decisions(gE[1].id)).length, (await decisions(gE[2].id)).length], [1, 1, 0], JSON.stringify(s));
+        assert.strictEqual((await last(gE[1].id)).outcome, 'refused', 'a repeated dry run still closes the class: the next candidate is refused again, not proposed');
+        const hv2 = s.constraints.hot_usd_per_month.video;
+        assert.ok(Math.abs(hv2.projected - (spend1 + one)) < 1e-12 && Math.abs(hv2.spend - spend1) < 1e-12, `the repeat counts in projected: ${JSON.stringify(hv2)}`);
+        // A dry-run demotion frees projected cost only when a live one could run: here the canonical file is gone, so it is refused.
+        const lostCanon = await addObject({ mime: 'video/mp4' });
+        buckets['r2-bucket'].set(`objects/live/${lostCanon.id}`, lostCanon.bytes);
+        await model.upsertLocation(lostCanon.id, { provider: 'r2', bucket: 'r2-bucket', key: `objects/live/${lostCanon.id}`, storage_class: 'cache', state: 'present', size_bytes: 4096, checksum: lostCanon.sum, verified: true });
+        await ageR2(lostCanon.id, 30);
+        fs.unlinkSync(lostCanon.file);
+        const goodCanon = await addObject({ mime: 'video/mp4' });
+        buckets['r2-bucket'].set(`objects/live/${goodCanon.id}`, goodCanon.bytes);
+        await model.upsertLocation(goodCanon.id, { provider: 'r2', bucket: 'r2-bucket', key: `objects/live/${goodCanon.id}`, storage_class: 'cache', state: 'present', size_bytes: 4096, checksum: goodCanon.sum, verified: true });
+        await ageR2(goodCanon.id, 30);
+        s = await tiering.runSweep();
+        assert.strictEqual((await last(lostCanon.id)).outcome, 'refused');
+        assert.ok(/the canonical local file is missing; the R2 copy is kept/.test((await last(lostCanon.id)).reason), (await last(lostCanon.id)).reason);
+        assert.strictEqual((await last(goodCanon.id)).outcome, 'dry_run');
+        const hv3 = s.constraints.hot_usd_per_month.video, freed = tiering.hotUsdPerMonth(4096);
+        assert.ok(Math.abs(hv3.spend - (spend1 + 2 * freed)) < 1e-12, JSON.stringify(hv3));
+        // (the two extra R2 copies now fill the ceiling, so the held-over promotion is refused and adds nothing)
+        assert.ok(Math.abs(hv3.projected - (hv3.spend - freed)) < 1e-12, `only the demotion a live sweep could make frees projected cost: ${JSON.stringify(hv3)}`);
+        await db.run("DELETE FROM media_object_tier_decisions WHERE object_id = ? AND outcome = 'refused'", [gE[0].id]);   // the zero-ceiling refusal below is logged afresh
         // A zero ceiling closes the class even at a zero R2 price (where every copy would cost $0 and fit any ceiling).
         await policy.set({ active: true }, { actor: { type: 'service', id: 'live' }, reason: 'test: gate on' });
         const ct = require('../server/placement/cost-tiers');
