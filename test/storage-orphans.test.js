@@ -113,6 +113,11 @@ const crypto = require('crypto');
                      VALUES ('mup_OPEN', ?, 'live', 8, 16, 2, 'active', datetime('now', '-1 hour'))`).run(kept);
         await raw.prepare("INSERT INTO media_upload_parts (upload_id, part_number, size_bytes, sha256) VALUES ('mup_OPEN', 1, 8, 'x')").run();
         write(path.join(env.OBJECTS_PATH, '.parts', 'mup_OPEN'), '1', 8, 3 * HOUR);
+        // A CMAF segment named by its media_timeline row (F3.1), on this disk and on B2: wanted in both places.
+        const seg = write(path.join(env.OBJECTS_PATH, '.timeline', 'live', kept, 'source'), '000001.m4s', 40, 3 * HOUR);
+        buckets['b2-bucket'].set(`${kept}/source/000001.m4s`, Buffer.alloc(40));
+        await require('../server/objects/timeline').replace(kept, 'source', [{ seq: 1, name: '000001.m4s', start_ms: 0, end_ms: 2000, keyframe_ms: 0,
+            key: `${kept}/source/000001.m4s`, local_path: seg, durable_provider: 'b2', byte_length: 40, sha256: 'b'.repeat(64), durability: 'durable' }]);
 
         // ── What storage holds that no row names ──
         write(env.VOD_PATH, 'vod-live-99-1758000000099.webm', 1000);                 // the recorder's name; row 99 never existed
@@ -160,7 +165,7 @@ const crypto = require('crypto');
         assert.ok(/vods-orphans-report/.test(remote['b2:vods-orphans/vod-live-7-1758000000007.webm'].hint), 'parked recordings point at the prefix report');
         assert.strictEqual(remote['r2:vods/vod-live-4-1758000000004.webm'].hint, 'an R2 copy of vod 4, which is served from b2');
         assert.deepStrictEqual(report.totals.unreferenced_remote, { b2: { keys: 2, bytes: 150 }, r2: { keys: 1, bytes: 50 } });
-        assert.deepStrictEqual([report.scope.providers.b2.listed, report.scope.providers.b2.keys, report.scope.providers.r2.keys], [true, 5, 2]);
+        assert.deepStrictEqual([report.scope.providers.b2.listed, report.scope.providers.b2.keys, report.scope.providers.r2.keys], [true, 6, 2], 'the CMAF segment is listed, not reported');
         console.log('✅ unreferenced bucket keys: strays, parked recordings, an R2 copy left behind by a demotion');
 
         // ── Copies the database records that are not there ──

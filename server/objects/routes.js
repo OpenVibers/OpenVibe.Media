@@ -35,7 +35,8 @@
  * URL), and the multipart routes the session token, so a browser can send the bytes directly.
  *
  * Public bytes: GET /o/:id (publicRouter) — public/unlisted objects openly,
- * private ones only with a valid ?exp&sig from /download.
+ * private ones only with a valid ?exp&sig from /download. With MEDIA_HLS_ENABLED, the object's timeline as HLS
+ * under the same check: /o/:id/master.m3u8, /o/:id/source/index.m3u8, /o/:id/source/{init.mp4,NNNNNN.m4s}.
  */
 'use strict';
 
@@ -667,13 +668,16 @@ router.get('/:id/download', read, limits('media.object.download'), async (req, r
     const json = req.query.format === 'json';
     res.set('Cache-Control', cache.htmlHeaders({ private: true }));
     // Developer-project sandbox objects are never public, whatever their visibility: always signed.
+    // With segment-native video on (MEDIA_HLS_ENABLED) and a timeline made, the JSON answer also names the HLS master
+    // playlist: open for a public object, under the same signature as `url` for a private one.
+    const hls = json && config.hls.enabled && await require('./timeline').has(obj.id);
     if (obj.visibility !== 'private' && !await db.isSandboxTenant(obj.app_id)) {
         const url = model.legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`;
-        return json ? res.json({ url, expires_at: null, public: true }) : res.redirect(302, url);
+        return json ? res.json({ url, expires_at: null, public: true, ...(hls && { hls_url: `${config.publicUrl}/o/${obj.id}/master.m3u8` }) }) : res.redirect(302, url);
     }
     const signed = signing.signedDownloadUrl(obj.id, req.query.ttl);
     if (['1', 'true'].includes(String(req.query.redirect || ''))) return res.redirect(302, signed.url);
-    res.json({ url: signed.url, expires_at: signed.expires_at, public: false });
+    res.json({ url: signed.url, expires_at: signed.expires_at, public: false, ...(hls && { hls_url: signed.url.replace('?', '/master.m3u8?') }) });
 });
 
 // ── Retention holds ──────────────────────────────────────────
@@ -727,6 +731,76 @@ router.delete('/:id/holds/:holdId', appOnly, async (req, res) => {
 const INLINE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$|text\/plain$)/;
 
 const publicRouter = express.Router();
+
+// ── Segment-native video (docs/media-fabric.md §3, F3.1; MEDIA_HLS_ENABLED) ──
+// GET /o/:id/master.m3u8, /o/:id/source/index.m3u8 and /o/:id/source/{init.mp4,NNNNNN.m4s}: the playlists are written
+// from the object's media_timeline rows (objects/timeline.js), never read from files. Every one passes the same check
+// as GET /o/:id: public and unlisted objects openly, private and sandbox ones only with the object's valid ?exp&sig
+// (from /download), which a signed playlist carries onto each URI; deleted 410, not ready 404. Off, these paths 404.
+const HLS_TYPE = 'application/vnd.apple.mpegurl';
+const SEGMENT_NAME = /^(init\.mp4|\d{6,}\.m4s)$/;
+
+/** The object of an HLS request, or null when answered (or passed on to the 404 while the flag is off). */
+async function hlsObject(req, res, next) {
+    if (!config.hls.enabled) { next(); return null; }
+    if (require('../drill').refuseBytes(res)) return null;
+    const obj = await model.getObject(String(req.params.id || ''));
+    if (!obj) { res.status(404).json({ error: 'Not found' }); return null; }
+    const signed = !!req.query.sig && signing.verifyDownload(obj.id, req.query.exp, req.query.sig);
+    const closed = obj.visibility === 'private' || await db.isSandboxTenant(obj.app_id);
+    if (closed && !signed) { res.status(404).json({ error: 'Not found' }); return null; }
+    if (obj.lifecycle_status === 'deleted') { res.status(410).json({ error: 'Gone' }); return null; }
+    if (obj.lifecycle_status !== 'ready') { res.status(404).json({ error: 'Not found' }); return null; }
+    res.set({
+        'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex', 'Access-Control-Allow-Origin': '*',
+        'Cache-Control': closed ? 'private, no-store' : 'public, max-age=300',
+    });
+    return { obj, closed, query: signed ? `exp=${encodeURIComponent(req.query.exp)}&sig=${encodeURIComponent(req.query.sig)}` : '' };
+}
+
+const hlsRoute = (fn) => async (req, res, next) => {
+    try {
+        const h = await hlsObject(req, res, next);
+        if (h) await fn(req, res, h);
+    } catch (err) {
+        console.error('[Objects] HLS error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to serve the playlist' });
+    }
+};
+
+publicRouter.get('/:id/master.m3u8', hlsRoute(async (req, res, { obj, query }) => {
+    const timeline = require('./timeline');
+    const rows = await timeline.list(obj.id, timeline.SOURCE);
+    if (!rows.some((r) => Number(r.seq) > 0)) return res.status(404).json({ error: 'No timeline' });
+    res.type(HLS_TYPE).send(timeline.masterPlaylist([{ name: timeline.SOURCE, rows }], { query }));
+}));
+
+publicRouter.get('/:id/source/index.m3u8', hlsRoute(async (req, res, { obj, query }) => {
+    const timeline = require('./timeline');
+    const rows = await timeline.list(obj.id, timeline.SOURCE);
+    if (!rows.some((r) => Number(r.seq) > 0)) return res.status(404).json({ error: 'No timeline' });
+    res.type(HLS_TYPE).send(timeline.mediaPlaylist(rows, { query }));
+}));
+
+publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, { obj, closed }) => {
+    const timeline = require('./timeline');
+    const name = String(req.params.name || '');
+    const row = SEGMENT_NAME.test(name) ? await timeline.byName(obj.id, timeline.SOURCE, name) : null;
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    const mime = Number(row.seq) === 0 ? 'video/mp4' : 'video/iso.segment';
+    // This node's copy first; otherwise a short presigned URL to the durable one.
+    if (row.local_path && fs.existsSync(row.local_path)) {
+        return require('../public/routes').streamFileWithRange(req, res, row.local_path, {
+            'Content-Type': mime, 'Cache-Control': closed ? 'private, no-store' : 'public, max-age=3600',
+        });
+    }
+    const url = row.durable_provider
+        ? await require('../vod/vod-storage').presignGet(row.durable_provider, row.key, 300, { contentType: mime }).catch(() => null)
+        : null;
+    if (!url) return res.status(404).json({ error: 'Segment bytes unavailable' });
+    res.set('Cache-Control', 'private, max-age=0');
+    res.redirect(302, url);
+}));
 publicRouter.get('/:id', async (req, res) => {
     // A restore drill (MEDIA_DRILL) serves no stored bytes, local or by a B2/R2 redirect.
     if (require('../drill').refuseBytes(res)) return;

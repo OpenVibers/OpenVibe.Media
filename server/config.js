@@ -85,6 +85,12 @@ const config = {
     },
 
     // Job system (server/jobs/; docs/object-model.md#jobs).
+    // Segment-native video (docs/media-fabric.md §3, F3.1): the object.cmaf job and the HLS playlists read from
+    // media_timeline (/o/:id/master.m3u8, /o/:id/source/…). Off by default: off, the job is refused and the routes 404.
+    hls: {
+        enabled: ['1', 'true', 'on'].includes(String(process.env.MEDIA_HLS_ENABLED || '').toLowerCase()),
+    },
+
     jobs: {
         enabled: !['0', 'false', 'off'].includes(String(process.env.MEDIA_JOBS_ENABLED || '').toLowerCase()),
         pollMs: intEnv('MEDIA_JOBS_POLL_MS', 5000),

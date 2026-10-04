@@ -305,7 +305,8 @@ function uploadTimeoutMs(bytes, settings = getSettings()) {
     return floor + Math.ceil((Number(bytes) || 0) / (mbps * 1024 * 1024)) * 1000;
 }
 
-async function uploadFile(provider, key, filePath, contentType = 'video/webm') {
+async function uploadFile(provider, key, filePath, contentType = 'video/webm', { signal = null } = {}) {
+    if (signal && signal.aborted) throw (signal.reason instanceof Error ? signal.reason : new Error('upload aborted'));
     const client = clientFor(provider);
     if (!client) throw new Error(`Provider ${provider} not configured`);
     loadSdk();
@@ -318,6 +319,9 @@ async function uploadFile(provider, key, filePath, contentType = 'video/webm') {
     // could drain). Abort past the deadline so the sweep moves on to the next VOD;
     // leavePartsOnError cleans the partial multipart up on the bucket.
     const abort = new AbortController();
+    // A cancelled job (the caller's signal) must stop an upload already in flight, not only the next one.
+    const onAbort = () => abort.abort(signal.reason instanceof Error ? signal.reason : new Error('upload aborted'));
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
     const deadline = setTimeout(() => abort.abort(new Error(`upload deadline exceeded (${Math.round(uploadTimeoutMs(size) / 60000)} min for ${(size / 1048576).toFixed(0)} MB)`)), uploadTimeoutMs(size));
     const upload = new LibStorage.Upload({
         client,
@@ -339,6 +343,7 @@ async function uploadFile(provider, key, filePath, contentType = 'video/webm') {
         throw err;
     } finally {
         clearTimeout(deadline);
+        if (signal) signal.removeEventListener('abort', onAbort);
     }
     const deletedSize = recentlyDeleted.get(`${provider}:${key}`);
     if (before || deletedSize != null) {
@@ -411,9 +416,10 @@ function rememberDeleted(id, size) {
     setTimeout(() => { if (recentlyDeleted.get(id) === size) recentlyDeleted.delete(id); }, 10 * 60e3).unref?.();
 }
 
+/** → true once the key is gone, false when there is no client or the delete failed (callers keep the key to retry). */
 async function deleteObject(provider, key) {
     const client = clientFor(provider);
-    if (!client) return;
+    if (!client) return false;
     // A shielded provider's cached slices leave the shield with the object (placement/shield.js): the size decides
     // how many slices to refresh, so it is read before the delete.
     const shield = require('../placement/shield');
@@ -422,12 +428,13 @@ async function deleteObject(provider, key) {
         await client.send(new S3.DeleteObjectCommand({ Bucket: PROVIDER_ENV[provider].bucket, Key: key }));
     } catch (err) {
         console.warn(`[VodStorage] Delete ${provider}:${key} failed:`, err.message);
-        return;
+        return false;
     }
     if (head) rememberDeleted(`${provider}:${key}`, head.size);
     if (head) shield.purge({ provider, key, size: head.size, presign: presignGet })
         .then((r) => { if (r.failed) console.warn(`[VodStorage] shield purge ${provider}:${key}: ${r.failed} of ${r.slices} slices not refreshed`); })
         .catch(() => { /* purge never throws */ });
+    return true;
 }
 
 /**
@@ -825,6 +832,8 @@ async function deleteVodObjects(vod) {
     if (!vod?.file_path) return;
     // Last line of defence for every delete path: a held object keeps its bytes.
     if (await _held(vod)) { console.warn(`[VodStorage] Not deleting media of ${vod.object_id}: under a retention hold`); return; }
+    // Its CMAF segments and timeline rows (F3.1, objects/timeline.js) go with it.
+    if (vod.object_id) await require('../objects/timeline').removeObject(vod.object_id).catch((err) => console.warn(`[VodStorage] timeline of ${vod.object_id}: ${err.message}`));
     const local = localPathForVod(vod);
     if (fs.existsSync(local)) {
         try { fs.unlinkSync(local); } catch { /* ignore */ }
