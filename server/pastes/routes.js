@@ -33,7 +33,7 @@ router.use((req, res, next) => {
 });
 
 // Screenshot directory, shared with the avatar ingest (server/pastes/storage.js).
-const { SCREENSHOTS_DIR, generateSlug } = require('./storage');
+const { SCREENSHOTS_DIR } = require('./storage');
 
 // ── Helpers ─────────────────────────────────────────────────
 
@@ -255,6 +255,5 @@ router.get('/:slug/comments', tenantAuth({ allowUser: true }), async (req, res) 
 });
 
 module.exports = router;
-module.exports.generateSlug = generateSlug;
 module.exports.SCREENSHOTS_DIR = SCREENSHOTS_DIR;
 module.exports.removePasteScreenshot = removePasteScreenshot;
