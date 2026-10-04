@@ -31,6 +31,9 @@ const CLASS_SCHEMA = {
         minResidencyMs: { type: 'integer', minimum: 0 },
         promoteReadsPerHour: { type: 'integer', minimum: 1, maximum: 1e9 },
         demoteReadsPerHour: { type: 'integer', minimum: 0, maximum: 1e9 },
+        // F2.6: the class's R2 Standard storage spend ceiling, in dollars a month at media.cost_tiers' list price
+        // (every present R2 copy of the class counts). Absent = no ceiling; 0 = the class never promotes, even at a $0 price.
+        maxHotUsdPerMonth: { type: 'number', minimum: 0, maximum: 1e9 },
     },
 };
 const SCHEMA = {
@@ -117,6 +120,12 @@ function budgetFor(name) {
     return { maxPromotionsPerSweep, maxDemotionsPerSweep };
 }
 
+/** The class's monthly R2 storage ceiling in dollars (maxHotUsdPerMonth), or null when it has none. */
+function hotCeilingFor(name) {
+    const { maxHotUsdPerMonth } = classPolicy(name);
+    return maxHotUsdPerMonth == null ? null : maxHotUsdPerMonth;
+}
+
 /** The class's hourly promote and demote thresholds (hysteresis: demote < promote). */
 function bandFor(name) {
     const { promoteReadsPerHour, demoteReadsPerHour } = classPolicy(name);
@@ -139,4 +148,4 @@ function mayMove({ class: name, lastMovedAt, now = Date.now() }) {
     return Number.isFinite(last) && Number.isFinite(current) && current - last >= minResidencyMs;
 }
 
-module.exports = { DEFAULTS, SCHEMA, CLASSES, init, get, set, settings, classOf, budgetFor, bandFor, mayMove, _reset: () => { store = null; } };
+module.exports = { DEFAULTS, SCHEMA, CLASSES, init, get, set, settings, classOf, budgetFor, hotCeilingFor, bandFor, mayMove, _reset: () => { store = null; } };

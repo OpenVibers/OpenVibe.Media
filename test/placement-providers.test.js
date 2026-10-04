@@ -65,6 +65,22 @@ const path = require('path');
     assert.deepStrictEqual(providers.eligibleClasses('r2'), ['online-hot'], 'an incomplete probe removes nothing');
     delete process.env.MEDIA_CAPABILITY_GATE;
 
+    // The placement gate (F2.6) holds whatever the read gate's mode: a completed probe that found a capability the
+    // class needs missing, or an open breaker, refuses a move; a probe not run or not completed decides nothing.
+    const signals = require('../server/placement/signals');
+    const gate = (name, cls) => { const g = providers.placementGate(name, cls); return [g.eligible, g.probe, g.breaker]; };
+    assert.deepStrictEqual(gate('r2', 'online-hot'), [true, 'incomplete', 'closed'], 'an incomplete probe does not block placement');
+    providers._setCapabilities('r2', { provider: 'r2', passed: true, capabilities: { range: true, range_206: false }, lastChecked: Date.now(), lastError: null });
+    assert.deepStrictEqual(providers.placementGate('r2', 'online-hot'), { provider: 'r2', class: 'online-hot', eligible: false, breaker: 'closed', probe: 'failed',
+        missing: ['range_206'], reason: 'r2 is not eligible for online-hot: the capability probe found range_206 missing' });
+    providers._setCapabilities('r2', { provider: 'r2', passed: true, capabilities: { range: true, range_206: true }, lastChecked: Date.now(), lastError: null });
+    assert.deepStrictEqual(gate('r2', 'online-hot'), [true, 'passed', 'closed']);
+    signals.openBreaker('r2');
+    assert.deepStrictEqual([...gate('r2', 'online-hot'), providers.placementGate('r2', 'online-hot').reason], [false, 'passed', 'open', 'r2 is not eligible for online-hot: its circuit breaker is open']);
+    signals.closeBreaker('r2');
+    assert.strictEqual(providers.placementGate('r2', 'online-canonical').eligible, false, 'a class the provider does not declare');
+    assert.deepStrictEqual(gate('local', 'regional-cache'), [true, 'passed', 'closed'], 'the local disk is always eligible as the regional cache');
+
     // isConfigured: false when env is empty, true for local.
     assert.strictEqual(providers.isConfigured('local'), true);
     assert.strictEqual(providers.isConfigured('b2'), false);
