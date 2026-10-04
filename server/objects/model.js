@@ -675,6 +675,7 @@ async function purgeExpired({ retentionDays = config.objects.retentionDays } = {
             if (l.provider === 'local' && path.resolve(l.key).startsWith(root)) { try { fs.unlinkSync(l.key); } catch { /* already gone */ } }
             if (l.provider === 'local') await db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
         }
+        await require('./timeline').removeObject(obj.id);   // its CMAF segments (F3.1) go with the bytes
         md.purged_at = new Date().toISOString();
         await db.run('UPDATE media_objects SET metadata = ?, updated_at = ov_now() WHERE id = ?', [JSON.stringify(md), obj.id]);
         purged++;

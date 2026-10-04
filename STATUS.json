@@ -36,7 +36,8 @@
     "per-actor limits (openvibe-sdk/limits)",
     "placement demand rollups on Valkey (F2.4): reads per object × region × 5-minute bucket, hotness over the hour, media.object.hot once per object per hour",
     "tiering on demand (F2.5): the object sweep promotes and demotes on the hour's Valkey reads against per-class hysteresis bands, one MGET per page, falling back to the daily PostgreSQL counts for a whole sweep when Valkey fails",
-    "placement constraints (F2.6): sweep moves refused while their provider fails its class (breaker or probe), and a per-class monthly R2 storage ceiling (maxHotUsdPerMonth) applied in value order, each explained in the decision's inputs"
+    "placement constraints (F2.6): sweep moves refused while their provider fails its class (breaker or probe), and a per-class monthly R2 storage ceiling (maxHotUsdPerMonth) applied in value order, each explained in the decision's inputs",
+    "segment-native video (F3.1, behind MEDIA_HLS_ENABLED): the media_timeline index, the object.cmaf job (CMAF/fMP4 segments of a finished video on its own keyframes, sha256 and durability per row, idempotent) and HLS playlists written from the timeline at /o/:id/master.m3u8 under the object's access checks"
   ],
   "updated": "2026-10-03"
 }

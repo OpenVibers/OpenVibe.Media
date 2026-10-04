@@ -87,6 +87,31 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   the shared axis for DVR, seek, clips, sprites, captions, transcripts, chapters, AI moments and moderation markers.
 - **MP4 stays for downloads and old clients:** a remuxed faststart MP4 (lazy, cached like any derivative) with plain
   HTTP ranges.
+- **F3.1, shipped: the timeline index and the source representation of finished video.** Migration
+  `0002_media_timeline.sql` adds `media_timeline` (object, rendition, segment number `seq` — 0 is the init segment —,
+  `start_ms`/`end_ms` (contiguous, half-open), `keyframe_ms`, the segment's `key` `<object>/<rendition>/<name>`,
+  `local_path`, `durable_provider`, `packed_object_id` + `byte_offset`/`byte_length` (packing is F3.3; NULL until then),
+  `sha256`, `durability` `local|durable`), keyed by (object, rendition, seq) for "segments in order" with an index on
+  (object, rendition, start_ms) for "the segment at t". `server/objects/timeline.js` is the store (`segmentAt(objectId,
+  rendition, tMs)`, `segments`, `replace`, `removeObject`, the playlist writers). The heavy-lane job **`object.cmaf`**
+  (`server/jobs/cmaf.js`) stream-copies a ready vod/clip/video object (`ffmpeg -c copy -f hls -hls_segment_type fmp4`,
+  `params.segment_seconds` 1–10, 4 by default, cut at the first source keyframe after it) into `init.mp4` +
+  `000001.m4s`…, stores each under `OBJECTS_PATH/.timeline/<app>/<object>/source/` and, with B2 configured, under the
+  key `<object>/source/<name>` on B2 (`durable` once B2 confirms the size), then writes all rows of the rendition in one
+  transaction. It never touches the source object; a rerun leaves rows whose sha256 matches as they are and uploads
+  only what is not durable yet; it honours the abort signal and the stream-copy budget and removes its work directory.
+  Behind **`MEDIA_HLS_ENABLED`** (off by default: the job is refused with `409 media.hls.disabled` and the routes 404),
+  `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8` and `/o/:id/source/{init.mp4,NNNNNN.m4s}` serve the timeline
+  under the same check as `GET /o/:id` (private and sandbox objects only with the object's `?exp&sig`, carried onto
+  every URI of a signed playlist; deleted 410). The playlists are written from the rows (`#EXT-X-PLAYLIST-TYPE:VOD`,
+  `#EXT-X-ENDLIST`, EXTINF = the row's duration, BANDWIDTH = peak segment bitrate); `GET …/download?format=json` adds
+  `hls_url` when a timeline exists. A purge, or a vod/clip deleted for good, removes the segments and rows; a held
+  object keeps them. Storage orphan reports count timeline files and keys as wanted.
+  **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
+  live segments and its upload-lag metric, packing into ~60 s chunks (F3.3), virtual and materialized clips over the
+  timeline, sprites and captions on it, the faststart MP4 fallback as a derivative, segment-bucket demand, a finalize
+  hook that queues `object.cmaf` by itself, signed playlists that outlive one signed-URL lifetime, and Live's player
+  moving to HLS. Renditions are F4.
 
 ## 4. Clips reuse the source
 
@@ -137,7 +162,7 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   `<bucket>` is the 5-minute bucket number (`floor(epoch_ms / 300000)`). The region is one per deployment
   (`MEDIA_DEMAND_REGION`, default `local`); per-viewer regions wait for an edge-provided header. `hotness()` sums the last
   12 buckets (one hour) per object. The writes are fire-and-forget: a slow, failing or absent Valkey never delays or fails
-  a read (without Valkey the counts stay in-process). Object × region only for now; the segment bucket comes with F3.
+  a read (without Valkey the counts stay in-process). Object × region only for now; the segment bucket comes later in F3 (F3.1 shipped the timeline it will bucket).
 - **The sweep reads demand (F2.5, shipped):** the object tiering sweep's promote/demote eligibility is `hotness()` for the
   deployment's region, against each class's hysteresis band in `media.storage_policy` (`promoteReadsPerHour` /
   `demoteReadsPerHour`, demote < promote, validated per revision): video 60 / 6, image 300 / 30, download 30 / 3, the
@@ -237,8 +262,9 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
   eligibility on them with per-class hysteresis and a PostgreSQL fallback (F2.5, shipped), the provider-class gate
   and per-class monthly R2 storage ceilings on its moves (F2.6, shipped), the move cleanup job and its alert after
   three failures (§6, shipped). Still open in F2: every class (not only native objects ↔ R2) through the one sweep.
-- **F3 segment-native video:** CMAF/HLS recording with the growing DVR playlist, the timeline index, packing after
-  finalize, virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to HLS.
+- **F3 segment-native video:** the timeline index and the CMAF/HLS source representation of finished video (F3.1,
+  shipped; §3); still open: CMAF/HLS recording with the growing DVR playlist from OpenRe, packing after finalize,
+  virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
   VODs, compute placement.
 - **F5 multi-CDN delivery:** Bunny path (B2 origin), R2 custom-domain path, OpenVibe edge first up to capacity, route

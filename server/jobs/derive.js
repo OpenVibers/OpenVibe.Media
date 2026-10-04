@@ -316,4 +316,6 @@ module.exports = {
     resolveSource, isMediaObject, extFor,
     // for the preview jobs (previews.js)
     loadSource, adopt, ffmpeg, inputArgs, probeDuration, workDir, cleanupWork, existing, checkRoom,
+    // and object.cmaf (cmaf.js)
+    budgetMs, sha256File,
 };

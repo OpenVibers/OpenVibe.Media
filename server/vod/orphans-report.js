@@ -222,6 +222,8 @@ async function localReferences() {
     for (const l of await db.all(`${LOCATION_ROWS} WHERE l.provider = 'local'`)) {
         if (locationWanted(l)) add(l.key); else deleted.set(path.resolve(String(l.key)), l);
     }
+    // CMAF segments on this node's disk (OBJECTS_PATH/.timeline/…), each named by its media_timeline row (F3.1).
+    for (const t of await db.all('SELECT local_path FROM media_timeline WHERE local_path IS NOT NULL')) add(t.local_path);
     const thumb = (u) => { const name = model.thumbFileFromUrl(u); if (name) add(path.join(config.thumbnails.path, name)); };
     const segmentBases = new Set();      // browser-chunk segments <base>.seg-<n>-<ms>.webm belong to <base>.webm
     for (const v of await db.all('SELECT id, file_path, master_file_path, thumbnail_url FROM vods')) {
@@ -305,6 +307,7 @@ async function remoteReferences(provider) {
         if (l.bucket && bucket && l.bucket !== bucket) continue;     // a copy recorded in another bucket
         if (locationWanted(l)) wanted.add(l.key); else deleted.set(l.key, l);
     }
+    for (const t of await db.all('SELECT key FROM media_timeline WHERE durable_provider = ?', [provider])) wanted.add(t.key);   // durable CMAF segments
     const rows = new Map();   // every key a vods/clips row points at, with the row (stale R2 copies are recognised by it)
     for (const table of ['vods', 'clips']) {
         for (const r of await db.all(`SELECT id, file_path, storage_provider, storage_key FROM ${table} WHERE COALESCE(file_path, '') != ''`)) {

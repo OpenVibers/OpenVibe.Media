@@ -3,7 +3,7 @@
  *
  * Runs media_jobs in-process, in two lanes so a long split never holds up a thumbnail:
  *   light  thumbnail.regenerate, invariant.scan      MEDIA_JOBS_LIGHT_CONCURRENCY (2)
- *   heavy  object.split, object.remux                 MEDIA_JOBS_HEAVY_CONCURRENCY (1); waits while a
+ *   heavy  object.split, object.remux, object.cmaf    MEDIA_JOBS_HEAVY_CONCURRENCY (1); waits while a
  *                                                     recording runs unless MEDIA_JOBS_HEAVY_WHILE_RECORDING=1
  *   finalize  vod.finalize                            MEDIA_JOBS_FINALIZE_CONCURRENCY (1); runs while recording
  *                                                     (it is the work the recorder does when a stream ends)

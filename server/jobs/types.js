@@ -7,6 +7,7 @@
  *   object.remux           heavy   a stream-copy remux of a vod/clip as a new private object
  *   object.waveform        heavy   the audio waveform (PNG) of a vod/clip as the source's `waveform` variant
  *   object.sprite          heavy   a seek-preview sprite sheet (JPEG, layout in its metadata) as the `sprite` variant
+ *   object.cmaf            heavy   the source as CMAF/HLS segments on its own keyframes, indexed in media_timeline (MEDIA_HLS_ENABLED)
  *   vod.finalize           finalize  finalize a recording whose finalize failed or never ran (orphans), with backoff
  *   clip.cut               clips   cut (or re-cut) a clip row from its VOD; retries with backoff (server/vod/clip-jobs.js)
  *   vod.duration.reconcile heavy   stored VOD durations vs a measurement of the real file (local or B2/R2), one batch
@@ -24,6 +25,7 @@ queue.register('object.split', require('./derive').split);
 queue.register('object.remux', require('./derive').remux);
 queue.register('object.waveform', require('./previews').waveform);
 queue.register('object.sprite', require('./previews').sprite);
+queue.register('object.cmaf', require('./cmaf').spec);
 queue.register('vod.finalize', require('./vod-finalize').spec);
 queue.register('clip.cut', require('../vod/clip-jobs').spec);
 queue.register('vod.duration.reconcile', require('./duration-reconcile').spec);

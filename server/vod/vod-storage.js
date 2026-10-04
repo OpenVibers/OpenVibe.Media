@@ -825,6 +825,8 @@ async function deleteVodObjects(vod) {
     if (!vod?.file_path) return;
     // Last line of defence for every delete path: a held object keeps its bytes.
     if (await _held(vod)) { console.warn(`[VodStorage] Not deleting media of ${vod.object_id}: under a retention hold`); return; }
+    // Its CMAF segments and timeline rows (F3.1, objects/timeline.js) go with it.
+    if (vod.object_id) await require('../objects/timeline').removeObject(vod.object_id).catch((err) => console.warn(`[VodStorage] timeline of ${vod.object_id}: ${err.message}`));
     const local = localPathForVod(vod);
     if (fs.existsSync(local)) {
         try { fs.unlinkSync(local); } catch { /* ignore */ }
