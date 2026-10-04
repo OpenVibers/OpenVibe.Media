@@ -16,11 +16,15 @@ const path = require('path');
     await policy.init();
 
     assert.strictEqual(policy.get().revision(), 1);
+    const bands = { image: [300, 30], download: [30, 3] };
     for (const name of policy.CLASSES) {
+        const [promoteReadsPerHour, demoteReadsPerHour] = bands[name] || [60, 6];
         assert.deepStrictEqual(policy.DEFAULTS.classes[name], {
-            maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 10, minResidencyMs: 0,
+            maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 10, minResidencyMs: 0, promoteReadsPerHour, demoteReadsPerHour,
         });
         assert.deepStrictEqual(policy.budgetFor(name), { maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 10 });
+        assert.deepStrictEqual(policy.bandFor(name), { promoteReadsPerHour, demoteReadsPerHour });
+        assert.ok(demoteReadsPerHour < promoteReadsPerHour, `${name}: hysteresis`);
     }
     assert.strictEqual(policy.mayMove({ class: 'video', lastMovedAt: 1000, now: 1000 }), true, 'zero residency is off');
     assert.throws(() => policy.budgetFor('unknown'), RangeError);
@@ -45,6 +49,13 @@ const path = require('path');
     assert.strictEqual(policy.get().revision(), 3);
     assert.deepStrictEqual(policy.budgetFor('image'), { maxPromotionsPerSweep: 2, maxDemotionsPerSweep: 4 }, 'second revision preserves image settings');
     assert.deepStrictEqual(policy.budgetFor('video'), { maxPromotionsPerSweep: 1, maxDemotionsPerSweep: 10 });
+
+    // The hysteresis band: demote below promote, refused as a whole revision otherwise.
+    await assert.rejects(policy.set({ classes: { video: { demoteReadsPerHour: 60 } } }, { reason: 'test: an empty band' }), /demoteReadsPerHour must be below promoteReadsPerHour/);
+    assert.strictEqual(policy.get().revision(), 3, 'a refused band changes nothing');
+    await policy.set({ classes: { video: { promoteReadsPerHour: 120, demoteReadsPerHour: 20 } } }, { reason: 'test: a wider video band' });
+    assert.deepStrictEqual(policy.bandFor('video'), { promoteReadsPerHour: 120, demoteReadsPerHour: 20 });
+    assert.deepStrictEqual(policy.budgetFor('video'), { maxPromotionsPerSweep: 1, maxDemotionsPerSweep: 10 }, 'the band keeps the budget');
 
     policy._reset();
     console.log('placement-storage-policy: all checks passed');

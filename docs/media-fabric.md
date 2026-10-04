@@ -133,7 +133,19 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   (`MEDIA_DEMAND_REGION`, default `local`); per-viewer regions wait for an edge-provided header. `hotness()` sums the last
   12 buckets (one hour) per object. The writes are fire-and-forget: a slow, failing or absent Valkey never delays or fails
   a read (without Valkey the counts stay in-process). Object × region only for now; the segment bucket comes with F3.
-  The sweep's eligibility still reads the daily PostgreSQL view counts; moving it to `hotness()` is F2.5.
+- **The sweep reads demand (F2.5, shipped):** the object tiering sweep's promote/demote eligibility is `hotness()` for the
+  deployment's region, against each class's hysteresis band in `media.storage_policy` (`promoteReadsPerHour` /
+  `demoteReadsPerHour`, demote < promote, validated per revision): video 60 / 6, image 300 / 30, download 30 / 3, the
+  other classes 60 / 6. At or above P an object may promote, below D its R2 copy may go (still in R2 at least
+  `demoteIdleDays`), in between nothing moves. Size bounds, per-class budgets, minimum residency, holds and back-off are
+  unchanged; value per dollar ranks at the hour's rate (reads × 24 × 30 a month). The reads are batched: one `MGET` per
+  page of 500 objects (the promotion scan pages by id; the R2 copies are read in pages of 500), never a round trip per
+  object. Valkey absent, erroring or timing out (2 s) anywhere in the scan sends the **whole** sweep back to the daily
+  PostgreSQL view counts (`media.object_tier` thresholds, today's rules), with one warning per sweep and
+  `media_sweep_demand_source_total{source="valkey"|"pg"}`; both candidate lists are read before anything moves. Every
+  decision's `inputs.demand` (`{ source, metric, value, threshold[, region, window_s] }`) and its reason say which source
+  and value drove it, dry runs included; a sweep's `media.replica.requested` and `media.replica.draining` carry the same
+  `demand`, and the sweep result carries `demand_source` (and `demand_fallback`).
 
 ## 7. Delivery: sticky, measured, canaried
 
@@ -173,6 +185,9 @@ request/playback → telemetry → Events → {Hotness, Health, Cost} engines �
   since }`) through the placement outbox for objects with at least 100 reads in the last hour, at most once per object per
   hour (`hot-announced:<region>:<object_id>`, `SET NX EX 3600`). Not yet: nginx logs, player beacons, EWMA/percentiles,
   HyperLogLog, the PostgreSQL 5-minute rollup and `media.region.hot`.
+- **Shipped (F2.5):** the placement loop reads those counters: the tiering sweep promotes and demotes on the hour's reads
+  per object with per-class hysteresis (§6), and falls back to the daily PostgreSQL counts for a whole sweep when Valkey
+  does not answer.
 - **Events emitted:** `media.object.hot`, `media.replica.requested|ready|draining|evicted`, `media.variant.requested|ready`,
   `media.region.hot`, `media.delivery.surge|degraded`, `media.provider.health_degraded`, `media.provider.capacity_warning`,
   `media.provider.cost_threshold`.
@@ -191,7 +206,8 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
   moves with a cleanup job; per-class hysteresis bands; `media_storage_alerts_total`, provider latency histograms; the
   corrected price table; the nginx shield (slice + cache lock) on the Media host.
 - **F2 one placement engine:** every class through one sweep, value-per-dollar under budgets, dry-run + simulator,
-  decision log with class and reason, the events above, Valkey rollups of demand.
+  decision log with class and reason, the events above, Valkey rollups of demand (F2.4, shipped) and the sweep's
+  eligibility on them with per-class hysteresis and a PostgreSQL fallback (F2.5, shipped).
 - **F3 segment-native video:** CMAF/HLS recording with the growing DVR playlist, the timeline index, packing after
   finalize, virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
