@@ -385,8 +385,16 @@ async function _doFinalize(vodId, opts) {
             [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId])),
         payload: async () => await vodPublic(await db.getVodById(vodId)),
     });
+    const ready = await db.getVodById(vodId);
+    // Segment-native video (MEDIA_HLS_ENABLED): the finished recording's timeline is cut by object.cmaf. A queue error
+    // never fails the finalize; GET …/download?format=json queues it again on the first request.
+    try {
+        if (ready && ready.object_id) await require('../objects/timeline-queue').queueCmaf(vod.app_id, ready.object_id);
+    } catch (err) {
+        console.warn(`[VOD] Timeline queue failed for vod ${vodId}:`, err.message);
+    }
     console.log(`[VOD] Finalized: vod ${vodId}, ${stored}s (${durationSource}), ${(stat.size / 1024 / 1024).toFixed(1)}MB`);
-    return await db.getVodById(vodId);
+    return ready;
 }
 
 module.exports = { finalizeVod, isFinalizing, vodPublic, rebuildWebmFromMaster, _absUrl, FINALIZE_ISSUES };
