@@ -1550,6 +1550,7 @@ async function getStatus() {
 
 module.exports = {
     cleanupStaleDownloads,
+    emitStorageEvent,
     DEFAULTS,
     REMOTE_PROVIDERS,
     OFFLOADABLE_WHERE,

@@ -337,13 +337,14 @@ async function demote(objectId, ctx = {}) {
         return await log('refused', `${why}; refused: ${gate.reason} (provider class gate); the R2 copy is kept`, { error: gate.reason, blocked: 'provider' });
     }
     const vs = vodStorage();
-    if (!settings.active) return await log('dry_run', `gate off (active = false): would demote: ${why}`);
     if (!vs.providerConfigured('r2')) return await log('refused', `${why}; refused: R2 is not configured`, { error: 'R2 not configured' });
     if (!canon || canon.provider === 'r2') return await log('refused', `${why}; refused: no canonical copy besides R2 (the R2 copy is kept)`, { error: 'no canonical copy' });
 
-    // The last good copy is never the one removed: the canonical copy must check out now.
+    // The last good copy is never the one removed: the canonical copy must check out now. A dry run checks it too,
+    // so it proposes (and projects the freed R2 cost of) only the demotions a live sweep could make.
     const check = await confirmCanonical(obj, canon);
     if (!check.ok) return await log('refused', `${why}; refused: ${check.why}; the R2 copy is kept (it may be the last good copy)`, { error: check.why });
+    if (!settings.active) return await log('dry_run', `gate off (active = false): would demote: ${why}`);
     await db.getDb().tx(async () => {
         await events().recordPlacement('media.replica.draining', obj.app_id, subjectOf(obj), {
             object_id: obj.id, app_id: obj.app_id || null, class: storagePolicy.classOf(obj), action: 'demote',
@@ -632,11 +633,12 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
         // candidates' value-per-dollar order. A refusal (residency, hold) or a back-off spends nothing, so the next
         // in line takes the slot.
         const spent = { promote: {}, demote: {} };
-        // A slot is spent by a move, a failed move, a dry run, or a promotion's provider-gate refusal, repeated or not
+        // A slot is spent by a move, a failed move, a dry run (a repeat of one logged earlier today included: it is only
+        // not logged again, and a live sweep would make that move), or a promotion's provider-gate refusal, repeated or not
         // (every promotion relies on R2, so the next in line would be refused for the same reason and a closed R2 costs
         // the class at most its budget of rows). A demotion's gate is the candidate's own canonical provider, so its
         // refusal spends nothing and an object with a healthy canonical copy takes the slot.
-        const spends = (r, action) => (action === 'promote' && r.blocked === 'provider') || (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome));
+        const spends = (r, action) => (action === 'promote' && r.blocked === 'provider') || ['done', 'failed', 'dry_run'].includes(r.outcome);
         const blocked = (r) => { if (r.blocked) out.constraints.refused[r.blocked]++; };
         // The storage ceiling (F2.6): each class's R2 copies at list price. `spend` follows the moves made; `projected`
         // also counts dry runs (the moves the sweep would make), and the ceiling is held against it.
@@ -656,7 +658,7 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
             blocked(r);
             if (spends(r, 'demote')) spent.demote[cls] = (spent.demote[cls] || 0) + 1;
             // hotSpend() counted only present copies: a corrupt or pending one leaves the class's spend as it was.
-            if (!r.repeat && ['done', 'dry_run'].includes(r.outcome) && row.r2_state === 'present') {
+            if (['done', 'dry_run'].includes(r.outcome) && row.r2_state === 'present') {
                 const freed = hotUsdPerMonth(row.r2_size_bytes ?? row.size_bytes);
                 projected[cls] = Math.max(0, projected[cls] - freed);
                 if (r.outcome === 'done') spend[cls] = Math.max(0, spend[cls] - freed);
@@ -687,8 +689,8 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
             blocked(r);
             if (r.blocked === 'budget') closed.add(cls);
             if (spends(r, 'promote')) spent.promote[cls] = (spent.promote[cls] || 0) + 1;
-            if (!r.repeat && ['done', 'dry_run'].includes(r.outcome)) projected[cls] += cost;
-            if (!r.repeat && r.outcome === 'done') spend[cls] += cost;
+            if (['done', 'dry_run'].includes(r.outcome)) projected[cls] += cost;
+            if (r.outcome === 'done') spend[cls] += cost;
         }
         for (const cls of storagePolicy.CLASSES) {
             out.constraints.hot_usd_per_month[cls] = { spend: spend[cls], projected: projected[cls], ceiling: storagePolicy.hotCeilingFor(cls) };

@@ -123,7 +123,12 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   `backup` (archive fabric only).
 - **Every move is two-phase:** verify the new copy (size + sha256), commit the location in one transaction, then
   delete old bytes after commit, with a retrying cleanup job and an alert after three failures. The row never points
-  at bytes that do not exist.
+  at bytes that do not exist. The sweep retries a failed move after 6 h and logs every failure as a `failed` row in
+  `media_object_tier_decisions`; the job `storage.move.cleanup` (`server/jobs/move-cleanup.js`, light lane, system app
+  only, report only) reads those rows every `MEDIA_MOVE_CLEANUP_MINUTES` (60; `0` = never; not in a restore drill): an
+  object whose move failed three times in the last 7 days (a later `done` of that move resets the count) raises one
+  `storage.alert` of kind `move_cleanup_failed`, listing the objects (`media_storage_alerts_total{kind}`, the Events
+  outbox and the per-app webhook, once per 6 h cooldown like every storage alert).
 - **Dry-run and simulator:** every policy can run in dry-run mode (logs what it would do and what it would cost), and a
   simulator replays recorded telemetry against a candidate policy before it is enabled.
 - **Demand rollups (F2.4, shipped):** every served viewer read (`router.route()` for playback or download, not a derive
@@ -164,7 +169,9 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   copy_usd_per_month, ceiling }`); the sweep result carries `constraints` (`promote_gate`, `refused.{provider,budget}`,
   `hot_usd_per_month.<class>.{spend,projected,ceiling}` for every class, `ceiling` null when unset). `spend` follows
   only the moves made; `projected` also counts the dry runs, and the ceiling (and `inputs.budget.usd_per_month`) is held
-  against it, so dry runs (gate off) are refused as a live sweep would be, without changing `spend`. Native objects classify only as `video`, `image` or `download` today, so a ceiling (or budget)
+  against it, so dry runs (gate off) are refused as a live sweep would be, without changing `spend` (a dry run
+  repeated the same day is logged once but still counts, and a dry-run demotion checks its canonical copy like a live
+  one before it frees any projected cost). Native objects classify only as `video`, `image` or `download` today, so a ceiling (or budget)
   set on `game-asset`, `attachment` or `backup` decides nothing yet.
 
 ## 7. Delivery: sticky, measured, canaried
@@ -228,8 +235,8 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
 - **F2 one placement engine:** every class through one sweep, value-per-dollar under budgets, dry-run + simulator,
   decision log with class and reason, the events above, Valkey rollups of demand (F2.4, shipped) and the sweep's
   eligibility on them with per-class hysteresis and a PostgreSQL fallback (F2.5, shipped), the provider-class gate
-  and per-class monthly R2 storage ceilings on its moves (F2.6, shipped). Still open in F2: the move cleanup job and
-  its alert after three failures (§6), every class (not only native objects ↔ R2) through the one sweep.
+  and per-class monthly R2 storage ceilings on its moves (F2.6, shipped), the move cleanup job and its alert after
+  three failures (§6, shipped). Still open in F2: every class (not only native objects ↔ R2) through the one sweep.
 - **F3 segment-native video:** CMAF/HLS recording with the growing DVR playlist, the timeline index, packing after
   finalize, virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral

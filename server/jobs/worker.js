@@ -21,7 +21,8 @@
  * Scheduling: the size-invariant validator (invariant.scan) is enqueued per tenant every
  * MEDIA_INVARIANT_SCAN_HOURS (it proposes split/remux jobs; it never runs them). Orphaned recordings
  * get a vod.finalize every MEDIA_FINALIZE_SWEEP_S (server/jobs/vod-finalize.js). The storage orphan
- * report (storage.orphans.scan, report only) runs every MEDIA_ORPHAN_SCAN_DAYS under queue.SYSTEM_APP.
+ * report (storage.orphans.scan, report only) runs every MEDIA_ORPHAN_SCAN_DAYS under queue.SYSTEM_APP;
+ * storage.move.cleanup (alerts on placement moves that failed three times) every MEDIA_MOVE_CLEANUP_MINUTES.
  */
 'use strict';
 
@@ -158,6 +159,7 @@ async function tick() {
                 try { await require('./duration-reconcile').schedule(now); } catch (err) { console.warn('[Jobs] duration reconcile schedule:', err.message); }
                 try { await require('./content-hash').schedule(now); } catch (err) { console.warn('[Jobs] content hash schedule:', err.message); }
                 try { await require('./storage-orphans').schedule(now); } catch (err) { console.warn('[Jobs] storage orphan scan schedule:', err.message); }
+                try { await require('./move-cleanup').schedule(now); } catch (err) { console.warn('[Jobs] move cleanup schedule:', err.message); }
             }
             try { await require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
             if (now - lastPruneAt > 6 * 3600 * 1000) {
