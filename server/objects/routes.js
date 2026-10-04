@@ -741,6 +741,7 @@ const publicRouter = express.Router();
 // A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
 const SEGMENT_NAME = /^(init\.mp4|\d{6,}\.m4s)$/;
+const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 
 /** The object of an HLS request, or null when answered (or passed on to the 404 while the flag is off). */
 async function hlsObject(req, res, next) {
@@ -810,8 +811,20 @@ async function sendSlice(req, res, { file, url, offset, length, headers }) {
         stream.on('error', () => res.destroy());
         return stream.pipe(res);
     }
-    const up = await fetch(url, { headers: { range: `bytes=${offset + start}-${offset + end}` } }).catch(() => null);
-    const body = up && up.status === 206 ? Buffer.from(await up.arrayBuffer()) : null;
+    // Bounded in time and dropped when the viewer goes away; any failure, mid-body too, moves on to the next copy.
+    const ac = new AbortController();
+    const gone = () => ac.abort();
+    req.on('close', gone);
+    let body = null;
+    try {
+        const up = await fetch(url, { headers: { range: `bytes=${offset + start}-${offset + end}` }, signal: AbortSignal.any([ac.signal, AbortSignal.timeout(SLICE_FETCH_MS)]) });
+        body = up.status === 206 ? Buffer.from(await up.arrayBuffer()) : null;
+    } catch {
+        body = null;
+    } finally {
+        req.off('close', gone);
+    }
+    if (res.destroyed) return undefined;   // the viewer left: nothing more to try for them
     if (!body || body.length !== end - start + 1) return false;
     res.writeHead(r ? 206 : 200, head);
     return res.end(body);

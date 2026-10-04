@@ -67,14 +67,30 @@ function same(a, b) {
     return FIELDS.every((f) => (a[f] == null ? null : String(a[f])) === (b[f] == null ? null : String(b[f])));
 }
 
+/** Inside a transaction: replace() and markPacked() of one object take turns, so each sees the other's commit. */
+async function lockObject(objectId) {
+    await db.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [`media.timeline:${objectId}`]);
+}
+
+/** Thrown by replace() when the rows changed since the caller read them (`expect`). */
+class TimelineChanged extends Error {}
+
 /**
  * Make the rows of one rendition exactly `rows` (each { seq, name, start_ms, … }), in one transaction: a row that already
  * says the same is not written, a changed one is updated, rows past the new end are dropped. → { inserted, updated, unchanged, removed }.
+ * `expect` (the rows the caller read, by seq) makes it compare-and-set: if any row's location or packing changed meanwhile
+ * (an object.pack committed), nothing is written and TimelineChanged is thrown.
  */
-async function replace(objectId, rendition, rows, { jobId = null } = {}) {
+async function replace(objectId, rendition, rows, { jobId = null, expect = null } = {}) {
     const out = { inserted: 0, updated: 0, unchanged: 0, removed: 0 };
     await db.getDb().tx(async () => {
+        await lockObject(objectId);
         const before = new Map((await list(objectId, rendition)).map((r) => [Number(r.seq), r]));
+        if (expect) {
+            const at = (r) => (r ? ['key', 'local_path', 'durable_provider', 'packed_object_id', 'sha256'].map((f) => (r[f] == null ? '' : String(r[f]))).join('\n') : null);
+            const seqs = new Set([...before.keys(), ...expect.keys()]);
+            for (const q of seqs) if (at(before.get(q)) !== at(expect.get(q))) throw new TimelineChanged(`timeline of ${objectId}/${rendition} changed (seq ${q})`);
+        }
         for (const r of rows) {
             const prev = before.get(r.seq);
             if (prev && same(prev, r)) { out.unchanged++; continue; }
@@ -121,6 +137,17 @@ async function deleteBytes(rows) {
 }
 
 /**
+ * Whether any timeline row still names this location (a durable `provider` + `key`, or a local `localPath`). Keys and
+ * paths are content-addressed, so a run that lost a race may have built exactly the bytes a winner committed: it deletes
+ * what it staged only when no row names it.
+ */
+async function isNamed({ provider = null, key = null, localPath = null }) {
+    if (provider && key && await db.get('SELECT 1 AS x FROM media_timeline WHERE durable_provider = ? AND key = ? LIMIT 1', [provider, key])) return true;
+    if (localPath && await db.get('SELECT 1 AS x FROM media_timeline WHERE local_path = ? LIMIT 1', [localPath])) return true;
+    return false;
+}
+
+/**
  * The object's whole timeline is gone with its bytes (a purge, or a vod/clip deleted for good): local files, then the
  * durable copies. A row whose durable delete failed is kept — with its key — so a later pass can retry; dropping it
  * would lose the only record of the bytes still in B2/R2. Callers have already refused a held object.
@@ -153,6 +180,7 @@ async function markPacked(objectId, rendition, updates, { jobId = null } = {}) {
     const CONFLICT = new Error('timeline changed');
     try {
         await db.getDb().tx(async () => {
+            await lockObject(objectId);
             for (const u of updates) {
                 const r = await db.run(`UPDATE media_timeline SET key = ?, local_path = ?, durable_provider = ?, durability = 'durable',
                                            packed_object_id = ?, byte_offset = ?, job_id = ?, updated_at = ov_now()
@@ -229,6 +257,6 @@ function masterPlaylist(renditions, { query = '' } = {}) {
 
 module.exports = {
     SOURCE, INIT_NAME, FIELDS, localRoot, localPathFor, keyFor, segmentName,
-    list, segments, byName, has, segmentAt, replace, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
+    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
     mediaPlaylist, masterPlaylist,
 };

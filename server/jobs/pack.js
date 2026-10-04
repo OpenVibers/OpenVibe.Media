@@ -176,8 +176,9 @@ async function run(job, ctx) {
                 if (!committed) throw new JobError('media.timeline.changed', 'The timeline changed while packing (a re-cut); a retry packs the new segments', { retryAfterS: 60 });
             } finally {
                 if (!committed) {
-                    if (uploaded) await vodStorage.deleteObject(provider, key).catch(() => { /* best effort: the orphan report names it */ });
-                    if (localPath) { try { fs.unlinkSync(localPath); } catch { /* not moved */ } }
+                    // Content-addressed: a concurrent pack of the same run may have committed this very chunk; never delete it.
+                    if (uploaded && !await timeline.isNamed({ provider, key }).catch(() => true)) await vodStorage.deleteObject(provider, key).catch(() => { /* best effort: the orphan report names it */ });
+                    if (localPath && !await timeline.isNamed({ localPath }).catch(() => true)) { try { fs.unlinkSync(localPath); } catch { /* not moved */ } }
                     try { fs.unlinkSync(tmp); } catch { /* moved or gone */ }
                 }
             }

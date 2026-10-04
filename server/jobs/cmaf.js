@@ -114,6 +114,8 @@ async function run(job, ctx) {
         const prev = new Map((await timeline.list(src.id, rendition)).map((x) => [Number(x.seq), x]));
         const vodStorage = require('../vod/vod-storage');
         const target = await timeline.durableProvider(src);
+        // B2/R2 configured but none healthy (breakers open) is "not durable yet", retried later, never a quiet success.
+        const remoteConfigured = vodStorage.REMOTE_PROVIDERS.some((p) => vodStorage.providerConfigured(p));
         const rows = [];
         let uploaded = 0;
         const failed = [];
@@ -150,6 +152,7 @@ async function run(job, ctx) {
                     fs.renameSync(tmp, dest);
                     stagedLocal.push(dest);
                 }
+                if (!durable && !target && remoteConfigured) failed.push(`${f.name}: no healthy durable provider`);
                 if (!durable && target) {
                     try {
                         if (!vodStorage.providerAvailable(target)) throw new Error(`${target} is unavailable`);
@@ -169,7 +172,14 @@ async function run(job, ctx) {
                 });
             }
             aborted(ctx);
-            const written = await timeline.replace(src.id, rendition, rows, { jobId: job.id });
+            let written;
+            try {
+                written = await timeline.replace(src.id, rendition, rows, { jobId: job.id, expect: prev });
+            } catch (err) {
+                // An object.pack committed after `prev` was read: these rows would name the segment keys it deleted.
+                if (err instanceof timeline.TimelineChanged) throw new JobError('media.timeline.changed', 'The timeline changed while cutting (a pack); a retry cuts against the new rows', { retryAfterS: 60 });
+                throw err;
+            }
             committed = true;
             // Phase two, only once the new rows are published: the bytes a previous cut named that this one does not.
             // A deletion that fails leaves an orphan the storage report names, never bytes a live row still points at.
@@ -189,8 +199,14 @@ async function run(job, ctx) {
             };
         } catch (err) {
             if (!committed) {
-                for (const k of stagedRemote) await vodStorage.deleteObject(k.provider, k.key).catch(() => { /* best effort */ });
-                for (const p of stagedLocal) { try { fs.unlinkSync(p); } catch { /* already gone */ } }
+                // Content-addressed: another run may have committed these very keys and files, so only unnamed ones go.
+                for (const k of stagedRemote) {
+                    if (!await timeline.isNamed({ provider: k.provider, key: k.key }).catch(() => true)) await vodStorage.deleteObject(k.provider, k.key).catch(() => { /* best effort */ });
+                }
+                for (const p of stagedLocal) {
+                    if (await timeline.isNamed({ localPath: p }).catch(() => true)) continue;
+                    try { fs.unlinkSync(p); } catch { /* already gone */ }
+                }
             }
             throw err;
         }
