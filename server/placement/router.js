@@ -16,7 +16,7 @@
  *   4. Rank by preference tier, with the measured 5-minute EWMA latency breaking ties:
  *        playback : R2 with a verified present copy (popularity promotion put it there to move
  *                   reads off the host; promoting a VOD also frees its local copy) > local > R2 > B2
- *        else     : local > R2 > B2 (canonical); `download` puts B2 before R2 (free ops)
+ *        else     : local > R2 > B2 (canonical); `download` (free ops) and `durable` (a job's derived bytes) put B2 before R2
  *      A VOD or clip offers every verified cloud copy its object records (media_locations), so a
  *      VOD promoted to R2 keeps B2 as its fallback when R2's breaker opens.
  *      A lower tier displaces a higher one only when both have measurements and the lower
@@ -140,6 +140,9 @@ function latencyOf(provider) {
  * Preference tier (lower wins). Purpose decides only the order between the hot and canonical
  * cloud copies; local is always preferred to a cloud copy that is not the hot cache.
  */
+// `download` (free B2 egress ops) and `durable` (where a job keeps bytes it derives: timeline segments and chunks)
+// rank the canonical copy before the hot cache.
+const CANONICAL_FIRST = new Set(['download', 'durable']);
 function tierOf(candidate, purpose) {
     const p = candidate.provider;
     if (p === 'local') return 1;
@@ -147,9 +150,9 @@ function tierOf(candidate, purpose) {
         // A verified R2 copy is the hot cache: popularity promotion put it there precisely so reads leave the
         // host (the design's spill, decided by popularity until F2 measures the port).
         if (purpose === 'playback' && candidate.verified_at) return 0;
-        return purpose === 'download' ? 3 : 2;
+        return CANONICAL_FIRST.has(purpose) ? 3 : 2;
     }
-    if (p === 'b2') return purpose === 'download' ? 2 : 3;
+    if (p === 'b2') return CANONICAL_FIRST.has(purpose) ? 2 : 3;
     return 2;
 }
 
