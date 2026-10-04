@@ -57,6 +57,13 @@ const path = require('path');
     assert.deepStrictEqual(policy.bandFor('video'), { promoteReadsPerHour: 120, demoteReadsPerHour: 20 });
     assert.deepStrictEqual(policy.budgetFor('video'), { maxPromotionsPerSweep: 1, maxDemotionsPerSweep: 10 }, 'the band keeps the budget');
 
+    // The monthly R2 storage ceiling (F2.6): absent = none; a revision sets it per class.
+    assert.strictEqual(policy.hotCeilingFor('video'), null, 'no ceiling by default');
+    await policy.set({ classes: { video: { maxHotUsdPerMonth: 12.5 } } }, { reason: 'test: a video storage ceiling' });
+    assert.deepStrictEqual([policy.hotCeilingFor('video'), policy.hotCeilingFor('image')], [12.5, null]);
+    await assert.rejects(policy.set({ classes: { video: { maxHotUsdPerMonth: -1 } } }, { reason: 'test: a negative ceiling' }));
+    assert.strictEqual(policy.hotCeilingFor('video'), 12.5, 'a refused ceiling changes nothing');
+
     policy._reset();
     console.log('placement-storage-policy: all checks passed');
     process.exit(0);

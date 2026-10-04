@@ -640,6 +640,114 @@ const crypto = require('crypto');
         for (const v of candViews) await db.run('INSERT INTO media_object_views_daily (object_id, day, unique_viewers, last_viewed_at) VALUES (?, ?, ?, ?)', [v.object_id, v.day, v.unique_viewers, v.last_viewed_at]);
         console.log('✅ demand from Valkey: hot promotes, cold demotes, the band holds; one MGET per page; a failed or stuck Valkey falls back to the daily counts for the whole sweep');
 
+        // ── 9f. Constraints (F2.6): the provider class gate and each class's monthly R2 storage ceiling ──
+        const providersMod = require('../server/placement/providers');
+        const signals = require('../server/placement/signals');
+        await db.run('DELETE FROM media_object_views_daily');
+        await sp.set({ classes: { video: { maxPromotionsPerSweep: 1, maxDemotionsPerSweep: 500 } } }, { reason: 'test: video budget 1' });
+        // R2's breaker is open: the best video is refused (its slot spent, so the next waits) and nothing moves.
+        const gA = [await addObject({ mime: 'video/mp4' }), await addObject({ mime: 'video/mp4' })];
+        await setViews(gA[0].id, [[0, 900]]); await setViews(gA[1].id, [[0, 800]]);
+        signals.openBreaker('r2');
+        s = await tiering.runSweep();
+        signals.closeBreaker('r2');
+        assert.ok(!await r2Row(gA[0].id) && !await r2Row(gA[1].id), 'no promotion while R2 is not eligible for online-hot');
+        d = await last(gA[0].id);
+        assert.deepStrictEqual([d.action, d.outcome], ['promote', 'refused']);
+        assert.ok(/; refused: r2 is not eligible for online-hot: its circuit breaker is open \(provider class gate\)$/.test(d.reason), d.reason);
+        assert.deepStrictEqual((({ provider, class: c, eligible, breaker }) => [provider, c, eligible, breaker])(JSON.parse(d.inputs).provider_gate), ['r2', 'online-hot', false, 'open']);
+        assert.strictEqual((await decisions(gA[1].id)).length, 0, 'the refusal spent the class slot');
+        assert.deepStrictEqual([s.constraints.promote_gate.eligible, s.constraints.refused.provider >= 1], [false, true], JSON.stringify(s.constraints));
+        // A completed probe found a capability online-hot needs missing: refused the same way, naming it.
+        for (const o of gA) await db.run('DELETE FROM media_object_views_daily WHERE object_id = ?', [o.id]);
+        const gB = await addObject({ mime: 'video/mp4' }); await setViews(gB.id, [[0, 900]]);
+        providersMod._setCapabilities('r2', { provider: 'r2', passed: true, capabilities: { range: true, range_206: false }, lastChecked: Date.now(), lastError: null });
+        s = await tiering.runSweep();
+        providersMod._setCapabilities('r2', { provider: 'r2', passed: null, capabilities: {}, lastChecked: null, lastError: null });
+        d = await last(gB.id);
+        assert.ok(!await r2Row(gB.id) && d.outcome === 'refused' && /r2 is not eligible for online-hot: the capability probe found range_206 missing/.test(d.reason), d.reason);
+        assert.deepStrictEqual([JSON.parse(d.inputs).provider_gate.probe, JSON.parse(d.inputs).provider_gate.missing], ['failed', ['range_206']]);
+        await db.run('DELETE FROM media_object_views_daily WHERE object_id = ?', [gB.id]);
+        // A ready object's R2 copy stays while its canonical copy's provider (B2, online-canonical) is failing. The
+        // refusal spends no demotion slot (the gate is per object): the smaller idle copy over a local canonical leaves.
+        await sp.set({ classes: { video: { maxDemotionsPerSweep: 1 } } }, { reason: 'test: video demotion budget 1' });
+        const gC = await addObject({ mime: 'video/mp4', canonical: 'b2' }); await inR2(gC, 30);
+        const gL = await addObject({ mime: 'video/mp4', size: 2048 }); await inR2(gL, 30);
+        signals.openBreaker('b2');
+        s = await tiering.runSweep();
+        signals.closeBreaker('b2');
+        await sp.set({ classes: { video: { maxDemotionsPerSweep: 500 } } }, { reason: 'test: video demotion budget back' });
+        assert.ok(!await r2Row(gL.id), 'a demotion refused by its own canonical provider leaves the slot to the next in line');
+        d = await last(gC.id);
+        assert.ok(await r2Row(gC.id), 'the R2 copy is kept while B2 is not eligible');
+        assert.deepStrictEqual([d.action, d.outcome], ['demote', 'refused']);
+        assert.ok(/; refused: b2 is not eligible for online-canonical: its circuit breaker is open \(provider class gate\); the R2 copy is kept$/.test(d.reason), d.reason);
+        assert.deepStrictEqual([JSON.parse(d.inputs).provider_gate.provider, JSON.parse(d.inputs).provider_gate.eligible], ['b2', false]);
+        // A corrupt R2 copy was never counted in the class's spend, so demoting it subtracts nothing.
+        const gX = await addObject({ mime: 'video/mp4' }); await inR2(gX, 30);
+        await db.run("UPDATE media_locations SET state = 'corrupt' WHERE object_id = ? AND provider = 'r2'", [gX.id]);
+        s = await tiering.runSweep();
+        assert.ok(!await r2Row(gC.id), 'B2 eligible again: the idle copy leaves');
+        assert.ok(!await r2Row(gX.id), 'the corrupt copy leaves');
+        assert.ok(Math.abs(s.constraints.hot_usd_per_month.video.spend - (await tiering.hotSpend()).video) < 1e-12, JSON.stringify(s.constraints));
+        assert.deepStrictEqual(Object.keys(s.constraints.hot_usd_per_month).sort(), [...sp.CLASSES].sort(), 'every class is reported');
+        assert.deepStrictEqual(JSON.parse((await last(gC.id)).inputs).provider_gate, { provider: 'b2', class: 'online-canonical', eligible: true, breaker: 'closed', probe: 'pending' });
+        // The ceiling: room for one more 4 KB video copy; the first in line takes it, the next is refused and closes the class.
+        const spend0 = (await tiering.hotSpend()).video;
+        const one = tiering.hotUsdPerMonth(4096);
+        assert.ok(one > 0 && Math.abs(one - 4096 / 1073741824 * 0.015) < 1e-15, `R2 Standard list price of 4 KB a month: ${one}`);
+        const ceiling = spend0 + one * 1.5;
+        await sp.set({ classes: { video: { maxPromotionsPerSweep: 3, maxHotUsdPerMonth: ceiling } } }, { reason: 'test: a video storage ceiling' });
+        const gD = [await addObject({ mime: 'video/mp4' }), await addObject({ mime: 'video/mp4' }), await addObject({ mime: 'video/mp4' })];
+        await setViews(gD[0].id, [[0, 900]]); await setViews(gD[1].id, [[0, 800]]); await setViews(gD[2].id, [[0, 700]]);
+        s = await tiering.runSweep();
+        assert.deepStrictEqual([!!await r2Row(gD[0].id), !!await r2Row(gD[1].id), !!await r2Row(gD[2].id)], [true, false, false], 'one copy fits under the ceiling');
+        assert.deepStrictEqual(JSON.parse((await last(gD[0].id)).inputs).budget, { class: 'video', usd_per_month: spend0, copy_usd_per_month: one, ceiling });
+        d = await last(gD[1].id);
+        assert.deepStrictEqual([d.action, d.outcome], ['promote', 'refused']);
+        assert.ok(/; refused: class video R2 storage would reach \$[0-9.e-]+\/month \(\$[0-9.e-]+ now \+ \$[0-9.e-]+ for this copy\) > maxHotUsdPerMonth \$[0-9.e-]+ \(media\.storage_policy\); the class promotes nothing more this sweep$/.test(d.reason), d.reason);
+        assert.strictEqual((await decisions(gD[2].id)).length, 0, 'a cheaper lower-ranked object does not jump the queue: the class is closed');
+        assert.strictEqual(s.constraints.refused.budget, 1);
+        assert.ok(Math.abs(s.constraints.hot_usd_per_month.video.spend - (spend0 + one)) < 1e-12 && s.constraints.hot_usd_per_month.video.ceiling === ceiling, JSON.stringify(s.constraints));
+        assert.strictEqual(s.constraints.hot_usd_per_month.video.projected, s.constraints.hot_usd_per_month.video.spend, 'with the gate on, projected is actual');
+        // Gate off: a dry run holds the ceiling against the projected spend (what it would move) and leaves the actual spend alone.
+        await policy.set({ active: false }, { actor: { type: 'service', id: 'live' }, reason: 'test: gate off under a ceiling' });
+        const spend1 = (await tiering.hotSpend()).video;
+        await sp.set({ classes: { video: { maxHotUsdPerMonth: spend1 + one * 1.5 } } }, { reason: 'test: a video storage ceiling, dry run' });
+        const gE = [await addObject({ mime: 'video/mp4' }), await addObject({ mime: 'video/mp4' }), await addObject({ mime: 'video/mp4' })];
+        await setViews(gE[0].id, [[0, 990]]); await setViews(gE[1].id, [[0, 980]]); await setViews(gE[2].id, [[0, 970]]);
+        s = await tiering.runSweep();
+        assert.strictEqual(s.would_demote, 0, JSON.stringify(s));
+        assert.ok(!await r2Row(gE[0].id) && !await r2Row(gE[1].id), 'a dry run moves nothing');
+        const e0 = await last(gE[0].id), e1 = await last(gE[1].id);
+        assert.deepStrictEqual([e0.outcome, e1.outcome], ['dry_run', 'refused']);
+        assert.ok(/maxHotUsdPerMonth/.test(e1.reason), e1.reason);
+        assert.ok(Math.abs(JSON.parse(e1.inputs).budget.usd_per_month - (JSON.parse(e0.inputs).budget.usd_per_month + one)) < 1e-12, e1.inputs);
+        assert.strictEqual((await decisions(gE[2].id)).length, 0, 'the projected spend closed the class');
+        const hv = s.constraints.hot_usd_per_month.video;
+        assert.ok(Math.abs(hv.spend - spend1) < 1e-12 && Math.abs(hv.spend - (await tiering.hotSpend()).video) < 1e-12, `a dry run spends nothing: ${JSON.stringify(hv)}`);
+        assert.ok(Math.abs(hv.projected - (spend1 + one)) < 1e-12, `the projected spend counts the dry run: ${JSON.stringify(hv)}`);
+        // A zero ceiling closes the class even at a zero R2 price (where every copy would cost $0 and fit any ceiling).
+        await policy.set({ active: true }, { actor: { type: 'service', id: 'live' }, reason: 'test: gate on' });
+        const ct = require('../server/placement/cost-tiers');
+        await ct.init();
+        const prices = ct.settings();
+        await ct.get().apply({ ...prices, r2: { ...prices.r2, standard: { ...prices.r2.standard, storagePerGbMonth: 0 }, infrequentAccess: { ...prices.r2.infrequentAccess, storagePerGbMonth: 0 } } }, { reason: 'test: free R2 storage' });
+        await sp.set({ classes: { video: { maxHotUsdPerMonth: 0 } } }, { reason: 'test: a zero video ceiling' });
+        assert.strictEqual(tiering.hotUsdPerMonth(4096), 0);
+        s = await tiering.runSweep();
+        await ct.get().apply(prices, { reason: 'test: R2 price back' });
+        assert.ok(!await r2Row(gE[0].id) && !await r2Row(gE[1].id), 'a zero ceiling promotes nothing');
+        d = await last(gE[0].id);
+        assert.deepStrictEqual([d.action, d.outcome], ['promote', 'refused']);
+        assert.ok(/; refused: class video has maxHotUsdPerMonth \$0 \(media\.storage_policy\): it never promotes; the class promotes nothing more this sweep$/.test(d.reason), d.reason);
+        assert.deepStrictEqual([s.constraints.refused.budget, s.constraints.hot_usd_per_month.video.ceiling], [1, 0], JSON.stringify(s.constraints));
+        console.log('✅ ceiling: a dry run projects its spend without spending; a zero ceiling closes the class at any price');
+        await sp.set({ classes: { video: { maxHotUsdPerMonth: 1e9, maxDemotionsPerSweep: 10 } } }, { reason: 'test: no video ceiling' });
+        await db.run('DELETE FROM media_object_views_daily');
+        for (const v of candViews) await db.run('INSERT INTO media_object_views_daily (object_id, day, unique_viewers, last_viewed_at) VALUES (?, ?, ?, ?)', [v.object_id, v.day, v.unique_viewers, v.last_viewed_at]);
+        console.log('✅ constraints: a provider failing its class (breaker or probe) refuses the move and keeps every copy; the monthly R2 storage ceiling closes a class in value order');
+
         // ── 10. The storage sweep runs it (step 4); a restore drill never does ──
         const vodSweep = await storage.runSweep();
         assert.ok(vodSweep.objects && vodSweep.objects.gate === true && typeof vodSweep.objects.promoted === 'number', JSON.stringify(vodSweep));

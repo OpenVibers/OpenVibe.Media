@@ -146,6 +146,26 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   decision's `inputs.demand` (`{ source, metric, value, threshold[, region, window_s] }`) and its reason say which source
   and value drove it, dry runs included; a sweep's `media.replica.requested` and `media.replica.draining` carry the same
   `demand`, and the sweep result carries `demand_source` (and `demand_fallback`).
+- **Constraints (F2.6, shipped):** a sweep move needs the provider class it relies on: a promotion needs R2 eligible
+  for `online-hot`, the demotion of a ready object needs its canonical copy's provider eligible for its class
+  (`online-canonical`; the Media host's disk is always the `regional-cache`). Eligible means the circuit breaker is
+  not open and no completed capability probe found a capability the class needs missing
+  (`providers.placementGate()`, whatever `MEDIA_CAPABILITY_GATE` says; a probe not run or not completed decides
+  nothing). Otherwise the move is refused and every copy stays; a promotion's refusal spends the class's slot (every
+  promotion relies on R2, so a failing R2 logs at most a class budget of refusals per sweep), a demotion's does not
+  (its gate is that object's own canonical provider). Each class may carry a monthly ceiling on its R2
+  storage, `maxHotUsdPerMonth` in `media.storage_policy` (absent = none; `0` = the class never promotes, whatever
+  R2's configured price), priced at R2 Standard's list price in
+  `media.cost_tiers` over every present R2 copy of the class, gross of R2's free tier (`freeGb` is account-wide, not
+  per class, so the ceiling binds up to its value early), and kept current as the sweep moves: the first
+  promotion that would pass it is refused and closes the class's promotions for that sweep (a cheaper, lower-ranked
+  object never jumps the value-per-dollar queue). Every decision records `inputs.provider_gate` (`{ provider, class,
+  eligible, breaker, probe[, missing, reason] }`) and a sweep promotion `inputs.budget` (`{ class, usd_per_month,
+  copy_usd_per_month, ceiling }`); the sweep result carries `constraints` (`promote_gate`, `refused.{provider,budget}`,
+  `hot_usd_per_month.<class>.{spend,projected,ceiling}` for every class, `ceiling` null when unset). `spend` follows
+  only the moves made; `projected` also counts the dry runs, and the ceiling (and `inputs.budget.usd_per_month`) is held
+  against it, so dry runs (gate off) are refused as a live sweep would be, without changing `spend`. Native objects classify only as `video`, `image` or `download` today, so a ceiling (or budget)
+  set on `game-asset`, `attachment` or `backup` decides nothing yet.
 
 ## 7. Delivery: sticky, measured, canaried
 
@@ -207,7 +227,9 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
   corrected price table; the nginx shield (slice + cache lock) on the Media host.
 - **F2 one placement engine:** every class through one sweep, value-per-dollar under budgets, dry-run + simulator,
   decision log with class and reason, the events above, Valkey rollups of demand (F2.4, shipped) and the sweep's
-  eligibility on them with per-class hysteresis and a PostgreSQL fallback (F2.5, shipped).
+  eligibility on them with per-class hysteresis and a PostgreSQL fallback (F2.5, shipped), the provider-class gate
+  and per-class monthly R2 storage ceilings on its moves (F2.6, shipped). Still open in F2: the move cleanup job and
+  its alert after three failures (§6), every class (not only native objects ↔ R2) through the one sweep.
 - **F3 segment-native video:** CMAF/HLS recording with the growing DVR playlist, the timeline index, packing after
   finalize, virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral

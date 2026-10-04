@@ -16,6 +16,13 @@
  * second it may demote, in between nothing moves. Without Valkey, or when a read fails or times out, the whole sweep
  * reads the daily PostgreSQL counts instead (the thresholds above), logged once and counted in
  * media_sweep_demand_source_total{source}. Each decision's inputs.demand says which source and value drove it.
+ * Constraints (F2.6): a promotion needs R2 eligible for the online-hot class, and the demotion of a ready object needs
+ * its canonical copy's provider eligible for its class (../placement/providers.js placementGate(): breaker not open,
+ * no failed capability), else it is refused and the copies stay where they are; each decision's inputs.provider_gate
+ * records the gate it saw. A class with maxHotUsdPerMonth (media.storage_policy) promotes only while its R2 copies'
+ * list-price storage (media.cost_tiers) stays within it: the first promotion that would pass it is refused
+ * (inputs.budget) and closes the class's promotions for the sweep, so a cheaper, lower-ranked object never jumps
+ * the value-per-dollar queue.
  *
  *   runSweep({ trigger })   one pass: rotate the popularity counts, then promote and demote by the policy.
  *                           Step 4 of the storage sweep (server/vod/vod-storage.js runSweep), which a restore
@@ -47,6 +54,7 @@ const policy = require('./tier-policy');
 const storagePolicy = require('../placement/storage-policy');
 const costTiers = require('../placement/cost-tiers');
 const value = require('../placement/value');
+const providers = require('../placement/providers');
 const popularity = require('./popularity');
 
 const MB = 1024 * 1024;
@@ -128,6 +136,28 @@ function r2KeyFor(obj, canon) {
     return canon && canon.provider === 'b2' ? canon.key : `objects/${obj.app_id}/${obj.id}`;
 }
 
+// ── Provider classes and the storage ceiling (F2.6) ──────────
+
+/** The class a canonical copy serves: the Media host's disk is the regional cache, a remote provider the online canonical. */
+const canonicalClass = (provider) => (provider === 'local' ? 'regional-cache' : 'online-canonical');
+
+/** R2 Standard's list price of keeping `bytes` for a month (media.cost_tiers). */
+function hotUsdPerMonth(bytes) {
+    return (Number(bytes) || 0) / value.GB * (Number(costTiers.settings().r2.standard.storagePerGbMonth) || 0);
+}
+
+const fmtUsd = (v) => `$${Number(Number(v).toPrecision(4))}`;
+
+/** What each class's present R2 copies cost a month at list price, gross of R2's account-wide free tier: { video: 0.12, image: 0, ... }. */
+async function hotSpend() {
+    const out = Object.fromEntries(storagePolicy.CLASSES.map((c) => [c, 0]));
+    const rows = await db.all(`SELECT o.kind, o.mime_type, SUM(COALESCE(l.size_bytes, o.size_bytes, 0))::bigint AS bytes
+        FROM media_locations l JOIN media_objects o ON o.id = l.object_id
+        WHERE l.provider = 'r2' AND l.state = 'present' GROUP BY o.kind, o.mime_type`);
+    for (const r of rows) out[storagePolicy.classOf(r)] += hotUsdPerMonth(r.bytes);
+    return out;
+}
+
 // ── Decisions ────────────────────────────────────────────────
 
 function thresholdSnapshot(settings) {
@@ -194,7 +224,12 @@ async function frame(objectId, action, ctx) {
     const inputs = await inputsOf(obj, { locs, pop, held, settings });
     if (ctx.valuePerDollar != null) inputs.value_per_dollar = ctx.valuePerDollar;
     if (ctx.demand) inputs.demand = ctx.demand;
+    if (ctx.budget) inputs.budget = ctx.budget;
     const canon = canonicalLocation(obj, locs);
+    // The provider class the move relies on: R2 as online-hot for a promotion, the canonical copy's provider for a demotion.
+    const gate = action === 'promote' ? providers.placementGate('r2', 'online-hot')
+        : canon && canon.provider !== 'r2' ? providers.placementGate(canon.provider, canonicalClass(canon.provider)) : null;
+    if (gate) inputs.provider_gate = gate;
     const trigger = ctx.trigger || 'manual';
     const why = ctx.reason || 'requested';
     const from = action === 'promote' ? (canon ? canon.provider : null) : 'r2';
@@ -204,7 +239,7 @@ async function frame(objectId, action, ctx) {
         if (!repeat) await recordDecision({ obj, action, from, to, outcome, trigger, reason, inputs, settings, error: extra.error });
         return { ok: outcome === 'done' || outcome === 'already', outcome, object_id: obj.id, repeat, ...extra };
     };
-    return { obj, locs, canon, held, settings, why, log };
+    return { obj, locs, canon, held, settings, why, log, gate };
 }
 
 /** Why an object may not be promoted at all, from the record (no I/O), or null. */
@@ -225,13 +260,15 @@ async function promoteRefusal(obj, { locs, held }) {
 async function promote(objectId, ctx = {}) {
     const f = await frame(objectId, 'promote', ctx);
     if (f.missing) return { ok: false, outcome: 'refused', error: 'object not found' };
-    const { obj, locs, canon, held, settings, why, log } = f;
+    const { obj, locs, canon, held, settings, why, log, gate } = f;
     if (ctx.residency) return await log('refused', `${why}; refused: ${ctx.residency}`, { error: ctx.residency });
     if (held) return await log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
     const r2Now = locs.find((l) => l.provider === 'r2');
     if (r2Now && r2Now.state === 'present' && r2Now.verified_at) return await log('already', `${why}; the R2 copy is already present`);
     const refusal = await promoteRefusal(obj, { locs, held });
     if (refusal) return await log('refused', `${why}; refused: ${refusal}`, { error: refusal });
+    if (!gate.eligible) return await log('refused', `${why}; refused: ${gate.reason} (provider class gate)`, { error: gate.reason, blocked: 'provider' });
+    if (ctx.overBudget) return await log('refused', `${why}; refused: ${ctx.overBudget}`, { error: ctx.overBudget, blocked: 'budget' });
     const vs = vodStorage();
     if (!settings.active) return await log('dry_run', `gate off (active = false): would promote: ${why}${vs.providerAvailable('r2') ? '' : ' (R2 is not available now)'}`);
     if (!vs.providerAvailable('r2')) return await log('refused', `${why}; refused: R2 is not available`, { error: 'R2 not available' });
@@ -290,11 +327,15 @@ async function promote(objectId, ctx = {}) {
 async function demote(objectId, ctx = {}) {
     const f = await frame(objectId, 'demote', ctx);
     if (f.missing) return { ok: false, outcome: 'refused', error: 'object not found' };
-    const { obj, locs, canon, held, settings, why, log } = f;
+    const { obj, locs, canon, held, settings, why, log, gate } = f;
     if (ctx.residency) return await log('refused', `${why}; refused: ${ctx.residency}`, { error: ctx.residency });
     if (held) return await log('refused', `${why}; refused: under a retention hold (a hold freezes placement)`, { error: 'held', held: true });
     const r2 = locs.find((l) => l.provider === 'r2');
     if (!r2) return await log('already', `${why}; there is no R2 copy`);
+    // Reads of a ready object fall back to its canonical copy: never shift them onto a provider that is failing.
+    if (obj.lifecycle_status === 'ready' && gate && !gate.eligible) {
+        return await log('refused', `${why}; refused: ${gate.reason} (provider class gate); the R2 copy is kept`, { error: gate.reason, blocked: 'provider' });
+    }
     const vs = vodStorage();
     if (!settings.active) return await log('dry_run', `gate off (active = false): would demote: ${why}`);
     if (!vs.providerConfigured('r2')) return await log('refused', `${why}; refused: R2 is not configured`, { error: 'R2 not configured' });
@@ -446,7 +487,7 @@ async function hotPromotionCandidates(settings, demand, { appId = null, limit = 
 async function demotionCandidates(settings, { now = Date.now(), appId = null, demand = null } = {}) {
     const idleFrom = popularity.windowStart(popularity.dayOf(now), settings.demoteIdleDays);
     const monthFrom = popularity.windowStart(popularity.dayOf(now), popularity.KEEP_DAYS);
-    const rows = await db.all(`SELECT o.*, l.created_at AS r2_since,
+    const rows = await db.all(`SELECT o.*, l.created_at AS r2_since, l.state AS r2_state, l.size_bytes AS r2_size_bytes,
                 (SELECT MAX(d.day) FROM media_object_views_daily d WHERE d.object_id = o.id AND d.unique_viewers > 0) AS last_viewed_day,
                 (SELECT COALESCE(SUM(d.unique_viewers), 0)::bigint FROM media_object_views_daily d WHERE d.object_id = o.id AND d.day >= ?) AS unique_viewers_30d
             FROM media_locations l JOIN media_objects o ON o.id = l.object_id
@@ -563,7 +604,8 @@ async function sweepCandidates(settings, now) {
 }
 
 /**
- * One pass over native objects. → { gate, demand_source, demand_fallback?, promoted, demoted, would_promote, would_demote, already, refused, failed,
+ * One pass over native objects. → { gate, demand_source, demand_fallback?, constraints: { promote_gate, refused: { provider, budget },
+ * hot_usd_per_month: { <class>: { spend, projected, ceiling } } }, promoted, demoted, would_promote, would_demote, already, refused, failed,
  * repeats, skipped_backoff, candidates: { promote, demote }, rotated, errors }
  */
 async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
@@ -590,6 +632,18 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
         // candidates' value-per-dollar order. A refusal (residency, hold) or a back-off spends nothing, so the next
         // in line takes the slot.
         const spent = { promote: {}, demote: {} };
+        // A slot is spent by a move, a failed move, a dry run, or a promotion's provider-gate refusal, repeated or not
+        // (every promotion relies on R2, so the next in line would be refused for the same reason and a closed R2 costs
+        // the class at most its budget of rows). A demotion's gate is the candidate's own canonical provider, so its
+        // refusal spends nothing and an object with a healthy canonical copy takes the slot.
+        const spends = (r, action) => (action === 'promote' && r.blocked === 'provider') || (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome));
+        const blocked = (r) => { if (r.blocked) out.constraints.refused[r.blocked]++; };
+        // The storage ceiling (F2.6): each class's R2 copies at list price. `spend` follows the moves made; `projected`
+        // also counts dry runs (the moves the sweep would make), and the ceiling is held against it.
+        const spend = await hotSpend();
+        const projected = { ...spend };
+        const closed = new Set();
+        out.constraints = { promote_gate: providers.placementGate('r2', 'online-hot'), refused: { provider: 0, budget: 0 }, hot_usd_per_month: {} };
         const room = (action, cls) => (spent[action][cls] || 0) < storagePolicy.budgetFor(cls)[action === 'promote' ? 'maxPromotionsPerSweep' : 'maxDemotionsPerSweep'];
         for (const { row, reason, class: cls, value_per_dollar: score, demand } of demote_) {
             if (!room('demote', cls)) continue;
@@ -599,7 +653,14 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
             const r = await demote(row.id, { trigger, settings, now, residency, valuePerDollar: score, demand,
                 reason: `${reason}; ${rankNote(cls, score, (spent.demote[cls] || 0) + 1, 'maxDemotionsPerSweep')}` });
             tally(out, { ...r, action: 'demote' });
-            if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.demote[cls] = (spent.demote[cls] || 0) + 1;
+            blocked(r);
+            if (spends(r, 'demote')) spent.demote[cls] = (spent.demote[cls] || 0) + 1;
+            // hotSpend() counted only present copies: a corrupt or pending one leaves the class's spend as it was.
+            if (!r.repeat && ['done', 'dry_run'].includes(r.outcome) && row.r2_state === 'present') {
+                const freed = hotUsdPerMonth(row.r2_size_bytes ?? row.size_bytes);
+                projected[cls] = Math.max(0, projected[cls] - freed);
+                if (r.outcome === 'done') spend[cls] = Math.max(0, spend[cls] - freed);
+            }
         }
 
         // Every eligible candidate is ranked (not a most-viewed prefix); the best SWEEP_KEEP are kept, so no class is crowded out of its budget.
@@ -607,13 +668,30 @@ async function runSweep({ trigger = 'sweep', now = Date.now() } = {}) {
         out.candidates.promote = promote_.length;
         for (const c of promote_) {
             const cls = c.class;
-            if (!room('promote', cls)) continue;
+            if (!room('promote', cls) || closed.has(cls)) continue;
             if (await inBackoff(c.id, 'promote')) { out.skipped_backoff++; continue; }
             const residency = await residencyRefusal(c, cls, 'promote', now);
+            const cost = hotUsdPerMonth(c.size_bytes);
+            const ceiling = storagePolicy.hotCeilingFor(cls);
+            const usd = projected[cls];
+            const budget = { class: cls, usd_per_month: usd, copy_usd_per_month: cost, ceiling };
+            // A zero ceiling closes the class even when R2's configured price is zero (every copy would then cost $0).
+            const overBudget = ceiling === 0
+                ? `class ${cls} has maxHotUsdPerMonth $0 (media.storage_policy): it never promotes; the class promotes nothing more this sweep`
+                : ceiling != null && usd + cost > ceiling
+                    ? `class ${cls} R2 storage would reach ${fmtUsd(usd + cost)}/month (${fmtUsd(usd)} now + ${fmtUsd(cost)} for this copy) > maxHotUsdPerMonth ${fmtUsd(ceiling)} (media.storage_policy); the class promotes nothing more this sweep`
+                    : null;
             const r = await promote(c.id, { trigger, reason: promoteReason(c, settings, (spent.promote[cls] || 0) + 1), settings, now, residency, valuePerDollar: c.value_per_dollar,
-                demand: c.demand, pop: picked.source === 'pg' ? { unique_viewers: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day } : undefined });
+                demand: c.demand, budget, overBudget, pop: picked.source === 'pg' ? { unique_viewers: c.unique_viewers_7d, last_viewed_day: c.last_viewed_day } : undefined });
             tally(out, { ...r, action: 'promote' });
-            if (!r.repeat && ['done', 'failed', 'dry_run'].includes(r.outcome)) spent.promote[cls] = (spent.promote[cls] || 0) + 1;
+            blocked(r);
+            if (r.blocked === 'budget') closed.add(cls);
+            if (spends(r, 'promote')) spent.promote[cls] = (spent.promote[cls] || 0) + 1;
+            if (!r.repeat && ['done', 'dry_run'].includes(r.outcome)) projected[cls] += cost;
+            if (!r.repeat && r.outcome === 'done') spend[cls] += cost;
+        }
+        for (const cls of storagePolicy.CLASSES) {
+            out.constraints.hot_usd_per_month[cls] = { spend: spend[cls], projected: projected[cls], ceiling: storagePolicy.hotCeilingFor(cls) };
         }
 
         // Demand (F2.4): stage media.object.hot for objects over the hourly read threshold.
@@ -698,7 +776,7 @@ async function report({ appId = null, limit = 20 } = {}) {
 }
 
 module.exports = {
-    FAILED_BACKOFF_H, OUTCOMES,
+    FAILED_BACKOFF_H, OUTCOMES, hotSpend, hotUsdPerMonth,
     runSweep, promote, demote, candidates, promotionCandidates, demotionCandidates,
     canonicalUnverified, confirmCanonical, r2KeyFor,
     counts24h, listDecisions, decisionPublic, report,

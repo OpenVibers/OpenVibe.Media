@@ -15,6 +15,8 @@
  *   probeAll()            probe every configured remote provider
  *   startHealthLoop()     the cheap per-minute HeadBucket and the hourly capability probe
  *   healthStatus()        { b2, r2 } each as { configured, healthy, lastCheck, lastError }
+ *   placementGate(name, cls)  may a placement move put bytes on (or shift reads to) it for the class:
+ *                         breaker not open, no failed capability the class needs (F2.6)
  *
  * A provider that fails a capability is removed from the classes that need it until it passes
  * again — `probeProvider(name)` returning a capability list with `passed=false` is the only
@@ -90,6 +92,28 @@ function eligibleClasses(name) {
     const measured = measuredClasses(name);
     if (gateMode() !== 'enforce' || measured === null) return providerClasses(name);
     return measured;
+}
+
+/**
+ * Whether placement may put bytes on (or shift reads to) a provider for a class (docs/media-fabric.md §2, F2.6):
+ * the provider declares the class, its circuit breaker is not open, and no completed capability probe found a
+ * capability the class needs missing. A probe not run yet, or one that could not complete, decides nothing (as for
+ * eligibleClasses(): live health is the breaker's job). This
+ * holds whatever MEDIA_CAPABILITY_GATE says: the read gate protects playback, and a placement move refused here
+ * leaves every copy where it is. Whether the provider is configured is the caller's check.
+ * → { provider, class, eligible, breaker, probe: 'pending'|'incomplete'|'passed'|'failed', missing?, reason? }
+ */
+function placementGate(name, cls) {
+    const out = { provider: name, class: cls, eligible: true, breaker: 'closed', probe: 'passed' };
+    if (!providerClasses(name).includes(cls)) return { ...out, eligible: false, reason: `${name} does not serve ${cls}` };
+    if (name === 'local') return out;
+    out.breaker = require('./signals').breakerState(name);
+    const caps = capabilities(name);
+    const missing = caps.passed ? CLASS_REQUIREMENTS[cls].filter((c) => !(caps.capabilities || {})[c]) : [];
+    out.probe = caps.passed === null ? 'pending' : !caps.passed ? 'incomplete' : missing.length ? 'failed' : 'passed';
+    if (out.breaker === 'open') return { ...out, eligible: false, reason: `${name} is not eligible for ${cls}: its circuit breaker is open` };
+    if (out.probe === 'failed') return { ...out, eligible: false, missing, reason: `${name} is not eligible for ${cls}: the capability probe found ${missing.join(', ')} missing` };
+    return out;
 }
 
 /** What classes each provider says it can serve. These are the design's assignments (docs/media-fabric.md §2):
@@ -315,7 +339,7 @@ function reset() { stop(); state.capabilities = {}; state.lastHealthCheck = {}; 
 
 module.exports = {
     CLASSES, CLASS_REQUIREMENTS, PROBE_PREFIX, PROBE_KEY,
-    isConfigured, providerClasses, eligibleClasses, measuredClasses, gateMode, capabilities,
+    isConfigured, providerClasses, eligibleClasses, measuredClasses, placementGate, gateMode, capabilities,
     probe, probeAll, liveHealth, healthStatus,
     startHealthLoop, stop, reset,
     // Test-only setter (used by tests to inject a known capability snapshot without touching the SDK).
