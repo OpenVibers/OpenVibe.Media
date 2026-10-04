@@ -34,6 +34,8 @@ const https = require('https');
         'server/webhooks.js': 'an app\'s webhook_url, set by the operator (MEDIA_APPS_SEED)',
         'server/thumbnails/live-frame-service.js': 'the app\'s internal URL (APP_INTERNAL_URLS), fixed path',
         'server/public/dev-data.js': 'the app\'s internal URL (APP_INTERNAL_URLS), ids and encoded names in the path',
+        'server/jobs/pack.js': 'a presigned GET on B2/R2 (operator-configured buckets) for a segment\'s durable copy',
+        'server/objects/routes.js': 'a ranged GET on a presigned B2/R2 URL (operator-configured buckets) for a packed segment\'s chunk',
         'server/drill.js': 'restore drill: only this server itself',
         'server/me/client.js': 'browser script, same-origin',
     };
