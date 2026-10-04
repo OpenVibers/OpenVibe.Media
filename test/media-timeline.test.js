@@ -4,6 +4,9 @@
 // rows (ENDLIST, the rows' durations); segmentAt answers the segment at an instant, at the boundaries too; a rerun is a
 // no-op; a private object's playlist refuses an anonymous reader and its signed one carries the signature on; with
 // MEDIA_HLS_ENABLED off nothing answers; a purge removes the segments unless the object is held.
+// F3.3: object.pack concatenates the durable segments into a chunk, each row naming its byte range; a packed segment is
+// served as a ranged read of the chunk (from this node or the durable copy) with the original bytes; a rerun packs
+// nothing; the per-segment copies are gone; the durable provider comes from the placement router; private stays private.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -25,9 +28,19 @@ const { spawn, spawnSync } = require('child_process');
     process.env.MEDIA_UPLOAD_MIN_FREE_MB = '0';
     process.env.MEDIA_HLS_ENABLED = '1';
     for (const p of ['B2', 'R2']) for (const k of ['ENDPOINT', 'BUCKET', 'KEY_ID', 'APP_KEY', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY']) process.env[`MEDIA_${p}_${k}`] = '';
+    // The durable providers' bytes ("<provider>:<key>"), served back with Range at /blob/… by the stub (presigned URLs).
+    const blobs = new Map();
     const stub = http.createServer((req, res) => {
         req.resume();
         req.on('end', () => {
+            if (req.url.startsWith('/blob/')) {
+                const b = blobs.get(decodeURIComponent(req.url.slice(6)));
+                if (!b) { res.statusCode = 404; return res.end(); }
+                const m = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range || '');
+                if (!m) return res.end(b);
+                res.statusCode = 206;
+                return res.end(b.subarray(Number(m[1]), Number(m[2]) + 1));
+            }
             res.setHeader('Content-Type', 'application/json');
             if (req.url === '/oauth/token') return res.end(JSON.stringify({ access_token: 'tok', token_type: 'Bearer', expires_in: 300 }));
             res.statusCode = 404; res.end('{}');
@@ -107,11 +120,11 @@ const { spawn, spawnSync } = require('child_process');
         const priv = await native('private');
         const before = JSON.stringify([await model.getObject(pub), await model.listLocations(pub)]);
 
-        const runJob = async (objectId, params) => {
-            const r = await call('POST', '/api/v2/live/jobs', { body: { type: 'object.cmaf', object_id: objectId, ...(params && { params }) } });
+        const runJob = async (objectId, params, type = 'object.cmaf') => {
+            const r = await call('POST', '/api/v2/live/jobs', { body: { type, object_id: objectId, ...(params && { params }) } });
             assert.strictEqual(r.status, 202, JSON.stringify(r.body));
             const fin = await waitFor(async () => ['succeeded', 'failed'].includes((await queue.get(r.body.job.id)).status));
-            assert.ok(fin, `object.cmaf finishes: ${JSON.stringify(queue.jobPublic(await queue.get(r.body.job.id)))}`);
+            assert.ok(fin, `${type} finishes: ${JSON.stringify(queue.jobPublic(await queue.get(r.body.job.id)))}`);
             return queue.jobPublic(await queue.get(r.body.job.id));
         };
 
@@ -156,14 +169,16 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual((await get(`/o/${pub}/source/..%2Findex.m3u8`)).status, 404);
         // A real HLS reader agrees: the playlist plays back as the 7 s source.
         // (spawned, not spawnSync: the server answering it runs in this process)
-        const probe = await new Promise((resolve) => {
+        const ffprobe = () => new Promise((resolve) => {
             const p = spawn('ffprobe', ['-v', 'error', '-rw_timeout', '10000000', '-show_entries', 'format=duration', '-of', 'csv=p=0', `${api}/o/${pub}/master.m3u8`]);
             let out = '';
             p.stdout.on('data', (d) => { out += d; });
             p.stderr.on('data', (d) => { out += d; });
             p.on('close', () => resolve(out.trim()));
         });
+        const probe = await ffprobe();
         assert.ok(Math.abs(Number(probe) - 7) < 0.2, `ffprobe reads the playlist: ${probe}`);
+        assert.strictEqual(master.headers.get('access-control-allow-origin'), '*', 'a public playlist may be read cross-origin');
 
         // ── segmentAt on the real timeline, at the boundaries ──
         const seqAt = async (t) => { const r = await timeline.segmentAt(pub, 'source', t); return r ? Number(r.seq) : null; };
@@ -178,6 +193,96 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(j2.result.uploaded, 0);
         assert.strictEqual(JSON.stringify(await timeline.list(pub)), JSON.stringify(rows), 'the rows are as they were (job_id, updated_at too)');
         assert.deepStrictEqual(rows.map((r) => fs.statSync(r.local_path).mtimeMs), mtimes, 'no segment rewritten');
+
+        // ── F3.3: durable segments (stubbed B2/R2), the provider chosen by the placement router ──
+        const pack = require('../server/jobs/pack');
+        const vodStorage = require('../server/vod/vod-storage');
+        const router = require('../server/placement/router');
+        let configured = ['b2', 'r2'];
+        Object.assign(vodStorage, {
+            providerConfigured: (p) => configured.includes(p),
+            providerAvailable: (p) => configured.includes(p),
+            uploadFile: async (p, key, file) => { blobs.set(`${p}:${key}`, fs.readFileSync(file)); },
+            sha256Object: async (p, key) => (blobs.has(`${p}:${key}`) ? { sha256: sha(blobs.get(`${p}:${key}`)), size: blobs.get(`${p}:${key}`).length } : null),
+            deleteObject: async (p, key) => { blobs.delete(`${p}:${key}`); return true; },
+            presignGet: async (p, key) => `${base}/blob/${encodeURIComponent(`${p}:${key}`)}`,
+        });
+        const realRoute = router.route;
+        const purposes = [];
+        router.route = async (opts) => { purposes.push(opts.purpose); return realRoute(opts); };
+        const j3 = await runJob(pub, { segment_seconds: 2 });
+        assert.strictEqual(j3.status, 'succeeded', JSON.stringify(j3.error));
+        assert.deepStrictEqual([j3.result.uploaded, j3.result.durable, j3.result.rows.updated], [5, 5, 5], JSON.stringify(j3.result));
+        assert.ok(purposes.includes('durable'), 'object.cmaf asks the placement router for its provider');
+        const durableRows = await timeline.list(pub);
+        assert.ok(durableRows.every((r) => r.durability === 'durable' && r.durable_provider === 'b2' && blobs.has(`b2:${r.key}`)), 'the router ranks the canonical tier first');
+        configured = ['r2'];
+        assert.strictEqual(await timeline.durableProvider(await model.getObject(pub)), 'r2', 'no B2: the router picks R2, nothing is hard-coded');
+        configured = [];
+        assert.strictEqual(await timeline.durableProvider(await model.getObject(pub)), null);
+        configured = ['b2', 'r2'];
+
+        // ── Planning: contiguous durable unpacked runs, ~target each, a short tail joins the chunk before ──
+        const pr = (seq, start, end, extra = {}) => ({ ...row(seq, start, end), durability: 'durable', durable_provider: 'b2', ...extra });
+        const planned = pack.plan([pr(0, 0, 0), ...[1, 2, 3, 4, 5, 6, 7].map((n) => pr(n, (n - 1) * 25000, n * 25000)), pr(8, 175000, 180000, { durability: 'local', durable_provider: null }),
+            pr(9, 180000, 190000), pr(10, 190000, 200000), pr(11, 200000, 210000, { packed_object_id: 'x' })], 60000);
+        assert.deepStrictEqual(planned.chunks.map((c) => c.map((r) => r.seq)), [[1, 2, 3], [4, 5, 6, 7], [9, 10]], 'a 25 s tail joins the chunk before; a local segment ends a run');
+        assert.deepStrictEqual([planned.alreadyPacked, planned.waiting], [1, 1]);
+
+        // ── The pack job's abort signal: nothing packed, the work directory removed ──
+        const acp = new AbortController();
+        acp.abort(new Error('pack cancelled in test'));
+        await assert.rejects(pack.spec.run({ id: 'mjob_PACKABORT', app_id: 'live', object_id: pub, params: { target_seconds: 10 } }, { signal: acp.signal }), /pack cancelled in test/);
+        assert.strictEqual(JSON.stringify(await timeline.list(pub)), JSON.stringify(durableRows));
+        assert.strictEqual(fs.existsSync(path.join(process.env.OBJECTS_PATH, '.jobs', 'mjob_PACKABORT')), false);
+
+        // ── Packing: one chunk, each row its byte range, the per-segment copies deleted ──
+        const jp = await runJob(pub, { target_seconds: 10 }, 'object.pack');
+        assert.strictEqual(jp.status, 'succeeded', JSON.stringify(jp.error));
+        assert.deepStrictEqual([jp.result.packs, jp.result.segments, jp.result.removed_segments, jp.result.left_behind, jp.result.provider], [1, 4, 4, 0, 'b2'], JSON.stringify(jp.result));
+        const packed = await timeline.list(pub);
+        assert.strictEqual(JSON.stringify(packed[0]), JSON.stringify(durableRows[0]), 'the init segment is not packed');
+        const chunkId = packed[1].packed_object_id;
+        const chunkKey = `${pub}/source/${chunkId.slice(0, 12)}/p000001.m4s`;
+        const chunk = blobs.get(`b2:${chunkKey}`);
+        assert.ok(chunk && sha(chunk) === chunkId, 'packed_object_id is the chunk sha256, and the durable chunk reads back as it');
+        assert.deepStrictEqual(fs.readFileSync(packed[1].local_path), chunk, 'this node keeps the same chunk');
+        let at0 = 0;
+        for (const [i, r] of packed.slice(1).entries()) {
+            const was = durableRows[i + 1];
+            assert.deepStrictEqual([r.name, r.start_ms, r.end_ms, r.sha256, r.byte_length], [was.name, was.start_ms, was.end_ms, was.sha256, was.byte_length], `${r.name} keeps its identity`);
+            assert.deepStrictEqual([r.packed_object_id, r.key, r.durable_provider, r.durability, Number(r.byte_offset)], [chunkId, chunkKey, 'b2', 'durable', at0], `${r.name} names its range`);
+            assert.strictEqual(sha(chunk.subarray(at0, at0 + Number(r.byte_length))), r.sha256, `${r.name}'s range is its bytes`);
+            assert.ok(!blobs.has(`b2:${was.key}`) && !fs.existsSync(was.local_path), `${r.name}'s own key and file are deleted`);
+            at0 += Number(r.byte_length);
+        }
+        assert.strictEqual(at0, chunk.length);
+        assert.strictEqual((await get(`/o/${pub}/source/index.m3u8`)).buf.toString(), media, 'the playlist is unchanged by packing');
+        for (const r of packed) {
+            const s = await get(`/o/${pub}/source/${r.name}`);
+            assert.deepStrictEqual([s.status, sha(s.buf), Number(s.headers.get('content-length'))], [200, r.sha256, Number(r.byte_length)], `${r.name} served from the chunk`);
+        }
+        const part = await get(`/o/${pub}/source/000002.m4s`, { range: 'bytes=10-99' });
+        assert.deepStrictEqual([part.status, part.headers.get('content-range')], [206, `bytes 10-99/${packed[2].byte_length}`]);
+        assert.deepStrictEqual(part.buf, chunk.subarray(Number(packed[2].byte_offset) + 10, Number(packed[2].byte_offset) + 100), 'a range inside a packed segment');
+        assert.strictEqual((await get(`/o/${pub}/source/000002.m4s`, { range: `bytes=${packed[2].byte_length}-` })).status, 416);
+        assert.ok(Math.abs(Number(await ffprobe()) - 7) < 0.2, 'the packed timeline still plays as the 7 s source');
+        // This node's chunk gone: the router's durable copy, read as a byte range.
+        fs.renameSync(packed[1].local_path, `${packed[1].local_path}.away`);
+        for (const r of packed.slice(1)) {
+            const s = await get(`/o/${pub}/source/${r.name}`);
+            assert.deepStrictEqual([s.status, sha(s.buf)], [200, r.sha256], `${r.name} served from the durable chunk`);
+        }
+        fs.renameSync(`${packed[1].local_path}.away`, packed[1].local_path);
+
+        // ── A rerun packs nothing; a cmaf rerun keeps the packed rows ──
+        const jp2 = await runJob(pub, { target_seconds: 10 }, 'object.pack');
+        assert.deepStrictEqual([jp2.status, jp2.result.packs, jp2.result.already_packed], ['succeeded', 0, 4], JSON.stringify(jp2.result));
+        assert.strictEqual(JSON.stringify(await timeline.list(pub)), JSON.stringify(packed), 'a rerun changes no row');
+        const j4 = await runJob(pub, { segment_seconds: 2 });
+        assert.deepStrictEqual([j4.status, j4.result.uploaded, j4.result.rows], ['succeeded', 0, { inserted: 0, updated: 0, unchanged: 5, removed: 0 }], JSON.stringify(j4.result));
+        assert.ok(blobs.has(`b2:${chunkKey}`) && fs.existsSync(packed[1].local_path), 'and its chunk');
+        router.route = realRoute;
 
         // ── The job's abort signal: nothing written, the work directory removed ──
         const cmaf = require('../server/jobs/cmaf');
@@ -201,6 +306,15 @@ const { spawn, spawnSync } = require('child_process');
         const smedia = (await get(`/o/${priv}/source/index.m3u8${signed.search}`)).buf.toString();
         assert.ok(smedia.includes(`#EXT-X-MAP:URI="init.mp4${signed.search}"`) && smedia.includes(`000001.m4s${signed.search}`), smedia);
         assert.strictEqual((await get(`/o/${priv}/source/000001.m4s${signed.search}`)).status, 200);
+        assert.strictEqual(sm.headers.get('access-control-allow-origin'), null, 'no CORS on a private playlist, as on GET /o/:id');
+        const jpp = await runJob(priv, { target_seconds: 10 }, 'object.pack');
+        assert.deepStrictEqual([jpp.status, jpp.result.packs], ['succeeded', 1], JSON.stringify(jpp));
+        const privRows = await timeline.list(priv);
+        assert.ok(privRows[1].packed_object_id);
+        assert.strictEqual((await get(`/o/${priv}/source/000002.m4s`)).status, 404, 'a packed private segment needs the signature');
+        assert.strictEqual((await get(`/o/${priv}/source/000002.m4s?exp=${signed.searchParams.get('exp')}&sig=${'0'.repeat(64)}`)).status, 404);
+        const sseg = await get(`/o/${priv}/source/000002.m4s${signed.search}`);
+        assert.deepStrictEqual([sseg.status, sha(sseg.buf), sseg.headers.get('access-control-allow-origin')], [200, privRows[2].sha256, null], 'signed: the packed bytes, no CORS');
         assert.strictEqual((await get(`/o/${priv}/master.m3u8?exp=${signed.searchParams.get('exp')}&sig=${'0'.repeat(64)}`)).status, 404, 'a forged signature');
         assert.strictEqual((await get(`/o/${pub}/master.m3u8${signed.search}`)).status, 200, 'a public object needs no signature');
         assert.strictEqual((await call('GET', `/api/v2/live/objects/${pub}/download?format=json`)).body.hls_url, `${config.publicUrl}/o/${pub}/master.m3u8`);
@@ -211,6 +325,8 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual((await get(`/o/${pub}/source/000001.m4s`)).status, 404);
         const off = await call('POST', '/api/v2/live/jobs', { body: { type: 'object.cmaf', object_id: pub } });
         assert.deepStrictEqual([off.status, off.body.code], [409, 'media.hls.disabled']);
+        const offPack = await call('POST', '/api/v2/live/jobs', { body: { type: 'object.pack', object_id: pub } });
+        assert.deepStrictEqual([offPack.status, offPack.body.code], [409, 'media.hls.disabled']);
         assert.deepStrictEqual(Object.keys((await call('GET', `/api/v2/live/objects/${pub}/download?format=json`)).body).sort(), ['expires_at', 'public', 'url']);
         config.hls.enabled = true;
 
@@ -223,6 +339,8 @@ const { spawn, spawnSync } = require('child_process');
         await model.purgeExpired({ retentionDays: 0 });
         assert.strictEqual(await timeline.has(pub), false, 'a purge removes the timeline');
         assert.ok(pubPaths.every((p) => !fs.existsSync(p)), 'and its segment files');
+        assert.ok(!fs.existsSync(packed[1].local_path) && !blobs.has(`b2:${chunkKey}`) && !blobs.has(`b2:${packed[0].key}`), 'and its chunk, here and durable');
+        assert.ok(blobs.has(`b2:${privRows[1].key}`), 'a held object keeps its durable chunk');
         assert.strictEqual(await timeline.has(priv), true, 'a held object keeps its timeline');
         assert.ok((await timeline.list(priv)).every((r) => fs.existsSync(r.local_path)));
         await model.releaseHold(hold.id);

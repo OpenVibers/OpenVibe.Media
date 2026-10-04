@@ -11,8 +11,11 @@
  *   result { source_id, rendition: 'source', segments, duration_ms, bytes, durable, local_only,
  *            rows: { inserted, updated, unchanged, removed }, uploaded, master_path }
  *
- * Bytes: each segment lands on this node's disk (OBJECTS_PATH/.timeline/…); with B2 configured it is uploaded under
- * <object>/source/<version>/<name> (version = the sha's prefix) and its row says `durable` once B2 confirms the size.
+ * Bytes: each segment lands on this node's disk (OBJECTS_PATH/.timeline/…); with a durable provider it is uploaded under
+ * <object>/source/<version>/<name> (version = the sha's prefix) and its row says `durable` once the provider confirms the
+ * size. The provider is the placement router's choice (timeline.durableProvider: the source's own canonical copy first),
+ * never a hard-coded one. A segment already packed into a chunk (object.pack, F3.3) whose bytes are unchanged keeps its
+ * packed row as it is.
  * Idempotent: a rerun makes the same bytes (bitexact), reuses a row whose sha256 matches and its location as it is, and
  * uploads only what is not durable yet. Two-phase: a re-cut writes beside the published segments and the rows commit in
  * one transaction before the old bytes go, so playback never reads bytes that disagree with the playlist; a run that
@@ -32,7 +35,6 @@ const { JobError } = require('./queue');
 
 const MB = 1024 * 1024;
 const DEFAULT_SEGMENT_SECONDS = 4;
-const DURABLE = 'b2';
 
 function disabled() {
     return new JobError('media.hls.disabled', 'Segment-native video is off on this server (MEDIA_HLS_ENABLED)', { permanent: true, status: 409 });
@@ -111,7 +113,9 @@ async function run(job, ctx) {
 
         const prev = new Map((await timeline.list(src.id, rendition)).map((x) => [Number(x.seq), x]));
         const vodStorage = require('../vod/vod-storage');
-        const durableOn = vodStorage.providerConfigured(DURABLE);
+        const target = await timeline.durableProvider(src);
+        // B2/R2 configured but none healthy (breakers open) is "not durable yet", retried later, never a quiet success.
+        const remoteConfigured = vodStorage.REMOTE_PROVIDERS.some((p) => vodStorage.providerConfigured(p));
         const rows = [];
         let uploaded = 0;
         const failed = [];
@@ -129,6 +133,11 @@ async function run(job, ctx) {
                 const sha = await derive.sha256File(tmp);
                 const old = prev.get(f.seq);
                 const match = !!old && old.sha256 === sha;
+                if (match && old.packed_object_id) {
+                    // Already packed into a chunk (object.pack): the same bytes, so the row and its chunk stay as they are.
+                    rows.push(Object.fromEntries(['seq', ...timeline.FIELDS].map((k) => [k, k === 'seq' ? f.seq : old[k]])));
+                    continue;
+                }
                 // Content-addressed: the same bytes always land at the same versioned location, so a rerun rewrites
                 // nothing and a re-cut writes beside the old segment until the new rows are published.
                 const version = sha.slice(0, 12);
@@ -143,12 +152,13 @@ async function run(job, ctx) {
                     fs.renameSync(tmp, dest);
                     stagedLocal.push(dest);
                 }
-                if (!durable && durableOn) {
+                if (!durable && !target && remoteConfigured) failed.push(`${f.name}: no healthy durable provider`);
+                if (!durable && target) {
                     try {
-                        if (!vodStorage.providerAvailable(DURABLE)) throw new Error(`${DURABLE} is unavailable`);
-                        await vodStorage.uploadFile(DURABLE, key, localPath, f.seq === 0 ? 'video/mp4' : 'video/iso.segment', { signal: ctx.signal });
-                        stagedRemote.push({ provider: DURABLE, key });
-                        durable = DURABLE;
+                        if (!vodStorage.providerAvailable(target)) throw new Error(`${target} is unavailable`);
+                        await vodStorage.uploadFile(target, key, localPath, f.seq === 0 ? 'video/mp4' : 'video/iso.segment', { signal: ctx.signal });
+                        stagedRemote.push({ provider: target, key });
+                        durable = target;
                         uploaded++;
                     } catch (err) {
                         if (ctx.signal.aborted) throw ctx.signal.reason || err;   // a cancelled upload is not "not durable yet"
@@ -162,7 +172,14 @@ async function run(job, ctx) {
                 });
             }
             aborted(ctx);
-            const written = await timeline.replace(src.id, rendition, rows, { jobId: job.id });
+            let written;
+            try {
+                written = await timeline.replace(src.id, rendition, rows, { jobId: job.id, expect: prev });
+            } catch (err) {
+                // An object.pack committed after `prev` was read: these rows would name the segment keys it deleted.
+                if (err instanceof timeline.TimelineChanged) throw new JobError('media.timeline.changed', 'The timeline changed while cutting (a pack); a retry cuts against the new rows', { retryAfterS: 60 });
+                throw err;
+            }
             committed = true;
             // Phase two, only once the new rows are published: the bytes a previous cut named that this one does not.
             // A deletion that fails leaves an orphan the storage report names, never bytes a live row still points at.
@@ -182,8 +199,14 @@ async function run(job, ctx) {
             };
         } catch (err) {
             if (!committed) {
-                for (const k of stagedRemote) await vodStorage.deleteObject(k.provider, k.key).catch(() => { /* best effort */ });
-                for (const p of stagedLocal) { try { fs.unlinkSync(p); } catch { /* already gone */ } }
+                // Content-addressed: another run may have committed these very keys and files, so only unnamed ones go.
+                for (const k of stagedRemote) {
+                    if (!await timeline.isNamed({ provider: k.provider, key: k.key }).catch(() => true)) await vodStorage.deleteObject(k.provider, k.key).catch(() => { /* best effort */ });
+                }
+                for (const p of stagedLocal) {
+                    if (await timeline.isNamed({ localPath: p }).catch(() => true)) continue;
+                    try { fs.unlinkSync(p); } catch { /* already gone */ }
+                }
             }
             throw err;
         }

@@ -11,6 +11,11 @@
  * on durable_provider. The name alone is the playlist URI, so a row carries the versioned location it serves from. The
  * object.cmaf job (server/jobs/cmaf.js) writes the source rendition; the public routes
  * /o/:id/master.m3u8 and /o/:id/source/… (objects/routes.js) serve it behind MEDIA_HLS_ENABLED.
+ *
+ * Packed (F3.3): object.pack (server/jobs/pack.js) concatenates ~60 s of durable segments into one chunk object. A packed
+ * row's key/local_path/durable_provider then name the chunk, packed_object_id its sha256 (content address) and
+ * byte_offset/byte_length the segment's bytes inside it; its name, times and sha256 stay the segment's. Several rows
+ * share one chunk, so the bytes are deleted once per location and kept (for a retry) while any delete of them fails.
  */
 'use strict';
 
@@ -62,14 +67,30 @@ function same(a, b) {
     return FIELDS.every((f) => (a[f] == null ? null : String(a[f])) === (b[f] == null ? null : String(b[f])));
 }
 
+/** Inside a transaction: replace() and markPacked() of one object take turns, so each sees the other's commit. */
+async function lockObject(objectId) {
+    await db.get('SELECT pg_advisory_xact_lock(hashtext(?)) AS locked', [`media.timeline:${objectId}`]);
+}
+
+/** Thrown by replace() when the rows changed since the caller read them (`expect`). */
+class TimelineChanged extends Error {}
+
 /**
  * Make the rows of one rendition exactly `rows` (each { seq, name, start_ms, … }), in one transaction: a row that already
  * says the same is not written, a changed one is updated, rows past the new end are dropped. → { inserted, updated, unchanged, removed }.
+ * `expect` (the rows the caller read, by seq) makes it compare-and-set: if any row's location or packing changed meanwhile
+ * (an object.pack committed), nothing is written and TimelineChanged is thrown.
  */
-async function replace(objectId, rendition, rows, { jobId = null } = {}) {
+async function replace(objectId, rendition, rows, { jobId = null, expect = null } = {}) {
     const out = { inserted: 0, updated: 0, unchanged: 0, removed: 0 };
     await db.getDb().tx(async () => {
+        await lockObject(objectId);
         const before = new Map((await list(objectId, rendition)).map((r) => [Number(r.seq), r]));
+        if (expect) {
+            const at = (r) => (r ? ['key', 'local_path', 'durable_provider', 'packed_object_id', 'sha256'].map((f) => (r[f] == null ? '' : String(r[f]))).join('\n') : null);
+            const seqs = new Set([...before.keys(), ...expect.keys()]);
+            for (const q of seqs) if (at(before.get(q)) !== at(expect.get(q))) throw new TimelineChanged(`timeline of ${objectId}/${rendition} changed (seq ${q})`);
+        }
         for (const r of rows) {
             const prev = before.get(r.seq);
             if (prev && same(prev, r)) { out.unchanged++; continue; }
@@ -96,12 +117,15 @@ async function deleteBytes(rows) {
     const vodStorage = require('../vod/vod-storage');
     const dirs = new Set();
     const failed = [];
+    const done = new Set();   // a packed chunk is named by every row it holds: each location is deleted once
     for (const r of rows) {
-        if (r.local_path && path.resolve(r.local_path).startsWith(root)) {
+        if (r.local_path && path.resolve(r.local_path).startsWith(root) && !done.has(`local\n${r.local_path}`)) {
+            done.add(`local\n${r.local_path}`);
             try { fs.unlinkSync(r.local_path); } catch { /* already gone */ }
             dirs.add(path.dirname(r.local_path));
         }
-        if (r.durable_provider && vodStorage.providerConfigured(r.durable_provider)) {
+        if (r.durable_provider && vodStorage.providerConfigured(r.durable_provider) && !done.has(`${r.durable_provider}\n${r.key}`)) {
+            done.add(`${r.durable_provider}\n${r.key}`);
             const ok = await vodStorage.deleteObject(r.durable_provider, r.key);
             if (!ok) failed.push({ row: r, provider: r.durable_provider, key: r.key, error: 'delete failed' });
         }
@@ -110,6 +134,17 @@ async function deleteBytes(rows) {
         for (const p of [d, path.dirname(d)]) { try { fs.rmdirSync(p); } catch { /* not empty or gone */ } }
     }
     return { failed };
+}
+
+/**
+ * Whether any timeline row still names this location (a durable `provider` + `key`, or a local `localPath`). Keys and
+ * paths are content-addressed, so a run that lost a race may have built exactly the bytes a winner committed: it deletes
+ * what it staged only when no row names it.
+ */
+async function isNamed({ provider = null, key = null, localPath = null }) {
+    if (provider && key && await db.get('SELECT 1 AS x FROM media_timeline WHERE durable_provider = ? AND key = ? LIMIT 1', [provider, key])) return true;
+    if (localPath && await db.get('SELECT 1 AS x FROM media_timeline WHERE local_path = ? LIMIT 1', [localPath])) return true;
+    return false;
 }
 
 /**
@@ -123,15 +158,66 @@ async function removeObject(objectId) {
     const rows = await db.all('SELECT * FROM media_timeline WHERE object_id = ?', [objectId]);
     if (!rows.length) return { removed: 0, pending: 0 };
     const { failed } = await deleteBytes(rows);
-    const stuck = new Set(failed.map((f) => `${f.row.rendition}\n${f.row.seq}`));
+    // Every row naming a location whose delete failed is kept: for a packed chunk that is all the rows it holds.
+    const stuck = new Set(failed.map((f) => `${f.provider}\n${f.key}`));
     let removed = 0;
     let pending = 0;
     for (const r of rows) {
-        if (stuck.has(`${r.rendition}\n${r.seq}`)) { pending++; continue; }
+        if (r.durable_provider && stuck.has(`${r.durable_provider}\n${r.key}`)) { pending++; continue; }
         removed += (await db.run('DELETE FROM media_timeline WHERE object_id = ? AND rendition = ? AND seq = ?', [objectId, r.rendition, r.seq])).changes || 0;
     }
     if (pending) console.warn(`[Timeline] ${objectId}: ${pending} segment row(s) kept — their durable copy could not be deleted`);
     return { removed, pending };
+}
+
+/**
+ * Point rows at the chunk they were packed into, in one transaction. `updates` = [{ row, key, local_path,
+ * durable_provider, packed_object_id, byte_offset }]; each row changes only if it is still exactly the unpacked segment
+ * the packer read (same key and sha256, not packed): a re-cut in between makes the whole commit roll back and false is
+ * returned, so the caller drops its chunk. Never deletes a row.
+ */
+async function markPacked(objectId, rendition, updates, { jobId = null } = {}) {
+    const CONFLICT = new Error('timeline changed');
+    try {
+        await db.getDb().tx(async () => {
+            await lockObject(objectId);
+            for (const u of updates) {
+                const r = await db.run(`UPDATE media_timeline SET key = ?, local_path = ?, durable_provider = ?, durability = 'durable',
+                                           packed_object_id = ?, byte_offset = ?, job_id = ?, updated_at = ov_now()
+                                        WHERE object_id = ? AND rendition = ? AND seq = ? AND key = ? AND sha256 = ? AND packed_object_id IS NULL`,
+                [u.key, u.local_path, u.durable_provider, u.packed_object_id, u.byte_offset, jobId, objectId, rendition, u.row.seq, u.row.key, u.row.sha256]);
+                if (!r.changes) throw CONFLICT;
+            }
+        });
+        return true;
+    } catch (err) {
+        if (err === CONFLICT) return false;
+        throw err;
+    }
+}
+
+/**
+ * The durable provider for bytes derived from `obj` (segments, packed chunks), chosen by the placement router like
+ * every other provider choice (derive.js): the provider of the object's own best-ranked remote copy, else the best
+ * configured, healthy one. Purpose `durable` ranks the canonical tier (B2) before the hot cache (R2). null = none.
+ */
+async function durableProvider(obj) {
+    const router = require('../placement/router');
+    const remote = (d) => (d.candidates || []).find((c) => c.provider !== 'local');
+    const own = remote(await router.route({ object: obj, purpose: 'durable', presign: false }));
+    if (own) return own.provider;
+    const vodStorage = require('../vod/vod-storage');
+    const configured = vodStorage.REMOTE_PROVIDERS.filter((p) => vodStorage.providerConfigured(p)).map((p) => ({ provider: p, key: p, state: 'present' }));
+    const any = remote(await router.route({ locations: configured, purpose: 'durable', presign: false }));
+    return any ? any.provider : null;
+}
+
+/** The copies of a row's bytes as router locations: this node's file, then the durable copy. */
+function locationsOf(row) {
+    const out = [];
+    if (row.local_path && fs.existsSync(row.local_path)) out.push({ provider: 'local', key: row.local_path, state: 'present' });
+    if (row.durable_provider && row.durability === 'durable') out.push({ provider: row.durable_provider, key: row.key, state: 'present' });
+    return out;
 }
 
 // ── Playlists (from the rows, never from files) ──────────────
@@ -170,6 +256,7 @@ function masterPlaylist(renditions, { query = '' } = {}) {
 }
 
 module.exports = {
-    SOURCE, INIT_NAME, localRoot, localPathFor, keyFor, segmentName,
-    list, segments, byName, has, segmentAt, replace, deleteBytes, removeObject, mediaPlaylist, masterPlaylist,
+    SOURCE, INIT_NAME, FIELDS, localRoot, localPathFor, keyFor, segmentName,
+    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
+    mediaPlaylist, masterPlaylist,
 };

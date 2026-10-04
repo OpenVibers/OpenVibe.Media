@@ -737,8 +737,11 @@ const publicRouter = express.Router();
 // from the object's media_timeline rows (objects/timeline.js), never read from files. Every one passes the same check
 // as GET /o/:id: public and unlisted objects openly, private and sandbox ones only with the object's valid ?exp&sig
 // (from /download), which a signed playlist carries onto each URI; deleted 410, not ready 404. Off, these paths 404.
+// Like GET /o/:id, a private or sandbox answer carries no Access-Control-Allow-Origin; a public one may be read cross-origin.
+// A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
 const SEGMENT_NAME = /^(init\.mp4|\d{6,}\.m4s)$/;
+const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 
 /** The object of an HLS request, or null when answered (or passed on to the 404 while the flag is off). */
 async function hlsObject(req, res, next) {
@@ -752,8 +755,9 @@ async function hlsObject(req, res, next) {
     if (obj.lifecycle_status === 'deleted') { res.status(410).json({ error: 'Gone' }); return null; }
     if (obj.lifecycle_status !== 'ready') { res.status(404).json({ error: 'Not found' }); return null; }
     res.set({
-        'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex', 'Access-Control-Allow-Origin': '*',
+        'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex',
         'Cache-Control': closed ? 'private, no-store' : 'public, max-age=300',
+        ...(!closed && { 'Access-Control-Allow-Origin': '*' }),
     });
     return { obj, closed, query: signed ? `exp=${encodeURIComponent(req.query.exp)}&sig=${encodeURIComponent(req.query.sig)}` : '' };
 }
@@ -782,24 +786,82 @@ publicRouter.get('/:id/source/index.m3u8', hlsRoute(async (req, res, { obj, quer
     res.type(HLS_TYPE).send(timeline.mediaPlaylist(rows, { query }));
 }));
 
+/** The client's Range over a `length`-byte body: { start, end } (inclusive), null for the whole, false if unsatisfiable. */
+function sliceRange(header, length) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(String(header || '').trim());
+    if (!m || (!m[1] && !m[2])) return null;
+    let start = m[1] ? Number(m[1]) : Math.max(0, length - Number(m[2]));
+    let end = m[1] && m[2] ? Math.min(Number(m[2]), length - 1) : length - 1;
+    if (start >= length || end < start) return false;
+    return { start, end };
+}
+
+/**
+ * A packed segment: bytes [offset, offset + length) of its chunk, from a local file or a ranged GET of a presigned URL,
+ * answered as if the segment were its own file (Range over the segment, 206/416, Content-Length).
+ */
+async function sendSlice(req, res, { file, url, offset, length, headers }) {
+    const r = sliceRange(req.headers.range, length);
+    if (r === false) { res.writeHead(416, { 'Content-Range': `bytes */${length}`, ...headers }); return res.end(); }
+    const { start, end } = r || { start: 0, end: length - 1 };
+    const head = { ...headers, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1, ...(r && { 'Content-Range': `bytes ${start}-${end}/${length}` }) };
+    if (file) {
+        res.writeHead(r ? 206 : 200, head);
+        const stream = fs.createReadStream(file, { start: offset + start, end: offset + end });
+        stream.on('error', () => res.destroy());
+        return stream.pipe(res);
+    }
+    // Bounded in time and dropped when the viewer goes away; any failure, mid-body too, moves on to the next copy.
+    const ac = new AbortController();
+    const gone = () => ac.abort();
+    req.on('close', gone);
+    let body = null;
+    try {
+        const up = await fetch(url, { headers: { range: `bytes=${offset + start}-${offset + end}` }, signal: AbortSignal.any([ac.signal, AbortSignal.timeout(SLICE_FETCH_MS)]) });
+        body = up.status === 206 ? Buffer.from(await up.arrayBuffer()) : null;
+    } catch {
+        body = null;
+    } finally {
+        req.off('close', gone);
+    }
+    if (res.destroyed) return undefined;   // the viewer left: nothing more to try for them
+    if (!body || body.length !== end - start + 1) return false;
+    res.writeHead(r ? 206 : 200, head);
+    return res.end(body);
+}
+
 publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, { obj, closed }) => {
     const timeline = require('./timeline');
     const name = String(req.params.name || '');
     const row = SEGMENT_NAME.test(name) ? await timeline.byName(obj.id, timeline.SOURCE, name) : null;
     if (!row) return res.status(404).json({ error: 'Not found' });
     const mime = Number(row.seq) === 0 ? 'video/mp4' : 'video/iso.segment';
-    // This node's copy first; otherwise a short presigned URL to the durable one.
-    if (row.local_path && fs.existsSync(row.local_path)) {
-        return require('../public/routes').streamFileWithRange(req, res, row.local_path, {
-            'Content-Type': mime, 'Cache-Control': closed ? 'private, no-store' : 'public, max-age=3600',
-        });
+    const headers = { 'Content-Type': mime, 'Cache-Control': closed ? 'private, no-store' : 'public, max-age=3600' };
+    const packed = !!row.packed_object_id;
+    const slice = { offset: Number(row.byte_offset), length: Number(row.byte_length), headers };
+    // The router ranks this node's copy and the durable one (no viewer demand counted per segment: segment-bucket demand
+    // comes later). A local file is streamed; a remote unpacked segment is a redirect to a short presigned URL; a remote
+    // packed one is read as a byte range of its chunk here, since a redirect cannot carry the segment's range.
+    const router = require('../placement/router');
+    const decision = await router.route({ locations: timeline.locationsOf(row), purpose: 'playback', session: router.sessionFor(req, `${obj.id}/source`),
+        contentType: mime, expiresIn: 300, presign: !packed });
+    for (const loc of decision.candidates || []) {
+        if (loc.provider === 'local') {
+            if (!fs.existsSync(loc.key)) continue;
+            if (packed) return sendSlice(req, res, { file: loc.key, ...slice });
+            return require('../public/routes').streamFileWithRange(req, res, loc.key, headers);
+        }
+        const url = (!packed && loc.provider === decision.provider && decision.url)
+            || await require('../vod/vod-storage').presignGet(loc.provider, loc.key, 300, packed ? {} : { contentType: mime }).catch(() => null);
+        if (!url) continue;
+        if (packed) {
+            if (await sendSlice(req, res, { url, ...slice }) !== false) return;
+            continue;
+        }
+        res.set('Cache-Control', 'private, max-age=0');
+        return res.redirect(302, url);
     }
-    const url = row.durable_provider
-        ? await require('../vod/vod-storage').presignGet(row.durable_provider, row.key, 300, { contentType: mime }).catch(() => null)
-        : null;
-    if (!url) return res.status(404).json({ error: 'Segment bytes unavailable' });
-    res.set('Cache-Control', 'private, max-age=0');
-    res.redirect(302, url);
+    res.status(404).json({ error: 'Segment bytes unavailable' });
 }));
 publicRouter.get('/:id', async (req, res) => {
     // A restore drill (MEDIA_DRILL) serves no stored bytes, local or by a B2/R2 redirect.

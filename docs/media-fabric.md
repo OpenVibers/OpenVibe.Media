@@ -91,7 +91,7 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   `0002_media_timeline.sql` adds `media_timeline` (object, rendition, segment number `seq` — 0 is the init segment —,
   `start_ms`/`end_ms` (contiguous, half-open), `keyframe_ms`, the segment's `key` `<object>/<rendition>/<version>/<name>`
   (`version` = the sha prefix of the bytes, so a re-cut writes beside the old segment, never over it), `local_path`,
-  `durable_provider`, `packed_object_id` + `byte_offset`/`byte_length` (packing is F3.3; NULL until then),
+  `durable_provider`, `packed_object_id` + `byte_offset`/`byte_length` (set by F3.3 packing; NULL until a segment is packed),
   `sha256`, `durability` `local|durable`), keyed by (object, rendition, seq) for "segments in order" with an index on
   (object, rendition, start_ms) for "the segment at t". `server/objects/timeline.js` is the store (`segmentAt(objectId,
   rendition, tMs)`, `segments`, `replace`, `removeObject`, the playlist writers). The heavy-lane job **`object.cmaf`**
@@ -111,11 +111,34 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   `hls_url` when a timeline exists. A purge, or a vod/clip deleted for good, removes the segments and rows; a durable
   copy that will not delete keeps its row so the next pass retries the key; a held object keeps them all. Storage orphan
   reports count timeline files and keys as wanted.
+  The durable provider of the segments is the placement router's choice (`timeline.durableProvider`: the source's own
+  best-ranked remote copy, else the best configured healthy provider; purpose `durable` ranks B2 before R2), and the
+  segment route serves the router's ranked copy; a private or sandbox HLS answer carries no
+  `Access-Control-Allow-Origin` (as `GET /o/:id`), a public one `*`.
+- **F3.3, shipped: packing after finalize.** The heavy-lane job **`object.pack`** (`server/jobs/pack.js`, `params`
+  `rendition` (`source`), `target_seconds` 10–300, 60 by default) concatenates each run of contiguous, durable, unpacked
+  media segments of one rendition into chunk objects of about the target (a tail under half of it joins the chunk
+  before; runs of one segment and the init segment stay as they are; a segment not durable yet ends a run). Each
+  segment's bytes are checked against its row's sha256 (this node's copy, else the durable one through the router); the
+  chunk goes to the router's durable provider under `<object>/<rendition>/<chunk sha prefix>/p<first seq>.m4s` and is
+  verified there (sha256 read back), this node keeps a copy where it kept the segments, and the rows move to it in one
+  transaction: `key`/`local_path`/`durable_provider` name the chunk, `packed_object_id` is its sha256 (content address),
+  `byte_offset`/`byte_length` the segment inside it; name, times and sha256 stay the segment's. Only after the commit are
+  the per-segment files and keys **deleted**: the chunk holds the same verified bytes, keeping both would double the
+  stored bytes and every per-segment object packing exists to remove, and a delete that fails leaves an orphan the
+  storage report names. A re-cut in between rolls the commit back and drops the chunk. The job never deletes a row, is
+  idempotent (a rerun packs nothing), refuses a held object, honours the abort signal and `derive.budgetMs` and removes
+  its work directory; `object.cmaf` keeps a packed row whose bytes it reproduces. The playlists do not change: the
+  segment route answers a packed segment as a byte range of its chunk (from this node's file, or a ranged GET of the
+  durable chunk, since a redirect cannot carry the range) under the same check and signature; the `EXT-X-BYTERANGE`
+  form over chunk URIs is not used, so URIs, signed playlists and caches stay as they were. Purge, VOD delete, holds
+  and the orphan report see a chunk through the rows that name it (each location deleted once, every row kept while its
+  chunk's delete fails). All of it behind `MEDIA_HLS_ENABLED`; no schema change (F3.1's columns carry it).
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
-  live segments and its upload-lag metric, packing into ~60 s chunks (F3.3), virtual and materialized clips over the
-  timeline, sprites and captions on it, the faststart MP4 fallback as a derivative, segment-bucket demand, a finalize
-  hook that queues `object.cmaf` by itself, signed playlists that outlive one signed-URL lifetime, and Live's player
-  moving to HLS. Renditions are F4.
+  live segments and its upload-lag metric, virtual and materialized clips over the timeline (chunk reference counts),
+  sprites and captions on it, the faststart MP4 fallback as a derivative, segment-bucket demand, a finalize hook that
+  queues `object.cmaf` and `object.pack` by itself, signed playlists that outlive one signed-URL lifetime, and Live's
+  player moving to HLS. Renditions are F4.
 
 ## 4. Clips reuse the source
 
@@ -267,8 +290,9 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
   and per-class monthly R2 storage ceilings on its moves (F2.6, shipped), the move cleanup job and its alert after
   three failures (§6, shipped). Still open in F2: every class (not only native objects ↔ R2) through the one sweep.
 - **F3 segment-native video:** the timeline index and the CMAF/HLS source representation of finished video (F3.1,
-  shipped; §3); still open: CMAF/HLS recording with the growing DVR playlist from OpenRe, packing after finalize,
-  virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to HLS.
+  shipped; §3), packing into ~60 s chunks (F3.3, shipped; §3); still open: live DVR from OpenRe (CMAF/HLS recording
+  with the growing playlist), virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to
+  HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
   VODs, compute placement.
 - **F5 multi-CDN delivery:** Bunny path (B2 origin), R2 custom-domain path, OpenVibe edge first up to capacity, route
