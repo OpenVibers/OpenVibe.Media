@@ -137,6 +137,20 @@ async function serveMediaRecord(kind, record, req, res) {
     // recordings exist (and, through the basename form of /v, which file names are real).
     if (visibility === 'private' && !canAccessPrivate(record, req, kind)) return notFound(res);
 
+    // A virtual clip (F3.5) has no file: its bytes are its HLS playlist over the source's timeline. Every reader allowed
+    // here (public, the owner, or a 'getc' URL from GET /api/clips/:id/signed-url), a browser navigation included, is sent
+    // to the master playlist, signed for a closed clip with the clip's own 'hls' token, which reaches only the segments
+    // inside the clip's window. Before the watch page: its player and download link name ?raw=1 bytes it does not have.
+    if (kind === 'clip' && !record.file_path && record.storage_provider === 'timeline') {
+        const config = require('../config');
+        if (drill.refuseBytes(res)) return;
+        if (!config.hls.enabled || !record.object_id || record.status !== 'ready') return res.status(404).json({ error: 'Media file unavailable' });
+        await trackUniqueView(kind, record.id, req, record.user_id);
+        const closed = visibility === 'private' || await db.isSandboxTenant(record.app_id);
+        res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
+        return res.redirect(302, closed ? require('../objects/signing').signedPlaylistUrl(record.object_id).url : `${config.publicUrl}/o/${record.object_id}/master.m3u8`);
+    }
+
     // A person (or a link-preview crawler) landing on the URL gets the watch
     // page; its <video> comes back here with ?raw=1 for the bytes. The page offers a player only when
     // the object is playable (server/objects/readiness.js: finished, and a copy whose bytes were
@@ -244,7 +258,7 @@ router.get('/c/:id', optionalIdentity, async (req, res) => {
         const clip = await db.getClipById(parseInt(req.params.id, 10));
         // A clip still being cut (or whose cut failed) has no file yet: its bytes are a 404, and a
         // browser navigation gets the watch page saying so (private clips still look missing).
-        if (!clip || (!clip.file_path && !pages.wantsHtmlPage(req))) return notFound(res);
+        if (!clip || (!clip.file_path && clip.storage_provider !== 'timeline' && !pages.wantsHtmlPage(req))) return notFound(res);
         await serveMediaRecord('clip', clip, req, res);
     } catch (err) {
         console.error('[Public] /c error:', err.message);

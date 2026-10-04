@@ -134,15 +134,51 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   form over chunk URIs is not used, so URIs, signed playlists and caches stay as they were. Purge, VOD delete, holds
   and the orphan report see a chunk through the rows that name it (each location deleted once, every row kept while its
   chunk's delete fails). All of it behind `MEDIA_HLS_ENABLED`; no schema change (F3.1's columns carry it).
+- **F3.c, shipped: the timeline queued by itself, signed playlists, the MP4 fallback.** A recording's finalize queues
+  `object.cmaf` for its object once it is ready (`server/objects/timeline-queue.js`; `dedupeActive` and the idempotency
+  key `object.cmaf:<id>`, so a second finalize joins the same job; a queue error is logged, never fails the finalize),
+  and `GET …/download?format=json` queues it lazily for a media object without a timeline (a VOD older than F3.1):
+  `hls_url` appears once the job ran. Nothing is queued with `MEDIA_HLS_ENABLED` off, for a non-media object or once
+  the source timeline exists. For a private or sandbox object `hls_url` is a **playlist token**: its own MAC purpose
+  (`hls`), valid for `MEDIA_HLS_PLAYLIST_TTL_S` (6 h by default, 60 s to 12 h) so a viewer plays a long VOD on one page
+  load, carried onto every playlist and segment URI, and accepted only by the HLS routes (never by `GET /o/:id` or any
+  other route); the HLS routes still accept the object's download signature, so earlier URLs keep working. A public
+  object's `hls_url` stays unsigned. `GET …/download?format=mp4` answers the object's `remux` variant (`object.remux`,
+  `-movflags +faststart` for an MP4 source; the container stays the source's) as a signed URL, or queues the remux
+  (`dedupeActive`) and answers `202 { job_id }` while it is missing.
+- **F3.5, shipped: virtual and materialized clips over the timeline (§4).**
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
-  live segments and its upload-lag metric, virtual and materialized clips over the timeline (chunk reference counts),
-  sprites and captions on it, the faststart MP4 fallback as a derivative, segment-bucket demand, a finalize hook that
-  queues `object.cmaf` and `object.pack` by itself, signed playlists that outlive one signed-URL lifetime, and Live's
-  player moving to HLS. Renditions are F4.
+  live segments and its upload-lag metric, a materialized clip that references the source's chunks (chunk reference
+  counts, boundary-only re-encode), sprites and captions on it, queuing `object.pack` after the cut by itself, segment-bucket demand, and Live's player
+  moving to HLS. Renditions are F4.
 
 ## 4. Clips reuse the source
 
 - **Virtual clip** (default): `{source, start, end}` → a clipped manifest over the source's segments. No bytes copied.
+- **F3.5, shipped.** `POST /api/v1/:app/clips` over a VOD whose object has a source timeline (with `MEDIA_HLS_ENABLED`)
+  makes a **virtual** clip: no ffmpeg, ready at once (**201**, `clip.ready` as before), the row `status='ready'`,
+  `file_path` NULL, `storage_provider='timeline'` (the marker; no schema change), its object ready with no location
+  and its `clip_of` edge carrying the window (`start_time`/`end_time`, seconds; the end clamped to the timeline's).
+  `timeline.clipRows(rows, startMs, endMs)` writes it: the media segments intersecting the window plus the init
+  segment, `seq` renumbered 1..n, times clipped to the window; `key`/`local_path`/`durable_provider`/`packed_object_id`/
+  `byte_*` and the name stay the source's, so a segment serves from the source's bytes or a slice of its packed chunk.
+  A segment straddling an edge is served whole (the clip's edges are the source's segment boundaries). The clip's
+  `/o/<clip>/master.m3u8`, `source/index.m3u8` and `source/<name>` go through `hlsObject()` with the **clip's** own
+  visibility and signature (a playlist token over the clip's id, purpose `hls`, or its download signature); the
+  segment route resolves a name on the clip's own timeline, else only among `clipRows` of its source: **a clip's token
+  reaches the segments inside its window and nothing else** (the rest of the source is a 404, the source's routes
+  refuse it, a source token is never needed and opens nothing of the clip, `GET /o/:id` refuses it). A clip with a
+  timeline of its own uses it. A virtual clip's source must be the same tenant's ready object; a deleted source stops
+  it. `…/download?format=json` names its `hls_url` and never queues `object.cmaf` for it; `/c/:id` (public, the owner,
+  or a `getc` URL from `GET /clips/:id/signed-url`) answers a virtual clip with a 302 to its master playlist (signed
+  with the clip's playlist token when closed), a browser navigation too (no watch page for it yet); `playback_url` is
+  unchanged. Its object's metadata carries `virtual: true`: readiness counts it `bytes_verified`/`playable` without a
+  location of its own, and the verify job skips it. **Materialized** = today's `clip.cut` full
+  re-encode into the clip's own file: with `materialize: true` on `POST /clips` or `POST /clips/:id/recut`, or when
+  the source has no timeline (or the flag is off). A virtual clip keeps playing while it is materialized and stays
+  virtual if the cut fails; a clip with a file is never turned virtual (its recut stays a cut). The retry sweeper
+  recovers a failed, file-less clip the way a recut does: virtual when its source now has a timeline. Holds still inherit
+  through `clip_of`.
 - **Materialized clip** (shared externally, downloaded, edited, popular): middle GOPs are **referenced**, not copied
   (the new manifest points at the source's packed chunks); only the two boundary segments are re-encoded for
   frame-accurate cuts. Segments and chunks are content-addressed (sha256) with reference counts, so deleting a VOD
@@ -290,9 +326,11 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
   and per-class monthly R2 storage ceilings on its moves (F2.6, shipped), the move cleanup job and its alert after
   three failures (§6, shipped). Still open in F2: every class (not only native objects ↔ R2) through the one sweep.
 - **F3 segment-native video:** the timeline index and the CMAF/HLS source representation of finished video (F3.1,
-  shipped; §3), packing into ~60 s chunks (F3.3, shipped; §3); still open: live DVR from OpenRe (CMAF/HLS recording
-  with the growing playlist), virtual clips, sprites and captions on the timeline, MP4 fallback; Live's player moves to
-  HLS.
+  shipped; §3), packing into ~60 s chunks (F3.3, shipped; §3), the timeline queued at finalize (and lazily on
+  download), signed playlists outliving a download URL and the faststart MP4 fallback (F3.c, shipped; §3), virtual and
+  materialized clips (F3.5, shipped; §4); still open: live DVR from OpenRe (CMAF/HLS recording with the growing
+  playlist), materialized clips referencing the source's chunks, sprites and captions on the
+  timeline, segment-bucket demand; Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
   VODs, compute placement.
 - **F5 multi-CDN delivery:** Bunny path (B2 origin), R2 custom-domain path, OpenVibe edge first up to capacity, route

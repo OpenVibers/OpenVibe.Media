@@ -9,8 +9,13 @@
  *                                   cut and every re-cut run as a job, so they carry media.job.* events and a
  *                                   job id the UI can reattach to (GET /api/v2/:app/jobs/:id). The queue
  *                                   owns the retries (backoff 2, 10, 30 min; a hopeless source fails at once).
+ *   timelineWindow / makeVirtual    a clip over a source that has a CMAF timeline (F3.5) is virtual: no cut, no
+ *                                   file; ready at once (storage_provider 'timeline') and played as its window of
+ *                                   the source's segments. clip.cut is the materialized path (asked for, or no
+ *                                   timeline); materializing a virtual clip keeps it playing until the file is in.
  *   start()                         sweeper: every 3 min, failed clips that still have
- *                                   attempts left are re-cut. From the second attempt on, a
+ *                                   attempts left are re-cut (or turned virtual, as a recut is,
+ *                                   when the source now has a timeline). From the second attempt on, a
  *                                   VOD that lives in cloud storage is first pulled back to
  *                                   local disk (moveToHot) — cutting a multi-hour recording
  *                                   over HTTP is what used to time out — as long as there is
@@ -62,8 +67,9 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false } = {}) {
         return { ok: false, error: 'Source VOD no longer exists' };
     }
     const attempt = (Number(clip.cut_attempts) || 0) + 1;
-    // Row and object (back to uploading) together.
-    await objects().withObject('clip', clipId, async () => await db.run("UPDATE clips SET status = 'processing', cut_attempts = ?, cut_next_at = NULL WHERE id = ?", [attempt, clipId]));
+    // Row and object (back to uploading) together. A virtual clip being materialized stays ready and playing meanwhile.
+    if (isVirtual(clip)) await db.run('UPDATE clips SET cut_attempts = ?, cut_next_at = NULL WHERE id = ?', [attempt, clipId]);
+    else await objects().withObject('clip', clipId, async () => await db.run("UPDATE clips SET status = 'processing', cut_attempts = ?, cut_next_at = NULL WHERE id = ?", [attempt, clipId]));
 
     // Attempt 2+: bring a cloud-stored VOD home first when the disk can take it.
     let source = await vodStorage.resolveMediaSource(vod);
@@ -88,7 +94,8 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false } = {}) {
     // object and its event in one transaction (webhooks.announce), then the webhook.
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
     await announce(clip.app_id, 'clip.ready', {
-        change: async () => await objects().withObject('clip', clipId, async () => await db.run("UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?",
+        change: async () => await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL,
+            storage_provider = CASE WHEN storage_provider = 'timeline' THEN 'local' ELSE storage_provider END WHERE id = ?`,
             [cut.filePath, cut.duration, startTime + cut.duration, clipId])),
         payload: async () => await _clipPublic(await db.getClipById(clipId)),
     });
@@ -105,12 +112,63 @@ async function fail(clipId, clip, attempt, error, { viaJob = false } = {}) {
     const more = !viaJob && attempt < MAX_ATTEMPTS && !hopeless;
     const mins = BACKOFF_MIN[Math.min(attempt - 1, BACKOFF_MIN.length - 1)];
     const nextAt = more ? new Date(Date.now() + mins * 60000).toISOString().replace('T', ' ').slice(0, 19) : null;
+    // A virtual clip whose materialization failed still plays from the timeline: it keeps its status and says why.
+    if (isVirtual(clip)) {
+        await db.run('UPDATE clips SET cut_error = ?, cut_next_at = NULL WHERE id = ?', [msg, clipId]);
+        console.warn(`[Clips] Clip ${clipId} materialization attempt ${attempt} failed: ${msg} — it stays virtual`);
+        return { ok: false, error: msg, retry_at: null, hopeless };
+    }
     await announce(clip.app_id, 'clip.failed', {
         change: async () => await objects().withObject('clip', clipId, async () => await db.run("UPDATE clips SET status = 'failed', cut_error = ?, cut_next_at = ? WHERE id = ?", [msg, nextAt, clipId])),
         payload: async () => await _clipPublic(await db.getClipById(clipId)),
     });
     console.warn(`[Clips] Clip ${clipId} attempt ${attempt}/${MAX_ATTEMPTS} failed: ${msg}${viaJob ? (hopeless ? ' — giving up' : ' — the job retries') : more ? ` — retry in ${mins} min` : ' — giving up'}`);
     return { ok: false, error: msg, retry_at: nextAt, hopeless };
+}
+
+// ── Virtual clips (docs/media-fabric.md §4, F3.5) ────────────
+
+function isVirtual(clip) { return !!clip && !clip.file_path && clip.storage_provider === 'timeline' && clip.status === 'ready'; }
+
+/**
+ * The window [startTime, endTime) seconds over the source timeline of a VOD → { objectId, endTime } (endTime clamped to
+ * the timeline's end), or null: MEDIA_HLS_ENABLED off (nothing would play it), no ready object, no timeline yet, or no
+ * segment inside the window. Null means the clip is cut (clip.cut).
+ */
+async function timelineWindow(vod, startTime, endTime) {
+    if (!config.hls.enabled || !vod || !vod.object_id || vod.is_recording) return null;
+    const obj = await objects().getObject(vod.object_id);
+    if (!obj || obj.lifecycle_status !== 'ready') return null;
+    const timeline = require('../objects/timeline');
+    const rows = timeline.clipRows(await timeline.list(obj.id, timeline.SOURCE), Math.round(startTime * 1000), Math.round(endTime * 1000));
+    if (!rows.some((r) => Number(r.seq) > 0)) return null;
+    const last = rows[rows.length - 1];
+    return { objectId: obj.id, endTime: startTime + Number(last.end_ms) / 1000 };
+}
+
+/** Make a clip row virtual and ready (no ffmpeg): row, object and clip.ready event in one transaction, then the webhook. */
+async function makeVirtual(clipId, win) {
+    const clip = await db.getClipById(clipId);
+    if (!clip) return { ok: false, error: 'Clip not found' };
+    const startTime = Number(clip.start_time) || 0;
+    const endTime = Math.min(Number(clip.end_time) || 0, win.endTime);
+    await announce(clip.app_id, 'clip.ready', {
+        change: async () => await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET file_path = NULL, storage_provider = 'timeline',
+            duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?`, [endTime - startTime, endTime, clipId])),
+        payload: async () => await _clipPublic(await db.getClipById(clipId)),
+    });
+    console.log(`[Clips] Clip ${clipId} virtual over vod ${clip.vod_id}'s timeline (${startTime.toFixed(1)}-${endTime.toFixed(1)}s)`);
+    return { ok: true, duration_seconds: endTime - startTime };
+}
+
+/** A file-less clip over a source with a timeline → made virtual (true); otherwise false and it is cut. */
+async function retryVirtual(clipId) {
+    const clip = await db.getClipById(clipId);
+    if (!clip || clip.file_path || !clip.vod_id) return false;
+    const win = await timelineWindow(await db.getVodById(clip.vod_id), Number(clip.start_time) || 0, Number(clip.end_time) || 0);
+    if (!win) return false;
+    await makeVirtual(clipId, win);
+    return true;
 }
 
 async function sweep() {
@@ -122,7 +180,12 @@ async function sweep() {
             AND created_at >= datetime('now', '-30 days')
             AND NOT EXISTS (SELECT 1 FROM media_jobs j WHERE j.job_type = 'clip.cut' AND j.app_id = clips.app_id AND CAST(json_extract(j.params, '$.clip_id') AS INTEGER) = clips.id)
             ORDER BY created_at DESC LIMIT 4`, [MAX_ATTEMPTS]) || [];
-        for (const row of due) { try { await recutClip(row.id, { reason: 'auto-retry' }); } catch (e) { console.warn(`[Clips] auto-retry ${row.id}:`, e.message); } }
+        for (const row of due) {
+            try {
+                // The same recovery as POST /api/clips/:id/recut: a failed clip whose source now has a timeline turns virtual.
+                if (!(await retryVirtual(row.id))) await recutClip(row.id, { reason: 'auto-retry' });
+            } catch (e) { console.warn(`[Clips] auto-retry ${row.id}:`, e.message); }
+        }
     } finally { _busy = false; }
 }
 
@@ -181,4 +244,4 @@ const spec = {
     },
 };
 
-module.exports = { recutClip, sweep, start, enqueueCut, clipObjectId, spec, MAX_ATTEMPTS };
+module.exports = { recutClip, sweep, start, enqueueCut, clipObjectId, timelineWindow, makeVirtual, isVirtual, spec, MAX_ATTEMPTS };

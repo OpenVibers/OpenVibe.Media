@@ -157,6 +157,7 @@ async function runOnce({ batch = config.verify.batch, head = defaultHead, upload
         const n = Math.max(1, Number(batch) || 1);
         const objects = await db.all(`SELECT o.* FROM media_objects o LEFT JOIN media_verifications v ON v.object_id = o.id
                                 WHERE o.lifecycle_status = 'ready'
+                                  AND NOT (o.kind = 'clip' AND (CASE WHEN json_valid(o.metadata) THEN json_extract(o.metadata, '$.virtual') END) IS NOT NULL)
                                 ORDER BY (v.verified_at IS NOT NULL), v.verified_at, o.id LIMIT ?`, [n]);
         const budget = { left: Math.max(0, Number(maxReuploads) || 0) };
         for (const obj of objects) {

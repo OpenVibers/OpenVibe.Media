@@ -665,20 +665,60 @@ router.get('/:id/download', read, limits('media.object.download'), async (req, r
     if (!obj) return;
     if (obj.lifecycle_status === 'deleted') return problem(res, 410, 'media.object.deleted', 'Object was deleted');
     if (obj.lifecycle_status !== 'ready') return problem(res, 409, 'media.object.not_ready', `Object is ${obj.lifecycle_status}`);
-    const json = req.query.format === 'json';
     res.set('Cache-Control', cache.htmlHeaders({ private: true }));
+    if (req.query.format === 'mp4') return await downloadMp4(req, res, obj);
+    const json = req.query.format === 'json';
     // Developer-project sandbox objects are never public, whatever their visibility: always signed.
     // With segment-native video on (MEDIA_HLS_ENABLED) and a timeline made, the JSON answer also names the HLS master
-    // playlist: open for a public object, under the same signature as `url` for a private one.
-    const hls = json && config.hls.enabled && await require('./timeline').has(obj.id);
+    // playlist: open for a public object, signed as a playlist (purpose 'hls', MEDIA_HLS_PLAYLIST_TTL_S) for a private
+    // one. A media object without a timeline yet (a VOD older than F3.1) gets object.cmaf queued, and hls_url once it ran.
+    // A clip without its own timeline plays its window of the source's (F3.5) and is never cut a CMAF timeline here.
+    const tl = json && config.hls.enabled ? await timelineOf(obj) : null;
+    const hls = !!tl && tl.rows.some((r) => Number(r.seq) > 0);
+    if (tl && !hls && !tl.window) {
+        try { await require('./timeline-queue').queueCmaf(obj.app_id, obj.id); } catch (err) { console.warn(`[Objects] Timeline queue failed for ${obj.id}:`, err.message); }
+    }
     if (obj.visibility !== 'private' && !await db.isSandboxTenant(obj.app_id)) {
         const url = model.legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`;
         return json ? res.json({ url, expires_at: null, public: true, ...(hls && { hls_url: `${config.publicUrl}/o/${obj.id}/master.m3u8` }) }) : res.redirect(302, url);
     }
     const signed = signing.signedDownloadUrl(obj.id, req.query.ttl);
     if (['1', 'true'].includes(String(req.query.redirect || ''))) return res.redirect(302, signed.url);
-    res.json({ url: signed.url, expires_at: signed.expires_at, public: false, ...(hls && { hls_url: signed.url.replace('?', '/master.m3u8?') }) });
+    const playlist = hls && signing.signedPlaylistUrl(obj.id);
+    res.json({ url: signed.url, expires_at: signed.expires_at, public: false, ...(playlist && { hls_url: playlist.url, hls_expires_at: playlist.expires_at }) });
 });
+
+/**
+ * GET …/download?format=mp4: the object's faststart MP4 (its `remux` variant, object.remux) as a signed URL (JSON, or a
+ * 302 with ?redirect=1). Without the variant yet: object.remux is queued (joining one already queued or running) and
+ * the answer is 202 { job_id }; ask again once the job succeeded.
+ */
+async function downloadMp4(req, res, obj) {
+    if (!require('../jobs/derive').isMediaObject(obj)) return problem(res, 400, 'media.object.not_media', 'Only video and audio objects have an MP4 download');
+    const variant = await model.getVariant(obj.id, 'remux');
+    const mp4 = variant && await model.getObject(variant.derived_object_id);
+    if (mp4 && mp4.lifecycle_status === 'ready') {
+        const signed = signing.signedDownloadUrl(mp4.id, req.query.ttl);
+        if (['1', 'true'].includes(String(req.query.redirect || ''))) return res.redirect(302, signed.url);
+        return res.json({ url: signed.url, expires_at: signed.expires_at, public: false, object_id: mp4.id });
+    }
+    const queue = require('../jobs/queue');
+    try {
+        const r = await queue.enqueue({
+            appId: obj.app_id, type: 'object.remux', objectId: obj.id, params: {}, dedupeActive: true,
+            createdBy: 'system:download', ownerUserId: req.authType === 'user' ? req.userId : null,
+        });
+        if (r.created) require('../jobs/worker').kick();
+        res.status(202).json({ job_id: r.job.id });
+    } catch (err) {
+        if (!(err instanceof queue.JobError)) {
+            console.error('[Objects] MP4 remux queue error:', err.message);
+            return problem(res, 500, 'media.job.failed_request', 'Could not queue the MP4');
+        }
+        if (err.retryAfterS) res.set('Retry-After', String(err.retryAfterS));
+        problem(res, err.status || 400, err.code, err.message);
+    }
+}
 
 // ── Retention holds ──────────────────────────────────────────
 
@@ -736,12 +776,43 @@ const publicRouter = express.Router();
 // GET /o/:id/master.m3u8, /o/:id/source/index.m3u8 and /o/:id/source/{init.mp4,NNNNNN.m4s}: the playlists are written
 // from the object's media_timeline rows (objects/timeline.js), never read from files. Every one passes the same check
 // as GET /o/:id: public and unlisted objects openly, private and sandbox ones only with the object's valid ?exp&sig
-// (from /download), which a signed playlist carries onto each URI; deleted 410, not ready 404. Off, these paths 404.
+// (a playlist token from /download's hls_url, or a download signature), which a signed playlist carries onto each URI;
+// deleted 410, not ready 404. Off, these paths 404.
 // Like GET /o/:id, a private or sandbox answer carries no Access-Control-Allow-Origin; a public one may be read cross-origin.
 // A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
 const SEGMENT_NAME = /^(init\.mp4|\d{6,}\.m4s)$/;
 const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
+
+/**
+ * The window of a clip object over its source (F3.5): { sourceId, startMs, endMs } from its `clip_of` edge (metadata
+ * start_time/end_time in seconds), or null — not a clip, no edge, or a source that is not this tenant's ready object.
+ */
+async function clipWindow(obj) {
+    if (!obj || obj.kind !== 'clip') return null;
+    const rel = await db.get(`SELECT to_object_id, metadata FROM media_relationships WHERE from_object_id = ? AND relation = 'clip_of' ORDER BY id LIMIT 1`, [obj.id]);
+    if (!rel) return null;
+    const src = await model.getObject(rel.to_object_id);
+    if (!src || src.app_id !== obj.app_id || src.lifecycle_status !== 'ready') return null;
+    const md = model.parseJson(rel.metadata, {});
+    const startMs = Math.max(0, Math.round(Number(md.start_time) * 1000) || 0);
+    const endMs = Math.round(Number(md.end_time) * 1000) || 0;
+    return endMs > startMs ? { sourceId: src.id, startMs, endMs } : null;
+}
+
+/**
+ * The source rendition an object's playlists are written from: its own rows, or — a clip without its own timeline (a
+ * virtual clip, F3.5) — timeline.clipRows over its source's rows, cut to the clip's window. The window is the token's
+ * scope: a clip's signature (checked against the clip's own id) reaches only the names these rows carry.
+ */
+async function timelineOf(obj) {
+    const timeline = require('./timeline');
+    const own = await timeline.list(obj.id, timeline.SOURCE);
+    if (own.some((r) => Number(r.seq) > 0)) return { rows: own, window: null };
+    const window = await clipWindow(obj);
+    if (!window) return { rows: [], window: null };
+    return { rows: timeline.clipRows(await timeline.list(window.sourceId, timeline.SOURCE), window.startMs, window.endMs), window };
+}
 
 /** The object of an HLS request, or null when answered (or passed on to the 404 while the flag is off). */
 async function hlsObject(req, res, next) {
@@ -749,7 +820,8 @@ async function hlsObject(req, res, next) {
     if (require('../drill').refuseBytes(res)) return null;
     const obj = await model.getObject(String(req.params.id || ''));
     if (!obj) { res.status(404).json({ error: 'Not found' }); return null; }
-    const signed = !!req.query.sig && signing.verifyDownload(obj.id, req.query.exp, req.query.sig);
+    // A playlist token (purpose 'hls', from /download's hls_url) or, as before, the object's download signature.
+    const signed = !!req.query.sig && (signing.verifyPlaylist(obj.id, req.query.exp, req.query.sig) || signing.verifyDownload(obj.id, req.query.exp, req.query.sig));
     const closed = obj.visibility === 'private' || await db.isSandboxTenant(obj.app_id);
     if (closed && !signed) { res.status(404).json({ error: 'Not found' }); return null; }
     if (obj.lifecycle_status === 'deleted') { res.status(410).json({ error: 'Gone' }); return null; }
@@ -774,14 +846,14 @@ const hlsRoute = (fn) => async (req, res, next) => {
 
 publicRouter.get('/:id/master.m3u8', hlsRoute(async (req, res, { obj, query }) => {
     const timeline = require('./timeline');
-    const rows = await timeline.list(obj.id, timeline.SOURCE);
+    const { rows } = await timelineOf(obj);
     if (!rows.some((r) => Number(r.seq) > 0)) return res.status(404).json({ error: 'No timeline' });
     res.type(HLS_TYPE).send(timeline.masterPlaylist([{ name: timeline.SOURCE, rows }], { query }));
 }));
 
 publicRouter.get('/:id/source/index.m3u8', hlsRoute(async (req, res, { obj, query }) => {
     const timeline = require('./timeline');
-    const rows = await timeline.list(obj.id, timeline.SOURCE);
+    const { rows } = await timelineOf(obj);
     if (!rows.some((r) => Number(r.seq) > 0)) return res.status(404).json({ error: 'No timeline' });
     res.type(HLS_TYPE).send(timeline.mediaPlaylist(rows, { query }));
 }));
@@ -833,7 +905,10 @@ async function sendSlice(req, res, { file, url, offset, length, headers }) {
 publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, { obj, closed }) => {
     const timeline = require('./timeline');
     const name = String(req.params.name || '');
-    const row = SEGMENT_NAME.test(name) ? await timeline.byName(obj.id, timeline.SOURCE, name) : null;
+    let row = SEGMENT_NAME.test(name) ? await timeline.byName(obj.id, timeline.SOURCE, name) : null;
+    // A virtual clip serves only the source segments inside its window (timelineOf): any other name is a 404, whatever
+    // the signature, so a clip's token never reaches the rest of its source.
+    if (!row && SEGMENT_NAME.test(name) && obj.kind === 'clip') row = (await timelineOf(obj)).rows.find((r) => r.name === name) || null;
     if (!row) return res.status(404).json({ error: 'Not found' });
     const mime = Number(row.seq) === 0 ? 'video/mp4' : 'video/iso.segment';
     const headers = { 'Content-Type': mime, 'Cache-Control': closed ? 'private, no-store' : 'public, max-age=3600' };

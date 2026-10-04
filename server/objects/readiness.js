@@ -40,13 +40,20 @@ function isVerifiedCopy(obj, l) {
     return l.state === 'present' && !!l.verified_at && !(l.checksum && obj.content_hash && l.checksum !== obj.content_hash);
 }
 
+/** A ready clip object with no file of its own, played as a window of its source's timeline (model.js clipProjection). */
+function isVirtualClip(obj, md = metadataOf(obj)) {
+    return obj.kind === 'clip' && obj.lifecycle_status === 'ready' && !!md && md.virtual === true;
+}
+
 /** Readiness of one object row (null → nothing known). `locations` may be passed when already loaded. */
 async function compute(obj, locations = null) {
     if (!obj) return { metadata: false, bytes_verified: false, playable: false, hash_verified: false, verified_copies: [], reason: 'no_object' };
     const locs = locations || await db.all('SELECT provider, state, checksum, verified_at FROM media_locations WHERE object_id = ? ORDER BY id', [obj.id]);
     const md = metadataOf(obj);
     const verified = locs.filter(l => isVerifiedCopy(obj, l));
-    const bytesVerified = verified.length > 0;
+    // A virtual clip (F3.5) has no copy of its own: its bytes are its source's timeline segments, served under the
+    // source's rules, so a ready one counts as having its bytes.
+    const bytesVerified = verified.length > 0 || isVirtualClip(obj, md);
     let reason = null;
     if (obj.lifecycle_status === 'deleted') reason = 'deleted';
     else if (!md) reason = 'metadata_unreadable';
@@ -75,8 +82,9 @@ async function forRow(row) {
 function playableSql(ref) {
     return `EXISTS (SELECT 1 FROM media_objects ro WHERE ro.id = ${ref} AND ro.lifecycle_status = 'ready'
         AND ro.kind IN (${PLAYBACK_KINDS.map(k => `'${k}'`).join(', ')}) AND (CASE WHEN json_valid(ro.metadata) THEN json_type(ro.metadata) END) = 'object'
-        AND EXISTS (SELECT 1 FROM media_locations rl WHERE rl.object_id = ro.id AND rl.state = 'present' AND rl.verified_at IS NOT NULL
-                    AND (rl.checksum IS NULL OR ro.content_hash IS NULL OR rl.checksum = ro.content_hash)))`;
+        AND (EXISTS (SELECT 1 FROM media_locations rl WHERE rl.object_id = ro.id AND rl.state = 'present' AND rl.verified_at IS NOT NULL
+                    AND (rl.checksum IS NULL OR ro.content_hash IS NULL OR rl.checksum = ro.content_hash))
+             OR (ro.kind = 'clip' AND (CASE WHEN json_valid(ro.metadata) THEN json_extract(ro.metadata, '$.virtual') END) IS NOT NULL)))`;
 }
 
-module.exports = { compute, forRow, playableSql, isVerifiedCopy, PLAYBACK_KINDS, REASONS };
+module.exports = { compute, forRow, playableSql, isVerifiedCopy, isVirtualClip, PLAYBACK_KINDS, REASONS };

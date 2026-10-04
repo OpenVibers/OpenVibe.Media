@@ -333,7 +333,10 @@ function clipProjection(row) {
     const clipsDir = path.resolve(config.vod.clipsPath);
     const { locs, canonical } = tieredLocations(row, [row.file_path || null, row.file_path ? path.join(clipsDir, path.basename(row.file_path)) : null]);
     const status = row.status || 'ready';
-    const lifecycle = status === 'processing' ? 'uploading' : status === 'failed' ? 'failed' : (row.file_path ? 'ready' : 'failed');
+    // A virtual clip (storage_provider 'timeline', F3.5) has no file of its own: it plays its window of the source VOD's
+    // timeline (objects/routes.js timelineOf), so it is ready without one.
+    const virtual = !row.file_path && row.storage_provider === 'timeline';
+    const lifecycle = status === 'processing' ? 'uploading' : status === 'failed' ? 'failed' : (row.file_path || virtual ? 'ready' : 'failed');
     const local = locs.find(l => l.provider === 'local' && l.state === 'present');
     return {
         legacy_ref: legacyRef(row.app_id, 'clip', row.id), existingId: row.object_id,
@@ -342,7 +345,9 @@ function clipProjection(row) {
         mime_type: row.file_path ? mimeFor(row.file_path, 'video/webm') : null,
         size_bytes: local ? local.size_bytes : 0,
         metadata: { title: row.title || null, duration_seconds: Number(row.duration_seconds) || 0, start_time: row.start_time, end_time: row.end_time,
-            channel_user_id: row.channel_user_id || null, auto_generated: !!row.auto_generated },
+            channel_user_id: row.channel_user_id || null, auto_generated: !!row.auto_generated,
+            // Marks the clip virtual for readiness and the verify job; undefined drops the key once it is materialized.
+            virtual: virtual || undefined },
         created_at: row.created_at, locations: locs, canonical,
     };
 }
