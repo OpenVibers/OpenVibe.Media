@@ -40,6 +40,8 @@ function safeEqual(a, b) {
 
 function nowS() { return Math.floor(Date.now() / 1000); }
 
+const PLAYLIST_MAX_S = 12 * 3600;
+
 /** Short-lived GET URL for /o/:id. ttl is clamped to [30 s, 1 h]. */
 function signedDownloadUrl(objectId, ttlS = config.objects.signedUrlTtlS) {
     const exp = nowS() + Math.min(3600, Math.max(30, Number(ttlS) || config.objects.signedUrlTtlS));
@@ -53,6 +55,25 @@ function verifyDownload(objectId, exp, sig) {
     const e = Number(exp);
     if (!Number.isInteger(e) || e < nowS()) return false;
     return safeEqual(sig, mac('get', objectId, e));
+}
+
+/**
+ * Signed HLS master playlist of an object (/o/:id/master.m3u8), carried onto every playlist and segment URI under it.
+ * Its own purpose ('hls'): a viewer plays a long VOD on one page load, so it lives longer than a download URL
+ * (MEDIA_HLS_PLAYLIST_TTL_S, 60 s to 12 h), and only the HLS routes accept it — never GET /o/:id or any other route.
+ */
+function signedPlaylistUrl(objectId, ttlS = config.hls.playlistTtlS) {
+    const exp = nowS() + Math.min(PLAYLIST_MAX_S, Math.max(60, Number(ttlS) || config.hls.playlistTtlS));
+    return {
+        url: `${config.publicUrl}/o/${encodeURIComponent(objectId)}/master.m3u8?exp=${exp}&sig=${mac('hls', objectId, exp)}`,
+        expires_at: new Date(exp * 1000).toISOString(),
+    };
+}
+
+function verifyPlaylist(objectId, exp, sig) {
+    const e = Number(exp);
+    if (!Number.isInteger(e) || e < nowS() || e > nowS() + PLAYLIST_MAX_S + 60) return false;
+    return safeEqual(sig, mac('hls', objectId, e));
 }
 
 /**
@@ -159,6 +180,6 @@ function verifyMultipartToken(token, { tenant, objectId, uploadId, totalSize }) 
 }
 
 module.exports = {
-    signedDownloadUrl, verifyDownload, signedFileUrl, verifyFile, signedMediaUrl, verifyMedia,
+    signedDownloadUrl, verifyDownload, signedPlaylistUrl, verifyPlaylist, signedFileUrl, verifyFile, signedMediaUrl, verifyMedia,
     uploadToken, uploadTtl, checkUploadToken, verifyUploadToken, multipartToken, verifyMultipartToken,
 };
