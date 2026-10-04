@@ -256,12 +256,12 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
 
 ## 10. Build order
 
-- **F1 foundation (now):** provider registry + capability probes; `media.cost_tiers` + per-class budgets in a revisioned
+- **F1 foundation (shipped):** provider registry + capability probes; `media.cost_tiers` + per-class budgets in a revisioned
   `media.storage_policy` (retiring `media.storage_tier`/`media.object_tier`); the read router (EWMA latency, error
   circuit breaker, continuous health probe, fastest healthy copy) in `server/placement/`; presigned-URL LRU; two-phase
   moves with a cleanup job; per-class hysteresis bands; `media_storage_alerts_total`, provider latency histograms; the
   corrected price table; the nginx shield (slice + cache lock) on the Media host.
-- **F2 one placement engine:** every class through one sweep, value-per-dollar under budgets, dry-run + simulator,
+- **F2 one placement engine (shipped; close-out: Media PR #24):** every class through one sweep, value-per-dollar under budgets, dry-run + simulator,
   decision log with class and reason, the events above, Valkey rollups of demand (F2.4, shipped) and the sweep's
   eligibility on them with per-class hysteresis and a PostgreSQL fallback (F2.5, shipped), the provider-class gate
   and per-class monthly R2 storage ceilings on its moves (F2.6, shipped), the move cleanup job and its alert after
