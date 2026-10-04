@@ -12,10 +12,12 @@
  *            rows: { inserted, updated, unchanged, removed }, uploaded, master_path }
  *
  * Bytes: each segment lands on this node's disk (OBJECTS_PATH/.timeline/…); with B2 configured it is uploaded under
- * <object>/source/<name> and its row says `durable` once B2 confirms the size. Idempotent: a rerun makes the same
- * bytes (bitexact), leaves a row whose sha256 matches as it is, and uploads only what is not durable yet. The rows of
- * a rendition are written in one transaction after every segment is stored, so a half-finished run leaves no
- * timeline. An upload that fails leaves its row `local` and fails the attempt, so the retry finishes it.
+ * <object>/source/<version>/<name> (version = the sha's prefix) and its row says `durable` once B2 confirms the size.
+ * Idempotent: a rerun makes the same bytes (bitexact), reuses a row whose sha256 matches and its location as it is, and
+ * uploads only what is not durable yet. Two-phase: a re-cut writes beside the published segments and the rows commit in
+ * one transaction before the old bytes go, so playback never reads bytes that disagree with the playlist; a run that
+ * aborts or fails before the commit removes its staged files and keys. An upload that fails leaves its row `local` and
+ * fails the attempt, so the retry finishes it.
  * Refused: MEDIA_HLS_ENABLED off, a source that is not ready or not media (permanent), less free disk than the source
  * size plus MEDIA_UPLOAD_MIN_FREE_MB (retried later), a codec fMP4 cannot carry (permanent).
  */
@@ -113,54 +115,78 @@ async function run(job, ctx) {
         const rows = [];
         let uploaded = 0;
         const failed = [];
-        for (const f of files) {
+        // Bytes written before the new rows commit are staged: an abort or a failure before the commit removes them
+        // again, so a cancelled run leaves neither untracked keys nor files.
+        const stagedRemote = [];
+        const stagedLocal = [];
+        let committed = false;
+        try {
+            for (const f of files) {
+                aborted(ctx);
+                const tmp = path.join(out, f.file || f.name);
+                if (!derive.existing(tmp)) throw new JobError('ffmpeg_failed', `ffmpeg listed ${f.file || f.name} but did not write it`);
+                const size = fs.statSync(tmp).size;
+                const sha = await derive.sha256File(tmp);
+                const old = prev.get(f.seq);
+                const match = !!old && old.sha256 === sha;
+                // Content-addressed: the same bytes always land at the same versioned location, so a rerun rewrites
+                // nothing and a re-cut writes beside the old segment until the new rows are published.
+                const version = sha.slice(0, 12);
+                const dest = timeline.localPathFor(src, rendition, f.name, version);
+                const key = timeline.keyFor(src.id, rendition, f.name, version);
+                let localPath = dest;
+                let durable = match && old.durability === 'durable' ? old.durable_provider : null;
+                if (match && old.local_path && derive.existing(old.local_path)) {
+                    localPath = old.local_path;   // the previous copy is exactly these bytes: keep it and its location
+                } else {
+                    fs.mkdirSync(path.dirname(dest), { recursive: true });
+                    fs.renameSync(tmp, dest);
+                    stagedLocal.push(dest);
+                }
+                if (!durable && durableOn) {
+                    try {
+                        if (!vodStorage.providerAvailable(DURABLE)) throw new Error(`${DURABLE} is unavailable`);
+                        await vodStorage.uploadFile(DURABLE, key, localPath, f.seq === 0 ? 'video/mp4' : 'video/iso.segment', { signal: ctx.signal });
+                        stagedRemote.push({ provider: DURABLE, key });
+                        durable = DURABLE;
+                        uploaded++;
+                    } catch (err) {
+                        if (ctx.signal.aborted) throw ctx.signal.reason || err;   // a cancelled upload is not "not durable yet"
+                        failed.push(`${f.name}: ${err.message}`);
+                    }
+                }
+                rows.push({
+                    seq: f.seq, name: f.name, start_ms: f.start_ms, end_ms: f.end_ms, keyframe_ms: f.keyframe_ms, key, local_path: localPath,
+                    durable_provider: durable, packed_object_id: null, byte_offset: null, byte_length: size, sha256: sha,
+                    durability: durable ? 'durable' : 'local',
+                });
+            }
             aborted(ctx);
-            const tmp = path.join(out, f.file || f.name);
-            if (!derive.existing(tmp)) throw new JobError('ffmpeg_failed', `ffmpeg listed ${f.file || f.name} but did not write it`);
-            const size = fs.statSync(tmp).size;
-            const sha = await derive.sha256File(tmp);
-            const old = prev.get(f.seq);
-            const match = !!old && old.sha256 === sha;
-            const dest = timeline.localPathFor(src, rendition, f.name);
-            if (!(match && derive.existing(dest))) {
-                fs.mkdirSync(path.dirname(dest), { recursive: true });
-                fs.renameSync(tmp, dest);
+            const written = await timeline.replace(src.id, rendition, rows, { jobId: job.id });
+            committed = true;
+            // Phase two, only once the new rows are published: the bytes a previous cut named that this one does not.
+            // A deletion that fails leaves an orphan the storage report names, never bytes a live row still points at.
+            const named = new Set(rows.map((r) => `${r.key}\n${r.local_path || ''}`));
+            const stale = [...prev.values()].filter((old) => !named.has(`${old.key}\n${old.local_path || ''}`));
+            const { failed: stuck } = await timeline.deleteBytes(stale);
+            if (stuck.length) console.warn(`[Cmaf] ${job.id}: ${stuck.length} old segment(s) left behind (the storage orphan report names them), first ${stuck[0].provider}:${stuck[0].key}`);
+            if (failed.length) {
+                throw new JobError('upload_failed', `${failed.length} segment(s) not durable yet (${failed[0].slice(0, 200)}); a retry uploads only those`, { retryAfterS: 600 });
             }
-            const key = timeline.keyFor(src.id, rendition, f.name);
-            let durable = match && old.durability === 'durable' ? old.durable_provider : null;
-            if (!durable && durableOn) {
-                try {
-                    if (!vodStorage.providerAvailable(DURABLE)) throw new Error(`${DURABLE} is unavailable`);
-                    await vodStorage.uploadFile(DURABLE, key, dest, f.seq === 0 ? 'video/mp4' : 'video/iso.segment');
-                    durable = DURABLE;
-                    uploaded++;
-                } catch (err) { failed.push(`${f.name}: ${err.message}`); }
+            const segs = rows.filter((x) => x.seq > 0);
+            return {
+                source_id: src.id, rendition, segments: segs.length, duration_ms: segs[segs.length - 1].end_ms,
+                bytes: rows.reduce((a, x) => a + x.byte_length, 0),
+                durable: rows.filter((x) => x.durability === 'durable').length, local_only: rows.filter((x) => x.durability === 'local').length,
+                rows: written, uploaded, master_path: `/o/${src.id}/master.m3u8`, source_unchanged: true,
+            };
+        } catch (err) {
+            if (!committed) {
+                for (const k of stagedRemote) await vodStorage.deleteObject(k.provider, k.key).catch(() => { /* best effort */ });
+                for (const p of stagedLocal) { try { fs.unlinkSync(p); } catch { /* already gone */ } }
             }
-            rows.push({
-                seq: f.seq, name: f.name, start_ms: f.start_ms, end_ms: f.end_ms, keyframe_ms: f.keyframe_ms, key, local_path: dest,
-                durable_provider: durable, packed_object_id: null, byte_offset: null, byte_length: size, sha256: sha,
-                durability: durable ? 'durable' : 'local',
-            });
+            throw err;
         }
-        aborted(ctx);
-        // Segments past the new end (an older run cut the source differently) go with their rows.
-        const last = files[files.length - 1].seq;
-        for (const [seq, old] of prev) {
-            if (seq <= last) continue;
-            if (old.local_path && path.resolve(old.local_path).startsWith(timeline.localRoot() + path.sep)) { try { fs.unlinkSync(old.local_path); } catch { /* gone */ } }
-            if (old.durable_provider && vodStorage.providerConfigured(old.durable_provider)) await vodStorage.deleteObject(old.durable_provider, old.key).catch(() => {});
-        }
-        const written = await timeline.replace(src.id, rendition, rows, { jobId: job.id });
-        if (failed.length) {
-            throw new JobError('upload_failed', `${failed.length} segment(s) not durable yet (${failed[0].slice(0, 200)}); a retry uploads only those`, { retryAfterS: 600 });
-        }
-        const segs = rows.filter((x) => x.seq > 0);
-        return {
-            source_id: src.id, rendition, segments: segs.length, duration_ms: segs[segs.length - 1].end_ms,
-            bytes: rows.reduce((a, x) => a + x.byte_length, 0),
-            durable: rows.filter((x) => x.durability === 'durable').length, local_only: rows.filter((x) => x.durability === 'local').length,
-            rows: written, uploaded, master_path: `/o/${src.id}/master.m3u8`, source_unchanged: true,
-        };
     } finally {
         derive.cleanupWork(job.id);
     }

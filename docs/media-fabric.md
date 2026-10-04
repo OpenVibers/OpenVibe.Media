@@ -89,24 +89,28 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   HTTP ranges.
 - **F3.1, shipped: the timeline index and the source representation of finished video.** Migration
   `0002_media_timeline.sql` adds `media_timeline` (object, rendition, segment number `seq` — 0 is the init segment —,
-  `start_ms`/`end_ms` (contiguous, half-open), `keyframe_ms`, the segment's `key` `<object>/<rendition>/<name>`,
-  `local_path`, `durable_provider`, `packed_object_id` + `byte_offset`/`byte_length` (packing is F3.3; NULL until then),
+  `start_ms`/`end_ms` (contiguous, half-open), `keyframe_ms`, the segment's `key` `<object>/<rendition>/<version>/<name>`
+  (`version` = the sha prefix of the bytes, so a re-cut writes beside the old segment, never over it), `local_path`,
+  `durable_provider`, `packed_object_id` + `byte_offset`/`byte_length` (packing is F3.3; NULL until then),
   `sha256`, `durability` `local|durable`), keyed by (object, rendition, seq) for "segments in order" with an index on
   (object, rendition, start_ms) for "the segment at t". `server/objects/timeline.js` is the store (`segmentAt(objectId,
   rendition, tMs)`, `segments`, `replace`, `removeObject`, the playlist writers). The heavy-lane job **`object.cmaf`**
   (`server/jobs/cmaf.js`) stream-copies a ready vod/clip/video object (`ffmpeg -c copy -f hls -hls_segment_type fmp4`,
   `params.segment_seconds` 1–10, 4 by default, cut at the first source keyframe after it) into `init.mp4` +
-  `000001.m4s`…, stores each under `OBJECTS_PATH/.timeline/<app>/<object>/source/` and, with B2 configured, under the
-  key `<object>/source/<name>` on B2 (`durable` once B2 confirms the size), then writes all rows of the rendition in one
-  transaction. It never touches the source object; a rerun leaves rows whose sha256 matches as they are and uploads
-  only what is not durable yet; it honours the abort signal and the stream-copy budget and removes its work directory.
+  `000001.m4s`…, stores each under `OBJECTS_PATH/.timeline/<app>/<object>/source/<version>/` and, with B2 configured,
+  under the key `<object>/source/<version>/<name>` on B2 (`durable` once B2 confirms the size), then writes all rows of
+  the rendition in one transaction and only then deletes the previous cut's bytes. It never touches the source object; a
+  rerun reuses rows whose sha256 matches and their location as they are and uploads only what is not durable yet; it
+  honours the abort signal (which stops an upload in flight) and, before the rows commit, removes the files and keys it
+  staged; the stream-copy budget is honoured and its work directory removed.
   Behind **`MEDIA_HLS_ENABLED`** (off by default: the job is refused with `409 media.hls.disabled` and the routes 404),
   `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8` and `/o/:id/source/{init.mp4,NNNNNN.m4s}` serve the timeline
   under the same check as `GET /o/:id` (private and sandbox objects only with the object's `?exp&sig`, carried onto
   every URI of a signed playlist; deleted 410). The playlists are written from the rows (`#EXT-X-PLAYLIST-TYPE:VOD`,
   `#EXT-X-ENDLIST`, EXTINF = the row's duration, BANDWIDTH = peak segment bitrate); `GET …/download?format=json` adds
-  `hls_url` when a timeline exists. A purge, or a vod/clip deleted for good, removes the segments and rows; a held
-  object keeps them. Storage orphan reports count timeline files and keys as wanted.
+  `hls_url` when a timeline exists. A purge, or a vod/clip deleted for good, removes the segments and rows; a durable
+  copy that will not delete keeps its row so the next pass retries the key; a held object keeps them all. Storage orphan
+  reports count timeline files and keys as wanted.
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
   live segments and its upload-lag metric, packing into ~60 s chunks (F3.3), virtual and materialized clips over the
   timeline, sprites and captions on it, the faststart MP4 fallback as a derivative, segment-bucket demand, a finalize

@@ -60,7 +60,7 @@ const { spawn, spawnSync } = require('child_process');
         assert.ok(mp.includes('#EXT-X-TARGETDURATION:3\n') && mp.includes('#EXT-X-MAP:URI="init.mp4"') && mp.includes('#EXTINF:1.932,\n000003.m4s') && mp.trim().endsWith('#EXT-X-ENDLIST'), mp);
         assert.ok(timeline.masterPlaylist([{ name: 'source', rows: hand }]).includes('#EXT-X-STREAM-INF:BANDWIDTH=80000,AVERAGE-BANDWIDTH='), 'peak = 30000 B over 3 s');
         assert.deepStrictEqual(await timeline.replace('med_HAND', 'source', hand.slice(0, 2)), { inserted: 0, updated: 0, unchanged: 2, removed: 2 }, 'rows past a shorter end are dropped');
-        assert.strictEqual(await timeline.removeObject('med_HAND'), 2);
+        assert.deepStrictEqual(await timeline.removeObject('med_HAND'), { removed: 2, pending: 0 });
         if (!hasFfmpeg) { console.log('media timeline: skipped (ffmpeg not found)'); process.exit(0); }
 
         await new Promise((r) => stub.listen(0, '127.0.0.1', r));
@@ -131,7 +131,7 @@ const { spawn, spawnSync } = require('child_process');
             const bytes = fs.readFileSync(r.local_path);
             assert.strictEqual(sha(bytes), r.sha256, `${r.name} sha256`);
             assert.strictEqual(bytes.length, Number(r.byte_length));
-            assert.strictEqual(r.key, `${pub}/source/${r.name}`);
+            assert.strictEqual(r.key, `${pub}/source/${r.sha256.slice(0, 12)}/${r.name}`, 'the key is versioned by the sha');
             assert.strictEqual(r.durability, 'local');
             assert.ok(r.local_path.startsWith(path.join(path.resolve(process.env.OBJECTS_PATH), '.timeline', 'live', pub, 'source')));
         }

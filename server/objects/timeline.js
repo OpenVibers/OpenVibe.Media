@@ -5,9 +5,11 @@
  * "the bytes for 01:47:12.350" (segmentAt) and "the segments of a rendition in order" (segments) without
  * opening a file, and writes the playlists from the rows. Segment 0 of a rendition is its init segment.
  *
- * Bytes: <object>/<rendition>/<name> is the segment's key; a copy on this node's disk sits at
- * OBJECTS_PATH/.timeline/<app>/<object>/<rendition>/<name> (local_path), and a durable one under the same key on
- * durable_provider. The object.cmaf job (server/jobs/cmaf.js) writes the source rendition; the public routes
+ * Bytes: <object>/<rendition>/<version>/<name> is the segment's key, `version` the sha prefix of the bytes, so a re-cut
+ * writes beside the old one instead of over it; a copy on this node's disk sits at
+ * OBJECTS_PATH/.timeline/<app>/<object>/<rendition>/<version>/<name> (local_path), and a durable one under the same key
+ * on durable_provider. The name alone is the playlist URI, so a row carries the versioned location it serves from. The
+ * object.cmaf job (server/jobs/cmaf.js) writes the source rendition; the public routes
  * /o/:id/master.m3u8 and /o/:id/source/… (objects/routes.js) serve it behind MEDIA_HLS_ENABLED.
  */
 'use strict';
@@ -22,8 +24,11 @@ const INIT_NAME = 'init.mp4';
 const FIELDS = ['name', 'start_ms', 'end_ms', 'keyframe_ms', 'key', 'local_path', 'durable_provider', 'packed_object_id', 'byte_offset', 'byte_length', 'sha256', 'durability'];
 
 function localRoot() { return path.join(path.resolve(config.objects.path), '.timeline'); }
-function localPathFor(obj, rendition, name) { return path.join(localRoot(), obj.app_id, obj.id, rendition, name); }
-function keyFor(objectId, rendition, name) { return `${objectId}/${rendition}/${name}`; }
+/** `version` names the immutable set of bytes (the sha's prefix): a re-cut lands beside the old one instead of on it. */
+function localPathFor(obj, rendition, name, version = null) {
+    return path.join(localRoot(), obj.app_id, obj.id, rendition, ...(version ? [version] : []), name);
+}
+function keyFor(objectId, rendition, name, version = null) { return `${objectId}/${rendition}/${version ? `${version}/` : ''}${name}`; }
 function segmentName(seq) { return seq === 0 ? INIT_NAME : `${String(seq).padStart(6, '0')}.m4s`; }
 
 /** Every row of a rendition in order, the init segment (seq 0) first. */
@@ -82,29 +87,51 @@ async function replace(objectId, rendition, rows, { jobId = null } = {}) {
 }
 
 /**
- * The object's whole timeline is gone with its bytes (a purge, or a vod/clip deleted for good): local files, durable
- * copies (best effort), then the rows. Callers have already refused a held object. → rows removed.
+ * Delete the bytes a set of rows names: this node's copy (only inside the timeline root) and the durable copy. A remote
+ * delete that fails is returned, never swallowed: the caller keeps those rows, and their keys, so a later pass retries.
+ * → { failed: [{ row, provider, key, error }] }.
  */
-async function removeObject(objectId) {
-    if (!objectId) return 0;
-    const rows = await db.all('SELECT * FROM media_timeline WHERE object_id = ?', [objectId]);
-    if (!rows.length) return 0;
+async function deleteBytes(rows) {
     const root = localRoot() + path.sep;
     const vodStorage = require('../vod/vod-storage');
     const dirs = new Set();
+    const failed = [];
     for (const r of rows) {
         if (r.local_path && path.resolve(r.local_path).startsWith(root)) {
             try { fs.unlinkSync(r.local_path); } catch { /* already gone */ }
             dirs.add(path.dirname(r.local_path));
         }
         if (r.durable_provider && vodStorage.providerConfigured(r.durable_provider)) {
-            await vodStorage.deleteObject(r.durable_provider, r.key).catch((err) => console.warn(`[Timeline] ${r.durable_provider}:${r.key} not deleted: ${err.message}`));
+            const ok = await vodStorage.deleteObject(r.durable_provider, r.key);
+            if (!ok) failed.push({ row: r, provider: r.durable_provider, key: r.key, error: 'delete failed' });
         }
     }
     for (const d of dirs) {
         for (const p of [d, path.dirname(d)]) { try { fs.rmdirSync(p); } catch { /* not empty or gone */ } }
     }
-    return (await db.run('DELETE FROM media_timeline WHERE object_id = ?', [objectId])).changes || 0;
+    return { failed };
+}
+
+/**
+ * The object's whole timeline is gone with its bytes (a purge, or a vod/clip deleted for good): local files, then the
+ * durable copies. A row whose durable delete failed is kept — with its key — so a later pass can retry; dropping it
+ * would lose the only record of the bytes still in B2/R2. Callers have already refused a held object.
+ * → { removed, pending } (pending = rows kept for a retry).
+ */
+async function removeObject(objectId) {
+    if (!objectId) return { removed: 0, pending: 0 };
+    const rows = await db.all('SELECT * FROM media_timeline WHERE object_id = ?', [objectId]);
+    if (!rows.length) return { removed: 0, pending: 0 };
+    const { failed } = await deleteBytes(rows);
+    const stuck = new Set(failed.map((f) => `${f.row.rendition}\n${f.row.seq}`));
+    let removed = 0;
+    let pending = 0;
+    for (const r of rows) {
+        if (stuck.has(`${r.rendition}\n${r.seq}`)) { pending++; continue; }
+        removed += (await db.run('DELETE FROM media_timeline WHERE object_id = ? AND rendition = ? AND seq = ?', [objectId, r.rendition, r.seq])).changes || 0;
+    }
+    if (pending) console.warn(`[Timeline] ${objectId}: ${pending} segment row(s) kept — their durable copy could not be deleted`);
+    return { removed, pending };
 }
 
 // ── Playlists (from the rows, never from files) ──────────────
@@ -144,5 +171,5 @@ function masterPlaylist(renditions, { query = '' } = {}) {
 
 module.exports = {
     SOURCE, INIT_NAME, localRoot, localPathFor, keyFor, segmentName,
-    list, segments, byName, has, segmentAt, replace, removeObject, mediaPlaylist, masterPlaylist,
+    list, segments, byName, has, segmentAt, replace, deleteBytes, removeObject, mediaPlaylist, masterPlaylist,
 };
