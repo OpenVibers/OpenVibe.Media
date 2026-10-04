@@ -497,10 +497,16 @@ Every stored blob is a **media object** (`med_<ULID>`, `media_objects`) with one
 existing route and response is unchanged, and the old write paths keep the
 model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
 
-- **Backfill** — `backfill()` in `server/objects/backfill.js`: one object per
-  vod, clip, file, screenshot, avatar and thumbnail; idempotent; never moves
-  bytes or calls B2/R2 (remote copies stay `pending`). It is a module, not a
-  CLI: the service calls it itself with `onlyMissing: true` 15 s after boot.
+- **Backfill** — the row→object projection (`server/objects/backfill.js`), not a
+  CLI script: one object per vod, clip, file, screenshot, avatar and thumbnail;
+  idempotent; never moves bytes or calls B2/R2 (remote copies stay `pending`). The
+  service runs the only-missing form 15 s after boot, for rows with no `object_id`
+  yet, and stores its report in `media_settings.objects.backfill.last_report`
+  (also surfaced by `/me/ops`). To see whether any row still lacks an object — or
+  disagrees with the object on record — run the read-only drift report:
+  `node scripts/object-drift-report.js [--app live] [--limit 20] [--json]
+  [--out report.json]`. Zero drift across a release is the signal to drop the boot
+  backfill ([details](docs/object-model.md#backfill)).
 - **API** — `/api/v2/:app/objects`: init → `PUT /:id/content` (sha256, size,
   quota) → `/:id/complete`; `GET /:id`, cursor `GET /`, soft `DELETE /:id`
   (bytes kept `MEDIA_DELETE_RETENTION_DAYS`), `/:id/restore`, `/:id/download`
