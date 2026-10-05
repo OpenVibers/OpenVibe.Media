@@ -110,7 +110,7 @@ const ready = (async () => {
         // Loopback only. A Network service token holding media.avatar.ingest (audience openvibe.media);
         // a Bearer is judged on the token alone (401 bad, 403 no capability) and nothing else opens the
         // route (server/service-guard.js). The handler takes its storage (screenshots dir, slug minting)
-        // from server/pastes/storage.js itself — nothing from the paste router is passed in.
+        // from server/pastes/storage.js itself — a leaf, not a router.
         app.post('/internal/avatar-ingest', require('./service-guard').guard('media.avatar.ingest'),
             require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config }));
     }
@@ -201,7 +201,6 @@ const ready = (async () => {
     app.use('/api/v1/:app/views', require('./views/routes'));
     app.use('/api/v1/:app/vods', require('./vod/routes'));
     app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
-    app.use('/api/v1/:app/pastes', require('./pastes/routes'));
     app.use('/api/v1/:app/files', require('./files/routes'));
     app.use('/api/v1/:app/thumbnails', require('./thumbnails/routes'));
     app.use('/api/v1/:app/assets', require('./assets/routes'));

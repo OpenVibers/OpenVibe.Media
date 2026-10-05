@@ -7,7 +7,8 @@ OpenVibe.Live predecessor. Owns VOD ingest/recording, storage tiering
 (local → Backblaze B2 → Cloudflare R2), clips, generic files, the canonical
 object model and thumbnails, for all OpenVibe apps (`live`, `games`, `tools`,
 `network`, `community`) and developer projects. Pastes moved to OpenVibe.Community
-on 2026-09-22; Media's paste API is read-only and writes answer 410 ([Pastes](#pastes)).
+on 2026-09-22; Media's read-only paste API is gone (T10 step 2) and it serves only the
+frozen rows and old screenshots ([Pastes](#pastes)).
 
 Implements **Media API v1** from `../CONTRACTS.md`.
 
@@ -89,7 +90,7 @@ server/
   vod/vod-storage.js     local/B2/R2 tiering, presigned playback, sweep, CLI
   vod/health-scanner.js  probe/decode/master-recovery primitives
   vod/health-job.js      background health scan + quarantine cleanup + master sweep
-  pastes/routes.js       /api/v1/:app/pastes (read-only; writes answer 410 pastes.moved)
+  pastes/storage.js      screenshot dir + slug minting kept after the pastes API was retired
   files/routes.js        /api/v1/:app/files
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
@@ -160,7 +161,7 @@ Credential types on `/api/v1/:app/...`:
    constant time against the app's stored hash. A key is only valid for its
    own `:app` segment; presenting another app's key returns **403**.
 2. **Network user JWT** (browser endpoints only — chunks/complete, clips,
-   pastes, files, thumbnails) — RS256, verified **offline** against the JWKS
+   files, thumbnails) — RS256, verified **offline** against the JWKS
    public key fetched from `OV_NETWORK_URL/api/.well-known/jwks` at boot
    (cached, refreshed every 6 h). `aud` must include `openvibe.media` when
    present. If the request carries an `Origin` header it must be in the app's
@@ -193,7 +194,7 @@ namespaces are `app.<project_id>` (production) and `app.<project_id>.sandbox`, w
   named in a URL. Nothing is created unless the token's `project_id` is the path's project and the
   token holds the route's capability.
 - App tokens reach only these tenants and only the capability routes (files, objects v2 without
-  retention holds). VODs, clips, pastes, thumbnails, assets, stats and admin refuse them.
+  retention holds). VODs, clips, thumbnails, assets, stats and admin refuse them.
 - **Sandbox tokens** (`env: sandbox`) are accepted on these routes only; everywhere else they get
   `401 token.sandbox_refused`.
 - **Sandbox content is never public.** `/f/:key` and `/o/:id` answer 404 for it unless the URL
@@ -278,9 +279,10 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 
 ### Pastes
 
-**Read-only since the move:** OpenVibe.Community owns pastes (since
-2026-09-22). The paste API here answers reads only: every other method
-(POST, PUT, DELETE, …) answers 410 `{ "code": "pastes.moved" }` for every app.
+**The API is gone:** OpenVibe.Community owns pastes (since 2026-09-22) and Media's
+read-only paste app API was retired in T10 step 2 — `/api/v1/:app/pastes` is
+unmounted, so every method there answers 404. No paste is created, read, listed or
+deleted through Media any more.
 `PASTES_MOVED_TO=https://openvibe.community` turns `/p/:slug` and its text
 `/raw` into 301s to Community. Screenshot bytes are still served from here, and
 new screenshots are uploaded to the token-only `community` tenant.
@@ -288,15 +290,16 @@ Paste screenshot and avatar objects (`legacy:<app>:paste:<slug>`,
 `legacy:<app>:avatar:<slug>`) are frozen with them: their v1 route is gone and
 `DELETE /api/v2/:app/objects/:id` answers 409 `media.object.legacy_managed`, so
 Media has no API that deletes them.
-An unauthenticated write still answers 401 before the 410. `GET /pastes/config`
-reports the old limits for information only.
+
+`server/pastes/storage.js` stays as a leaf: the avatar ingest still mints slugs
+and writes screenshots into the same directory, and burn-after-read removes a
+screenshot's bytes (skipping a held row).
 
 | method | path | notes |
 |---|---|---|
-| GET | `/pastes?limit&offset&type&search&user_id` | public list |
-| GET | `/pastes/config` | paste limits (`maxSizeKb`, `cooldownSeconds`, `maxPerUserPerDay`, `todayCount`, …) |
-| GET | `/pastes/:slug` | full paste (private: owner/app only) |
-| GET | `/pastes/:slug/comments` | threaded comments |
+| GET | `/p/:slug` | 301 to OpenVibe.Community when `PASTES_MOVED_TO` is set; otherwise the old page |
+| GET | `/p/:slug/raw` | 301 to Community; image pastes 302 to their screenshot |
+| GET | `/p/:slug/screenshot` | frozen screenshot bytes (unknown/private slugs 301 to Community) |
 
 AI summary/tags columns remain for imported rows.
 
@@ -411,7 +414,7 @@ release now in production as the next N-1 (`npm run n-1:record [ref]`) and commi
 Express `trust proxy` is `loopback` (`server/client-ip.js`): `req.ip` is the `X-Forwarded-For` that the
 local nginx set when the request came through it, and the socket address for anyone else. A caller
 that reaches port 4100 directly cannot choose its IP by sending `X-Forwarded-For` or
-`CF-Connecting-IP` itself. View counting, paste limits and the live-frame rate limit read `req.ip`,
+`CF-Connecting-IP` itself. View counting and the live-frame rate limit read `req.ip`,
 never the headers (`test/trust-proxy.test.js`).
 
 ## Per-actor limits
@@ -477,7 +480,7 @@ Private items (and legacy rows with no visibility and `is_public = 0`) answer
 exactly like a missing id — the same 404 and body — unless the request bears the
 owning app's API key, optionally acting for the owner via `X-OV-User-Id`. That holds
 for the watch page, the bytes, `transcript.json`, the legacy `/api/thumbnails` redirect
-and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`, `/pastes/:slug`)
+and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`)
 apply it to an app acting for someone other than the owner. A call acting for a user writes
 only that user's VODs and clips (update, delete, ingest, chunks, finalize, re-cut, thumbnail):
 someone else's private one is the missing answer, anything else 403. The media index lists a

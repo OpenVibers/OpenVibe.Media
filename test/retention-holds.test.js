@@ -67,7 +67,6 @@ const http = require('http');
     app.use('/api/v1/:app/admin/storage', require('../server/admin/routes'));
     app.use('/api/v1/:app/vods', require('../server/vod/routes'));
     app.use('/api/v1/:app/clips', require('../server/vod/clips-routes'));
-    app.use('/api/v1/:app/pastes', require('../server/pastes/routes'));
     app.use('/api/v2/:app/objects', require('../server/objects/routes'));
 
     (async () => {
@@ -173,17 +172,17 @@ const http = require('http');
         assert.strictEqual(await vod(24), undefined, 'and still removes an unheld one');
         console.log('✅ finalize and the junk sweep settle held empty recordings instead of deleting them');
 
-        // ── A held screenshot paste: paste writes moved to OpenVibe.Community, so deletes answer 410 ──
+        // ── A held screenshot paste: the v1 paste API is retired (T10 step 2), so the hold is
+        //    enforced by the delete trigger alone — the row, its bytes and its object stay. ──
         const shot = await db.get("SELECT * FROM pastes WHERE slug = 'shot1'");
         await model.placeHold({ object_id: shot.object_id, kind: 'evidence', reason: 'x' });
-        r = await call('DELETE', '/api/v1/live/pastes/shot1');
-        assert.deepStrictEqual([r.status, r.body.code], [410, 'pastes.moved']);
-        r = await call('POST', '/api/v1/live/pastes/bulk', { slugs: ['shot1'], action: 'delete' });
-        assert.deepStrictEqual([r.status, r.body.code], [410, 'pastes.moved'], 'bulk delete is gone too');
+        await assert.rejects(async () => await db.run("DELETE FROM pastes WHERE slug = 'shot1'"), /retention hold/, 'row SQL is refused by the trigger');
+        const probe = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/live/pastes/shot1`, { method: 'DELETE', headers: { authorization: 'Bearer live-key' }, redirect: 'manual' });
+        assert.strictEqual(probe.status, 404, 'the paste API has no delete route any more');
         assert.ok(fs.existsSync(shot.screenshot_path) && await db.get("SELECT 1 AS x FROM pastes WHERE slug = 'shot1'"));
         const shotObj = await model.getObject(shot.object_id);
         assert.ok(shotObj && shotObj.lifecycle_status !== 'deleted', 'the paste keeps its object');
-        console.log('✅ a held screenshot paste: DELETE and bulk delete answer 410 pastes.moved; row, bytes and object stay');
+        console.log('✅ a held screenshot paste: the delete trigger refuses it; row, bytes and object stay');
 
         // ── Listing and release ──
         r = await call('GET', H);

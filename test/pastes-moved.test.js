@@ -1,6 +1,7 @@
 'use strict';
-// Pastes moved to OpenVibe.Community: paste writes always answer 410 pastes.moved and reads keep working.
-// With PASTES_MOVED_TO set, the paste page and its text 301 to Community; screenshot bytes are still served here.
+// Pastes moved to OpenVibe.Community: Media's read-only paste API is retired (T10 step 2), so
+// /api/v1/:app/pastes is unmounted and every method there answers 404. The public /p/:slug page
+// and its text still 301 to Community when PASTES_MOVED_TO is set, and screenshot bytes are served here.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -18,7 +19,6 @@ const express = require('express');
 
     const app = express();
     app.use(express.json());
-    app.use('/api/v1/:app/pastes', require('../server/pastes/routes'));
     app.use(require('../server/public/routes'));
     const server = http.createServer(app);
 
@@ -28,25 +28,21 @@ const express = require('express');
         const get = (p) => fetch(base + p, { redirect: 'manual' });
         const post = () => fetch(`${base}/api/v1/live/pastes`, { method: 'POST', headers: { authorization: 'Bearer live-key', 'content-type': 'application/json' }, body: JSON.stringify({ content: 'x' }) });
 
-        // Writes answer 410 for every app, with or without PASTES_MOVED_TO, and create nothing.
+        // The app API is gone: no method on /api/v1/:app/pastes is mounted, so a write has no route to
+        // answer 410 and creates nothing, and a read has no route either.
         const pasteCount = async () => (await db.get('SELECT COUNT(*) AS n FROM pastes')).n;
         const rows = await pasteCount();
         let r = await post();
-        assert.strictEqual(r.status, 410); assert.strictEqual((await r.json()).code, 'pastes.moved');
-        assert.strictEqual(await pasteCount(), rows, 'a refused write creates no paste');
-        // The caller is authenticated before the 410: an anonymous write answers 401, like the reads.
-        r = await fetch(`${base}/api/v1/live/pastes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content: 'x' }) });
-        assert.strictEqual(r.status, 401);
+        assert.strictEqual(r.status, 404, 'no paste-write route remains');
+        r = await fetch(`${base}/api/v1/live/pastes/text-1`, { headers: { authorization: 'Bearer live-key' } });
+        assert.strictEqual(r.status, 404, 'no paste-read route remains');
+        assert.strictEqual(await pasteCount(), rows, 'nothing creates a paste');
 
         // Before the redirect switch: the pages are served here.
         assert.strictEqual((await get('/p/text-1')).status, 200);
         assert.strictEqual(await (await get('/p/text-1/raw')).text(), 'hello');
 
         process.env.PASTES_MOVED_TO = 'https://openvibe.community/';
-        r = await post();
-        assert.strictEqual(r.status, 410); assert.strictEqual((await r.json()).code, 'pastes.moved');
-        r = await fetch(`${base}/api/v1/live/pastes/text-1`, { headers: { authorization: 'Bearer live-key' } });
-        assert.strictEqual(r.status, 200, 'reads still work');
         r = await get('/p/text-1');
         assert.strictEqual(r.status, 301); assert.strictEqual(r.headers.get('location'), 'https://openvibe.community/p/text-1');
         r = await get('/p/text-1/raw');
