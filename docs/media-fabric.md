@@ -136,6 +136,20 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   chunk's delete fails). All of it behind `MEDIA_HLS_ENABLED`; no schema change (F3.1's columns carry it). A finished
   `object.cmaf` queues it by itself (`objects/timeline-queue.js`; `dedupeActive`, so a rerun while a pack is active joins
   it and a later cut queues a new one), so packing follows the cut without an operator.
+- **F3.4, shipped: shared locations and reference counts (the foundation of materialized clips, §4).** A location names
+  bytes, not an owner: any number of `media_timeline` rows — of any number of objects (a source and the clips over it) —
+  may name one location, because a location is content-addressed and names the same bytes. **A location's bytes are
+  deleted exactly when no row names it.** The reference count is a query over the rows (`timeline.namedElsewhere`: the
+  rows of another object naming a durable `(durable_provider, key)` or a `local_path`), never a counter table, so a count
+  cannot drift from the rows; migration `0003_media_timeline_locations.sql` indexes both so the query is an index
+  lookup. `timeline.removeObject(objectId)`/`deleteBytes` keep a location another object's rows still name: deleting a
+  clip never deletes its source's bytes, deleting a source a clip still names keeps them (its rows go; the bytes are
+  deleted when the last naming object is removed), and only a delete that fails keeps rows for a retry, as before.
+  `object.pack` re-keys **every** row that names a packed segment's old location with the same sha256 — not only the
+  source's — to the chunk in the same transaction, so a clip follows its source into the chunk and the per-segment
+  location is then freed only once nothing names it; a row naming the old location with a different sha256 (which should
+  not happen) is left alone and keeps the location named. `object.cmaf` deletes an older cut's locations under the same
+  rule. No schema besides the two indexes; additive, an older release never reads it.
 - **F3.c, shipped: the timeline queued by itself, signed playlists, the MP4 fallback.** A recording's finalize queues
   `object.cmaf` for its object once it is ready (`server/objects/timeline-queue.js`; `dedupeActive` and the idempotency
   key `object.cmaf:<id>`, so a second finalize joins the same job; a queue error is logged, never fails the finalize),
@@ -157,9 +171,9 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   and metadata are the seek path's, so the player contract is unchanged. A source without a timeline, or with
   `MEDIA_HLS_ENABLED` off, keeps the one-fast-seek-per-frame path; captions stay with AI's `media.analyze`.
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
-  live segments and its upload-lag metric, a materialized clip that references the source's chunks (chunk reference
-  counts, boundary-only re-encode), captions on the timeline, segment-bucket demand, and Live's player
-  moving to HLS. Renditions are F4.
+  live segments and its upload-lag metric, a materialized clip that references the source's chunks (reference counts
+  shipped, F3.4; its own persisted rows and boundary-only re-encode are open), captions on the timeline,
+  segment-bucket demand, and Live's player moving to HLS. Renditions are F4.
 
 ## 4. Clips reuse the source
 
@@ -190,8 +204,13 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   through `clip_of`.
 - **Materialized clip** (shared externally, downloaded, edited, popular): middle GOPs are **referenced**, not copied
   (the new manifest points at the source's packed chunks); only the two boundary segments are re-encoded for
-  frame-accurate cuts. Segments and chunks are content-addressed (sha256) with reference counts, so deleting a VOD
-  that a clip still references keeps the referenced chunks (and holds still freeze everything).
+  frame-accurate cuts. Segments and chunks are content-addressed (sha256), so the reference count of a location is just
+  the rows that name it (F3.4, shipped: `timeline.namedElsewhere`, no counter table; migration 0003 indexes it) and
+  deleting a VOD that a clip still references keeps the referenced chunks — they go when the last naming object is
+  removed, and holds still freeze everything. The clip's own persisted rows over the source's locations are the next
+  step (§3, F3.4 carries the deletion rule). Inserting a clip's rows over a source's locations must check, in the same
+  transaction, that a source row still names each location (and take a per-location lock with the delete check), or a
+  concurrent delete can drop bytes the new clip names.
 
 ## 5. Derivatives are cost-managed computed caches
 

@@ -165,6 +165,10 @@ const { spawn, spawnSync } = require('child_process');
         const sto = await model.getObject(st.result.object_id);
         assert.strictEqual(model.parseJson(sto.metadata, {}).source_duration_seconds, 7, 'the seek metadata carries the real duration');
         assert.strictEqual(fs.readdirSync(path.join(process.env.OBJECTS_PATH, '.jobs')).length, 0, 'the work directory is removed');
+        // shorty's rows name pub's segment files (two objects, one location): dropping them keeps the bytes, which pub still names,
+        // and lets the purge below delete them, since after that no row of any object names them
+        await timeline.removeObject(shorty);
+        assert.ok(rows.every((r) => fs.existsSync(r.local_path)), 'pub still names its files after a sharing object is removed');
 
         // ── The finished cut queues object.pack by itself, once (the worker runs it; no provider yet, so it packs nothing) ──
         const packJobs = async (objectId) => (await queue.list('live', { type: 'object.pack', objectId })).jobs;
