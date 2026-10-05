@@ -63,7 +63,6 @@ const http = require('http');
     app.use(express.json());
     app.use('/api/v1/:app/vods', require('../server/vod/routes'));
     app.use('/api/v1/:app/clips', require('../server/vod/clips-routes'));
-    app.use('/api/v1/:app/pastes', require('../server/pastes/routes'));
     app.use('/o', require('../server/objects/routes').publicRouter);
     app.use('/', require('../server/public/routes'));
     const server = http.createServer(app);
@@ -182,9 +181,11 @@ const http = require('http');
 
         const views = async () => (await raw.prepare("SELECT views FROM pastes WHERE slug = 'priv-text'").get()).views;
         const before = await views();
-        await same(['/api/v1/live/pastes/priv-text', asUser(77)], ['/api/v1/live/pastes/no-such-slug', asUser(77)], 'acting non-owner: private paste looks missing');
+        // The read-only paste API is retired (T10 step 2): the v1 path is unmounted for everyone,
+        // so it cannot confirm a private paste exists either.
+        assert.strictEqual((await get('/api/v1/live/pastes/priv-text', asUser(5))).status, 404, 'the paste API is gone');
+        assert.strictEqual((await get('/api/v1/live/pastes/priv-text', asUser(77))).status, 404);
         assert.strictEqual(await views(), before, 'a refused read counts no view');
-        assert.strictEqual((await get('/api/v1/live/pastes/priv-text', asUser(5))).status, 200);
         console.log('✅ v1 detail: acting non-owners get the missing answer');
 
         server.close();

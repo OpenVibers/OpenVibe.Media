@@ -548,7 +548,7 @@ router.get('/p/:slug', optionalIdentity, async (req, res) => {
 
         // Burn-after-read: allow one non-owner read, then delete.
         if (paste.burn_after_read && !isOwner && paste.views > 1) {
-            await require('../pastes/routes').removePasteScreenshot(paste);
+            await require('../pastes/storage').removePasteScreenshot(paste);
             await db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
             return res.status(410).send('This paste has been burned after reading.');
         }

@@ -125,7 +125,7 @@ router.get('/', async (req, res) => {
         `, [req.appId]) || {};
         const clipStats = await db.get('SELECT COUNT(*) AS count FROM clips WHERE app_id = ?', [req.appId]) || {};
         // Paste rows are frozen (pastes moved to OpenVibe.Community, 2026-09-22) and
-        // the read-only paste API is being retired (T10 step 2); the count stays
+        // the read-only paste API was retired (T10 step 2); the count stays
         // while the table exists (it feeds /api/v2/me and operator stats).
         const pasteStats = await db.get(`
             SELECT COUNT(*) AS count,

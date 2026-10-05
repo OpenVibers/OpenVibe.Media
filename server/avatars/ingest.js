@@ -15,7 +15,8 @@
 //   • the bytes are decoded by sharp and re-encoded (512×512 WebP): metadata, scripts hidden in image
 //     containers and non-image payloads do not survive; a pixel-count limit stops decompression bombs
 // The result is stored as an unlisted "screenshot" paste owned by the account, so avatars live in the same
-// system as every other picture (deletable, reportable, served with range/caching by the paste routes).
+// system as every other picture (reportable, served with range/caching by the public /p/:slug/screenshot
+// route). The paste API was retired in T10 step 2, so Media has no route that deletes them.
 // ═══════════════════════════════════════════════════════════════
 const dns = require('dns').promises;
 const https = require('https');
@@ -34,7 +35,7 @@ const egress = require('openvibe-shared/egress');
 const isPublicAddress = (ip) => egress.isPublicAddress(ip);
 
 // Where avatars land and how their slug is minted: the paste storage module
-// (server/pastes/storage.js), not the paste router. The defaults keep the exact
+// (server/pastes/storage.js), a leaf with no router. The defaults keep the exact
 // persisted path and slug behavior; tests may inject their own.
 const pasteStorage = require('../pastes/storage');
 

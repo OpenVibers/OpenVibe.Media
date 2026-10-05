@@ -72,7 +72,6 @@ const sharp = require('sharp');
     app.use('/api/v1/:app/clips', require('../server/vod/clips-routes'));
     app.use('/api/v1/:app/files', require('../server/files/routes'));
     app.use('/api/v1/:app/thumbnails', require('../server/thumbnails/routes'));
-    app.use('/api/v1/:app/pastes', require('../server/pastes/routes'));
     const server = http.createServer(app);
 
     (async () => {
@@ -203,10 +202,10 @@ const sharp = require('sharp');
         assert.strictEqual((await call('DELETE', `/files/${encodeURIComponent(spare.body.key)}`)).status, 200);
         assert.strictEqual((await model.getObject(spareObj)).lifecycle_status, 'deleted');
 
-        // Paste writes moved to OpenVibe.Community: POST /pastes answers 410 and writes nothing.
+        // The read-only paste API is retired (T10 step 2): POST /pastes has no route and writes nothing.
         const pastesBefore = [await count('pastes'), await count('media_objects')];
         r = await call('POST', '/pastes', form('screenshot', png, 'image/png', 'shot.png', { title: 'Shot', visibility: 'unlisted' }));
-        assert.deepStrictEqual([r.status, r.body.code], [410, 'pastes.moved']);
+        assert.strictEqual(r.status, 404, 'no paste-write route remains');
         assert.deepStrictEqual([await count('pastes'), await count('media_objects')], pastesBefore, 'a refused paste write creates neither a row nor an object');
         // A screenshot paste row (imported before the move) still commits with its object.
         const slug = 'shot1';
