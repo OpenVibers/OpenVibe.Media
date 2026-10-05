@@ -96,6 +96,10 @@ const express = require('express');
         assert.strictEqual((await call('POST', `/api/v1/live/vods/${vodId}/chunks`, f)).body.status, 'created');
         const vodObj = (await finalizeVod(vodId)).object_id;
         const vodRow = await model.getObject(vodObj);
+        // Before the timeline exists: no hls_url, and the VOD answer queues object.cmaf (idempotent with the finalize's).
+        r = await call('GET', `/api/v1/live/vods/${vodId}`);
+        assert.ok(!('hls_url' in r.body), 'no hls_url before the timeline exists');
+        assert.strictEqual((await jobs('object.cmaf', `AND object_id = '${vodObj}'`)).length, 1, 'the VOD answer queues object.cmaf once');
         const bytes = {};
         const rows = src.map((s) => {
             const p = timeline.localPathFor(vodRow, 'source', s.name, 'v1');
@@ -108,6 +112,25 @@ const express = require('express');
             return { ...s, local_path: p, byte_length: s.packed_object_id ? 10 : bytes[s.name].length };
         });
         await timeline.replace(vodObj, 'source', rows);
+
+        // ── The v1 VOD names its HLS playlist: a playlist token (private) that plays through /o/<object>/master.m3u8 ──
+        r = await call('GET', `/api/v1/live/vods/${vodId}`);
+        assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+        const vhu = new URL(r.body.hls_url);
+        assert.strictEqual(vhu.pathname, `/o/${vodObj}/master.m3u8`, 'hls_url names the object\'s master playlist');
+        assert.ok(signing.verifyPlaylist(vodObj, vhu.searchParams.get('exp'), vhu.searchParams.get('sig')), 'a private VOD\'s hls_url carries a playlist token');
+        assert.ok(r.body.hls_expires_at, 'and its expiry');
+        assert.strictEqual((await get(r.body.hls_url)).status, 200, 'the VOD hls_url serves 200');
+        assert.strictEqual((await jobs('object.cmaf', `AND object_id = '${vodObj}'`)).length, 1, 'no extra object.cmaf once the timeline exists');
+        // An open VOD's hls_url stays unsigned; put it back for the clip paths below.
+        assert.strictEqual((await call('PUT', `/api/v1/live/vods/${vodId}`, { visibility: 'public' })).status, 200);
+        const vpub = await call('GET', `/api/v1/live/vods/${vodId}`);
+        assert.strictEqual(vpub.body.hls_url, `${config.publicUrl}/o/${vodObj}/master.m3u8`, 'a public VOD\'s hls_url is the plain master URL');
+        assert.ok(!('hls_expires_at' in vpub.body), 'and carries no expiry');
+        assert.strictEqual((await call('PUT', `/api/v1/live/vods/${vodId}`, { visibility: 'private' })).status, 200);
+        const vlist = await call('GET', '/api/v1/live/vods?limit=5&include_private=1');
+        assert.ok(vlist.body.vods.find((v) => v.id === vodId).hls_url, 'the VOD list carries hls_url too');
+        console.log('✅ GET /vods/:id: hls_url signed for a private VOD, plain for a public one, and it plays');
 
         // ── A clip over it is virtual: ready at once, no clip.cut ──
         r = await call('POST', '/api/v1/live/clips', { vod_id: vodId, start_s: 5, end_s: 11, visibility: 'private', title: 'Virtual' });
@@ -128,6 +151,18 @@ const express = require('express');
         assert.ok(!verified.objects.some((o) => o.object_id === clipObj), 'the verify job leaves a virtual clip alone');
         assert.ok(!(await db.get('SELECT 1 FROM media_verifications WHERE object_id = ?', [clipObj])), 'and reports no no_good_copy for it');
         console.log('✅ POST /clips over a timeline: ready at once (201), storage_provider timeline, playable, no clip.cut, not verified');
+
+        // ── The v1 clip names its playlist too: its own token, over its source window, serving 200 ──
+        r = await call('GET', `/api/v1/live/clips/${clipId}`);
+        assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+        const chu = new URL(r.body.hls_url);
+        assert.strictEqual(chu.pathname, `/o/${clipObj}/master.m3u8`, 'the clip\'s hls_url names its own master playlist');
+        assert.ok(signing.verifyPlaylist(clipObj, chu.searchParams.get('exp'), chu.searchParams.get('sig')), 'and carries the clip\'s playlist token');
+        assert.strictEqual((await get(r.body.hls_url)).status, 200, 'the clip hls_url serves 200');
+        assert.strictEqual((await jobs('object.cmaf', `AND object_id = '${clipObj}'`)).length, 0, 'a virtual clip is never queued object.cmaf');
+        const clist = await call('GET', `/api/v1/live/clips?vod_id=${vodId}&limit=5&include_private=1`);
+        assert.ok(clist.body.clips.find((c) => c.id === clipId).hls_url, 'the clip list carries hls_url too');
+        console.log('✅ GET /clips/:id: hls_url is the clip\'s playlist token over its source window, and it plays');
 
         // ── Its playlists: hlsObject() rules, the source's segments inside the window ──
         for (const p of ['master.m3u8', 'source/index.m3u8', 'source/init.mp4', 'source/000002.m4s']) assert.strictEqual((await get(`/o/${clipObj}/${p}`)).status, 404, `unsigned ${p}`);
@@ -217,6 +252,8 @@ const express = require('express');
         assert.strictEqual(r.status, 202, JSON.stringify(r.body));
         assert.strictEqual((await clipCuts(r.body.id)).length, 1, 'MEDIA_HLS_ENABLED off: clip.cut');
         assert.strictEqual((await get(`/o/${clipObj}/master.m3u8${tok}`)).status, 404, 'and the HLS routes are off');
+        assert.ok(!('hls_url' in (await call('GET', `/api/v1/live/vods/${vodId}`)).body), 'flag off: the VOD omits hls_url');
+        assert.ok(!('hls_url' in (await call('GET', `/api/v1/live/clips/${clipId}`)).body), 'flag off: the clip omits hls_url');
         config.hls.enabled = true;
         console.log('✅ MEDIA_HLS_ENABLED off: clips are cut as before');
 

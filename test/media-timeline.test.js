@@ -464,6 +464,14 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual((await get(`/o/${pub}/master.m3u8${signed.search}`)).status, 200, 'a public object needs no signature');
         assert.strictEqual((await call('GET', `/api/v2/live/objects/${pub}/download?format=json`)).body.hls_url, `${config.publicUrl}/o/${pub}/master.m3u8`);
 
+        // ── The shared discovery (objects/hls.js) the v1 VOD/clip shapes read answers exactly as /download does ──
+        const hls = require('../server/objects/hls');
+        assert.deepStrictEqual(await hls.discovery(pub), { hls_url: `${config.publicUrl}/o/${pub}/master.m3u8` }, 'an open object with a timeline: the plain master URL');
+        const privHls = new URL((await hls.discovery(priv)).hls_url);
+        assert.strictEqual(privHls.pathname, `/o/${priv}/master.m3u8`, 'a private object: the signed master URL');
+        assert.ok(privHls.searchParams.get('exp') && privHls.searchParams.get('sig'), 'with a playlist token');
+        assert.strictEqual(await hls.discovery('med_NOPE'), null, 'a missing object answers nothing');
+
         // ── MEDIA_HLS_ENABLED off: the routes 404, the job is refused, the download answer is as before ──
         config.hls.enabled = false;
         assert.strictEqual((await get(`/o/${pub}/master.m3u8`)).status, 404);

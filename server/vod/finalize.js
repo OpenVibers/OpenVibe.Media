@@ -78,6 +78,11 @@ async function vodPublic(vod, { readiness = false } = {}) {
         created_at: vod.created_at,
         meta: (() => { try { return JSON.parse(vod.meta_json || '{}'); } catch { return {}; } })(),
     };
+    // The HLS master playlist of the VOD's object, when it has one (objects/hls.js): the same field and access rules as
+    // GET /o/:id/download?format=json — unsigned for an open object, a signed playlist (+ hls_expires_at) for a private
+    // or sandbox one. Absent with MEDIA_HLS_ENABLED off, before the object is ready, and until its timeline exists
+    // (object.cmaf is queued for it, idempotently). Never throws.
+    Object.assign(out, await require('../objects/hls').discovery(vod.object_id) || {});
     if (readiness) out.readiness = await require('../objects/readiness').forRow(vod);
     return out;
 }

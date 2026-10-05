@@ -91,6 +91,12 @@ async function clipPublic(clip, { readiness = false } = {}) {
         view_count: clip.view_count || 0,
         created_at: clip.created_at,
     };
+    // The HLS master playlist of the clip's object, when it has one (objects/hls.js): the same field and access rules as
+    // GET /o/:id/download?format=json — unsigned for an open object, a signed playlist (+ hls_expires_at) for a private
+    // or sandbox one. Absent with MEDIA_HLS_ENABLED off, before the object is ready, and until its timeline (or, for a
+    // virtual clip, its source's window) has a segment; object.cmaf is queued for a materialized clip that has none.
+    // Never throws.
+    Object.assign(out, await require('../objects/hls').discovery(clip.object_id) || {});
     if (readiness) out.readiness = await require('../objects/readiness').forRow(clip);
     return out;
 }
