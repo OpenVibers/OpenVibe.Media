@@ -186,9 +186,10 @@ async function run(job, ctx) {
             // A deletion that fails leaves an orphan the storage report names, never bytes a live row still points at.
             const named = new Set(rows.map((r) => `${r.key}\n${r.local_path || ''}`));
             const stale = [...prev.values()].filter((old) => !named.has(`${old.key}\n${old.local_path || ''}`));
-            // A location another object's rows still name (a clip over the source) is kept: the old cut's rows go, the
-            // shared bytes stay, and the last naming object's removal deletes them.
-            const { failed: stuck, kept } = await timeline.deleteBytes(stale, { exceptObjectId: src.id });
+            // A location any row still names — another object's, or the source's own (another rendition/seq, or a
+            // different local_path with the same key) — is kept: the old cut's rows go, the shared bytes stay, and the
+            // last naming object's removal deletes them. `isNamed` counts every object, no exception.
+            const { failed: stuck, kept } = await timeline.deleteBytes(stale);
             if (stuck.length) console.warn(`[Cmaf] ${job.id}: ${stuck.length} old segment(s) left behind (the storage orphan report names them), first ${stuck[0].provider}:${stuck[0].key}`);
             if (kept.length) console.warn(`[Cmaf] ${job.id}: ${kept.length} old segment location(s) kept — another object's rows name them`);
             if (failed.length) {

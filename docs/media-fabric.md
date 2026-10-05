@@ -201,7 +201,9 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   the rows that name it (F3.4, shipped: `timeline.namedElsewhere`, no counter table; migration 0003 indexes it) and
   deleting a VOD that a clip still references keeps the referenced chunks — they go when the last naming object is
   removed, and holds still freeze everything. The clip's own persisted rows over the source's locations are the next
-  step (§3, F3.4 carries the deletion rule).
+  step (§3, F3.4 carries the deletion rule). Inserting a clip's rows over a source's locations must check, in the same
+  transaction, that a source row still names each location (and take a per-location lock with the delete check), or a
+  concurrent delete can drop bytes the new clip names.
 
 ## 5. Derivatives are cost-managed computed caches
 

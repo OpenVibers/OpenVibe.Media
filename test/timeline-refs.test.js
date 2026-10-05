@@ -28,15 +28,21 @@ const crypto = require('crypto');
         const vodStorage = require('../server/vod/vod-storage');
         const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 
-        // The durable providers, stubbed: bytes in a Map, every delete recorded, uploads kept.
+        // The durable providers, stubbed: bytes in a Map, uploads kept, and deletes recorded only when a key actually
+        // went (a delete of bytes already gone is a success, as S3's is — so a concurrent double delete records once).
         const blobs = new Map();
         const deletes = [];
+        const failDeletes = new Set();   // keys whose durable delete fails once (returns false), for the retry case
         Object.assign(vodStorage, {
             providerConfigured: (p) => ['b2', 'r2'].includes(p),
             providerAvailable: (p) => ['b2', 'r2'].includes(p),
             uploadFile: async (p, key, file) => { blobs.set(`${p}:${key}`, fs.readFileSync(file)); },
             sha256Object: async (p, key) => (blobs.has(`${p}:${key}`) ? { sha256: sha(blobs.get(`${p}:${key}`)), size: blobs.get(`${p}:${key}`).length } : null),
-            deleteObject: async (p, key) => { deletes.push(`${p}:${key}`); return blobs.delete(`${p}:${key}`); },
+            deleteObject: async (p, key) => {
+                if (failDeletes.has(`${p}:${key}`)) return false;
+                if (blobs.delete(`${p}:${key}`)) deletes.push(`${p}:${key}`);
+                return true;
+            },
             presignGet: async () => null,
         });
 
@@ -167,6 +173,56 @@ const crypto = require('crypto');
         assert.ok(fs.existsSync(pmA[1].local_path) && blobs.has(`b2:${pmA[1].key}`), 'so the old location it names is kept');
         assert.ok(pmA.slice(2).every((r) => !blobs.has(`b2:${r.key}`)), 'the other segments (no mismatched row) were freed');
         assert.ok(pmChunk.packed_object_id);
+
+        // ── Concurrent removal of two objects over one shared location: the last committer deletes it, no orphan ──
+        const ccA = await seedSource('cc-A');
+        for (const [i, r] of ccA.slice(1).entries()) await insert('cc-B', clipRow(r, i + 1));
+        deletes.length = 0;
+        const [ccRa, ccRb] = await Promise.all([timeline.removeObject('cc-A'), timeline.removeObject('cc-B')]);
+        assert.deepStrictEqual(ccRa, { removed: ccA.length, pending: 0 }, 'the source rows all went');
+        assert.deepStrictEqual(ccRb, { removed: ccA.length - 1, pending: 0 }, 'the clip rows all went');
+        assert.strictEqual((await timeline.list('cc-A')).length + (await timeline.list('cc-B')).length, 0, 'no row is left');
+        assert.ok(!await timeline.isNamed({ provider: 'b2', key: ccA[1].key }), 'no row names the shared location afterwards');
+        assert.ok(!blobs.has(`b2:${ccA[1].key}`), 'the shared bytes are gone, not orphaned');
+        assert.strictEqual(deletes.filter((d) => d === `b2:${ccA[1].key}`).length, 1, 'and they were deleted exactly once');
+        assert.ok(ccA.slice(1).every((r) => !fs.existsSync(r.local_path)), 'the shared local files are gone too');
+
+        // ── A pack whose source was re-cut must not commit on a clip's same-sha row alone ──
+        const rcA = await seedSource('rcut-A');
+        await insert('rcut-B', clipRow(rcA[1], 1));
+        const rcStale = await timeline.list('rcut-A');       // the rows the pack reads before the re-cut
+        // The re-cut: the source's own row now names different bytes (a new key and sha); the clip's row is unchanged.
+        await db.run(`UPDATE media_timeline SET key = ?, sha256 = ?, local_path = ? WHERE object_id = ? AND rendition = ? AND seq = ?`,
+            ['rcut-A/source/000001.m4s/v2', 'b'.repeat(64), timeline.localPathFor({ app_id: 'live', id: 'rcut-A' }, 'source', '000001.m4s', 'v2'), 'rcut-A', 'source', 1]);
+        const realList = timeline.list;
+        timeline.list = async (id, rendition) => (id === 'rcut-A' ? rcStale : realList.call(timeline, id, rendition));
+        let conflict = null;
+        try {
+            await pack.spec.run({ id: 'mjob_REFS3', app_id: 'live', object_id: 'rcut-A', params: { target_seconds: 60 } }, { signal: new AbortController().signal });
+        } catch (err) { conflict = err; } finally { timeline.list = realList; }
+        assert.ok(conflict && conflict.code === 'media.timeline.changed', `pack refused a re-cut source: ${conflict && conflict.message}`);
+        const rcNow = await timeline.list('rcut-A');
+        assert.strictEqual(rcNow[1].sha256, 'b'.repeat(64), 'the source row is still the re-cut one');
+        assert.strictEqual(rcNow[1].packed_object_id, null, 'and was not packed without the source');
+        assert.deepStrictEqual((await timeline.list('rcut-B')).map((r) => [r.key, r.sha256, r.packed_object_id]),
+            [[rcA[1].key, rcA[1].sha256, null]], 'the clip row is untouched');
+        assert.ok(await timeline.isNamed({ provider: 'b2', key: rcA[1].key }) && blobs.has(`b2:${rcA[1].key}`), 'the old location the clip names survives');
+
+        // ── A shared location whose durable delete fails is retried and deleted once unnamed ──
+        const rtA = await seedSource('rt-A');
+        for (const [i, r] of rtA.slice(1).entries()) await insert('rt-B', clipRow(r, i + 1));
+        assert.deepStrictEqual(await timeline.removeObject('rt-A'), { removed: rtA.length, pending: 0 }, 'the source goes; the bytes stay');
+        assert.ok(rtA.slice(1).every((r) => blobs.has(`b2:${r.key}`)), 'the shared locations survive while the clip names them');
+        failDeletes.add(`b2:${rtA[1].key}`);
+        assert.deepStrictEqual(await timeline.removeObject('rt-B'), { removed: 3, pending: 1 }, 'the failed delete leaves its row behind');
+        assert.deepStrictEqual((await timeline.list('rt-B')).map((r) => [Number(r.seq), r.key, r.durable_provider]),
+            [[1, rtA[1].key, 'b2']], 'the row survives with its key');
+        assert.ok(blobs.has(`b2:${rtA[1].key}`), 'the bytes are still there');
+        assert.ok(!blobs.has(`b2:${rtA[2].key}`), 'the other shared locations were deleted');
+        failDeletes.clear();
+        assert.deepStrictEqual(await timeline.removeObject('rt-B'), { removed: 1, pending: 0 }, 'the retry deletes it once unnamed');
+        assert.ok(!blobs.has(`b2:${rtA[1].key}`) && !fs.existsSync(rtA[1].local_path), 'the bytes are gone');
+        assert.strictEqual((await timeline.list('rt-B')).length, 0, 'and its row is dropped');
 
         console.log('timeline-refs: all checks passed');
         process.exit(0);

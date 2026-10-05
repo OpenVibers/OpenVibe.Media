@@ -118,12 +118,14 @@ async function replace(objectId, rendition, rows, { jobId = null, expect = null 
 
 /**
  * Delete the bytes a set of rows names: this node's copy (only inside the timeline root) and the durable copy. A remote
- * delete that fails is returned, never swallowed: the caller keeps those rows, and their keys, so a later pass retries.
- * A location any OTHER object's rows still name (`namedElsewhere`, `exceptObjectId` is the object being removed) is kept,
- * never deleted: it is shared (a source and the clips over it). → { failed: [{ row, provider, key, error }],
- * kept: [{ row, provider, key }] } (kept = intentionally not deleted; for a local location provider is 'local').
+ * delete that fails is returned, never swallowed: the caller keeps (or restores) those rows, and their keys, so a later
+ * pass retries. A location any row still names (`isNamed`, across EVERY object, the caller's own included) is kept,
+ * never deleted: it is shared (a source and the clips over it). Callers therefore delete the rows that named a location
+ * first, in one transaction, so the check sees the other objects' rows: concurrent removals of objects sharing a
+ * location converge on the last committer deleting it, and a double delete is idempotent. → { failed: [{ row, provider,
+ * key, error }], kept: [{ row, provider, key }] } (kept = intentionally not deleted; for a local location provider is 'local').
  */
-async function deleteBytes(rows, { exceptObjectId = null } = {}) {
+async function deleteBytes(rows) {
     const root = localRoot() + path.sep;
     const vodStorage = require('../vod/vod-storage');
     const dirs = new Set();
@@ -133,12 +135,12 @@ async function deleteBytes(rows, { exceptObjectId = null } = {}) {
     for (const r of rows) {
         if (r.local_path && path.resolve(r.local_path).startsWith(root) && !done.has(`local\n${r.local_path}`)) {
             done.add(`local\n${r.local_path}`);
-            if (await namedElsewhere({ localPath: r.local_path }, exceptObjectId)) kept.push({ row: r, provider: 'local', key: r.local_path });
+            if (await isNamed({ localPath: r.local_path })) kept.push({ row: r, provider: 'local', key: r.local_path });
             else { try { fs.unlinkSync(r.local_path); } catch { /* already gone */ } dirs.add(path.dirname(r.local_path)); }
         }
         if (r.durable_provider && vodStorage.providerConfigured(r.durable_provider) && !done.has(`${r.durable_provider}\n${r.key}`)) {
             done.add(`${r.durable_provider}\n${r.key}`);
-            if (await namedElsewhere({ provider: r.durable_provider, key: r.key }, exceptObjectId)) kept.push({ row: r, provider: r.durable_provider, key: r.key });
+            if (await isNamed({ provider: r.durable_provider, key: r.key })) kept.push({ row: r, provider: r.durable_provider, key: r.key });
             else {
                 const ok = await vodStorage.deleteObject(r.durable_provider, r.key);
                 if (!ok) failed.push({ row: r, provider: r.durable_provider, key: r.key, error: 'delete failed' });
@@ -155,8 +157,8 @@ async function deleteBytes(rows, { exceptObjectId = null } = {}) {
  * Whether any row of ANOTHER object names this location (a durable `provider` + `key`, or a local `localPath`), i.e.
  * whether its bytes are shared with an object other than `exceptObjectId`. That is the reference count's only question:
  * a location's bytes may be deleted exactly when this is false. Keys and paths are content-addressed, so two objects'
- * rows can name one location (a source and the clips over it). `exceptObjectId` is the object whose rows are being
- * removed; null counts every object (isNamed).
+ * rows can name one location (a source and the clips over it). `exceptObjectId`, when given, is an object whose own rows
+ * to ignore (a caller that has not deleted them yet); null counts every object (isNamed).
  */
 async function namedElsewhere({ provider = null, key = null, localPath = null }, exceptObjectId = null) {
     const skip = exceptObjectId ? ' AND object_id <> ?' : '';
@@ -172,27 +174,42 @@ async function namedElsewhere({ provider = null, key = null, localPath = null },
  */
 async function isNamed(loc) { return await namedElsewhere(loc, null); }
 
+/** Put a row back exactly as it was read, so a later pass retries a delete that failed (a packed chunk: every row). */
+async function reinsertRow(r) {
+    await db.run(`INSERT INTO media_timeline (object_id, rendition, seq, ${FIELDS.join(', ')}, job_id)
+                  VALUES (?, ?, ?, ${FIELDS.map(() => '?').join(', ')}, ?)
+                  ON CONFLICT (object_id, rendition, seq) DO UPDATE SET ${FIELDS.map((f) => `${f} = excluded.${f}`).join(', ')},
+                      job_id = excluded.job_id, updated_at = ov_now()`,
+    [r.object_id, r.rendition, r.seq, ...FIELDS.map((f) => r[f] ?? null), r.job_id ?? null]);
+}
+
 /**
- * The object's whole timeline is gone with its bytes (a purge, or a vod/clip deleted for good): local files, then the
- * durable copies. A location another object's rows still name is kept (deleteBytes with this object's id): the rows go,
- * the shared bytes stay, and they are deleted when the last naming object is removed. A row whose own durable delete
- * failed is kept — with its key — so a later pass can retry; dropping it would lose the only record of the bytes still
- * in B2/R2. Callers have already refused a held object. → { removed, pending } (pending = rows kept for a retry).
+ * The object's whole timeline is gone with its bytes (a purge, or a vod/clip deleted for good): row, then local files,
+ * then the durable copies. The rows go first, in one transaction, and the bytes are deleted only once `isNamed` — a
+ * check across ALL objects — sees no row naming a location; a location another object's rows still name is kept (its
+ * rows are already gone, the shared bytes stay, and they are deleted when the last naming object is removed). That is
+ * what makes concurrent removals converge: each remover deletes its rows before checking, so the last one to commit
+ * sees no naming row and deletes, and the loser's double delete is idempotent. A durable delete that failed gets its
+ * rows back — with their keys — so a later pass retries; dropping them would lose the only record of the bytes still in
+ * B2/R2. Callers have already refused a held object. → { removed, pending } (pending = rows restored for a retry).
  */
 async function removeObject(objectId) {
     if (!objectId) return { removed: 0, pending: 0 };
     const rows = await db.all('SELECT * FROM media_timeline WHERE object_id = ?', [objectId]);
     if (!rows.length) return { removed: 0, pending: 0 };
-    // Kept (shared) locations do not keep the rows: the row of a deleted object must go, and the next object to name
-    // the location takes over the bytes' deletion. Only a failed delete keeps its rows for a retry.
-    const { failed } = await deleteBytes(rows, { exceptObjectId: objectId });
-    // Every row naming a location whose delete failed is kept: for a packed chunk that is all the rows it holds.
-    const stuck = new Set(failed.map((f) => `${f.provider}\n${f.key}`));
+    // (a) The rows go first, in one transaction, before their bytes; the delete is not conditioned on what another
+    // object still names, so two concurrent removals of a shared location cannot each keep it and both drop their rows.
     let removed = 0;
+    await db.getDb().tx(async () => {
+        removed = (await db.run('DELETE FROM media_timeline WHERE object_id = ?', [objectId])).changes || 0;
+    });
+    // (b) After the commit, each location the rows named, deleted only when no row of ANY object names it.
+    const { failed } = await deleteBytes(rows);
+    // (c) Every row naming a location whose delete failed is restored: for a packed chunk that is all the rows it holds.
+    const stuck = new Set(failed.map((f) => `${f.provider}\n${f.key}`));
     let pending = 0;
     for (const r of rows) {
-        if (r.durable_provider && stuck.has(`${r.durable_provider}\n${r.key}`)) { pending++; continue; }
-        removed += (await db.run('DELETE FROM media_timeline WHERE object_id = ? AND rendition = ? AND seq = ?', [objectId, r.rendition, r.seq])).changes || 0;
+        if (r.durable_provider && stuck.has(`${r.durable_provider}\n${r.key}`)) { await reinsertRow(r); pending++; }
     }
     if (pending) console.warn(`[Timeline] ${objectId}: ${pending} segment row(s) kept — their durable copy could not be deleted`);
     return { removed, pending };
@@ -203,10 +220,12 @@ async function removeObject(objectId) {
  * durable_provider, packed_object_id, byte_offset }]; the location is the segment's old key (content-addressed, versioned
  * by its sha), and EVERY row of any object that names it with the same sha256 — the source's, and a clip's over it —
  * moves to the chunk in this same transaction, so a clip follows its source into the chunk. Each group changes only if
- * it still names the unpacked segment the packer read (same key and sha256, not packed): a re-cut in between makes the
- * whole commit roll back and false is returned, so the caller drops its chunk. A row naming the old location with a
- * different sha256 (which should not happen) does not match, is left alone, and so keeps the old location named (its
- * bytes are not deleted). Never deletes a row.
+ * it still names the unpacked segment the packer read (same key and sha256, not packed) AND at least one changed row is
+ * `objectId`'s own: a re-cut in between makes the whole commit roll back and false is returned, so the caller drops its
+ * chunk. Without that second condition a re-cut source row (new key/sha) would leave only a clip's same-sha row matching
+ * and the pack would commit while the source is not in the chunk. A row naming the old location with a different sha256
+ * (which should not happen) does not match, is left alone, and so keeps the old location named (its bytes are not
+ * deleted). Never deletes a row.
  */
 async function markPacked(objectId, updates, { jobId = null } = {}) {
     const CONFLICT = new Error('timeline changed');
@@ -221,10 +240,15 @@ async function markPacked(objectId, updates, { jobId = null } = {}) {
                 const names = u.row.local_path ? `(${loc} OR local_path = ?)` : loc;
                 const r = await db.run(`UPDATE media_timeline SET key = ?, local_path = ?, durable_provider = ?, durability = 'durable',
                                            packed_object_id = ?, byte_offset = ?, byte_length = ?, job_id = ?, updated_at = ov_now()
-                                        WHERE sha256 = ? AND packed_object_id IS NULL AND ${names}`,
+                                        WHERE sha256 = ? AND packed_object_id IS NULL AND ${names}
+                                        RETURNING object_id`,
                 [u.key, u.local_path, u.durable_provider, u.packed_object_id, u.byte_offset, u.row.byte_length, jobId,
                     u.row.sha256, ...at, ...(u.row.local_path ? [u.row.local_path] : [])]);
-                if (!r.changes) throw CONFLICT;
+                // The pack changes `objectId`'s OWN timeline: at least one re-keyed row must be its. A re-cut between
+                // the read and this commit leaves the source's row with a new key/sha; the same-sha match is then only
+                // some other object's row (a clip's), and committing would leave the source out of the chunk it names.
+                // Treat that as a conflict — nothing is written and the caller drops its chunk and retries.
+                if (!r.rows.some((row) => String(row.object_id) === String(objectId))) throw CONFLICT;
             }
         });
         return true;

@@ -182,10 +182,10 @@ async function run(job, ctx) {
                     try { fs.unlinkSync(tmp); } catch { /* moved or gone */ }
                 }
             }
-            // Phase two, after the commit: the per-segment copies the chunk now replaces. A location another object's
-            // rows still name (a clip over the source whose row did not follow the sha, which should not happen) is
-            // kept, not deleted — those bytes are shared.
-            const { failed, kept } = await timeline.deleteBytes(chunk, { exceptObjectId: src.id });
+            // Phase two, after the commit: the per-segment copies the chunk now replaces. A location any row still
+            // names — another object's, or the source's own if it somehow did not follow the sha — is kept, not
+            // deleted: `isNamed` counts every object, no exception.
+            const { failed, kept } = await timeline.deleteBytes(chunk);
             if (failed.length) console.warn(`[Pack] ${job.id}: ${failed.length} packed segment key(s) left behind (the storage orphan report names them), first ${failed[0].provider}:${failed[0].key}`);
             if (kept.length) console.warn(`[Pack] ${job.id}: ${kept.length} packed segment location(s) kept — another object's rows name them`);
             out.left_behind += failed.length;
