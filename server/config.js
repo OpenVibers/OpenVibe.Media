@@ -94,6 +94,10 @@ const config = {
         // On-demand renditions (docs/media-fabric.md §5/F4): the rendition.create job and the extra master-playlist
         // variants. Also needs `enabled`; off by default, so no new rendition is cut or queued (an existing one serves).
         renditions: ['1', 'true', 'on'].includes(String(process.env.MEDIA_RENDITIONS || '').toLowerCase()),
+        // Materialized clips (docs/materialized-clips.md/F3.6): with `enabled` and a source that has a source timeline,
+        // clip.cut copies the source's interior segments into the clip's own rows and re-encodes only the two window
+        // edges, instead of the full re-encode. Off by default: every clip is cut exactly as before.
+        materialized: ['1', 'true', 'on'].includes(String(process.env.MEDIA_MATERIALIZED_CLIPS || '').toLowerCase()),
     },
 
     jobs: {

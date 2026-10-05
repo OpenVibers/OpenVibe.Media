@@ -167,7 +167,19 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   answers the object's `remux` variant (`object.remux`,
   `-movflags +faststart` for an MP4 source; the container stays the source's) as a signed URL, or queues the remux
   (`dedupeActive`) and answers `202 { job_id }` while it is missing.
-- **F3.5, shipped: virtual and materialized clips over the timeline (§4).**
+- **F3.5, shipped: virtual clips over the timeline (§4).**
+- **F3.6, shipped (behind `MEDIA_HLS_ENABLED` + `MEDIA_MATERIALIZED_CLIPS`, off by default): materialized clips over
+  the source's bytes (§4, docs/materialized-clips.md).** A clip whose source has a timeline gets its own persisted
+  `media_timeline` rows: the interior segments are the source's rows (same location, packed chunk range and sha256,
+  renumbered and relative to the clip), only the two window edges are re-encoded (H.264/AAC fMP4) with their own init
+  rows (`init-head.mp4`/`init-tail.mp4`, negative seq), and the playlist switches init with `#EXT-X-DISCONTINUITY` +
+  `#EXT-X-MAP`. The rows are inserted in one transaction that locks the named source rows `FOR SHARE` and aborts with a
+  retryable JobError when one is gone or any location column moved (a pack), so a racing source delete either waits and
+  keeps the bytes or aborts the insert; the clip's projection keeps `virtual: true` and gains `materialized: true`, so
+  readiness, `playableSql` and the verify job treat it as a virtual clip; deleting the clip removes its rows and edge
+  bytes while every location the source still names stays; sprites decode each edge with its own init; a source without
+  a timeline (or the flag off) keeps the full re-encode, and `…/download?format=mp4` answers the playlist for a
+  timeline-only clip until `object.remux` gains a timeline input branch.
 - **F3.1 sprites, shipped: a sprite sheet from the timeline.** `object.sprite` (with `MEDIA_HLS_ENABLED`) cuts its
   frames from the object's `media_timeline` rows instead of seeking the source: each sample time picks the row covering
   it (`timeline.segmentAt`) and one frame is decoded from that row's bytes — this node's segment file, or a packed row's
@@ -176,10 +188,8 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   and metadata are the seek path's, so the player contract is unchanged. A source without a timeline, or with
   `MEDIA_HLS_ENABLED` off, keeps the one-fast-seek-per-frame path; captions stay with AI's `media.analyze`.
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
-  live segments and its upload-lag metric, a materialized clip that references the source's chunks (reference counts
-  shipped, F3.4; its own persisted rows and boundary-only re-encode are open: docs/materialized-clips.md), captions on
-  the timeline, and Live's player moving to HLS. Segment-bucket demand (F2.4) now records reads per timeline segment;
-  deciding placement per segment stays F5's. Renditions are F4.
+  live segments and its upload-lag metric, captions on the timeline, and Live's player moving to HLS. Segment-bucket
+  demand (F2.4) now records reads per timeline segment; deciding placement per segment stays F5's. Renditions are F4.
 
 ## 4. Clips reuse the source
 
@@ -203,22 +213,24 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   with the clip's playlist token when closed), a browser navigation too (no watch page for it yet); the clip answers
   (`GET /api/v1/:app/clips/:id` and the list/create/update shapes) carry its `hls_url` (the clip's own token when
   closed), and `playback_url` is unchanged. Its object's metadata carries `virtual: true`: readiness counts it
-  `bytes_verified`/`playable` without a location of its own, and the verify job skips it. **Materialized** = today's
-  `clip.cut` full
-  re-encode into the clip's own file: with `materialize: true` on `POST /clips` or `POST /clips/:id/recut`, or when
-  the source has no timeline (or the flag is off). A virtual clip keeps playing while it is materialized and stays
-  virtual if the cut fails; a clip with a file is never turned virtual (its recut stays a cut). The retry sweeper
+  `bytes_verified`/`playable` without a location of its own, and the verify job skips it. **Materialized** = a clip
+  that asked for it (`materialize: true` on `POST /clips` or `POST /clips/:id/recut`), or whose source has no timeline:
+  with `MEDIA_HLS_ENABLED` + `MEDIA_MATERIALIZED_CLIPS` on and a source timeline it gets its own persisted rows over
+  the source's segments — only the edges re-encoded (F3.6, docs/materialized-clips.md) — and otherwise it is
+  `clip.cut`'s full re-encode into the clip's own file. A virtual clip keeps playing while it is materialized and
+  stays virtual if the cut fails; a clip with a file is never turned virtual (its recut stays a cut). The retry sweeper
   recovers a failed, file-less clip the way a recut does: virtual when its source now has a timeline. Holds still inherit
   through `clip_of`.
-- **Materialized clip** (shared externally, downloaded, edited, popular): middle GOPs are **referenced**, not copied
-  (the new manifest points at the source's packed chunks); only the two boundary segments are re-encoded for
-  frame-accurate cuts. Segments and chunks are content-addressed (sha256), so the reference count of a location is just
-  the rows that name it (F3.4, shipped: `timeline.namedElsewhere`, no counter table; migration 0003 indexes it) and
-  deleting a VOD that a clip still references keeps the referenced chunks — they go when the last naming object is
-  removed, and holds still freeze everything. The clip's own persisted rows over the source's locations are the next
-  step (§3, F3.4 carries the deletion rule). Inserting a clip's rows over a source's locations must check, in the same
-  transaction, that a source row still names each location (and take a per-location lock with the delete check), or a
-  concurrent delete can drop bytes the new clip names.
+- **Materialized clip, shipped (F3.6; docs/materialized-clips.md)** (shared externally, downloaded, edited, popular):
+  middle GOPs are **referenced**, not copied (the clip's own persisted rows point at the source's locations, packed
+  chunk ranges included); only the two boundary segments are re-encoded for frame-accurate cuts. Segments and chunks
+  are content-addressed (sha256), so the reference count of a location is just the rows that name it (F3.4, shipped:
+  `timeline.namedElsewhere`, no counter table; migration 0003 indexes it) and deleting a VOD that a clip still
+  references keeps the referenced chunks — they go when the last naming object is removed, and holds still freeze
+  everything. The clip's rows are inserted in one transaction that locks the named source rows `FOR SHARE` and aborts
+  when one is gone or any location column moved (a pack), so a concurrent delete cannot drop bytes the new clip names.
+  The path is behind `MEDIA_MATERIALIZED_CLIPS` (off by default); a download still answers the playlist until
+  `object.remux` gains a timeline input branch.
 
 ## 5. Derivatives are cost-managed computed caches
 
@@ -395,10 +407,10 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
 - **F3 segment-native video:** the timeline index and the CMAF/HLS source representation of finished video (F3.1,
   shipped; §3), packing into ~60 s chunks (F3.3, shipped; §3), the timeline queued at finalize (and lazily on
   download), signed playlists outliving a download URL and the faststart MP4 fallback (F3.c, shipped; §3), virtual and
-  materialized clips (F3.5, shipped; §4) and sprite sheets cut from the timeline's rows (F3.1, shipped; §3); still
+  materialized clips (F3.5/F3.6, shipped; §4) and sprite sheets cut from the timeline's rows (F3.1, shipped; §3); still
   open: live DVR from OpenRe (CMAF/HLS recording with the growing
-  playlist), materialized clips referencing the source's chunks, captions on the
-  timeline (the demand rollups already record reads per timeline segment, F2.4); Live's player moves to HLS.
+  playlist), captions on the timeline (the demand rollups already record reads per timeline segment, F2.4); Live's
+  player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
   VODs, compute placement. (Slice 1 shipped: one on-demand 720p rung, queued by the master playlist / JSON download
   and cut into the timeline; the economics, AV1 and compute placement are still open.)

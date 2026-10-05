@@ -333,8 +333,11 @@ function clipProjection(row) {
     const clipsDir = path.resolve(config.vod.clipsPath);
     const { locs, canonical } = tieredLocations(row, [row.file_path || null, row.file_path ? path.join(clipsDir, path.basename(row.file_path)) : null]);
     const status = row.status || 'ready';
-    // A virtual clip (storage_provider 'timeline', F3.5) has no file of its own: it plays its window of the source VOD's
-    // timeline (objects/routes.js timelineOf), so it is ready without one.
+    // A clip with no file and storage_provider 'timeline' (F3.5) has no location of its own: a virtual clip plays its
+    // window of the source VOD's timeline, a materialized clip (F3.6) its own persisted rows. Both keep `virtual: true`
+    // — readiness, playableSql and the verify job read it as "no location of its own needed" — and a materialized
+    // clip's metadata also carries `materialized: true`, written by clip.cut's ready transition in the same
+    // transaction and preserved here by project()'s metadata merge (a clips row has no column to derive it from).
     const virtual = !row.file_path && row.storage_provider === 'timeline';
     const lifecycle = status === 'processing' ? 'uploading' : status === 'failed' ? 'failed' : (row.file_path || virtual ? 'ready' : 'failed');
     const local = locs.find(l => l.provider === 'local' && l.state === 'present');
@@ -346,7 +349,7 @@ function clipProjection(row) {
         size_bytes: local ? local.size_bytes : 0,
         metadata: { title: row.title || null, duration_seconds: Number(row.duration_seconds) || 0, start_time: row.start_time, end_time: row.end_time,
             channel_user_id: row.channel_user_id || null, auto_generated: !!row.auto_generated,
-            // Marks the clip virtual for readiness and the verify job; undefined drops the key once it is materialized.
+            // Marks the clip virtual for readiness and the verify job; undefined drops the key once it has a file.
             virtual: virtual || undefined },
         created_at: row.created_at, locations: locs, canonical,
     };

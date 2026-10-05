@@ -237,22 +237,37 @@ function sweepPieces(dir) {
 }
 
 /**
+ * The init row a media segment decodes with: the row its init_name names (a materialized clip's re-encoded edges have
+ * their own init), else the rendition's seq 0 init (a NULL init_name, every pre-F3.6 row). null = no init at all.
+ */
+function initRowFor(rows, row) {
+    const named = row && row.init_name ? rows.find((r) => Number(r.seq) <= 0 && r.name === row.init_name) : null;
+    return named || rows.find((r) => Number(r.seq) === 0) || null;
+}
+
+/**
  * The sheet from the timeline (F3.1): each sample time picks the row covering it (segmentAt) and one frame is
- * decoded from that row's bytes — init.mp4 + the segment as one small file, never the source, never a full-file
- * decode. Layout, metadata and the player contract are the seek path's.
+ * decoded from that row's bytes — its init segment + the segment as one small file, never the source, never a
+ * full-file decode. Layout, metadata and the player contract are the seek path's.
  */
 async function runTimelineSprite(job, ctx, src, p, rows, segs) {
-    const initRow = rows.find((r) => Number(r.seq) === 0) || null;
     // Pieces are deleted as the samples move past them, so only one or two are on disk at once.
-    const initLen = initRow ? Number(initRow.byte_length) || 0 : 0;
+    const maxInit = rows.filter((r) => Number(r.seq) <= 0).reduce((m, r) => Math.max(m, Number(r.byte_length) || 0), 0);
     const maxSeg = segs.reduce((m, r) => Math.max(m, Number(r.byte_length) || 0), 0);
-    await d.checkRoom(src, 2 * (maxSeg + initLen) + 4 * MB);
+    await d.checkRoom(src, 2 * (maxSeg + maxInit) + 4 * MB);
     const duration = await spriteDuration(src, segs);
     if (!(duration > 0)) throw new JobError('no_duration', 'The timeline has no duration to spread frames over', { permanent: true });
     const layout = spriteLayout(duration, p);
     const dir = d.workDir(job.id);
-    // The init segment is read once and prepended to every piece; a media segment alone is not playable.
-    const initBody = initRow ? await rowBuffer(initRow, ctx) : null;
+    // Each init segment is read once and prepended to the pieces that decode with it; a media segment alone is not
+    // playable. A materialized clip's edges name their own init (initRowFor), the interior uses the seq 0 init.
+    const initBodies = new Map();
+    const initBodyFor = async (row) => {
+        const init = initRowFor(rows, row);
+        if (!init) return null;
+        if (!initBodies.has(init.name)) initBodies.set(init.name, await rowBuffer(init, ctx));
+        return initBodies.get(init.name);
+    };
     const pieceFile = (seq) => path.join(dir, `seg-${String(seq).padStart(6, '0')}.mp4`);
     const dropPiece = (seq) => { if (seq != null) { try { fs.unlinkSync(pieceFile(seq)); } catch { /* already gone */ } } };
     sweepPieces(dir);   // pieces a previous attempt left behind are rebuilt from the rows as needed
@@ -264,6 +279,7 @@ async function runTimelineSprite(job, ctx, src, p, rows, segs) {
         let file = null;
         if (body) {
             file = pieceFile(seq);
+            const initBody = await initBodyFor(row);
             fs.writeFileSync(file, initBody && seq !== 0 ? Buffer.concat([initBody, body]) : body);
         }
         cache.set(seq, file);
@@ -330,5 +346,6 @@ module.exports = {
     waveform: { lane: 'heavy', maxAttempts: 3, timeoutMs: 3 * 3600 * 1000, needsObject: true, validate: validateWaveform, run: runWaveform },
     sprite: { lane: 'heavy', maxAttempts: 3, timeoutMs: 3 * 3600 * 1000, needsObject: true, validate: validateSprite, run: runSprite },
     spriteLayout,
+    initRowFor,  // tested directly: each segment decodes with its own init (materialized clips, F3.6)
     rowBuffer,   // tested directly: the durable ranged-GET guards
 };

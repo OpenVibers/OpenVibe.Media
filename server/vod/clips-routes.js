@@ -451,6 +451,13 @@ router.delete('/:id', tenantAuth({ verb: 'delete' }), async (req, res) => {
             require('./vod-storage').deleteVodObjects(clip).catch(err =>
                 console.warn(`[Clips] Remote object cleanup failed for clip ${clip.id}:`, err.message));
         }
+        // A timeline clip's own bytes are its media_timeline rows (F3.5/F3.6): remove them and the edge bytes they
+        // name. A location another object's rows still name — a materialized clip's interior, the source's segments —
+        // is kept (timeline.removeObject, F3.4), so deleting a clip never deletes its source's bytes.
+        if (clip.storage_provider === 'timeline' && clip.object_id) {
+            await require('../objects/timeline').removeObject(clip.object_id)
+                .catch(err => console.warn(`[Clips] Timeline cleanup failed for clip ${clip.id}:`, err.message));
+        }
 
         await db.run('DELETE FROM clips WHERE id = ?', [clip.id]);   // its object is marked deleted by the row-delete trigger, same statement
         res.json({ message: 'Clip deleted' });
