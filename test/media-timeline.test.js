@@ -154,6 +154,18 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(JSON.stringify([await model.getObject(pub), await model.listLocations(pub)]), before, 'the source is untouched');
         assert.strictEqual(fs.readdirSync(path.join(process.env.OBJECTS_PATH, '.jobs')).length, 0, 'the work directory is removed');
 
+        // ── A truncated timeline (an in-progress cut) must not shrink the sheet: the object's own 7 s duration
+        // lays it out, exactly as the seek path would, and the samples past the rows become black tiles ──
+        const shorty = await model.createObject({ app_id: 'live', owner_user_id: 5, visibility: 'private', lifecycle_status: 'ready', kind: 'file', mime_type: 'video/mp4', size_bytes: 1, metadata: { duration_seconds: 7 } });
+        await timeline.replace(shorty, 'source', rows.slice(0, 2));   // init + one 3 s segment: the timeline ends at 3 s
+        const st = await runJob(shorty, {}, 'object.sprite');
+        assert.strictEqual(st.status, 'succeeded', JSON.stringify(st.error));
+        assert.deepStrictEqual(st.result.sprite, require('../server/jobs/previews').spriteLayout(7, { frames: 100, columns: 10, tile_width: 160 }), 'the object duration, not the 3 s timeline end, lays the sheet out');
+        assert.deepStrictEqual([st.result.sprite.count, st.result.sprite.interval_seconds], [3, 2.333], 'same interval/count as the seek path over the 7 s source');
+        const sto = await model.getObject(st.result.object_id);
+        assert.strictEqual(model.parseJson(sto.metadata, {}).source_duration_seconds, 7, 'the seek metadata carries the real duration');
+        assert.strictEqual(fs.readdirSync(path.join(process.env.OBJECTS_PATH, '.jobs')).length, 0, 'the work directory is removed');
+
         // ── The finished cut queues object.pack by itself, once (the worker runs it; no provider yet, so it packs nothing) ──
         const packJobs = async (objectId) => (await queue.list('live', { type: 'object.pack', objectId })).jobs;
         const autoPack = await packJobs(pub);
@@ -330,6 +342,66 @@ const { spawn, spawnSync } = require('child_process');
         assert.deepStrictEqual([sr2.result.sprite.count, sr2.result.sprite.rows, sr2.result.sprite.columns], [3, 2, 2], 'the same layout from rows, with no source to seek');
         assert.strictEqual(size((await model.listLocations(sr2.result.object_id))[0].key), '192,108');
         fs.renameSync(`${pubFile}.away`, pubFile);
+
+        // ── The durable fallback and its guards. A packed row is a byte range of the chunk: with this node's
+        // chunk gone the frame must come from a 206 ranged GET of the durable copy. A 200 (Range ignored) or a
+        // wrong content-length is refused before the body is read; a sha mismatch is a black tile, not a failure ──
+        const previews = require('../server/jobs/previews');
+        assert.strictEqual(typeof previews.rowBuffer, 'function');
+        const durableRow = { durability: 'durable', durable_provider: 'b2', key: 'k', packed_object_id: 'chunk', byte_offset: 10, byte_length: 4, sha256: sha(Buffer.from('abcd')) };
+        const realFetch = global.fetch;
+        let cancelled = 0;
+        let read = 0;
+        global.fetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, body: { cancel: async () => { cancelled++; } }, arrayBuffer: async () => { read++; return Buffer.from('abcd'); } });
+        assert.strictEqual(await previews.rowBuffer(durableRow, {}), null, 'a 200 answer to a packed ranged GET is refused');
+        assert.deepStrictEqual([cancelled, read], [1, 0], 'refused without buffering the whole chunk');
+        cancelled = 0;
+        global.fetch = async () => ({ ok: true, status: 206, headers: { get: () => '999' }, body: { cancel: async () => { cancelled++; } }, arrayBuffer: async () => { read++; return Buffer.alloc(999); } });
+        assert.strictEqual(await previews.rowBuffer(durableRow, {}), null, 'a 206 of the wrong length is refused');
+        assert.deepStrictEqual([cancelled, read], [1, 0], 'refused before this one was read either');
+        global.fetch = async () => ({ ok: true, status: 206, headers: { get: () => '4' }, body: null, arrayBuffer: async () => Buffer.from('0000') });
+        assert.strictEqual(await previews.rowBuffer(durableRow, {}), null, 'a sha mismatch is a black tile, not a failure');
+        global.fetch = async () => ({ ok: true, status: 206, headers: { get: () => '4' }, body: null, arrayBuffer: async () => Buffer.from('abcd') });
+        assert.deepStrictEqual(await previews.rowBuffer(durableRow, {}), Buffer.from('abcd'), 'the verified range');
+        global.fetch = realFetch;
+
+        const tileBrightness = (file, i, layout) => {
+            const x = (i % layout.columns) * layout.tile_width;
+            const y = Math.floor(i / layout.columns) * layout.tile_height;
+            const r = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', `crop=${layout.tile_width}:${layout.tile_height}:${x}:${y},scale=1:1,format=gray`, '-f', 'rawvideo', '-'], { encoding: null, maxBuffer: 1 << 20 });
+            return r.stdout && r.stdout.length ? r.stdout[r.stdout.length - 1] : -1;
+        };
+        fs.renameSync(packed[1].local_path, `${packed[1].local_path}.sprite-away`);
+        const sd = await runJob(pub, { frames: 4, columns: 2, tile_width: 96 }, 'object.sprite');
+        assert.strictEqual(sd.status, 'succeeded', JSON.stringify(sd.error));
+        assert.deepStrictEqual([sd.result.sprite.count, sd.result.sprite.columns, sd.result.sprite.rows], [3, 2, 2], 'the durable ranges cut the same sheet');
+        const sdFile = (await model.listLocations(sd.result.object_id))[0].key;
+        assert.ok([0, 1, 2].every((i) => tileBrightness(sdFile, i, sd.result.sprite) > 30), 'real frames from the durable chunk');
+        // One durable range corrupted: its tile is black, the others still decode.
+        const cleanChunk = blobs.get(`b2:${chunkKey}`);
+        const corruptChunk = Buffer.from(cleanChunk);
+        corruptChunk.fill(0, Number(packed[1].byte_offset), Number(packed[1].byte_offset) + Number(packed[1].byte_length));
+        blobs.set(`b2:${chunkKey}`, corruptChunk);
+        const sc = await runJob(pub, { frames: 4, columns: 2, tile_width: 96 }, 'object.sprite');
+        assert.strictEqual(sc.status, 'succeeded', JSON.stringify(sc.error));
+        const scFile = (await model.listLocations(sc.result.object_id))[0].key;
+        assert.ok(tileBrightness(scFile, 0, sc.result.sprite) < 20, 'the sha-mismatched range is a black tile');
+        assert.ok(tileBrightness(scFile, 1, sc.result.sprite) > 30, 'the intact ranges still cut real frames');
+        blobs.set(`b2:${chunkKey}`, cleanChunk);
+        fs.renameSync(`${packed[1].local_path}.sprite-away`, packed[1].local_path);
+
+        // ── A failed run leaves no seg-*.mp4 behind, only the resumable frame checkpoints ──
+        {
+            const derive = require('../server/jobs/derive');
+            const acs = new AbortController();
+            acs.abort(new Error('sprite cancelled in test'));
+            const wdir = derive.workDir('mjob_SPRITEABORT');
+            fs.writeFileSync(path.join(wdir, 'f0000.jpg'), 'checkpoint');
+            await assert.rejects(previews.sprite.run({ id: 'mjob_SPRITEABORT', app_id: 'live', object_id: pub, params: {} }, { signal: acs.signal }), /sprite cancelled in test/);
+            assert.deepStrictEqual(fs.readdirSync(wdir).filter((n) => /^seg-.*\.mp4$/.test(n)), [], 'no sampled segment is left behind');
+            assert.ok(fs.existsSync(path.join(wdir, 'f0000.jpg')), 'the frame checkpoint survives for a retry');
+            derive.cleanupWork('mjob_SPRITEABORT');
+        }
 
         // A source with no timeline uses the old seek path (and writes no rows).
         const plainFile = path.join(process.env.VOD_PATH, 'plain.mp4');

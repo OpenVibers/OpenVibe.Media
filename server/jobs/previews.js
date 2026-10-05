@@ -195,11 +195,45 @@ async function rowBuffer(row, ctx) {
         const packed = !!row.packed_object_id;
         const headers = packed ? { range: `bytes=${Number(row.byte_offset)}-${Number(row.byte_offset) + length - 1}` } : {};
         const res = await fetch(url, { headers, signal: ctx.signal }).catch(() => null);
-        if (!res || !res.ok) return null;
+        if (!res) return null;
+        // A packed row is a byte range of the chunk: a server that ignores Range answers 200 with the whole
+        // (many MB) chunk. Refuse that without reading a byte, and never read past the length we asked for.
+        const refuse = () => {
+            try { const p = res.body && res.body.cancel ? res.body.cancel() : null; if (p && typeof p.catch === 'function') p.catch(() => { /* gone */ }); } catch { /* gone */ }
+            return null;
+        };
+        if (packed) {
+            if (res.status !== 206) return refuse();
+            if (Number(res.headers.get('content-length')) !== length) return refuse();
+        } else if (!res.ok) return refuse();
         const b = Buffer.from(await res.arrayBuffer());
         if (b.length === length && crypto.createHash('sha256').update(b).digest('hex') === row.sha256) return b;
     }
     return null;
+}
+
+/**
+ * The layout duration for a timeline sprite: the object's own duration (the seek path's metadata first, then its
+ * probe), never the timeline end unless neither is known. A truncated or in-progress cut must not shrink the sheet
+ * or its seek metadata; sample times past the timeline end already fall back to black tiles.
+ */
+async function spriteDuration(src, segs) {
+    const md = require('../objects/model').parseJson(src.metadata, {});
+    const known = Number(md.duration_seconds) || 0;
+    if (known > 0) return known;
+    const source = await d.resolveSource(src).catch(() => null);
+    if (source) {
+        const meta = await streamsOf(source.input).catch(() => ({ duration: 0 }));
+        if (Number(meta.duration) > 0) return Number(meta.duration);
+    }
+    return Number(segs[segs.length - 1].end_ms) / 1000;
+}
+
+/** Remove the sampled pieces of a failed run; the frame checkpoints (f*.jpg) stay, so a retry resumes. */
+function sweepPieces(dir) {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return; }
+    for (const n of names) if (/^seg-\d+\.mp4$/.test(n)) { try { fs.unlinkSync(path.join(dir, n)); } catch { /* gone */ } }
 }
 
 /**
@@ -208,64 +242,78 @@ async function rowBuffer(row, ctx) {
  * decode. Layout, metadata and the player contract are the seek path's.
  */
 async function runTimelineSprite(job, ctx, src, p, rows, segs) {
-    await d.checkRoom(src, 16 * MB);
-    const duration = Number(segs[segs.length - 1].end_ms) / 1000;
+    const initRow = rows.find((r) => Number(r.seq) === 0) || null;
+    // Pieces are deleted as the samples move past them, so only one or two are on disk at once.
+    const initLen = initRow ? Number(initRow.byte_length) || 0 : 0;
+    const maxSeg = segs.reduce((m, r) => Math.max(m, Number(r.byte_length) || 0), 0);
+    await d.checkRoom(src, 2 * (maxSeg + initLen) + 4 * MB);
+    const duration = await spriteDuration(src, segs);
     if (!(duration > 0)) throw new JobError('no_duration', 'The timeline has no duration to spread frames over', { permanent: true });
     const layout = spriteLayout(duration, p);
     const dir = d.workDir(job.id);
-    const initRow = rows.find((r) => Number(r.seq) === 0) || null;
+    // The init segment is read once and prepended to every piece; a media segment alone is not playable.
+    const initBody = initRow ? await rowBuffer(initRow, ctx) : null;
+    const pieceFile = (seq) => path.join(dir, `seg-${String(seq).padStart(6, '0')}.mp4`);
+    const dropPiece = (seq) => { if (seq != null) { try { fs.unlinkSync(pieceFile(seq)); } catch { /* already gone */ } } };
+    sweepPieces(dir);   // pieces a previous attempt left behind are rebuilt from the rows as needed
     const cache = new Map();
-    // One small playable file per row: the init segment then the row's bytes. fMP4 media segments need the init
-    // prepended, and decoding one GOP is what keeps this off the source.
     const piece = async (row) => {
         const seq = Number(row.seq);
         if (cache.has(seq)) return cache.get(seq);
         const body = await rowBuffer(row, ctx);
         let file = null;
         if (body) {
-            const head = initRow && seq !== 0 ? await rowBuffer(initRow, ctx) : null;
-            file = path.join(dir, `seg-${String(seq).padStart(6, '0')}.mp4`);
-            fs.writeFileSync(file, head ? Buffer.concat([head, body]) : body);
+            file = pieceFile(seq);
+            fs.writeFileSync(file, initBody && seq !== 0 ? Buffer.concat([initBody, body]) : body);
         }
         cache.set(seq, file);
         return file;
     };
-    // An audio-only source has a timeline but no frame to cut: permanent, like the seek path's `no_video`.
-    const first = await piece(segs[0]);
-    if (first) {
-        const info = await require('../vod/media-tools').probeVodInfo(first);
-        if (info.streams.length && !info.streams.some((s) => s.codec_type === 'video')) {
-            d.cleanupWork(job.id);
-            throw new JobError('no_video', 'The source has no video track', { permanent: true });
-        }
-    }
     const tile = tileFilter(layout);
     let decoded = 0;
-    for (let i = 0; i < layout.count; i++) {
-        if (ctx.signal.aborted) throw ctx.signal.reason || new Error('aborted');
-        const frame = path.join(dir, `f${String(i).padStart(4, '0')}.jpg`);
-        if (d.existing(frame)) { decoded++; continue; }
-        const at = Math.min(duration - 0.1, i * layout.interval_seconds + layout.interval_seconds / 2);
-        const row = await timeline.segmentAt(src.id, timeline.SOURCE, Math.max(0, at) * 1000);
-        let ok = false;
-        if (row) {
-            const file = await piece(row);
-            if (file) {
-                // Seek is relative to the segment's own start (ffmpeg shifts the fMP4 segment's tfdt to 0 with the init).
-                const rel = Math.max(0, at - Number(row.start_ms) / 1000);
-                const r = await d.ffmpeg(['-y', '-nostdin', '-v', 'error', ...(rel > 0 ? ['-ss', rel.toFixed(3)] : []), '-i', file,
-                    '-frames:v', '1', '-vf', tile, '-q:v', '5', frame], { signal: ctx.signal, timeoutMs: 5 * 60 * 1000 });
-                ok = r.ok && d.existing(frame);
+    let lastSeq = null;
+    try {
+        // An audio-only source has a timeline but no frame to cut: permanent, like the seek path's `no_video`.
+        const first = await piece(segs[0]);
+        if (first) {
+            const info = await require('../vod/media-tools').probeVodInfo(first);
+            if (info.streams.length && !info.streams.some((s) => s.codec_type === 'video')) {
+                d.cleanupWork(job.id);
+                throw new JobError('no_video', 'The source has no video track', { permanent: true });
             }
         }
-        if (ok) decoded++;
-        else await blackTile(frame, layout, ctx);
+        for (let i = 0; i < layout.count; i++) {
+            if (ctx.signal.aborted) throw ctx.signal.reason || new Error('aborted');
+            const frame = path.join(dir, `f${String(i).padStart(4, '0')}.jpg`);
+            if (d.existing(frame)) { decoded++; continue; }
+            const at = Math.min(duration - 0.1, i * layout.interval_seconds + layout.interval_seconds / 2);
+            const row = await timeline.segmentAt(src.id, timeline.SOURCE, Math.max(0, at) * 1000);
+            let ok = false;
+            if (row) {
+                const seq = Number(row.seq);
+                // Samples are in time order: once the row advances, the previous piece has taken its last sample.
+                if (lastSeq != null && seq > lastSeq) dropPiece(lastSeq);
+                lastSeq = seq;
+                const file = await piece(row);
+                if (file) {
+                    // Seek is relative to the segment's own start (ffmpeg shifts the fMP4 segment's tfdt to 0 with the init).
+                    const rel = Math.max(0, at - Number(row.start_ms) / 1000);
+                    const r = await d.ffmpeg(['-y', '-nostdin', '-v', 'error', ...(rel > 0 ? ['-ss', rel.toFixed(3)] : []), '-i', file,
+                        '-frames:v', '1', '-vf', tile, '-q:v', '5', frame], { signal: ctx.signal, timeoutMs: 5 * 60 * 1000 });
+                    ok = r.ok && d.existing(frame);
+                }
+            }
+            if (ok) decoded++;
+            else await blackTile(frame, layout, ctx);
+        }
+        if (!decoded) throw new JobError('segment_unreadable', 'No frame could be read from the timeline segments; a retry reads the durable copies', { retryAfterS: 1800 });
+        return await finishSprite({ src, job, ctx, dir, layout, duration });
+    } finally {
+        // However the run ends (abort, ffmpeg, no_video), the pieces go: hundreds of MB must not be left behind.
+        // The frame checkpoints stay for a retry.
+        dropPiece(lastSeq);
+        sweepPieces(dir);
     }
-    if (!decoded) {
-        d.cleanupWork(job.id);
-        throw new JobError('segment_unreadable', 'No frame could be read from the timeline segments; a retry reads the durable copies', { retryAfterS: 1800 });
-    }
-    return finishSprite({ src, job, ctx, dir, layout, duration });
 }
 
 async function runSprite(job, ctx) {
@@ -282,4 +330,5 @@ module.exports = {
     waveform: { lane: 'heavy', maxAttempts: 3, timeoutMs: 3 * 3600 * 1000, needsObject: true, validate: validateWaveform, run: runWaveform },
     sprite: { lane: 'heavy', maxAttempts: 3, timeoutMs: 3 * 3600 * 1000, needsObject: true, validate: validateSprite, run: runSprite },
     spriteLayout,
+    rowBuffer,   // tested directly: the durable ranged-GET guards
 };
