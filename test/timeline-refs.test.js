@@ -86,7 +86,10 @@ const crypto = require('crypto');
         const indexes = (await db.all(`SELECT indexname FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'media_timeline'`)).map((r) => r.indexname);
         assert.ok(indexes.includes('media_timeline_location_durable') && indexes.includes('media_timeline_location_local'), `migration 0003 applied: ${indexes.join(', ')}`);
         const migration = fs.readFileSync(path.join(__dirname, '..', 'migrations', '0003_media_timeline_locations.sql'), 'utf8');
-        await db.getDb().query(migration);   // CREATE INDEX IF NOT EXISTS: a no-op on the row-filled database, never an error
+        // CREATE INDEX IF NOT EXISTS: a no-op on the row-filled database, never an error. Only on PGlite: under test:pg the test
+        // runs as the service role, and PostgreSQL checks table ownership before IF NOT EXISTS (the migration runner applies
+        // migrations as the owner).
+        if (process.env.MEDIA_TEST_STORE !== 'pg') await db.getDb().query(migration);
         await timeline.removeObject('idx-A');
         deletes.length = 0;
 
