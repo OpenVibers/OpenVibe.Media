@@ -12,8 +12,11 @@
  *                    by the sha prefix) and — through the placement router's durable provider (timeline.durableProvider,
  *                    purpose `durable`) — on B2/R2, then commit every row of the rendition in ONE transaction
  *                    (timeline.replace). Only then are the bytes a previous cut named and this one does not deleted, and
- *                    a location any row of any object still names is kept (F3.4; timeline.deleteBytes). Finally
- *                    object.pack is queued for the rendition so packing follows the cut by itself.
+ *                    a location any row of any object still names is kept (F3.4; timeline.deleteBytes). A source re-cut
+ *                    also drops every other rendition's rows in that same transaction (their bytes are deleted after it),
+ *                    so a stale rendition never plays against the new source. The init segment's width/height/codecs are
+ *                    parsed (objects/mp4-codecs.js) and stored in the object's metadata under renditions.<name> for the
+ *                    master playlist. Finally object.pack is queued for the rendition so packing follows the cut by itself.
  *
  * Idempotent: a rerun makes the same bytes (bitexact), reuses a row whose sha256 matches and its location as it is, keeps
  * a packed row whose chunk holds the same bytes, and uploads only what is not durable yet. Two-phase: the rows commit
@@ -65,12 +68,29 @@ function checkDisk(needBytes) {
 const aborted = (ctx) => { if (ctx.signal.aborted) throw ctx.signal.reason || new Error('aborted'); };
 
 /**
+ * Store what the cut's init segment says (width/height/codecs) under the object's metadata.renditions.<name>, in one
+ * UPDATE: the source cut and a rendition job may finish together, and a read-modify-write would drop one of them.
+ */
+async function storeRenditionMeta(objectId, rendition, meta) {
+    const value = JSON.stringify({ width: meta.width, height: meta.height, codecs: meta.codecs });
+    // The expression reads the row's own column, so a concurrent writer's committed metadata is what it builds on.
+    const doc = `COALESCE(NULLIF(metadata, ''), '{}')::jsonb`;
+    await require('../db/database').run(`UPDATE media_objects SET metadata = jsonb_set(${doc}, '{renditions}',
+            COALESCE(${doc}->'renditions', '{}'::jsonb) || jsonb_build_object(?::text, ?::jsonb))::text, updated_at = ov_now()
+        WHERE id = ?`, [rendition, value, objectId]);
+}
+
+/**
  * Publish `files` (producedFiles) of `rendition` for `src` from the work directory `out`. Returns the row counts and
  * the totals the job result is built from. Throws JobError: the timeline changed under a pack, or a segment that is not
  * durable yet. `label` names the job in warnings (e.g. 'Cmaf').
  */
 async function publishRendition({ job, ctx, src, rendition, out, list, label = 'Segments' }) {
     const files = producedFiles(list);
+    // Read the init segment while it is still in the work directory (the loop below moves it to its content-addressed
+    // location): its codecs/resolution go into the object's metadata for the master playlist.
+    let meta = null;
+    try { meta = require('../objects/mp4-codecs').parseInit(fs.readFileSync(path.join(out, timeline.INIT_NAME))); } catch { /* no attributes */ }
     const prev = new Map((await timeline.list(src.id, rendition)).map((x) => [Number(x.seq), x]));
     const vodStorage = require('../vod/vod-storage');
     const target = await timeline.durableProvider(src);
@@ -134,23 +154,33 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
         aborted(ctx);
         let written;
         try {
-            written = await timeline.replace(src.id, rendition, rows, { jobId: job.id, expect: prev });
+            // A source re-cut (object.cmaf) drops every other rendition's rows here, in this same transaction: the
+            // rendition was cut against the old source and would otherwise play beside the new one.
+            written = await timeline.replace(src.id, rendition, rows, { jobId: job.id, expect: prev, dropOtherRenditions: rendition === timeline.SOURCE });
         } catch (err) {
             // An object.pack committed after `prev` was read: these rows would name the segment keys it deleted.
             if (err instanceof timeline.TimelineChanged) throw new JobError('media.timeline.changed', 'The timeline changed while cutting (a pack); a retry cuts against the new rows', { retryAfterS: 60 });
             throw err;
         }
         committed = true;
-        // Phase two, only once the new rows are published: the bytes a previous cut named that this one does not.
+        // The master playlist reads these without touching bytes; a failure here leaves the timeline correct and only
+        // the variant's RESOLUTION/CODECS absent, so it never fails the cut.
+        if (meta) {
+            try { await storeRenditionMeta(src.id, rendition, meta); }
+            catch (err) { console.warn(`[${label}] ${job.id}: rendition metadata store failed: ${err.message}`); }
+        }
+        // Phase two, only once the new rows are published: the bytes a previous cut named that this one does not, and
+        // — after a source re-cut — the bytes every dropped rendition row named.
         // A deletion that fails leaves an orphan the storage report names, never bytes a live row still points at.
         const named = new Set(rows.map((r) => `${r.key}\n${r.local_path || ''}`));
-        const stale = [...prev.values()].filter((old) => !named.has(`${old.key}\n${old.local_path || ''}`));
+        const stale = [...prev.values()].filter((old) => !named.has(`${old.key}\n${old.local_path || ''}`)).concat(written.dropped || []);
         // A location any row still names — another object's, or the source's own (another rendition/seq, or a
         // different local_path with the same key) — is kept: the old cut's rows go, the shared bytes stay, and the
         // last naming object's removal deletes them. `isNamed` counts every object, no exception.
         const { failed: stuck, kept } = await timeline.deleteBytes(stale);
         if (stuck.length) console.warn(`[${label}] ${job.id}: ${stuck.length} old segment(s) left behind (the storage orphan report names them), first ${stuck[0].provider}:${stuck[0].key}`);
         if (kept.length) console.warn(`[${label}] ${job.id}: ${kept.length} old segment location(s) kept — another object's rows name them`);
+        if ((written.dropped || []).length) console.log(`[${label}] ${job.id}: dropped ${written.dropped.length} row(s) of an earlier rendition (the source was re-cut)`);
         if (failed.length) {
             throw new JobError('upload_failed', `${failed.length} segment(s) not durable yet (${failed[0].slice(0, 200)}); a retry uploads only those`, { retryAfterS: 600 });
         }

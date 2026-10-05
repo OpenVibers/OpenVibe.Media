@@ -96,14 +96,17 @@ async function queueRenditionsOnce(obj) {
 /**
  * The renditions an object's master playlist offers: `source` first, then every other rendition whose rows exist (the
  * route lists a rendition only once it was produced). `sourceRows` is the object's own source rows when the caller
- * already has them (a virtual clip's window over its source), so it is not read twice.
+ * already has them (a virtual clip's window over its source), so it is not read twice. `meta` is the resolution/codecs
+ * the cut stored in the object's metadata (renditions.<name>), so the playlist carries RESOLUTION/CODECS without
+ * reading bytes; it is null for a rendition cut before this was stored.
  */
 async function renditionsFor(obj, sourceRows = null) {
     const timeline = require('./timeline');
+    const stored = model.parseJson(obj.metadata, {}).renditions || {};
     const source = sourceRows || (await timelineOf(obj)).rows;
-    const out = [{ name: timeline.SOURCE, rows: source }];
+    const out = [{ name: timeline.SOURCE, rows: source, meta: stored[timeline.SOURCE] || null }];
     const extra = await db.all('SELECT DISTINCT rendition FROM media_timeline WHERE object_id = ? AND rendition <> ? AND seq > 0 ORDER BY rendition', [obj.id, timeline.SOURCE]);
-    for (const r of extra) out.push({ name: r.rendition, rows: await timeline.list(obj.id, r.rendition) });
+    for (const r of extra) out.push({ name: r.rendition, rows: await timeline.list(obj.id, r.rendition), meta: stored[r.rendition] || null });
     return out;
 }
 

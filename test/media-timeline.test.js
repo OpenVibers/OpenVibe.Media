@@ -77,7 +77,7 @@ const { spawn, spawnSync } = require('child_process');
         assert.ok(timeline.masterPlaylist([{ name: 'source', rows: hand }]).includes('#EXT-X-STREAM-INF:BANDWIDTH=80000,AVERAGE-BANDWIDTH='), 'peak = 30000 B over 3 s');
         // F4 slice 1: one variant per rendition, source first — the route passes every rendition whose rows exist.
         const twoUp = timeline.masterPlaylist([{ name: 'source', rows: hand }, { name: '720p', rows: hand }]);
-        assert.deepStrictEqual([...twoUp.matchAll(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+\n(\S+)\n/g)].map((m) => m[1]),
+        assert.deepStrictEqual([...twoUp.matchAll(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+[^\n]*\n(\S+)\n/g)].map((m) => m[1]),
             ['source/index.m3u8', '720p/index.m3u8'], twoUp);
         assert.deepStrictEqual(await timeline.replace('med_HAND', 'source', hand.slice(0, 2)), { inserted: 0, updated: 0, unchanged: 2, removed: 2 }, 'rows past a shorter end are dropped');
         assert.deepStrictEqual(await timeline.removeObject('med_HAND'), { removed: 2, pending: 0 });
@@ -125,7 +125,9 @@ const { spawn, spawnSync } = require('child_process');
         };
         const pub = await native('public');
         const priv = await native('private');
-        const before = JSON.stringify([await model.getObject(pub), await model.listLocations(pub)]);
+        // The cut adds only derived metadata (renditions.<name> = width/height/codecs): everything the object IS stays.
+        const untouched = async () => { const o = await model.getObject(pub); const md = model.parseJson(o.metadata, {}); delete md.renditions; return [{ ...o, metadata: JSON.stringify(md) }, await model.listLocations(pub)]; };
+        const before = JSON.stringify(await untouched());
 
         const runJob = async (objectId, params, type = 'object.cmaf') => {
             const r = await call('POST', '/api/v2/live/jobs', { body: { type, object_id: objectId, ...(params && { params }) } });
@@ -155,7 +157,7 @@ const { spawn, spawnSync } = require('child_process');
             assert.strictEqual(r.durability, 'local');
             assert.ok(r.local_path.startsWith(path.join(path.resolve(process.env.OBJECTS_PATH), '.timeline', 'live', pub, 'source')));
         }
-        assert.strictEqual(JSON.stringify([await model.getObject(pub), await model.listLocations(pub)]), before, 'the source is untouched');
+        assert.strictEqual(JSON.stringify(await untouched()), before, 'the source bytes, locations and row are untouched (only derived rendition metadata is added)');
         assert.strictEqual(fs.readdirSync(path.join(process.env.OBJECTS_PATH, '.jobs')).length, 0, 'the work directory is removed');
 
         // ── A truncated timeline (an in-progress cut) must not shrink the sheet: the object's own 7 s duration
@@ -185,7 +187,7 @@ const { spawn, spawnSync } = require('child_process');
         const master = await get(`/o/${pub}/master.m3u8`);
         assert.strictEqual(master.status, 200);
         assert.ok(/^application\/vnd\.apple\.mpegurl/.test(master.headers.get('content-type')));
-        assert.ok(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+\nsource\/index\.m3u8\n/.test(master.buf.toString()), master.buf.toString());
+        assert.ok(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+[^\n]*\nsource\/index\.m3u8\n/.test(master.buf.toString()), master.buf.toString());
         const media = (await get(`/o/${pub}/source/index.m3u8`)).buf.toString();
         assert.ok(media.trim().endsWith('#EXT-X-ENDLIST') && media.includes('#EXT-X-PLAYLIST-TYPE:VOD') && media.includes('#EXT-X-TARGETDURATION:3\n'), media);
         assert.deepStrictEqual(parsePlaylist(media), [['000001.m4s', 3], ['000002.m4s', 1.5], ['000003.m4s', 1.5], ['000004.m4s', 1]].map(([name, seconds]) => ({ name, seconds })), 'the durations are the rows');

@@ -251,11 +251,19 @@ const express = require('express');
         const index = (await get(`/o/${clipObj}/source/index.m3u8${tok}`)).buf.toString();
         assert.ok(index.includes(`#EXT-X-MAP:URI="init.mp4${tok}"`) && index.includes(`#EXTINF:3.000,\n000002.m4s${tok}`) && index.includes(`#EXTINF:3.000,\n000003.m4s${tok}`), index);
         assert.ok(!/00000[145]\.m4s/.test(index), 'nothing outside the window is listed');
+        const demand = require('../server/placement/demand');
+        demand._reset();                                  // only the segment reads below count
         for (const n of ['init.mp4', '000002.m4s', '000003.m4s']) {
             const s = await get(`/o/${clipObj}/source/${n}${tok}`);
             assert.strictEqual(s.status, 200, n);
             assert.deepStrictEqual(s.buf, bytes[n], `${n}: the source's bytes${n === '000003.m4s' ? ' (a slice of its packed chunk)' : ''}`);
         }
+        // The segment route threads the segment into the demand rollup (F2.4): the object total is what it served,
+        // and each segment reads apart from the others.
+        assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ objectIds: [clipObj] })), { [clipObj]: 3 });
+        assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ objectIds: [clipObj], segment: '000002.m4s' })), { [clipObj]: 1 });
+        assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ objectIds: [clipObj], segment: '000003.m4s' })), { [clipObj]: 1 });
+        assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ objectIds: [clipObj], segment: '000001.m4s' })), { [clipObj]: 0 }, 'a segment outside the window was never served');
         console.log('✅ a private virtual clip: 404 unsigned, signed playlists over the source window, source bytes and packed slices');
 
         // ── Token scope: the clip's window only ──

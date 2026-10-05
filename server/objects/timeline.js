@@ -89,9 +89,13 @@ class TimelineChanged extends Error {}
  * says the same is not written, a changed one is updated, rows past the new end are dropped. → { inserted, updated, unchanged, removed }.
  * `expect` (the rows the caller read, by seq) makes it compare-and-set: if any row's location or packing changed meanwhile
  * (an object.pack committed), nothing is written and TimelineChanged is thrown.
+ * `dropOtherRenditions` (a source re-cut) also removes every other rendition's rows of the object IN THE SAME
+ * TRANSACTION: a rendition cut against the old source can never play against the new one. The removed rows are returned
+ * as `dropped`, for the caller to delete their bytes after the commit (deleteBytes, guarded by isNamed).
  */
-async function replace(objectId, rendition, rows, { jobId = null, expect = null } = {}) {
+async function replace(objectId, rendition, rows, { jobId = null, expect = null, dropOtherRenditions = false } = {}) {
     const out = { inserted: 0, updated: 0, unchanged: 0, removed: 0 };
+    let dropped = null;
     await db.getDb().tx(async () => {
         await lockObject(objectId);
         const before = new Map((await list(objectId, rendition)).map((r) => [Number(r.seq), r]));
@@ -112,8 +116,12 @@ async function replace(objectId, rendition, rows, { jobId = null, expect = null 
         }
         const last = rows.reduce((m, r) => Math.max(m, r.seq), -1);
         out.removed = (await db.run('DELETE FROM media_timeline WHERE object_id = ? AND rendition = ? AND seq > ?', [objectId, rendition, last])).changes || 0;
+        if (dropOtherRenditions) {
+            dropped = await db.all('SELECT * FROM media_timeline WHERE object_id = ? AND rendition <> ?', [objectId, rendition]);
+            if (dropped.length) await db.run('DELETE FROM media_timeline WHERE object_id = ? AND rendition <> ?', [objectId, rendition]);
+        }
     });
-    return out;
+    return dropped && dropped.length ? { ...out, dropped } : out;
 }
 
 /**
@@ -302,16 +310,25 @@ function mediaPlaylist(rows, { query = '' } = {}) {
     return lines.join('\n');
 }
 
-/** The master playlist: one variant per rendition (only `source` in F3.1), BANDWIDTH = its peak segment bitrate. */
+/**
+ * The master playlist: one variant per rendition (only `source` in F3.1), BANDWIDTH = its peak segment bitrate.
+ * `meta` (the object's stored renditions.<name> = { width, height, codecs }, F4) adds RESOLUTION/CODECS; a rendition
+ * cut before metadata was stored — or one whose init could not be parsed — lists without them, exactly as before.
+ */
 function masterPlaylist(renditions, { query = '' } = {}) {
     const lines = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-INDEPENDENT-SEGMENTS'];
-    for (const { name, rows } of renditions) {
+    for (const { name, rows, meta } of renditions) {
         const segs = rows.filter((r) => Number(r.seq) > 0);
         const rate = (r) => Math.ceil(Number(r.byte_length) * 8 * 1000 / Math.max(1, Number(r.end_ms) - Number(r.start_ms)));
         const peak = Math.max(1, ...segs.map(rate));
         const total = segs.reduce((a, r) => a + Number(r.end_ms) - Number(r.start_ms), 0);
         const avg = Math.max(1, Math.ceil(segs.reduce((a, r) => a + Number(r.byte_length), 0) * 8 * 1000 / Math.max(1, total)));
-        lines.push(`#EXT-X-STREAM-INF:BANDWIDTH=${peak},AVERAGE-BANDWIDTH=${avg}`, withQuery(`${name}/index.m3u8`, query));
+        const attrs = [`BANDWIDTH=${peak}`, `AVERAGE-BANDWIDTH=${avg}`];
+        if (meta) {
+            if (Number(meta.width) > 0 && Number(meta.height) > 0) attrs.push(`RESOLUTION=${Number(meta.width)}x${Number(meta.height)}`);
+            if (meta.codecs) attrs.push(`CODECS="${meta.codecs}"`);
+        }
+        lines.push(`#EXT-X-STREAM-INF:${attrs.join(',')}`, withQuery(`${name}/index.m3u8`, query));
     }
     lines.push('');
     return lines.join('\n');

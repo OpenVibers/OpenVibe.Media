@@ -177,8 +177,9 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   `MEDIA_HLS_ENABLED` off, keeps the one-fast-seek-per-frame path; captions stay with AI's `media.analyze`.
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
   live segments and its upload-lag metric, a materialized clip that references the source's chunks (reference counts
-  shipped, F3.4; its own persisted rows and boundary-only re-encode are open), captions on the timeline,
-  segment-bucket demand, and Live's player moving to HLS. Renditions are F4.
+  shipped, F3.4; its own persisted rows and boundary-only re-encode are open: docs/materialized-clips.md), captions on
+  the timeline, and Live's player moving to HLS. Segment-bucket demand (F2.4) now records reads per timeline segment;
+  deciding placement per segment stays F5's. Renditions are F4.
 
 ## 4. Clips reuse the source
 
@@ -248,7 +249,9 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
 
 - **Hotness is per object × region × segment bucket** (5-minute buckets for video: beginnings are hotter than middles).
   A two-hour VOD can have its first 10 minutes on R2 + CDN + edge, minutes 10–40 on R2, the rest only on B2, and
-  promote minute 60 when viewers start landing there.
+  promote minute 60 when viewers start landing there. The reads record both axes (F2.4, below): the object total the
+  tiering sweep's eligibility reads, and each timeline segment's own count; the per-segment placement decision
+  itself stays open.
 - **Decision rule:** value-per-dollar greedy under per-class budgets (the knapsack is near-optimal when costs are
   monotone): expected requests and bytes saved × latency value, against storage + requests + retrieval + minimum
   residency, with hysteresis (promote above P, demote below D < P), minimum residency, and rate limits on moves.
@@ -268,10 +271,17 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
 - **Demand rollups (F2.4, shipped):** every served viewer read (`router.route()` for playback or download, not a derive
   job) adds one best-effort hit in Valkey (`server/placement/demand.js`): a counter `demand:<region>:<bucket>:<object_id>`
   and the region's hot sorted set `hot:<region>:<bucket>` (object id → reads), both under `VALKEY_PREFIX` with a 2 h TTL;
-  `<bucket>` is the 5-minute bucket number (`floor(epoch_ms / 300000)`). The region is one per deployment
-  (`MEDIA_DEMAND_REGION`, default `local`); per-viewer regions wait for an edge-provided header. `hotness()` sums the last
-  12 buckets (one hour) per object. The writes are fire-and-forget: a slow, failing or absent Valkey never delays or fails
-  a read (without Valkey the counts stay in-process). Object × region only for now; the segment bucket comes later in F3 (F3.1 shipped the timeline it will bucket).
+  `<bucket>` is the 5-minute bucket number (`floor(epoch_ms / 300000)`). A read of a timeline segment (`GET
+  /o/:id/source/:name`) carries the segment name, moving that segment's member in the per-object segment set
+  `hot:<region>:<bucket>:<object_id>` (segment → reads; capped at `TOP_N` members, 2 h TTL), so a hot beginning reads
+  apart from a cold middle without a key per segment; the object counter moves on every read either
+  way, so the object is the sum over its segments (plus whole-object reads) and `hotness()` — the sweep's eligibility —
+  is unchanged. `hotness({ segment })` reads one segment (per object, or across the region's hottest `TOP_N` objects).
+  The region is one per deployment (`MEDIA_DEMAND_REGION`, default `local`); per-viewer regions wait for an
+  edge-provided header.
+  `hotness()` sums the last 12 buckets (one hour). The writes are fire-and-forget: a slow, failing or absent Valkey never
+  delays or fails a read (without Valkey the counts stay in-process, both axes). The per-segment placement decision
+  (which minutes of a VOD sit on R2/edge) stays open; F2 records the demand it will read.
 - **The sweep reads demand (F2.5, shipped):** the object tiering sweep's promote/demote eligibility is `hotness()` for the
   deployment's region, against each class's hysteresis band in `media.storage_policy` (`promoteReadsPerHour` /
   `demoteReadsPerHour`, demote < promote, validated per revision): video 60 / 6, image 300 / 30, download 30 / 3, the
@@ -388,7 +398,7 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
   materialized clips (F3.5, shipped; §4) and sprite sheets cut from the timeline's rows (F3.1, shipped; §3); still
   open: live DVR from OpenRe (CMAF/HLS recording with the growing
   playlist), materialized clips referencing the source's chunks, captions on the
-  timeline, segment-bucket demand; Live's player moves to HLS.
+  timeline (the demand rollups already record reads per timeline segment, F2.4); Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
   VODs, compute placement. (Slice 1 shipped: one on-demand 720p rung, queued by the master playlist / JSON download
   and cut into the timeline; the economics, AV1 and compute placement are still open.)

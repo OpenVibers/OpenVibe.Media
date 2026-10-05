@@ -54,6 +54,44 @@ const { spawn, spawnSync } = require('child_process');
         const queue = require('../server/jobs/queue');
         const worker = require('../server/jobs/worker');
         const express = require('express');
+
+        // ── The init parser (objects/mp4-codecs.js) on hand-built minimal boxes ──
+        {
+            const { parseInit } = require('../server/objects/mp4-codecs');
+            const bx = (type, ...parts) => {
+                const body = Buffer.concat(parts.map((x) => (Buffer.isBuffer(x) ? x : Buffer.from(x))));
+                const out = Buffer.alloc(8 + body.length);
+                out.writeUInt32BE(out.length, 0);
+                out.write(type, 4, 'latin1');
+                body.copy(out, 8);
+                return out;
+            };
+            const u16 = (n) => { const b = Buffer.alloc(2); b.writeUInt16BE(n); return b; };
+            const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
+            const avc1 = (w, h, profile, compat, level) => bx('avc1', Buffer.alloc(6), u16(1), Buffer.alloc(16), u16(w), u16(h), Buffer.alloc(50),
+                bx('avcC', Buffer.from([1, profile, compat, level])));
+            const desc = (tag, payload) => Buffer.concat([Buffer.from([tag, payload.length]), payload]);   // MPEG-4 descriptors, not boxes
+            const mp4a = (aot) => {
+                const dsi = desc(0x05, Buffer.from([aot << 3, 0x10]));
+                const dcd = desc(0x04, Buffer.concat([Buffer.from([0x40, 0x15, 0, 0, 0]), u32(0), u32(0), dsi]));
+                const es = desc(0x03, Buffer.concat([u16(1), Buffer.from([0]), dcd]));
+                const esds = bx('esds', Buffer.alloc(4), es);
+                return bx('mp4a', Buffer.alloc(6), u16(1), Buffer.alloc(8), u16(2), u16(16), u16(0), u16(0), u32(44100 * 65536), esds);
+            };
+            const trakOf = (e) => bx('trak', bx('mdia', bx('minf', bx('stbl', bx('stsd', Buffer.alloc(4), u32(1), e)))));
+            const moovOf = (...es) => bx('moov', ...es.map(trakOf));
+            assert.deepStrictEqual(parseInit(moovOf(avc1(1280, 800, 0x4d, 0x40, 0x1e))),
+                { width: 1280, height: 800, codecs: 'avc1.4d401e' }, 'avc1 profile/compat/level and sample-entry size');
+            assert.deepStrictEqual(parseInit(moovOf(mp4a(2))), { width: null, height: null, codecs: 'mp4a.40.2' }, 'AAC-LC from the esds DecoderSpecificInfo');
+            assert.deepStrictEqual(parseInit(moovOf(bx('Opus', Buffer.alloc(28)))), { width: null, height: null, codecs: 'opus' }, 'an Opus sample entry');
+            assert.deepStrictEqual(parseInit(moovOf(avc1(640, 360, 0x42, 0x00, 0x1e), mp4a(2))),
+                { width: 640, height: 360, codecs: 'avc1.42001e,mp4a.40.2' }, 'video + audio, in track order');
+            // A track whose codec is not recognised: CODECS is omitted entirely, RESOLUTION stays.
+            assert.deepStrictEqual(parseInit(moovOf(avc1(1280, 800, 0x4d, 0x40, 0x1e), bx('zzzz', Buffer.alloc(28)))),
+                { width: 1280, height: 800, codecs: null }, 'one unknown track omits CODECS, never a partial string');
+            assert.deepStrictEqual(parseInit(Buffer.alloc(0)), { width: null, height: null, codecs: null }, 'empty bytes never throw');
+            console.log('✅ mp4-codecs parses avc1/mp4a/Opus, omits a partial CODECS, and never throws');
+        }
         const app = express();
         app.use(express.json());
         app.use('/api/v2/:app/jobs', require('../server/jobs/routes'));
@@ -106,8 +144,9 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(m1.status, 200);
         let jobs = await rendJobs(pub);
         assert.strictEqual(jobs.length, 1, 'the first master playlist request queues one rendition.create');
+        const srcVer = crypto.createHash('sha256').update((await timeline.list(pub, 'source')).map((r) => `${Number(r.seq)}:${r.sha256 || ''}\n`).join('')).digest('hex').slice(0, 16);
         assert.deepStrictEqual([jobs[0].status, jobs[0].created_by, jobs[0].idempotency_key, JSON.parse(jobs[0].params).rendition],
-            ['queued', 'system:rendition', `rendition.create:${pub}:720p`, '720p']);
+            ['queued', 'system:rendition', `rendition.create:${pub}:720p:${srcVer}`, '720p']);
         await get(`/o/${pub}/master.m3u8`);
         jobs = await rendJobs(pub);
         assert.strictEqual(jobs.length, 1, 'a second request joins the active job');
@@ -140,14 +179,29 @@ const { spawn, spawnSync } = require('child_process');
 
         // ── The master playlist now lists source + 720p, each with its own BANDWIDTH, and the variant plays ──
         const master = (await get(`/o/${pub}/master.m3u8`)).buf.toString();
-        assert.ok(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+\nsource\/index\.m3u8\n/.test(master), master);
-        assert.ok(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+\n720p\/index\.m3u8\n/.test(master), master);
+        assert.ok(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+[^\n]*\nsource\/index\.m3u8\n/.test(master), master);
+        assert.ok(/#EXT-X-STREAM-INF:BANDWIDTH=\d+,AVERAGE-BANDWIDTH=\d+[^\n]*\n720p\/index\.m3u8\n/.test(master), master);
         const bw = [...master.matchAll(/#EXT-X-STREAM-INF:BANDWIDTH=(\d+)/g)].map((m) => Number(m[1]));
         assert.strictEqual(bw.length, 2, 'one variant per rendition whose rows exist');
         const media720 = (await get(`/o/${pub}/720p/index.m3u8`)).buf.toString();
         assert.ok(media720.includes('#EXT-X-PLAYLIST-TYPE:VOD') && media720.trim().endsWith('#EXT-X-ENDLIST') && media720.includes('000001.m4s'), media720);
-        const bw720 = Number(/#EXT-X-STREAM-INF:BANDWIDTH=(\d+),AVERAGE-BANDWIDTH=\d+\n720p/.exec(master)[1]);
+        const bw720 = Number(/#EXT-X-STREAM-INF:BANDWIDTH=(\d+),AVERAGE-BANDWIDTH=\d+[^\n]*\n720p/.exec(master)[1]);
         assert.strictEqual(bw720, Math.max(...segs.map((r) => Math.ceil(Number(r.byte_length) * 8 * 1000 / Math.max(1, Number(r.end_ms) - Number(r.start_ms))))), 'the 720p BANDWIDTH is its own segments\' peak');
+
+        // ── Item 2: the stored init metadata feeds RESOLUTION/CODECS, without a bytes read per request ──
+        const sourceLine = /#EXT-X-STREAM-INF:([^\n]*)\nsource\/index\.m3u8\n/.exec(master)[1];
+        const v720Line = /#EXT-X-STREAM-INF:([^\n]*)\n720p\/index\.m3u8\n/.exec(master)[1];
+        assert.ok(sourceLine.includes('RESOLUTION=1280x800'), sourceLine);
+        assert.ok(v720Line.includes('RESOLUTION=1152x720'), v720Line);
+        assert.ok(/CODECS="avc1\.[0-9a-f]{6},mp4a\.40\.2"/.test(sourceLine), sourceLine);
+        assert.ok(/CODECS="avc1\.[0-9a-f]{6},mp4a\.40\.2"/.test(v720Line), v720Line);
+        assert.ok(/CODECS="avc1\.4d4[0-9a-f]/.test(v720Line), `the 720p rung is libx264 main: ${v720Line}`);
+        const mdPub = model.parseJson((await model.getObject(pub)).metadata, {});
+        assert.deepStrictEqual([mdPub.renditions['720p'].width, mdPub.renditions['720p'].height], [1152, 720], 'the cut stored the rendition\'s size');
+        assert.ok(/^avc1\.[0-9a-f]{6},mp4a\.40\.2$/.test(mdPub.renditions['720p'].codecs), mdPub.renditions['720p'].codecs);
+        const { parseInit } = require('../server/objects/mp4-codecs');
+        assert.deepStrictEqual(parseInit(fs.readFileSync(rows[0].local_path)), mdPub.renditions['720p'], 'the parser on the real init.mp4 agrees with what was stored');
+        console.log('✅ the master playlist carries RESOLUTION and CODECS from the stored init metadata');
         for (const r of rows) {
             const s = await get(`/o/${pub}/720p/${r.name}`);
             assert.deepStrictEqual([s.status, sha(s.buf)], [200, r.sha256], `${r.name} served`);
@@ -191,6 +245,42 @@ const { spawn, spawnSync } = require('child_process');
         assert.deepStrictEqual([hj.status, hj.error_code], ['queued', 'media.object.held'], JSON.stringify(hj));
         assert.strictEqual(await timeline.has(held, '720p'), false, 'no rows on a held object');
         await model.releaseHold(hold.id);
+
+        // ── The rendition key is scoped to the source cut: a failure replays against the same source, a re-cut requeues ──
+        const scope = await media(srcFile, 'public', { duration_seconds: 6 });
+        await runJob('object.cmaf', scope, { segment_seconds: 2 });
+        const first = await queueRendition('live', scope);
+        assert.ok(first, 'a missing rendition is queued');
+        await db.run("UPDATE media_jobs SET status = 'failed', attempts = 3, error_code = 'ffmpeg_failed' WHERE id = ?", [first]);
+        assert.strictEqual(await queueRendition('live', scope), first, 'the same source cut answers the failed job instead of requeueing it');
+        assert.strictEqual((await rendJobs(scope)).length, 1, 'and creates nothing new');
+        // A re-cut changes the source rows (new segmenting, new shas): a new key, a new job.
+        await runJob('object.cmaf', scope, { segment_seconds: 1 });
+        const second = await queueRendition('live', scope);
+        assert.ok(second && second !== first, 'a re-cut source queues a new job');
+        const keys = (await rendJobs(scope)).map((j) => j.idempotency_key).sort();
+        assert.strictEqual(new Set(keys).size, 2, `two different source-versioned keys: ${keys}`);
+        console.log('✅ rendition idempotency is scoped to the source cut: same source replays, a re-cut requeues');
+
+        // ── A source re-cut drops the stale rendition's rows and bytes; the master lists only source until it is re-cut ──
+        const staleFiles = (await timeline.list(pub, '720p')).map((r) => r.local_path).filter(Boolean);
+        assert.ok(staleFiles.length && staleFiles.every((f) => fs.existsSync(f)), 'the 720p bytes are there before the re-cut');
+        await runJob('object.cmaf', pub, { segment_seconds: 1 });
+        assert.strictEqual(await timeline.has(pub, '720p'), false, 'the re-cut removed the stale rendition rows');
+        assert.ok(staleFiles.every((f) => !fs.existsSync(f)), 'and their bytes');
+        const afterCut = (await get(`/o/${pub}/master.m3u8`)).buf.toString();
+        assert.ok(!afterCut.includes('720p/index.m3u8'), 'the master lists only source until a new rendition lands');
+        assert.ok(/CODECS="avc1\.[0-9a-f]{6},mp4a\.40\.2"/.test(afterCut), 'the source variant keeps its stored CODECS');
+        console.log('✅ a source re-cut drops the stale rendition rows and bytes; the master lists source only');
+
+        // ── A held object is queued no rendition at all (the lazy path checks the hold first) ──
+        const heldQ = await media(srcFile, 'public', { duration_seconds: 6 });
+        await runJob('object.cmaf', heldQ, { segment_seconds: 2 });
+        const qh = await model.placeHold({ object_id: heldQ, kind: 'admin', reason: 'queue test' });
+        assert.strictEqual(await queueRendition('live', heldQ), null, 'nothing is queued for a held object');
+        assert.strictEqual((await rendJobs(heldQ)).length, 0, 'no rendition.create row exists');
+        await model.releaseHold(qh.id);
+        console.log('✅ a held object queues no rendition');
 
         // ── MEDIA_RENDITIONS off: nothing is queued or cut; the job is refused ──
         const off = await media(srcFile, 'public', { duration_seconds: 6 });
