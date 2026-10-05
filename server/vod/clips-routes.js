@@ -133,7 +133,9 @@ const VALID_VIS = new Set(['public', 'unlisted', 'private']);
 const flag = (v) => (['1', 'true'].includes(String(v)) ? 1 : ['0', 'false'].includes(String(v)) ? 0 : null);
 
 // ── Create clip ──────────────────────────────────────────────
-// JSON body: cut a window out of a VOD (202, background cut + webhook).
+// JSON body: a window of a VOD. Over a source with a CMAF timeline (MEDIA_HLS_ENABLED) the clip is virtual: ready at
+// once (201, clip.ready webhook), no ffmpeg, played as HLS over the source's segments (docs/media-fabric.md §4, F3.5).
+// With `materialize: true`, or a source without a timeline, it is cut into its own file (202, background clip.cut + webhook).
 // Multipart `video`: direct upload of an already-cut blob (201, ready) —
 // inherited browser-MediaRecorder clip path.
 router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.single('video'), async (req, res) => {
@@ -170,14 +172,16 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
             return res.status(200).json({ id: duplicate.id, status: duplicate.status, deduplicated: true });
         }
 
-        // Resolve a source ffmpeg can read: local file, or presigned B2/R2 URL.
+        const clipJobs = require('./clip-jobs');
+        const win = flag(body.materialize) !== 1 && await clipJobs.timelineWindow(vod, startTime, endTime);
+        // Resolve a source ffmpeg can read: local file, or presigned B2/R2 URL (a virtual clip reads no file).
         const vodStorage = require('./vod-storage');
-        const source = await vodStorage.resolveMediaSource(vod);
-        if (!source) return res.status(404).json({ error: 'VOD media unavailable' });
+        const source = win ? null : await vodStorage.resolveMediaSource(vod);
+        if (!win && !source) return res.status(404).json({ error: 'VOD media unavailable' });
 
         // Live recording: clamp to what's ACTUALLY on disk, not wall-clock — a
         // seek past end-of-file emits a header-only "broken clip".
-        if (vod.is_recording && source.kind === 'file') {
+        if (vod.is_recording && source && source.kind === 'file') {
             let recordedDur = 0;
             try { const pi = await tools.probeVodInfo(source.value); recordedDur = pi.duration || 0; } catch { /* */ }
             if (recordedDur > 0) {
@@ -221,11 +225,15 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
         });   // the row and its object (uploading) in one transaction
         const clipId = result.lastInsertRowid;
         const appId = req.appId;
+        if (win) {
+            await clipJobs.makeVirtual(clipId, win);
+            return res.status(201).json({ ...await clipPublic(await db.getClipById(clipId, appId), { readiness: true }) });
+        }
 
         // The cut is a media job (clip.cut, WS-G task 3): media.job.* events, retries with backoff, and a
         // job id the caller's UI follows (GET /api/v2/:app/jobs/:id) and reattaches to after a reload.
         // clip.ready / clip.failed and the webhook come from the cut itself, as before.
-        const { job } = await require('./clip-jobs').enqueueCut(appId, clipId, {
+        const { job } = await clipJobs.enqueueCut(appId, clipId, {
             reason: 'cut', createdBy: req.authType === 'user' ? `app:${appId}:user:${req.userId}` : `app:${appId}`, ownerUserId: userId ?? null,
         });
 
@@ -360,6 +368,8 @@ router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, re
  * (vod_id, start_time, end_time), so a failure is recoverable rather than
  * permanent — previously a failed clip stayed broken forever with no retry path,
  * and the viewer was shown "the server is cutting your clip" indefinitely.
+ * A clip without a file, over a source with a timeline, becomes virtual instead (200, ready); `materialize: true` (body or query)
+ * always cuts its own file (clip.cut), and a virtual clip keeps playing while it is cut.
  */
 router.post('/:id/recut', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
@@ -368,10 +378,21 @@ router.post('/:id/recut', tenantAuth({ verb: 'write' }), async (req, res) => {
         const clipId = clip.id;
         if (clip.status === 'processing') return res.status(409).json({ error: 'Clip is already being cut' });
         if (!clip.vod_id) return res.status(422).json({ error: 'Clip has no source VOD to re-cut from' });
+        const clipJobs = require('./clip-jobs');
+        const materialize = flag((req.body || {}).materialize ?? req.query.materialize) === 1;
+        // A clip that has a file of its own keeps it: only a file-less one (failed, or already virtual) turns virtual.
+        if (!materialize && !clip.file_path) {
+            const vod = await db.getVodById(clip.vod_id, req.appId);
+            const win = await clipJobs.timelineWindow(vod, Number(clip.start_time) || 0, Number(clip.end_time) || 0);
+            if (win) {
+                await clipJobs.makeVirtual(clipId, win);
+                return res.json({ ...await clipPublic(await db.getClipById(clipId, req.appId), { readiness: true }) });
+            }
+        }
         // A manual retry resets the attempt counter so it gets the full ladder again (not projected: no object change).
         await db.run("UPDATE clips SET cut_attempts = 0 WHERE id = ?", [clipId]);
-        const { job } = await require('./clip-jobs').enqueueCut(req.appId, clipId, { reason: 're-cut', createdBy: `app:${req.appId}` });
-        res.status(202).json({ id: clipId, status: 'processing', job_id: job.id });
+        const { job } = await clipJobs.enqueueCut(req.appId, clipId, { reason: materialize ? 'materialize' : 're-cut', createdBy: `app:${req.appId}` });
+        res.status(202).json({ id: clipId, status: clipJobs.isVirtual(clip) ? 'ready' : 'processing', job_id: job.id });
     } catch (err) {
         console.error('[Clips] Re-cut error:', err.message);
         res.status(500).json({ error: 'Failed to re-cut clip' });

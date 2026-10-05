@@ -268,8 +268,9 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 
 | method | path | notes |
 |---|---|---|
-| POST | `/clips` | `{ vod_id, start_s, end_s, title?, description?, user_id?, visibility?, auto_generated? }` → **202** `{ id, status: 'processing' }`; cut runs in background (from the local file or a presigned B2/R2 URL); duplicate windows are deduplicated; live recordings are clamped to flushed footage. Multipart `video` = direct upload of an already-cut blob → **201** ready |
+| POST | `/clips` | `{ vod_id, start_s, end_s, title?, description?, user_id?, visibility?, auto_generated?, materialize? }` → over a VOD with a CMAF timeline (`MEDIA_HLS_ENABLED`): a **virtual** clip, **201** ready at once (the clip, `storage_provider: 'timeline'`), played as HLS over the source's segments (`/c/:id` redirects to its playlist); with `materialize: true` or no timeline → **202** `{ id, status: 'processing', job_id }`; cut (`clip.cut`) runs in background (from the local file or a presigned B2/R2 URL); duplicate windows are deduplicated; live recordings are clamped to flushed footage. Multipart `video` = direct upload of an already-cut blob → **201** ready |
 | GET | `/clips/:id` | status: `processing | ready | failed` |
+| POST | `/clips/:id/recut` | `{ materialize? }` → a file-less clip over a timeline turns virtual (200, the clip); otherwise (or `materialize: true`) **202** `{ id, status, job_id }` (`clip.cut`; a virtual clip stays ready while it is cut) |
 | GET | `/clips?limit&offset&vod_id&stream_id&user_id&channel_user_id&hide_self&include_private&order&auto_generated&status&since` | list; `channel_user_id` = clipped-channel owner; `include_private` app-key only; `auto_generated=1\|0` = cut by the app's automation (AI auto-clips) or made by a person; `status=ready` = playable clips only; `since` as for VODs |
 | PUT | `/clips/:id` | `{ title?, visibility?, auto_generated? }` (`auto_generated` app key only, 403 when acting for a user) |
 | DELETE | `/clips/:id` | local + offloaded objects + row |

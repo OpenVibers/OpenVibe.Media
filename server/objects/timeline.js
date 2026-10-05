@@ -255,8 +255,26 @@ function masterPlaylist(renditions, { query = '' } = {}) {
     return lines.join('\n');
 }
 
+// ── Clips (docs/media-fabric.md §4, F3.5) ───────────────────
+/**
+ * A virtual clip is a manifest over its source's rows: the media segments intersecting [startMs, endMs), the source's
+ * init segment, seq renumbered 1..n, each row's times clipped to the window (and made relative to its start). key,
+ * local_path, durable_provider, packed_object_id and byte_* stay the source's, so a segment serves from the source's
+ * bytes (or its packed chunk), and its name, the playlist URI, never changes. A segment straddling an edge is served
+ * whole: a virtual clip's edges are the source's segment boundaries (a materialized clip cuts exactly).
+ */
+function clipRows(rows, startMs, endMs) {
+    const init = rows.find((r) => Number(r.seq) === 0);
+    const segs = rows
+        .filter((r) => Number(r.seq) > 0 && Number(r.end_ms) > startMs && Number(r.start_ms) < endMs)
+        .map((r) => ({ ...r, start_ms: Math.max(Number(r.start_ms), startMs) - startMs, end_ms: Math.min(Number(r.end_ms), endMs) - startMs }))
+        .filter((r) => r.end_ms > r.start_ms)
+        .map((r, i) => ({ ...r, seq: i + 1 }));
+    return segs.length && init ? [{ ...init, seq: 0, start_ms: 0, end_ms: 0 }, ...segs] : segs;
+}
+
 module.exports = {
     SOURCE, INIT_NAME, FIELDS, localRoot, localPathFor, keyFor, segmentName,
     list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
-    mediaPlaylist, masterPlaylist,
+    mediaPlaylist, masterPlaylist, clipRows,
 };
