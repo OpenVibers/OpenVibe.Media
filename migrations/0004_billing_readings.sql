@@ -42,7 +42,7 @@ BEGIN
 END $$;
 CREATE TRIGGER billing_readings_frozen BEFORE UPDATE ON billing_readings FOR EACH ROW EXECUTE FUNCTION billing_readings_frozen();
 
--- The closed periods already aggregated, per metric (gib-delivered: the hour; gb-month: the day).
+-- The closed periods already aggregated, per metric (gb-month: the UTC day).
 CREATE TABLE billing_periods (
     metric        text COLLATE "C" NOT NULL,
     period_start  bigint NOT NULL,

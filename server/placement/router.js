@@ -196,8 +196,10 @@ const DEMAND_PURPOSES = new Set(['playback', 'download']);
 
 /**
  * The only function every read path uses.
- * opts: { object | vod | clip | locations, purpose, session?, range?, presign?, expiresIn?,
+ * opts: { object | vod | clip | locations, objectId?, purpose, session?, segment?, range?, presign?, expiresIn?,
  *         contentType?, contentDisposition? }
+ * `objectId` names the object a demand hit belongs to when the caller passes no object/vod/clip row (a segment
+ * read: the route already resolved its row and passes explicit locations); `segment` is the timeline segment served.
  * returns: { provider, key, url, reason, fallbacks, candidates } — `fallbacks` are provider names, ranked;
  *          `candidates` the ranked copies with their keys ({ provider, key }), the chosen one first.
  */
@@ -248,12 +250,13 @@ async function route(opts = {}) {
     if (primary) stickyPut(session, primary.provider);
 
     incMetric('media_router_decisions_total', { provider: primary ? primary.provider : 'none', purpose, reason });
-    // Demand (F2.4): one hit per served viewer read (not a derive job), object × region × 5-minute bucket.
+    // Demand (F2.4): one hit per served viewer read (not a derive job), object × region × 5-minute bucket, carrying the
+    // timeline segment the read served when the caller names one (a segment read, whose route passes `objectId`).
     // Best-effort and fire-and-forget: a Valkey error or absence never delays or fails the read.
     if (primary && DEMAND_PURPOSES.has(purpose)) {
         try {
-            const id = opts.object ? opts.object.id : (opts.vod || opts.clip || {}).object_id;
-            if (id) require('./demand').record({ objectId: id });
+            const id = opts.objectId || (opts.object ? opts.object.id : (opts.vod || opts.clip || {}).object_id);
+            if (id) require('./demand').record({ objectId: id, segment: opts.segment });
         } catch { /* demand is a hint */ }
     }
     const chain = [primary, ...ordered.filter((c) => c !== primary)].filter(Boolean).map((c) => ({ provider: c.provider, key: c.key }));

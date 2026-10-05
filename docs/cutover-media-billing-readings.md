@@ -1,11 +1,17 @@
-# Cutover runbook — Media storage and delivery readings to OpenVibe.Billing (plan T5 step 14)
+# Cutover runbook — Media storage readings to OpenVibe.Billing (plan T5 step 14)
 
-This change makes Media the last producer of `platform.usage-sample@1` readings for its own storage and
-delivery: `migrations/0004_billing_readings.sql` adds the SDK usage reporter's outbox plus Media's aggregation
-state, and `server/billing.js` aggregates each closed UTC hour/day into one reading per (project, subject) and
-relays it to OpenVibe.Billing's `POST /api/v1/usage`. Nothing is renamed, dropped, altered or backfilled, and
-the reads and writes that serve media are untouched. No money moves here: Billing stores the readings and rates
-them in its own sweep (its `BILLING_RATING_INTERVAL_MS`, off by default, and no rate card loaded = no charge).
+This change makes Media a producer of `platform.usage-sample@1` readings for its own storage:
+`migrations/0004_billing_readings.sql` adds the SDK usage reporter's outbox plus Media's aggregation state, and
+`server/billing.js` aggregates each closed UTC day into one `gb-month` reading per (project, subject, tier) and
+relays it to OpenVibe.Billing's `POST /api/v1/usage`. Nothing is renamed, dropped, altered or backfilled, and the
+reads and writes that serve media are untouched. No money moves here: Billing stores the readings and rates them in
+its own sweep (its `BILLING_RATING_INTERVAL_MS`, off by default, and no rate card loaded = no charge).
+
+Media emits `gb-month` only. `gib-delivered` is deliberately not emitted: `demand.record()` counts `route()` calls,
+not bytes, so reads × `size_bytes` would bill aborted downloads and range reads in full, would bill presigned B2/R2
+redirects Media never serves, and would miss HLS segment reads. It comes back once responses are metered by the
+bytes actually written (`sendSlice`/`streamFileWithRange`) and redirected reads are metered by CDN logs. Nothing
+here bills delivery.
 
 ## What the migration does
 
@@ -17,8 +23,8 @@ them in its own sweep (its `BILLING_RATING_INTERVAL_MS`, off by default, and no 
   columns; the trigger `billing_readings_frozen` refuses every change to `event_id`/`envelope`/`created_at`, so a
   stored reading is immutable and a retry always posts the same body. A generated `idempotency_key` column names
   `event_id` for readers.
-- `billing_periods` — one row per `(metric, period_start)` already aggregated (`gib-delivered`: the UTC hour;
-  `gb-month`: the UTC day), so a re-run inserts nothing.
+- `billing_periods` — one row per `(metric, period_start)` already aggregated (`gb-month`: the UTC day), so a
+  re-run inserts nothing.
 
 The runner is `openvibe-sdk/db`'s `migrate()`, started by `server/db/database.js` as the owner
 (`DATABASE_DIRECT_URL`) when the process boots: it locks `ov_migrations`, runs the file in one transaction,
@@ -28,15 +34,16 @@ records id `0004` with its checksum, and refuses a later edit of it.
 
 | metric (`resource`) | source | period | unit | provider |
 |---|---|---|---|---|
-| `gib-delivered` | the closed hour's object reads (placement demand rollups, `server/placement/demand.js`) × the object's `size_bytes` | closed UTC hour | `GiB` | `local` |
-| `gb-month` | `media_locations` present copies, summed by provider | closed UTC day | `GB` | the tier (`local`/`b2`/`r2`) |
+| `gb-month` | `media_locations` present copies, summed by provider, each location counted once when more than one object names it and billed to the oldest owner, as that day's share of a GB-month (`bytes / GB / days in that UTC month`) | closed UTC day | `GB` | the tier (`local`/`b2`/`r2`) |
 
-One reading per (project, subject), plus the tier for `gb-month`. Only `apps.env = 'production'` tenants with a
-`project_id` are recorded (first-party and sandbox are dropped before `record()`); an object without an
-`owner_subject` is stored with its project alone and Billing leaves it unrated until it names a user subject.
-Because delivery reads live in the demand rollups, turn this on where `VALKEY_URL` is set in production: with no
-Valkey only the process's own counters are seen, and a period with no reads records nothing (it still marks the
-period so a later run does not re-scan).
+One reading per (project, subject, tier), so a month of daily readings sums to one GB-month per tier. Only
+`apps.env = 'production'` tenants with a `project_id` are recorded (first-party and sandbox are dropped before
+`record()`); an object without an `owner_subject` is stored with its project alone and Billing leaves it unrated
+until it names a user subject.
+
+Only the newest closed UTC day is aggregated: the storage query reads `media_locations`' current state, so a day
+missed while the service was down is simply not billed — a reading never claims today's state for an older day.
+Nothing here reads Valkey.
 
 ## Order
 
@@ -61,10 +68,9 @@ period so a later run does not re-scan).
 - The migration is recorded: `SELECT id, name, phase FROM ov_migrations WHERE id = '0004'` returns
   `0004 | billing_readings | expand`, and with the interval still 0 `SELECT COUNT(*) FROM billing_readings` is 0.
 - After step 5: `SELECT metric, COUNT(*) AS n, MAX(period_start) AS last FROM billing_periods GROUP BY metric`
-  shows the newest closed hour and day appearing; `SELECT COUNT(*) FROM billing_readings WHERE sent_at IS NULL
+  shows the newest closed day appearing; `SELECT COUNT(*) FROM billing_readings WHERE sent_at IS NULL
   AND rejected_at IS NULL` stays small. `GET /api/v1/usage?service=media` in Billing (its `billing.ledger.admin`
-  capability) lists the readings with `idempotency_key` `media:deliver:<project>:<subject>:<hour>` and
-  `media:store:<project>:<subject>:<tier>:<day>`.
+  capability) lists the readings with `idempotency_key` `media:store:<project>:<subject>:<tier>:<day>`.
 - A reading is never edited: `UPDATE billing_readings SET envelope = '{}'::jsonb WHERE …` fails with
   `billing_readings: reading … is never edited`.
 - A relay that cannot reach Billing leaves rows pending; a reading Billing refuses (any other 4xx) is marked

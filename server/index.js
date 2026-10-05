@@ -247,8 +247,8 @@ const ready = (async () => {
         require('./jobs/worker').start().catch((err) => console.warn('[Jobs] worker did not start:', err.message));   // media_jobs worker (light + heavy lanes; proposals wait for their owner)
         require('./objects/owner-subject-job').start();            // owner_subject for objects that name only an app-local owner (asks Network)
         // Usage readings → Billing (plan T5 step 14): off by default (MEDIA_BILLING_INTERVAL_MS=0 starts nothing).
-        // With an interval it aggregates each closed UTC hour/day into platform.usage-sample@1 readings and relays
-        // them to billing.usage.record; without OV_BILLING_URL or OV_OAUTH_CLIENT_SECRET they stay queued.
+        // With an interval it aggregates each closed UTC day into one platform.usage-sample@1 gb-month reading and
+        // relays it to billing.usage.record; without OV_BILLING_URL or OV_OAUTH_CLIENT_SECRET it stays queued.
         if (config.billing.intervalMs > 0) {
             billing = require('./billing').createMediaBilling({ db: db.getDb(), config: config.billing, networkUrl: config.network.internalUrl });
             billing.start();

@@ -13,8 +13,9 @@ const { createTestDb } = require('openvibe-sdk/testing');
 // ends without process.exit() exits. On PGlite, openvibe-sdk >= 0.29 reuses a migrated snapshot (OV_TEST_SNAPSHOT=0
 // opts out) and loadDataDir starts PGlite's Emscripten alarm — a ref'd setTimeout the wasm runtime keeps
 // rescheduling — which holds the event loop open the same way (a pure test, or a harness that exits only on
-// failure, would never exit and the per-file runner would time it out). Unref the timers PGlite's own wasm
-// schedules; every other timer a test sets stays ref'd.
+// failure, would never exit and the per-file runner would time it out). This is Media-side and only for the timers
+// PGlite's own wasm schedules: drop once openvibe-sdk unrefs PGlite's alarm itself (the pin, v0.32.0, does not
+// yet), then every timer a test sets stays ref'd.
 const realSetTimeout = globalThis.setTimeout, realSetInterval = globalThis.setInterval;
 const fromPglite = () => { const s = new Error().stack; return !!s && s.includes('@electric-sql/pglite'); };
 globalThis.setTimeout = function (...a) { const h = realSetTimeout.apply(this, a); if (fromPglite()) { try { h.unref?.(); } catch { /* already gone */ } } return h; };

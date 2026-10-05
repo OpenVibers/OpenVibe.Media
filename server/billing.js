@@ -1,16 +1,21 @@
 'use strict';
 /**
- * Media's storage and delivery usage readings → OpenVibe.Billing (plan T5 step 14, Media slice).
+ * Media's storage usage readings → OpenVibe.Billing (plan T5 step 14, Media slice).
  *
- * Media is the authority for every stored byte and every delivered byte, so it emits two platform.usage-sample@1
- * metrics, the two the platform.rate-card@1 contract names for it:
+ * Media emits one platform.usage-sample@1 metric, gb-month, the storage metric the platform.rate-card@1 contract
+ * names for it:
  *
- *   gib-delivered  the bytes served in one closed UTC hour, per (project, subject): the hour's object reads (the
- *                  placement demand rollups, server/placement/demand.js) × the object's size_bytes, in GiB.
- *                  resource 'gib-delivered', provider 'local', unit 'GiB', operation 'deliver'.
  *   gb-month       the bytes stored for one closed UTC day, per (project, subject, tier): every present copy in
  *                  media_locations, once a day ("daily partition"), in GB. resource 'gb-month', provider the tier
- *                  (local/b2/r2), unit 'GB', operation 'store'.
+ *                  (local/b2/r2), unit 'GB', operation 'store'. Each daily reading carries that day's share of a
+ *                  GB-month — bytes / GB / (days in that UTC month) — so a month of daily readings sums to one
+ *                  GB-month. A location more than one object names (F3.4) is counted once, billed to the oldest
+ *                  object naming it.
+ *
+ * gib-delivered is deliberately not emitted. demand.record() counts route() calls, not bytes: reads × size_bytes
+ * would bill aborted downloads and range reads in full, would bill presigned B2/R2 redirects Media never serves,
+ * and never sees HLS segment reads. It comes back once responses are metered by the bytes actually written
+ * (sendSlice/streamFileWithRange) and redirected reads are metered by CDN logs. Nothing here bills delivery.
  *
  * First-party traffic (a tenant with no project) and sandbox tenants are never recorded: the reporter bills whatever
  * reading it is given, so the aggregate query joins apps and keeps only `env = 'production'` rows with a project id.
@@ -35,21 +40,17 @@
 const { createUsageReporter } = require('openvibe-sdk/usage');
 const { createServiceTokenClient } = require('openvibe-sdk/auth');
 
-const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
-const GRACE_MS = 5 * 60 * 1000;               // an hour/day is aggregated only once this much of the next one passed
-const GIB = 1024 * 1024 * 1024;               // a GiB in bytes: the unit gib-delivered is metered in
+const DAY_MS = 24 * 60 * 60 * 1000;
+const GRACE_MS = 5 * 60 * 1000;               // a day is aggregated only once this much of the next one passed
 const GB = 1000 * 1000 * 1000;                // a GB in bytes: the unit gb-month is metered in
-const MAX_CATCHUP_HOURS = 7 * 24;             // hours a late start aggregates back, newest-first (Valkey demand TTL is shorter)
-const MAX_CATCHUP_DAYS = 31;
 const TABLE = 'billing_readings';
-const DELIVERED = 'gib-delivered';
 const STORAGE = 'gb-month';
 const UNKNOWN_CONTRACT = /unknown contract/;
 
-const hourStart = (ms) => Math.floor(ms / HOUR_MS) * HOUR_MS;
 const dayStart = (ms) => Math.floor(ms / DAY_MS) * DAY_MS;
 const iso = (ms) => new Date(ms).toISOString();
+/** Days in the UTC month containing `ms`: the divisor that turns a day's bytes into its share of a GB-month. */
+function daysInMonth(ms) { const d = new Date(ms); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate(); }
 
 /**
  * @param {object} o
@@ -76,7 +77,6 @@ function createMediaBilling({ db, config, networkUrl, clock = { now: () => Date.
         billingUrl: config && config.url, tokenClient, audience: config && config.audience,
         fetchImpl, timeoutMs: (config && config.timeoutMs) || 5000, now, log,
     });
-    const demand = require('./placement/demand');
     let lastError = null;
 
     /**
@@ -103,70 +103,29 @@ function createMediaBilling({ db, config, networkUrl, clock = { now: () => Date.
     const periodDone = (metric, periodStart) =>
         db.prepare(`SELECT readings FROM billing_periods WHERE metric = ? AND period_start = ?`).get(metric, periodStart);
 
-    /** The last aggregated period start for `metric` (null when none). */
-    const lastPeriod = async (metric) => {
-        const v = await db.value(`SELECT MAX(period_start) AS p FROM billing_periods WHERE metric = ?`, [metric]);
-        return v == null ? null : Number(v);
-    };
-
-    /**
-     * Aggregate the closed UTC hour [periodStart, +1h) into one gib-delivered reading per (project, subject), in the
-     * transaction that marks the period. Reads the hour's object reads from the placement demand rollups and the
-     * objects' size_bytes; first-party and sandbox tenants are dropped before anything is recorded. A re-run of the
-     * hour sees the billing_periods row and inserts nothing.
-     */
-    async function aggregateDeliveryHour(periodStart, { now: at = now() } = {}) {
-        if (periodStart !== hourStart(periodStart)) throw new RangeError(`billing: ${periodStart} is not the start of an hour`);
-        if (periodStart + HOUR_MS + GRACE_MS > at) throw new RangeError(`billing: the hour ${iso(periodStart)} has not closed`);
-        const reads = await demand.readsForWindow({ from: periodStart, to: periodStart + HOUR_MS, now: at });
-        let rows = [];
-        if (reads.size) {
-            rows = await db.prepare(`SELECT o.id, o.owner_subject, o.size_bytes, a.project_id
-                    FROM media_objects o JOIN apps a ON a.app_id = o.app_id
-                    WHERE o.id = ANY(?) AND o.lifecycle_status <> 'deleted'
-                      AND a.env = 'production' AND a.project_id IS NOT NULL`).all([[...reads.keys()]]);
-        }
-        const groups = new Map();
-        for (const row of rows) {
-            const n = reads.get(String(row.id)) || 0;
-            const bytes = n * Number(row.size_bytes || 0);
-            if (!(bytes > 0)) continue;
-            const gkey = `${row.project_id}\u0000${row.owner_subject || ''}`;
-            const g = groups.get(gkey) || { project: String(row.project_id), subject: row.owner_subject || undefined, bytes: 0 };
-            g.bytes += bytes;
-            groups.set(gkey, g);
-        }
-        return await db.tx(async (t) => {
-            if (await periodDone(DELIVERED, periodStart)) return { period: periodStart, readings: 0, created: 0, skipped: true };
-            let created = 0, count = 0;
-            for (const g of groups.values()) {
-                const hour = iso(periodStart);
-                const key = reporter.key('deliver', g.project, g.subject || '-', hour);
-                const reading = reporter.sample({ idempotency_key: key, project: g.project, subject: g.subject,
-                    resource: DELIVERED, provider: 'local', operation: 'deliver', quantity: g.bytes / GIB, unit: 'GiB', at: hour });
-                if (await queue(t, reading)) created++;
-                count++;
-            }
-            await t.exec(`INSERT INTO billing_periods (metric, period_start, readings, aggregated_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-                [DELIVERED, periodStart, count, at]);
-            return { period: periodStart, readings: count, created };
-        });
-    }
-
     /**
      * Aggregate the closed UTC day [periodStart, +1d) into one gb-month reading per (project, subject, tier), in the
-     * transaction that marks the day. Sums every present copy's size in media_locations by provider; first-party and
-     * sandbox tenants are dropped. A re-run of the day inserts nothing.
+     * transaction that marks the day. A location is counted once even when several objects name it (F3.4): the
+     * subquery keeps, per storage identity (provider + key), the oldest non-deleted object naming it and that
+     * location's bytes, so the sum bills the bytes once to that object's owner. First-party and sandbox tenants are
+     * dropped. Each reading carries the day's share of a GB-month (bytes / GB / days in the UTC month), so a month
+     * of daily readings sums to one GB-month. A re-run of the day inserts nothing.
      */
     async function aggregateStorageDay(periodStart, { now: at = now() } = {}) {
         if (periodStart !== dayStart(periodStart)) throw new RangeError(`billing: ${periodStart} is not the start of a day`);
         if (periodStart + DAY_MS + GRACE_MS > at) throw new RangeError(`billing: the day ${iso(periodStart)} has not closed`);
-        const rows = await db.prepare(`SELECT a.project_id, o.owner_subject, l.provider AS tier,
-                    SUM(COALESCE(l.size_bytes, o.size_bytes)) AS bytes
-                FROM media_locations l JOIN media_objects o ON o.id = l.object_id JOIN apps a ON a.app_id = o.app_id
-                WHERE l.state = 'present' AND o.lifecycle_status <> 'deleted'
-                  AND a.env = 'production' AND a.project_id IS NOT NULL
-                GROUP BY a.project_id, o.owner_subject, l.provider`).all();
+        const rows = await db.prepare(`WITH named AS (
+                    SELECT DISTINCT ON (l.provider, l.key)
+                           l.provider AS tier, COALESCE(l.size_bytes, o.size_bytes) AS bytes, o.owner_subject, o.app_id
+                    FROM media_locations l JOIN media_objects o ON o.id = l.object_id
+                    WHERE l.state = 'present' AND o.lifecycle_status <> 'deleted'
+                    ORDER BY l.provider, l.key, o.created_at, o.id
+                )
+                SELECT a.project_id, n.owner_subject, n.tier, SUM(n.bytes) AS bytes
+                FROM named n JOIN apps a ON a.app_id = n.app_id
+                WHERE a.env = 'production' AND a.project_id IS NOT NULL
+                GROUP BY a.project_id, n.owner_subject, n.tier`).all();
+        const days = daysInMonth(periodStart);
         return await db.tx(async (t) => {
             if (await periodDone(STORAGE, periodStart)) return { period: periodStart, readings: 0, created: 0, skipped: true };
             const day = iso(periodStart);
@@ -177,7 +136,7 @@ function createMediaBilling({ db, config, networkUrl, clock = { now: () => Date.
                 const project = String(row.project_id), subject = row.owner_subject || undefined, tier = String(row.tier);
                 const key = reporter.key('store', project, subject || '-', tier, day);
                 const reading = reporter.sample({ idempotency_key: key, project, subject,
-                    resource: STORAGE, provider: tier, operation: 'store', quantity: bytes / GB, unit: 'GB', at: day });
+                    resource: STORAGE, provider: tier, operation: 'store', quantity: (bytes / GB) / days, unit: 'GB', at: day });
                 if (await queue(t, reading)) created++;
                 count++;
             }
@@ -188,24 +147,17 @@ function createMediaBilling({ db, config, networkUrl, clock = { now: () => Date.
     }
 
     /**
-     * Aggregate every closed hour and day not yet aggregated: from the one after the last marked (capped at the
-     * catch-up window) through the newest closed one. The first run aggregates just the newest closed hour and day.
+     * Aggregate the newest closed UTC day. The storage query reads media_locations' current state, so a past day can
+     * never be reconstructed later: only this day is aggregated, and a day missed while the service was down is
+     * simply not billed (a reading must not claim today's state for an older day).
      */
     async function aggregateClosed({ now: at = now() } = {}) {
-        let created = 0;
-        const newestHour = hourStart(at - GRACE_MS) - HOUR_MS;
-        const lastHour = await lastPeriod(DELIVERED);
-        let fromHour = lastHour == null ? newestHour : Math.max(lastHour + HOUR_MS, newestHour - (MAX_CATCHUP_HOURS - 1) * HOUR_MS);
-        for (; fromHour <= newestHour; fromHour += HOUR_MS) created += (await aggregateDeliveryHour(fromHour, { now: at })).created;
-
         const newestDay = dayStart(at - GRACE_MS) - DAY_MS;
-        const lastDay = await lastPeriod(STORAGE);
-        let fromDay = lastDay == null ? newestDay : Math.max(lastDay + DAY_MS, newestDay - (MAX_CATCHUP_DAYS - 1) * DAY_MS);
-        for (; fromDay <= newestDay; fromDay += DAY_MS) created += (await aggregateStorageDay(fromDay, { now: at })).created;
-        return { created };
+        const r = await aggregateStorageDay(newestDay, { now: at });
+        return { created: r.created };
     }
 
-    /** One pass: aggregate the closed periods, then relay what is due. Never overlaps itself; never throws. */
+    /** One pass: aggregate the newest closed day, then relay what is due. Never overlaps itself; never throws. */
     let running = null;
     function tick() {
         if (!running) running = (async () => {
@@ -227,7 +179,7 @@ function createMediaBilling({ db, config, networkUrl, clock = { now: () => Date.
         enabled: intervalMs > 0,
         reporting: !!tokenClient,
         reporter,
-        aggregateDeliveryHour, aggregateStorageDay, aggregateClosed, tick,
+        aggregateStorageDay, aggregateClosed, tick,
         /** Queue one reading in its own transaction (tests and ad-hoc re-queues). */
         async record(reading) { return await db.tx(async (t) => queue(t, reading)); },
         /** Relay due readings now (alias of the reporter's flush). */
@@ -262,5 +214,5 @@ function createMediaBilling({ db, config, networkUrl, clock = { now: () => Date.
 
 module.exports = {
     createMediaBilling,
-    HOUR_MS, DAY_MS, GRACE_MS, GIB, GB, TABLE, DELIVERED, STORAGE, hourStart, dayStart,
+    DAY_MS, GRACE_MS, GB, TABLE, STORAGE, dayStart,
 };
