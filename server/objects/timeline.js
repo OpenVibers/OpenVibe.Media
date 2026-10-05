@@ -16,6 +16,15 @@
  * row's key/local_path/durable_provider then name the chunk, packed_object_id its sha256 (content address) and
  * byte_offset/byte_length the segment's bytes inside it; its name, times and sha256 stay the segment's. Several rows
  * share one chunk, so the bytes are deleted once per location and kept (for a retry) while any delete of them fails.
+ *
+ * Locations are shared (§3/§4): any number of rows — of any number of objects (a source and the clips over it, F3.5/F4) —
+ * may name one location, because a location is content-addressed and names bytes, not an owner. A location's bytes are
+ * deleted only when no row names it. "How many objects name this location?" is a query over these rows (namedElsewhere),
+ * never a counter table, so a count cannot drift from them; migration 0003 indexes (durable_provider, key) and
+ * (local_path) for it. removeObject and deleteBytes therefore keep a location another object's rows still name, and
+ * object.pack re-keys every row that names a packed segment's old location (same sha256) to the chunk in the same
+ * transaction, so a clip follows its source into the chunk and the per-segment location is freed only once nothing names
+ * it. A source's own purge deletes its rows; the shared bytes go when the last naming object does.
  */
 'use strict';
 
@@ -110,54 +119,73 @@ async function replace(objectId, rendition, rows, { jobId = null, expect = null 
 /**
  * Delete the bytes a set of rows names: this node's copy (only inside the timeline root) and the durable copy. A remote
  * delete that fails is returned, never swallowed: the caller keeps those rows, and their keys, so a later pass retries.
- * → { failed: [{ row, provider, key, error }] }.
+ * A location any OTHER object's rows still name (`namedElsewhere`, `exceptObjectId` is the object being removed) is kept,
+ * never deleted: it is shared (a source and the clips over it). → { failed: [{ row, provider, key, error }],
+ * kept: [{ row, provider, key }] } (kept = intentionally not deleted; for a local location provider is 'local').
  */
-async function deleteBytes(rows) {
+async function deleteBytes(rows, { exceptObjectId = null } = {}) {
     const root = localRoot() + path.sep;
     const vodStorage = require('../vod/vod-storage');
     const dirs = new Set();
     const failed = [];
-    const done = new Set();   // a packed chunk is named by every row it holds: each location is deleted once
+    const kept = [];
+    const done = new Set();   // a packed chunk is named by every row it holds: each location is handled once
     for (const r of rows) {
         if (r.local_path && path.resolve(r.local_path).startsWith(root) && !done.has(`local\n${r.local_path}`)) {
             done.add(`local\n${r.local_path}`);
-            try { fs.unlinkSync(r.local_path); } catch { /* already gone */ }
-            dirs.add(path.dirname(r.local_path));
+            if (await namedElsewhere({ localPath: r.local_path }, exceptObjectId)) kept.push({ row: r, provider: 'local', key: r.local_path });
+            else { try { fs.unlinkSync(r.local_path); } catch { /* already gone */ } dirs.add(path.dirname(r.local_path)); }
         }
         if (r.durable_provider && vodStorage.providerConfigured(r.durable_provider) && !done.has(`${r.durable_provider}\n${r.key}`)) {
             done.add(`${r.durable_provider}\n${r.key}`);
-            const ok = await vodStorage.deleteObject(r.durable_provider, r.key);
-            if (!ok) failed.push({ row: r, provider: r.durable_provider, key: r.key, error: 'delete failed' });
+            if (await namedElsewhere({ provider: r.durable_provider, key: r.key }, exceptObjectId)) kept.push({ row: r, provider: r.durable_provider, key: r.key });
+            else {
+                const ok = await vodStorage.deleteObject(r.durable_provider, r.key);
+                if (!ok) failed.push({ row: r, provider: r.durable_provider, key: r.key, error: 'delete failed' });
+            }
         }
     }
     for (const d of dirs) {
         for (const p of [d, path.dirname(d)]) { try { fs.rmdirSync(p); } catch { /* not empty or gone */ } }
     }
-    return { failed };
+    return { failed, kept };
 }
 
 /**
- * Whether any timeline row still names this location (a durable `provider` + `key`, or a local `localPath`). Keys and
- * paths are content-addressed, so a run that lost a race may have built exactly the bytes a winner committed: it deletes
- * what it staged only when no row names it.
+ * Whether any row of ANOTHER object names this location (a durable `provider` + `key`, or a local `localPath`), i.e.
+ * whether its bytes are shared with an object other than `exceptObjectId`. That is the reference count's only question:
+ * a location's bytes may be deleted exactly when this is false. Keys and paths are content-addressed, so two objects'
+ * rows can name one location (a source and the clips over it). `exceptObjectId` is the object whose rows are being
+ * removed; null counts every object (isNamed).
  */
-async function isNamed({ provider = null, key = null, localPath = null }) {
-    if (provider && key && await db.get('SELECT 1 AS x FROM media_timeline WHERE durable_provider = ? AND key = ? LIMIT 1', [provider, key])) return true;
-    if (localPath && await db.get('SELECT 1 AS x FROM media_timeline WHERE local_path = ? LIMIT 1', [localPath])) return true;
+async function namedElsewhere({ provider = null, key = null, localPath = null }, exceptObjectId = null) {
+    const skip = exceptObjectId ? ' AND object_id <> ?' : '';
+    const rest = exceptObjectId ? [exceptObjectId] : [];
+    if (provider && key && await db.get(`SELECT 1 AS x FROM media_timeline WHERE durable_provider = ? AND key = ?${skip} LIMIT 1`, [provider, key, ...rest])) return true;
+    if (localPath && await db.get(`SELECT 1 AS x FROM media_timeline WHERE local_path = ?${skip} LIMIT 1`, [localPath, ...rest])) return true;
     return false;
 }
 
 /**
+ * Whether any timeline row still names this location. Keys and paths are content-addressed, so a run that lost a race
+ * may have built exactly the bytes a winner committed: it deletes what it staged only when no row names it.
+ */
+async function isNamed(loc) { return await namedElsewhere(loc, null); }
+
+/**
  * The object's whole timeline is gone with its bytes (a purge, or a vod/clip deleted for good): local files, then the
- * durable copies. A row whose durable delete failed is kept — with its key — so a later pass can retry; dropping it
- * would lose the only record of the bytes still in B2/R2. Callers have already refused a held object.
- * → { removed, pending } (pending = rows kept for a retry).
+ * durable copies. A location another object's rows still name is kept (deleteBytes with this object's id): the rows go,
+ * the shared bytes stay, and they are deleted when the last naming object is removed. A row whose own durable delete
+ * failed is kept — with its key — so a later pass can retry; dropping it would lose the only record of the bytes still
+ * in B2/R2. Callers have already refused a held object. → { removed, pending } (pending = rows kept for a retry).
  */
 async function removeObject(objectId) {
     if (!objectId) return { removed: 0, pending: 0 };
     const rows = await db.all('SELECT * FROM media_timeline WHERE object_id = ?', [objectId]);
     if (!rows.length) return { removed: 0, pending: 0 };
-    const { failed } = await deleteBytes(rows);
+    // Kept (shared) locations do not keep the rows: the row of a deleted object must go, and the next object to name
+    // the location takes over the bytes' deletion. Only a failed delete keeps its rows for a retry.
+    const { failed } = await deleteBytes(rows, { exceptObjectId: objectId });
     // Every row naming a location whose delete failed is kept: for a packed chunk that is all the rows it holds.
     const stuck = new Set(failed.map((f) => `${f.provider}\n${f.key}`));
     let removed = 0;
@@ -172,20 +200,30 @@ async function removeObject(objectId) {
 
 /**
  * Point rows at the chunk they were packed into, in one transaction. `updates` = [{ row, key, local_path,
- * durable_provider, packed_object_id, byte_offset }]; each row changes only if it is still exactly the unpacked segment
- * the packer read (same key and sha256, not packed): a re-cut in between makes the whole commit roll back and false is
- * returned, so the caller drops its chunk. Never deletes a row.
+ * durable_provider, packed_object_id, byte_offset }]; the location is the segment's old key (content-addressed, versioned
+ * by its sha), and EVERY row of any object that names it with the same sha256 — the source's, and a clip's over it —
+ * moves to the chunk in this same transaction, so a clip follows its source into the chunk. Each group changes only if
+ * it still names the unpacked segment the packer read (same key and sha256, not packed): a re-cut in between makes the
+ * whole commit roll back and false is returned, so the caller drops its chunk. A row naming the old location with a
+ * different sha256 (which should not happen) does not match, is left alone, and so keeps the old location named (its
+ * bytes are not deleted). Never deletes a row.
  */
-async function markPacked(objectId, rendition, updates, { jobId = null } = {}) {
+async function markPacked(objectId, updates, { jobId = null } = {}) {
     const CONFLICT = new Error('timeline changed');
     try {
         await db.getDb().tx(async () => {
             await lockObject(objectId);
             for (const u of updates) {
+                // The old location: the durable pair when the row was durable (packed rows always are), the local copy
+                // too. The (durable_provider, key) index serves the first, (local_path) the second.
+                const loc = u.row.durable_provider ? '(durable_provider = ? AND key = ?)' : 'key = ?';
+                const at = u.row.durable_provider ? [u.row.durable_provider, u.row.key] : [u.row.key];
+                const names = u.row.local_path ? `(${loc} OR local_path = ?)` : loc;
                 const r = await db.run(`UPDATE media_timeline SET key = ?, local_path = ?, durable_provider = ?, durability = 'durable',
-                                           packed_object_id = ?, byte_offset = ?, job_id = ?, updated_at = ov_now()
-                                        WHERE object_id = ? AND rendition = ? AND seq = ? AND key = ? AND sha256 = ? AND packed_object_id IS NULL`,
-                [u.key, u.local_path, u.durable_provider, u.packed_object_id, u.byte_offset, jobId, objectId, rendition, u.row.seq, u.row.key, u.row.sha256]);
+                                           packed_object_id = ?, byte_offset = ?, byte_length = ?, job_id = ?, updated_at = ov_now()
+                                        WHERE sha256 = ? AND packed_object_id IS NULL AND ${names}`,
+                [u.key, u.local_path, u.durable_provider, u.packed_object_id, u.byte_offset, u.row.byte_length, jobId,
+                    u.row.sha256, ...at, ...(u.row.local_path ? [u.row.local_path] : [])]);
                 if (!r.changes) throw CONFLICT;
             }
         });
@@ -275,6 +313,6 @@ function clipRows(rows, startMs, endMs) {
 
 module.exports = {
     SOURCE, INIT_NAME, FIELDS, localRoot, localPathFor, keyFor, segmentName,
-    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
+    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, namedElsewhere, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
     mediaPlaylist, masterPlaylist, clipRows,
 };

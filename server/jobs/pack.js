@@ -170,7 +170,7 @@ async function run(job, ctx) {
                 if (!back || back.sha256 !== sha) throw new JobError('pack_unverified', `${provider}:${key} does not read back as ${sha.slice(0, 12)}`, { retryAfterS: 600 });
                 if (localPath) { fs.mkdirSync(path.dirname(localPath), { recursive: true }); fs.renameSync(tmp, localPath); }
                 aborted(ctx);
-                committed = await timeline.markPacked(src.id, rendition, placed.map((p) => ({
+                committed = await timeline.markPacked(src.id, placed.map((p) => ({
                     row: p.row, key, local_path: localPath, durable_provider: provider, packed_object_id: sha, byte_offset: p.byte_offset,
                 })), { jobId: job.id });
                 if (!committed) throw new JobError('media.timeline.changed', 'The timeline changed while packing (a re-cut); a retry packs the new segments', { retryAfterS: 60 });
@@ -182,9 +182,12 @@ async function run(job, ctx) {
                     try { fs.unlinkSync(tmp); } catch { /* moved or gone */ }
                 }
             }
-            // Phase two, after the commit: the per-segment copies the chunk now replaces.
-            const { failed } = await timeline.deleteBytes(chunk);
+            // Phase two, after the commit: the per-segment copies the chunk now replaces. A location another object's
+            // rows still name (a clip over the source whose row did not follow the sha, which should not happen) is
+            // kept, not deleted — those bytes are shared.
+            const { failed, kept } = await timeline.deleteBytes(chunk, { exceptObjectId: src.id });
             if (failed.length) console.warn(`[Pack] ${job.id}: ${failed.length} packed segment key(s) left behind (the storage orphan report names them), first ${failed[0].provider}:${failed[0].key}`);
+            if (kept.length) console.warn(`[Pack] ${job.id}: ${kept.length} packed segment location(s) kept — another object's rows name them`);
             out.left_behind += failed.length;
             out.removed_segments += chunk.length - failed.length;
             out.packs++;
