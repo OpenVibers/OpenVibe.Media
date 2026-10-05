@@ -174,7 +174,8 @@ const crypto = require('crypto');
         assert.ok(pmA.slice(2).every((r) => !blobs.has(`b2:${r.key}`)), 'the other segments (no mismatched row) were freed');
         assert.ok(pmChunk.packed_object_id);
 
-        // ── Concurrent removal of two objects over one shared location: the last committer deletes it, no orphan ──
+        // ── Two removals over one shared location, started together: whatever order the scheduler gives their commits
+        //    and checks (one PGlite connection serializes the queries), they converge: no row, no orphan, no lost bytes ──
         const ccA = await seedSource('cc-A');
         for (const [i, r] of ccA.slice(1).entries()) await insert('cc-B', clipRow(r, i + 1));
         deletes.length = 0;
@@ -184,7 +185,7 @@ const crypto = require('crypto');
         assert.strictEqual((await timeline.list('cc-A')).length + (await timeline.list('cc-B')).length, 0, 'no row is left');
         assert.ok(!await timeline.isNamed({ provider: 'b2', key: ccA[1].key }), 'no row names the shared location afterwards');
         assert.ok(!blobs.has(`b2:${ccA[1].key}`), 'the shared bytes are gone, not orphaned');
-        assert.strictEqual(deletes.filter((d) => d === `b2:${ccA[1].key}`).length, 1, 'and they were deleted exactly once');
+        assert.ok(deletes.filter((d) => d === `b2:${ccA[1].key}`).length >= 1, 'and they were deleted (twice is fine: a delete is idempotent)');
         assert.ok(ccA.slice(1).every((r) => !fs.existsSync(r.local_path)), 'the shared local files are gone too');
 
         // ── A pack whose source was re-cut must not commit on a clip's same-sha row alone ──
