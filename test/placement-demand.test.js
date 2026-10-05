@@ -28,7 +28,9 @@ const path = require('path');
     assert.strictEqual(demand.bucketOf(T0 + B), T0 / B + 1);
     assert.strictEqual(demand.region(), 'local');
     assert.strictEqual(demand.counterKey('local', 7, 'obj-a'), 'demand:local:7:obj-a');
+    assert.strictEqual(demand.counterKey('local', 7, 'obj-a', '000001.m4s'), 'demand:local:7:obj-a:000001.m4s');
     assert.strictEqual(demand.hotKey('local', 7), 'hot:local:7');
+    assert.strictEqual(demand.segKey('local', 7, 'obj-a'), 'hot:local:7:obj-a');
     assert.strictEqual(demand.KEY_TTL_S, 7200);
     assert.ok(demand.KEY_TTL_S * 1000 > demand.WINDOW_BUCKETS * B, 'a key outlives the window it is read in');
     console.log('✅ bucket math and key layout');
@@ -46,9 +48,21 @@ const path = require('path');
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, buckets: 1 })), { 'obj-a': 3, 'obj-b': 1 });
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ region: 'eu', now: T0 })), { 'obj-a': 1 });
     assert.deepStrictEqual(await demand.top({ now: T0 }), [{ object_id: 'obj-a', reads: 3 }, { object_id: 'obj-b', reads: 1 }]);
+    // A segment read moves the object total and that segment's own counter, never another segment's; hotness()
+    // aggregates the segments to the object, and the segment axis reads each object's per-segment set.
+    demand.record({ objectId: 'obj-s', segment: 'init.mp4', now: T0 });
+    for (let i = 0; i < 3; i++) demand.record({ objectId: 'obj-s', segment: '000001.m4s', now: T0 });
+    demand.record({ objectId: 'obj-s', segment: '000001.m4s', now: T0 - B });                        // inside the hour
+    demand.record({ objectId: 'obj-s', segment: '000002.m4s', now: T0 - demand.WINDOW_BUCKETS * B }); // 13th bucket back: outside
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-s'] })), { 'obj-s': 5 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-s'], segment: '000001.m4s' })), { 'obj-s': 4 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-s'], segment: 'init.mp4' })), { 'obj-s': 1 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-s'], segment: '000002.m4s' })), { 'obj-s': 0 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-s'], segment: '000009.m4s' })), { 'obj-s': 0 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, segment: '000001.m4s' })), { 'obj-s': 4 }, 'the segment axis without an object list');
     // Past the TTL, the in-process counters are gone as Valkey's would be.
     assert.strictEqual((await demand.hotness({ now: T0 + demand.KEY_TTL_S * 1000 + B, buckets: 100 })).size, 0);
-    console.log('✅ hotness() sums the window per object and region; top() orders the bucket; TTL expires counts');
+    console.log('✅ hotness() sums the window per object and region; segments aggregate to the object and read apart; top() orders the bucket; TTL expires counts');
 
     // 3. On Valkey: the exact keys inside the service prefix, and a TTL set once per key.
     const calls = [];
@@ -81,7 +95,21 @@ const path = require('path');
     assert.strictEqual(calls.filter((c) => c[0] === 'expire' && c[1] === ck).length, 1, 'TTL set on the first hit only');
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0 })), { 'obj-a': 2, 'obj-b': 1 });
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-a', 'obj-b'] })), { 'obj-a': 2, 'obj-b': 1 });
-    console.log('✅ Valkey keys ov:media:demand:<region>:<bucket>:<id> and ov:media:hot:<region>:<bucket>, TTL 7200 s');
+    // A segment read writes the segment counter and the object's per-segment set, and the object total with them.
+    demand.record({ objectId: 'obj-a', segment: '000001.m4s', now: T0 });
+    demand.record({ objectId: 'obj-a', segment: '000001.m4s', now: T0 });
+    demand.record({ objectId: 'obj-a', segment: '000002.m4s', now: T0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    const sk = `ov:media:demand:local:${b}:obj-a:000001.m4s`, gk = `ov:media:hot:local:${b}:obj-a`;
+    assert.strictEqual(store.get(sk), 2);
+    assert.deepStrictEqual([...zsets.get(gk)], [['000001.m4s', 2], ['000002.m4s', 1]]);
+    assert.strictEqual(ttls.get(sk), 7200);
+    assert.strictEqual(ttls.get(gk), 7200);
+    assert.strictEqual(calls.filter((c) => c[0] === 'expire' && c[1] === sk).length, 1, 'TTL set on the first segment hit only');
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0 })), { 'obj-a': 5, 'obj-b': 1 }, 'the object total grew by its segments');
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-a'], segment: '000001.m4s' })), { 'obj-a': 2 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, segment: '000001.m4s' })), { 'obj-a': 2 }, 'the segment axis without an object list');
+    console.log('✅ Valkey keys ov:media:demand:<region>:<bucket>:<id>[:<segment>] and ov:media:hot:<region>:<bucket>[:<id>], TTL 7200 s');
 
     // 4. The router records one hit per served viewer read; none for a derive job or when nothing is served.
     const file = path.join(tmp, 'objects', 'obj-r');
@@ -93,9 +121,13 @@ const path = require('path');
     await router.route({ vod: { id: 9, object_id: 'obj-v' }, locations: served.locations, purpose: 'download' });
     await router.route({ object: served, purpose: 'derive' });
     await router.route({ object: { id: 'obj-none', locations: [] }, purpose: 'playback' });
+    // A segment read names its object through `objectId` and the segment through `segment` (routes.js /o/:id/source/:name).
+    await router.route({ locations: served.locations, objectId: 'obj-sg', segment: '000002.m4s', purpose: 'playback' });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.deepStrictEqual(calls.filter((c) => c[0] === 'incr').map((c) => c[1]).map((k) => k.split(':').pop()), ['obj-r', 'obj-v']);
-    console.log('✅ router: one demand hit per served playback/download, none for derive or no copy');
+    const incrKeys = calls.filter((c) => c[0] === 'incr').map((c) => c[1]);
+    assert.deepStrictEqual(incrKeys.map((k) => k.split(':').pop()), ['obj-r', 'obj-v', 'obj-sg', '000002.m4s']);
+    assert.ok(incrKeys.some((k) => k.endsWith(':obj-sg:000002.m4s')), 'the segment key carries the object and the segment');
+    console.log('✅ router: one demand hit per served playback/download, none for derive or no copy, segments named');
 
     // 5. A failing Valkey (rejecting, throwing, hanging) leaves the read path untouched.
     const unhandled = [];

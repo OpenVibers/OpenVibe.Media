@@ -1,19 +1,26 @@
 'use strict';
 /**
- * Demand rollups (F2.4, docs/media-fabric.md §6, §8): reads per object × region × 5-minute bucket, folded into
- * Valkey counters plus one hot sorted set per region and bucket, with an in-process fallback when Valkey is off.
+ * Demand rollups (F2.4, docs/media-fabric.md §6, §8): reads per object × region × 5-minute bucket, each carrying the
+ * timeline segment it served (a beginning is hotter than a middle), folded into Valkey counters plus one hot sorted
+ * set per region and bucket and one per object and bucket, with an in-process fallback when Valkey is off.
  * Valkey is never authoritative (ADR-007): a lost counter only delays a promotion, never loses bytes, and a slow
  * or absent Valkey never delays or fails a read (record() is fire-and-forget).
  *
  * Keys (inside the service prefix, VALKEY_PREFIX=ov:media:):
- *   demand:<region>:<bucket>:<object_id>   counter, one per served read                     TTL KEY_TTL_S
- *   hot:<region>:<bucket>                  sorted set, object_id -> reads in that bucket    TTL KEY_TTL_S
- *   hot-announced:<region>:<object_id>     media.object.hot staged within the hour (NX)     TTL ANNOUNCE_S
+ *   demand:<region>:<bucket>:<object_id>              counter, one per served read (the object total)  TTL KEY_TTL_S
+ *   demand:<region>:<bucket>:<object_id>:<segment>    counter, one per served read of that segment    TTL KEY_TTL_S
+ *   hot:<region>:<bucket>                             sorted set, object_id -> reads in that bucket TTL KEY_TTL_S
+ *   hot:<region>:<bucket>:<object_id>                 sorted set, segment -> reads in that bucket    TTL KEY_TTL_S
+ *   hot-announced:<region>:<object_id>                media.object.hot staged within the hour (NX)   TTL ANNOUNCE_S
  * <bucket> = floor(epoch_ms / BUCKET_MS). The region is one per deployment (MEDIA_DEMAND_REGION, default 'local');
  * a per-viewer region needs an edge-provided header that does not exist yet.
  *
- * The tiering sweep (objects/tiering.js, F2.5) reads hotness() with `strict` for its promote/demote eligibility, one
- * MGET per page of objects, and calls rollup(), which stages media.object.hot for objects over HOT_READS in the window.
+ * Every read bumps the object counter, so the object is the sum over its segments (plus any whole-object reads): the
+ * object-level hotness the tiering sweep's eligibility reads (objects/tiering.js, F2.5) is unchanged, and a segment
+ * read additionally bumps only that segment's counter and per-object segment set.
+ *
+ * The tiering sweep reads hotness() with `strict` for its promote/demote eligibility, one MGET per page of objects, and
+ * calls rollup(), which stages media.object.hot for objects over HOT_READS in the window.
  */
 const config = require('../config');
 
@@ -37,8 +44,11 @@ function available() { return !!vk; }
 function region() { return String((config.demand && config.demand.region) || 'local').replace(/[^A-Za-z0-9_.-]/g, '_') || 'local'; }
 function bucketOf(now = Date.now()) { return Math.floor(now / BUCKET_MS); }
 const name = (...parts) => (vk ? vk.key(...parts) : parts.join(':'));
-function counterKey(r, b, id) { return name('demand', r, String(b), String(id)); }
+/** The object total without a segment, the segment's own counter with one (the object total moves too: see record()). */
+function counterKey(r, b, id, segment) { return name('demand', r, String(b), String(id), ...(segment ? [String(segment)] : [])); }
 function hotKey(r, b) { return name('hot', r, String(b)); }
+/** The per-object segment hot set: segment name -> reads in that bucket. */
+function segKey(r, b, id) { return name('hot', r, String(b), String(id)); }
 function announceKey(r, id) { return name('hot-announced', r, String(id)); }
 const windowOf = (now, buckets) => Array.from({ length: buckets }, (_, i) => bucketOf(now) - i);
 const quiet = (p) => { if (p && typeof p.catch === 'function') p.catch(() => {}); return p; };
@@ -50,43 +60,66 @@ function pruneFallback(now = Date.now()) {
     for (const [k, at] of announced) if (at <= now) announced.delete(k);
 }
 
-/** One served read of an object. Best-effort: never throws, never awaits Valkey. */
-function record({ objectId, region: r = region(), now = Date.now() } = {}) {
+/** Bump one in-process hot set (member -> reads), evicting the coldest member over TOP_N. */
+function bumpSet(hk, member, expiresAt) {
+    const s = sets.get(hk) || { members: new Map(), expiresAt };
+    s.members.set(member, (s.members.get(member) || 0) + 1);
+    if (s.members.size > TOP_N) {
+        let lo = null;
+        for (const e of s.members) if (e[0] !== member && (!lo || e[1] < lo[1])) lo = e;
+        if (lo) s.members.delete(lo[0]);
+    }
+    sets.set(hk, s);
+}
+
+function bumpCounter(ck, expiresAt) {
+    const c = counters.get(ck) || { n: 0, expiresAt };
+    c.n++;
+    counters.set(ck, c);
+}
+
+/**
+ * One served read of an object, optionally of one of its timeline segments. Best-effort: never throws, never awaits
+ * Valkey. The object total is bumped on every read; with a segment, that segment's own counter and its per-object
+ * hot set move too, so hotness({ segment }) can tell a hot beginning from a cold middle.
+ */
+function record({ objectId, segment = null, region: r = region(), now = Date.now() } = {}) {
     if (objectId == null || objectId === '') return;
-    const id = String(objectId), b = bucketOf(now);
+    const id = String(objectId), b = bucketOf(now), seg = segment == null || segment === '' ? null : String(segment);
     try {
         if (vk) {
             const ck = counterKey(r, b, id), hk = hotKey(r, b);
             quiet(vk.client.incr(ck).then((n) => (n === 1 ? vk.client.expire(ck, KEY_TTL_S) : null)));
             quiet(vk.client.zincrby(hk, 1, id).then((n) => (Number(n) === 1 ? vk.client.expire(hk, KEY_TTL_S) : null)));
+            if (seg) {
+                const sk = counterKey(r, b, id, seg), gk = segKey(r, b, id);
+                quiet(vk.client.incr(sk).then((n) => (n === 1 ? vk.client.expire(sk, KEY_TTL_S) : null)));
+                quiet(vk.client.zincrby(gk, 1, seg).then((n) => (Number(n) === 1 ? vk.client.expire(gk, KEY_TTL_S) : null)));
+            }
             return;
         }
         const expiresAt = now + KEY_TTL_S * 1000;
         if (counters.size >= FALLBACK_MAX) pruneFallback(now);
-        const ck = counterKey(r, b, id);
-        const c = counters.get(ck) || { n: 0, expiresAt };
-        c.n++;
-        counters.set(ck, c);
-        const hk = hotKey(r, b);
-        const s = sets.get(hk) || { members: new Map(), expiresAt };
-        s.members.set(id, (s.members.get(id) || 0) + 1);
-        if (s.members.size > TOP_N) {
-            let lo = null;
-            for (const e of s.members) if (e[0] !== id && (!lo || e[1] < lo[1])) lo = e;
-            if (lo) s.members.delete(lo[0]);
+        bumpCounter(counterKey(r, b, id), expiresAt);
+        bumpSet(hotKey(r, b), id, expiresAt);
+        if (seg) {
+            bumpCounter(counterKey(r, b, id, seg), expiresAt);
+            bumpSet(segKey(r, b, id), seg, expiresAt);
         }
-        sets.set(hk, s);
     } catch { /* demand is a hint */ }
 }
 
 /**
  * Reads per object over the last `buckets` buckets (summed), newest bucket included. With `objectIds`, the counters
  * of those objects (all of them, zero when unread); without, every object in the region's hot sets.
+ * `segment` narrows the read to one timeline segment: with `objectIds`, that segment's own counters; without, the
+ * objects of the region's hot sets, read out of each object's per-segment hot set.
  * A Valkey error answers an empty map: demand is a hint. With `strict`, an error, a timeout or no Valkey at all throws
  * instead (a caller that would act on zeros falls back to another signal). → Map(object_id -> reads)
  */
-async function hotness({ region: r = region(), now = Date.now(), buckets = WINDOW_BUCKETS, objectIds = null, strict = false } = {}) {
+async function hotness({ region: r = region(), now = Date.now(), buckets = WINDOW_BUCKETS, objectIds = null, strict = false, segment = null } = {}) {
     if (strict && !vk) throw new Error('Valkey is not configured');
+    const seg = segment == null || segment === '' ? null : String(segment);
     const out = new Map();
     const window = windowOf(now, buckets);
     const ids = objectIds ? [...new Set(objectIds.filter((x) => x != null).map(String))] : null;
@@ -95,12 +128,30 @@ async function hotness({ region: r = region(), now = Date.now(), buckets = WINDO
         if (vk) {
             if (ids) {
                 if (!ids.length) return out;
-                const keys = ids.flatMap((id) => window.map((b) => counterKey(r, b, id)));
+                const keys = ids.flatMap((id) => window.map((b) => counterKey(r, b, id, seg)));
                 const vals = await timed(vk.client.mget(...keys));
                 ids.forEach((id, i) => {
                     let n = 0;
                     for (let j = 0; j < window.length; j++) n += Number(vals[i * window.length + j]) || 0;
                     out.set(id, n);
+                });
+                return out;
+            }
+            if (seg) {
+                // The segment axis with no object list: the region's objects, then that segment out of each one's set.
+                // Not the tiering sweep's path (that always names its object ids, one MGET per page).
+                const objectSets = await timed(Promise.all(window.map((b) => vk.client.zrange(hotKey(r, b), 0, -1, 'WITHSCORES'))));
+                const objs = new Set();
+                for (const flat of objectSets) for (let i = 0; i + 1 < flat.length; i += 2) objs.add(flat[i]);
+                const list = [...objs];
+                const groups = await timed(Promise.all(list.flatMap((id) => window.map((b) => vk.client.zrange(segKey(r, b, id), 0, -1, 'WITHSCORES')))));
+                list.forEach((id, i) => {
+                    let n = 0;
+                    for (let j = 0; j < window.length; j++) {
+                        const flat = groups[i * window.length + j];
+                        for (let k = 0; k + 1 < flat.length; k += 2) if (flat[k] === seg) n += Number(flat[k + 1]) || 0;
+                    }
+                    if (n) out.set(id, n);
                 });
                 return out;
             }
@@ -114,8 +165,18 @@ async function hotness({ region: r = region(), now = Date.now(), buckets = WINDO
         if (ids) {
             for (const id of ids) {
                 let n = 0;
-                for (const b of window) { const c = counters.get(counterKey(r, b, id)); if (c) n += c.n; }
+                for (const b of window) { const c = counters.get(counterKey(r, b, id, seg)); if (c) n += c.n; }
                 out.set(id, n);
+            }
+            return out;
+        }
+        if (seg) {
+            const objs = new Set();
+            for (const b of window) { const s = sets.get(hotKey(r, b)); if (s) for (const id of s.members.keys()) objs.add(id); }
+            for (const id of objs) {
+                let n = 0;
+                for (const b of window) { const s = sets.get(segKey(r, b, id)); if (s) n += s.members.get(seg) || 0; }
+                if (n) out.set(id, n);
             }
             return out;
         }
@@ -205,5 +266,5 @@ function _reset() { counters.clear(); sets.clear(); announced.clear(); }
 
 module.exports = {
     BUCKET_MS, WINDOW_BUCKETS, KEY_TTL_S, TOP_N, HOT_READS, ANNOUNCE_S,
-    useValkey, available, region, bucketOf, counterKey, hotKey, announceKey, record, hotness, top, rollup, _reset,
+    useValkey, available, region, bucketOf, counterKey, hotKey, segKey, announceKey, record, hotness, top, rollup, _reset,
 };
