@@ -770,15 +770,18 @@ const INLINE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$|text\/plain$)
 const publicRouter = express.Router();
 
 // ── Segment-native video (docs/media-fabric.md §3, F3.1; MEDIA_HLS_ENABLED) ──
-// GET /o/:id/master.m3u8, /o/:id/source/index.m3u8 and /o/:id/source/{init.mp4,NNNNNN.m4s}: the playlists are written
-// from the object's media_timeline rows (objects/timeline.js), never read from files. Every one passes the same check
-// as GET /o/:id: public and unlisted objects openly, private and sandbox ones only with the object's valid ?exp&sig
+// GET /o/:id/master.m3u8, /o/:id/source/index.m3u8, /o/:id/source/{init.mp4,NNNNNN.m4s} and — for a produced
+// rendition (F4) — /o/:id/<rendition>/index.m3u8 and /o/:id/<rendition>/<name>: the playlists are written from the
+// object's media_timeline rows (objects/timeline.js), never read from files. Every one passes the same check as
+// GET /o/:id: public and unlisted objects openly, private and sandbox ones only with the object's valid ?exp&sig
 // (a playlist token from /download's hls_url, or a download signature), which a signed playlist carries onto each URI;
-// deleted 410, not ready 404. Off, these paths 404.
+// deleted 410, not ready 404. Off, these paths 404. The master playlist lists a rendition only once its rows exist
+// and queues the missing ones on demand (objects/hls.js, MEDIA_RENDITIONS).
 // Like GET /o/:id, a private or sandbox answer carries no Access-Control-Allow-Origin; a public one may be read cross-origin.
 // A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
 const SEGMENT_NAME = /^(init\.mp4|\d{6,9}\.m4s)$/;
+const RENDITION_NAME = /^[a-z0-9_-]{1,32}$/;
 const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 // clipWindow/timelineOf (a clip's window over its source, and the rows its playlists are written from) live in
 // objects/hls.js, shared with the v1 VOD/clip discovery.
@@ -817,7 +820,10 @@ publicRouter.get('/:id/master.m3u8', hlsRoute(async (req, res, { obj, query }) =
     const timeline = require('./timeline');
     const { rows } = await hls.timelineOf(obj);
     if (!rows.some((r) => Number(r.seq) > 0)) return res.status(404).json({ error: 'No timeline' });
-    res.type(HLS_TYPE).send(timeline.masterPlaylist([{ name: timeline.SOURCE, rows }], { query }));
+    // A missing rendition (F4) is queued lazily; only the ones whose rows exist are listed, so a client never follows
+    // a variant that is not there yet.
+    await hls.queueRenditionsOnce(obj);
+    res.type(HLS_TYPE).send(timeline.masterPlaylist(await hls.renditionsFor(obj, rows), { query }));
 }));
 
 publicRouter.get('/:id/source/index.m3u8', hlsRoute(async (req, res, { obj, query }) => {
@@ -871,14 +877,13 @@ async function sendSlice(req, res, { file, url, offset, length, headers }) {
     return res.end(body);
 }
 
-publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, { obj, closed }) => {
+/**
+ * Send one timeline row's bytes: this node's file streamed, a remote unpacked segment 302'd to a short presigned URL,
+ * a remote packed one read as a byte range of its chunk here (a redirect cannot carry the range). `rendition` keys the
+ * router's sticky session and names the prefix the row's bytes live under.
+ */
+async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
     const timeline = require('./timeline');
-    const name = String(req.params.name || '');
-    let row = SEGMENT_NAME.test(name) ? await timeline.byName(obj.id, timeline.SOURCE, name) : null;
-    // A virtual clip serves only the source segments inside its window (timelineOf): any other name is a 404, whatever
-    // the signature, so a clip's token never reaches the rest of its source.
-    if (!row && SEGMENT_NAME.test(name) && obj.kind === 'clip') row = (await hls.timelineOf(obj)).rows.find((r) => r.name === name) || null;
-    if (!row) return res.status(404).json({ error: 'Not found' });
     const mime = Number(row.seq) === 0 ? 'video/mp4' : 'video/iso.segment';
     const headers = { 'Content-Type': mime, 'Cache-Control': closed ? 'private, no-store' : 'public, max-age=3600' };
     const packed = !!row.packed_object_id;
@@ -888,8 +893,8 @@ publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, { obj, closed })
     // streamed; a remote unpacked segment is a redirect to a short presigned URL; a remote packed one is read as a byte
     // range of its chunk here, since a redirect cannot carry the segment's range.
     const router = require('../placement/router');
-    const decision = await router.route({ locations: timeline.locationsOf(row), objectId: obj.id, segment: name,
-        purpose: 'playback', session: router.sessionFor(req, `${obj.id}/source`),
+    const decision = await router.route({ locations: timeline.locationsOf(row), objectId: obj.id, segment: row.name,
+        purpose: 'playback', session: router.sessionFor(req, `${obj.id}/${rendition}`),
         contentType: mime, expiresIn: 300, presign: !packed });
     for (const loc of decision.candidates || []) {
         if (loc.provider === 'local') {
@@ -908,6 +913,38 @@ publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, { obj, closed })
         return res.redirect(302, url);
     }
     res.status(404).json({ error: 'Segment bytes unavailable' });
+}
+
+publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, h) => {
+    const timeline = require('./timeline');
+    const name = String(req.params.name || '');
+    let row = SEGMENT_NAME.test(name) ? await timeline.byName(h.obj.id, timeline.SOURCE, name) : null;
+    // A virtual clip serves only the source segments inside its window (timelineOf): any other name is a 404, whatever
+    // the signature, so a clip's token never reaches the rest of its source.
+    if (!row && SEGMENT_NAME.test(name) && h.obj.kind === 'clip') row = (await hls.timelineOf(h.obj)).rows.find((r) => r.name === name) || null;
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    return sendSegmentRow(req, res, h, row, timeline.SOURCE);
+}));
+
+// A produced rendition (F4, rendition.create): its own media playlist and segments, under /o/:id/<rendition>/…. The
+// master playlist's variant URI is `<rendition>/index.m3u8`; a rendition with no rows answers 404 (nothing to play).
+publicRouter.get('/:id/:rendition/index.m3u8', hlsRoute(async (req, res, { obj, query }) => {
+    const timeline = require('./timeline');
+    const rendition = String(req.params.rendition || '');
+    if (!RENDITION_NAME.test(rendition) || rendition === timeline.SOURCE) return res.status(404).json({ error: 'Not found' });
+    const rows = await timeline.list(obj.id, rendition);
+    if (!rows.some((r) => Number(r.seq) > 0)) return res.status(404).json({ error: 'No timeline' });
+    res.type(HLS_TYPE).send(timeline.mediaPlaylist(rows, { query }));
+}));
+
+publicRouter.get('/:id/:rendition/:name', hlsRoute(async (req, res, h) => {
+    const timeline = require('./timeline');
+    const rendition = String(req.params.rendition || '');
+    const name = String(req.params.name || '');
+    if (!RENDITION_NAME.test(rendition) || rendition === timeline.SOURCE) return res.status(404).json({ error: 'Not found' });
+    const row = SEGMENT_NAME.test(name) ? await timeline.byName(h.obj.id, rendition, name) : null;
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    return sendSegmentRow(req, res, h, row, rendition);
 }));
 publicRouter.get('/:id', async (req, res) => {
     // A restore drill (MEDIA_DRILL) serves no stored bytes, local or by a B2/R2 redirect.

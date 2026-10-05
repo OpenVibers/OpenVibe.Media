@@ -8,8 +8,9 @@
  * A playlist exists when MEDIA_HLS_ENABLED is on and the object's source timeline has a media row (seq > 0) — its own
  * rows, or for a virtual clip (F3.5) its source's window rows. With none, object.cmaf is queued (idempotent) and no URL
  * is answered, unless the object is a virtual clip (its source's window plays it; it is never cut a timeline of its own).
- * A single-item read takes that path (deduped in-process); a list read uses discoveryMany, which answers a whole page in
- * a constant number of queries and never queues anything.
+ * With a source timeline and MEDIA_RENDITIONS on, the missing renditions (F4: rendition.create) are queued the same lazy
+ * way, so the master playlist lists them once they exist. A single-item read takes that path (deduped in-process); a
+ * list read uses discoveryMany, which answers a whole page in a constant number of queries and never queues anything.
  *
  * The URL is built exactly as the v2 route does: an open object (not private, not in a sandbox tenant) gets the plain
  * /o/<id>/master.m3u8; a closed one gets a signed playlist (purpose 'hls', signing.signedPlaylistUrl) and its expiry.
@@ -62,18 +63,51 @@ async function isOpen(obj) {
 const QUEUE_TTL_MS = 10 * 60 * 1000;
 const QUEUE_MAX = 1000;
 const _queuedCmaf = new Map();
+const _queuedRenditions = new Map();
+
+/** Run `queue()` for an object at most once per QUEUE_TTL_MS in this process. Never throws. */
+async function throttleOnce(map, objectId, queue) {
+    const now = Date.now();
+    const last = map.get(objectId);
+    if (last != null && now - last < QUEUE_TTL_MS) return;
+    if (map.size >= QUEUE_MAX) {
+        for (const [id, at] of map) if (now - at >= QUEUE_TTL_MS) map.delete(id);
+        while (map.size >= QUEUE_MAX) map.delete(map.keys().next().value);
+    }
+    map.set(objectId, now);
+    try { await queue(); } catch (err) { console.warn(`[HLS] Queue failed for ${objectId}:`, err.message); }
+}
 
 /** Queue object.cmaf for an object at most once per QUEUE_TTL_MS in this process. Never throws. */
 async function queueCmafOnce(appId, objectId) {
-    const now = Date.now();
-    const last = _queuedCmaf.get(objectId);
-    if (last != null && now - last < QUEUE_TTL_MS) return;
-    if (_queuedCmaf.size >= QUEUE_MAX) {
-        for (const [id, at] of _queuedCmaf) if (now - at >= QUEUE_TTL_MS) _queuedCmaf.delete(id);
-        while (_queuedCmaf.size >= QUEUE_MAX) _queuedCmaf.delete(_queuedCmaf.keys().next().value);
-    }
-    _queuedCmaf.set(objectId, now);
-    try { await require('./timeline-queue').queueCmaf(appId, objectId); } catch (err) { console.warn(`[HLS] Timeline queue failed for ${objectId}:`, err.message); }
+    await throttleOnce(_queuedCmaf, objectId, () => require('./timeline-queue').queueCmaf(appId, objectId));
+}
+
+/**
+ * Queue the missing renditions (rendition.create, F4) for an object at most once per QUEUE_TTL_MS in this process: the
+ * lazy path from the master playlist route and GET …/download?format=json. Never throws. Nothing is queued when
+ * MEDIA_RENDITIONS is off (timeline-queue.queueRendition checks) or for a virtual clip.
+ */
+async function queueRenditionsOnce(obj) {
+    if (!config.hls.enabled || !config.hls.renditions) return;
+    await throttleOnce(_queuedRenditions, obj.id, () => require('./timeline-queue').queueRendition(obj.app_id, obj.id));
+}
+
+/**
+ * The renditions an object's master playlist offers: `source` first, then every other rendition whose rows exist (the
+ * route lists a rendition only once it was produced). `sourceRows` is the object's own source rows when the caller
+ * already has them (a virtual clip's window over its source), so it is not read twice. `meta` is the resolution/codecs
+ * the cut stored in the object's metadata (renditions.<name>), so the playlist carries RESOLUTION/CODECS without
+ * reading bytes; it is null for a rendition cut before this was stored.
+ */
+async function renditionsFor(obj, sourceRows = null) {
+    const timeline = require('./timeline');
+    const stored = model.parseJson(obj.metadata, {}).renditions || {};
+    const source = sourceRows || (await timelineOf(obj)).rows;
+    const out = [{ name: timeline.SOURCE, rows: source, meta: stored[timeline.SOURCE] || null }];
+    const extra = await db.all('SELECT DISTINCT rendition FROM media_timeline WHERE object_id = ? AND rendition <> ? AND seq > 0 ORDER BY rendition', [obj.id, timeline.SOURCE]);
+    for (const r of extra) out.push({ name: r.rendition, rows: await timeline.list(obj.id, r.rendition), meta: stored[r.rendition] || null });
+    return out;
 }
 
 /** What an object with a serviceable timeline is discovered by: { hls_url, hls_expires_at? } (open stays unsigned). */
@@ -96,6 +130,8 @@ async function discoveryForObject(obj) {
             if (!tl.window) await queueCmafOnce(obj.app_id, obj.id);
             return null;
         }
+        // The source timeline exists: queue any missing rendition (F4) so the master playlist can list it next time.
+        if (!tl.window) await queueRenditionsOnce(obj);
         return playlistFor(obj, await isOpen(obj));
     } catch (err) {
         console.warn(`[HLS] Discovery failed for ${obj.id}:`, err.message);
@@ -187,4 +223,4 @@ async function discoveryMany(rows) {
     return out;
 }
 
-module.exports = { timelineOf, discoveryForObject, discovery, discoveryMany };
+module.exports = { timelineOf, renditionsFor, queueRenditionsOnce, discoveryForObject, discovery, discoveryMany };
