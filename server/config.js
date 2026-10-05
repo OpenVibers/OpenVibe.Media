@@ -149,6 +149,18 @@ const config = {
         internalUrl: (process.env.OV_NETWORK_INTERNAL_URL || 'http://127.0.0.1:4000').replace(/\/$/, ''),
     },
 
+    // Usage readings → OpenVibe.Billing (plan T5 step 14; server/billing.js). Off by default:
+    // MEDIA_BILLING_INTERVAL_MS=0 starts no timer and aggregates/sends nothing. With an interval but no
+    // OV_BILLING_URL (or no OV_OAUTH_CLIENT_SECRET) readings are aggregated and stay queued in billing_readings.
+    billing: {
+        intervalMs: Math.max(0, intEnv('MEDIA_BILLING_INTERVAL_MS', 0)),
+        url: (process.env.OV_BILLING_URL || process.env.OV_BILLING_INTERNAL_URL || '').replace(/\/$/, ''),
+        audience: process.env.OV_BILLING_AUDIENCE || 'openvibe.billing',
+        clientId: process.env.OV_OAUTH_CLIENT_ID || 'media',
+        clientSecret: process.env.OV_OAUTH_CLIENT_SECRET || '',
+        timeoutMs: intEnv('MEDIA_BILLING_TIMEOUT_MS', 10000),
+    },
+
     // IndexNow (openvibe-shared/indexnow): a key makes search engines recrawl a public page when it
     // appears or changes (the key file is served at /<key>.txt). Unset: off, no key file, nothing sent.
     indexnow: { key: String(process.env.INDEXNOW_KEY || '').trim() },
