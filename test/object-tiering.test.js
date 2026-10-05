@@ -91,11 +91,11 @@ const crypto = require('crypto');
         await storage.setSettings({ hotDiskPressurePct: 100, criticalDiskPct: 100, minFreeGb: 0 }, { reason: 'test: no pressure drain' });
 
         const today = popularity.dayOf(Date.now());
-        const addObject = async ({ app = 'live', size = 4096, mime = 'application/octet-stream', verified = true, hash = true, canonical = 'local' } = {}) => {
+        const addObject = async ({ app = 'live', size = 4096, mime = 'application/octet-stream', verified = true, hash = true, canonical = 'local', meta = {} } = {}) => {
             const bytes = crypto.randomBytes(size);
             const sum = sha256(bytes);
             const id = await model.createObject({ app_id: app, kind: 'file', visibility: 'public', lifecycle_status: 'ready', mime_type: mime, size_bytes: size,
-                content_hash: hash ? sum : null, canonical_provider: canonical, metadata: { filename: 'x.bin' } });
+                content_hash: hash ? sum : null, canonical_provider: canonical, metadata: { filename: 'x.bin', ...meta } });
             let file = null;
             if (canonical === 'local') {
                 file = path.join(process.env.OBJECTS_PATH, app, id);
@@ -772,6 +772,75 @@ const crypto = require('crypto');
         await db.run('DELETE FROM media_object_views_daily');
         for (const v of candViews) await db.run('INSERT INTO media_object_views_daily (object_id, day, unique_viewers, last_viewed_at) VALUES (?, ?, ?, ?)', [v.object_id, v.day, v.unique_viewers, v.last_viewed_at]);
         console.log('✅ constraints: a provider failing its class (breaker or probe) refuses the move and keeps every copy; the monthly R2 storage ceiling closes a class in value order');
+
+        // ── 9g. Every storage class through the one sweep: an app declares its object's class in the metadata ──
+        await db.run('DELETE FROM media_object_views_daily');
+        const att = await addObject({ meta: { class: 'attachment' } });
+        const bak = await addObject({ meta: { class: 'backup' } });
+        const dl0 = await addObject();
+        for (const o of [att, bak, dl0]) await setViews(o.id, [[0, 900]]);
+        assert.deepStrictEqual([sp.classOf(await model.getObject(att.id)), sp.classOf(await model.getObject(bak.id)), sp.classOf(await model.getObject(dl0.id))],
+            ['attachment', 'backup', 'download'], 'an app-declared class rides on the metadata the sweep reads');
+        await sp.set({ classes: { download: { maxPromotionsPerSweep: 0 }, attachment: { maxPromotionsPerSweep: 1 }, backup: { maxPromotionsPerSweep: 1 } } },
+            { reason: 'test: per-class budgets for attachment and backup' });
+        s = await tiering.runSweep();
+        assert.ok(await r2Row(att.id) && await r2Row(bak.id), 'attachment and backup promote under their own budgets');
+        assert.ok(!await r2Row(dl0.id) && (await decisions(dl0.id)).length === 0, 'the download budget of 0 spends nothing on them');
+        assert.strictEqual(JSON.parse((await last(att.id)).inputs).class, 'attachment');
+        assert.ok(/class attachment, value per dollar/.test((await last(att.id)).reason), (await last(att.id)).reason);
+        // A class's R2 spend counts its own copies: a declared class is never billed to its mime type's class.
+        const spendBefore = await tiering.hotSpend();
+        const gasPrice = tiering.hotUsdPerMonth(4096);
+        const gas = await addObject({ meta: { class: 'game-asset' } });
+        await inR2(gas, 30);
+        const spendAfter = await tiering.hotSpend();
+        assert.ok(Math.abs(spendAfter['game-asset'] - (spendBefore['game-asset'] + gasPrice)) < 1e-12, `the game-asset copy spends on game-asset: ${JSON.stringify(spendAfter)}`);
+        assert.ok(Math.abs(spendAfter.download - spendBefore.download) < 1e-12, 'and not on download, which its mime type alone would say');
+        // hotSpend aggregates in SQL: several copies in one (declared class, kind, mime type) group come back as
+        // one row with their bytes summed, rather than one row each carrying the copy's whole metadata.
+        for (let i = 0; i < 3; i++) await inR2(await addObject({ meta: { class: 'backup' } }), 30);
+        const realAll = db.all;
+        let groupedRows = null;
+        db.all = async (sql, params) => { const rows = await realAll.call(db, sql, params); if (/SUM\(grp\.bytes\)/.test(sql)) groupedRows = rows; return rows; };
+        const groupedSpend = await tiering.hotSpend();
+        db.all = realAll;
+        const group = groupedRows.filter((r) => r.declared_class === 'backup' && r.kind === 'file' && r.mime_type === 'application/octet-stream');
+        const groupCopies = await db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(l.size_bytes, o.size_bytes, 0)), 0)::bigint AS bytes
+            FROM media_locations l JOIN media_objects o ON o.id = l.object_id
+            WHERE l.provider = 'r2' AND l.state = 'present' AND o.kind = 'file' AND o.mime_type = 'application/octet-stream'
+              AND lower(trim(json_extract(o.metadata, '$.class'))) = 'backup'`);
+        assert.ok(Number(groupCopies.n) >= 3, `several copies in the group (${groupCopies.n})`);
+        assert.strictEqual(group.length, 1, 'the copies are grouped into one row');
+        assert.strictEqual(Number(group[0].bytes), Number(groupCopies.bytes), 'their bytes are summed in that row');
+        assert.ok(Math.abs(groupedSpend.backup - tiering.hotUsdPerMonth(groupCopies.bytes)) < 1e-12, 'the class spend is the summed group');
+        // A demotion spends the class's own budget too.
+        const attR2 = await addObject({ meta: { class: 'attachment' } });
+        const dlR2 = await addObject();
+        await inR2(attR2, 30); await inR2(dlR2, 30);
+        await sp.set({ classes: { download: { maxDemotionsPerSweep: 0 }, attachment: { maxDemotionsPerSweep: 1 } } }, { reason: 'test: per-class demotion budgets' });
+        s = await tiering.runSweep();
+        assert.ok(!await r2Row(attR2.id) && await r2Row(dlR2.id), 'the attachment demotes under its own budget; the download budget of 0 keeps its copy');
+        assert.strictEqual(JSON.parse((await last(attR2.id)).inputs).class, 'attachment');
+        // A ceiling on one class refuses only that class.
+        const gAs = [await addObject({ meta: { class: 'game-asset' } }), await addObject({ meta: { class: 'game-asset' } })];
+        const dl3 = await addObject();
+        for (const o of [...gAs, dl3]) await setViews(o.id, [[0, 900]]);
+        await sp.set({ classes: { 'game-asset': { maxHotUsdPerMonth: 0 }, download: { maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 20 } } },
+            { reason: 'test: a game-asset ceiling' });
+        s = await tiering.runSweep();
+        assert.ok(!await r2Row(gAs[0].id) && !await r2Row(gAs[1].id), 'the game-asset ceiling refuses the class');
+        assert.ok(await r2Row(dl3.id), 'the download class is unaffected');
+        d = await last(gAs[0].id);
+        assert.deepStrictEqual([d.action, d.outcome, JSON.parse(d.inputs).class], ['promote', 'refused', 'game-asset']);
+        assert.ok(/class game-asset has maxHotUsdPerMonth \$0/.test(d.reason), d.reason);
+        assert.strictEqual((await decisions(gAs[1].id)).length, 0, 'the refusal closed game-asset only');
+        assert.deepStrictEqual([s.constraints.hot_usd_per_month['game-asset'].ceiling, s.constraints.refused.budget], [0, 1], JSON.stringify(s.constraints));
+        console.log('✅ every class through one sweep: declared attachment/backup promote and demote under their own budgets, and a game-asset ceiling refuses only that class');
+
+        await sp.set({ classes: { download: { maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 20 }, attachment: { maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 10 },
+            backup: { maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 10 }, 'game-asset': { maxHotUsdPerMonth: 1e9 } } }, { reason: 'test: class policy back' });
+        await db.run('DELETE FROM media_object_views_daily');
+        for (const v of candViews) await db.run('INSERT INTO media_object_views_daily (object_id, day, unique_viewers, last_viewed_at) VALUES (?, ?, ?, ?)', [v.object_id, v.day, v.unique_viewers, v.last_viewed_at]);
 
         // ── 10. The storage sweep runs it (step 4); a restore drill never does ──
         const vodSweep = await storage.runSweep();

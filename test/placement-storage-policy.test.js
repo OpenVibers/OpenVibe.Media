@@ -28,10 +28,37 @@ const path = require('path');
     }
     assert.strictEqual(policy.mayMove({ class: 'video', lastMovedAt: 1000, now: 1000 }), true, 'zero residency is off');
     assert.throws(() => policy.budgetFor('unknown'), RangeError);
-    const cls = (kind, mime_type) => policy.classOf({ kind, mime_type });
+    const cls = (kind, mime_type, metadata) => policy.classOf({ kind, mime_type, metadata });
     assert.deepStrictEqual([cls('vod'), cls('clip'), cls('file', 'audio/mpeg'), cls('file', 'Video/MP4'), cls('asset', 'video/webm')], Array(5).fill('video'));
     assert.deepStrictEqual([cls('thumbnail'), cls('screenshot'), cls('avatar'), cls('file', 'image/png')], Array(4).fill('image'));
     assert.deepStrictEqual([cls('file', 'application/zip'), cls('file'), cls('asset', null), policy.classOf(null)], Array(4).fill('download'));
+
+    // Every class acts: an app declares its object's role in the object's metadata (class, or the explicit
+    // media_class / placement_class). A declaration is honoured only when kind and mime type would say
+    // download, and only for game-asset / attachment / backup: content alone decides video and image.
+    assert.deepStrictEqual([
+        cls('file', 'application/zip', { class: 'attachment' }),
+        cls('file', null, { class: 'backup' }),
+        cls('asset', null, { media_class: 'game-asset' }),
+        cls('file', 'video/mp4', { placement_class: 'game-asset' }),
+        cls('file', 'application/octet-stream', { class: 'Video' }),
+    ], ['attachment', 'backup', 'game-asset', 'video', 'download']);
+    assert.strictEqual(policy.classOf({ kind: 'file', metadata: JSON.stringify({ class: 'backup' }) }), 'backup', 'metadata read as its JSON text too');
+    assert.deepStrictEqual([cls('file', 'application/zip', { class: 'nope' }), cls('file', null, { class: 7 }),
+        cls('file', null, 'not json metadata'), cls('file', null, { class: ['attachment'] })], Array(4).fill('download'),
+    'an unknown, non-string or unreadable declaration is ignored and kind/mime decide');
+    // Class escape: a declaration can never override content, so one app cannot bill a large video (or an
+    // image) to another class's global budget, hysteresis band or R2 ceiling.
+    assert.strictEqual(cls('file', 'video/mp4', { class: 'backup' }), 'video', 'a declared backup does not steal video');
+    assert.strictEqual(cls('vod', null, { class: 'attachment' }), 'video', 'a VOD kind stays video');
+    assert.strictEqual(cls('file', 'image/png', { placement_class: 'attachment' }), 'image', 'an image stays image');
+    assert.strictEqual(cls('thumbnail', null, { media_class: 'game-asset' }), 'image', 'a thumbnail stays image');
+    assert.strictEqual(cls('file', 'application/zip', { class: 'backup' }), 'backup', 'a download may be a backup');
+    assert.strictEqual(cls('file', 'application/zip', { class: 'video' }), 'download', 'but never declared video');
+    assert.strictEqual(cls('file', 'application/zip', { class: 'image' }), 'download', 'nor declared image');
+    assert.deepStrictEqual([policy.budgetFor('attachment'), policy.hotCeilingFor('backup'), policy.bandFor('game-asset')],
+        [{ maxPromotionsPerSweep: 3, maxDemotionsPerSweep: 10 }, null, { promoteReadsPerHour: 60, demoteReadsPerHour: 6 }],
+        'the classes an app declares have their own policy like any other');
 
     await policy.set({ classes: { image: { maxPromotionsPerSweep: 2, maxDemotionsPerSweep: 4, minResidencyMs: 60_000 } } },
         { actor: { type: 'service', id: 'media-test' }, reason: 'test image placement policy' });

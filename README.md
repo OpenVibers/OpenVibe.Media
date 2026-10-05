@@ -556,7 +556,11 @@ unique viewers per object per UTC day, counted on `/o/:id` without storing an IP
 or when the object is no longer ready. Its **activation gate `active` is off by default**: the sweep (step 4
 of this one) then moves nothing and records what it would do as `dry_run` decisions. Holds block every
 move, only a verified canonical copy is promoted (re-hashed; the R2 copy's size and sha256 are checked
-before it is used), and a demotion never removes the last good copy. Decisions:
+before it is used), and a demotion never removes the last good copy. Every object classifies into one of the six
+storage classes (`video`, `image`, `download`, `game-asset`, `attachment`, `backup`): kind and mime type decide
+video and image, and an app may declare any class in the object's metadata (`metadata.class`, or `media_class` /
+`placement_class`), so each class's budgets, hysteresis band and R2 storage ceiling act on that class alone.
+Decisions:
 `media_object_tier_decisions`, `/admin/storage/tiers/objects/*`, `/me/ops`, and
 `media_tier_decisions_24h{target="object"}` (`test/object-tiering.test.js`).
 
