@@ -131,6 +131,32 @@ async function hotness({ region: r = region(), now = Date.now(), buckets = WINDO
     }
 }
 
+/**
+ * Reads per object over the exact bucket window [from, to): the closed-period reader the billing aggregation uses
+ * (one closed UTC hour), where hotness() only reads the last N buckets from now. Best-effort like hotness(): a Valkey
+ * error answers an empty map, and with no Valkey only this process's counters are seen. → Map(object_id -> reads)
+ */
+async function readsForWindow({ region: r = region(), from, to, now = Date.now() } = {}) {
+    const out = new Map();
+    if (!(to > from)) return out;
+    const first = Math.floor(from / BUCKET_MS), last = Math.floor((to - 1) / BUCKET_MS);
+    const buckets = [];
+    for (let b = first; b <= last; b++) buckets.push(b);
+    try {
+        if (vk) {
+            const all = await timed(Promise.all(buckets.map((b) => vk.client.zrange(hotKey(r, b), 0, -1, 'WITHSCORES'))));
+            for (const flat of all) for (let i = 0; i + 1 < flat.length; i += 2) out.set(flat[i], (out.get(flat[i]) || 0) + Number(flat[i + 1]));
+            return out;
+        }
+        pruneFallback(now);
+        for (const b of buckets) { const s = sets.get(hotKey(r, b)); if (s) for (const [id, n] of s.members) out.set(id, (out.get(id) || 0) + n); }
+        return out;
+    } catch (err) {
+        console.warn('[Demand] window not read:', err.message);
+        return out;
+    }
+}
+
 /** The hottest objects of a region over the last `buckets` buckets, hottest first. → [{ object_id, reads }] */
 async function top({ region: r = region(), now = Date.now(), buckets = 1, limit = 100 } = {}) {
     return [...(await hotness({ region: r, now, buckets }))]
@@ -205,5 +231,5 @@ function _reset() { counters.clear(); sets.clear(); announced.clear(); }
 
 module.exports = {
     BUCKET_MS, WINDOW_BUCKETS, KEY_TTL_S, TOP_N, HOT_READS, ANNOUNCE_S,
-    useValkey, available, region, bucketOf, counterKey, hotKey, announceKey, record, hotness, top, rollup, _reset,
+    useValkey, available, region, bucketOf, counterKey, hotKey, announceKey, record, hotness, readsForWindow, top, rollup, _reset,
 };

@@ -227,6 +227,7 @@ const ready = (async () => {
     const thumbService = require('./thumbnails/thumbnail-service');
 
     const timers = [];
+    let billing = null;   // usage readings → Billing (started below only when MEDIA_BILLING_INTERVAL_MS > 0)
     function every(ms, fn) {
         const t = setInterval(fn, ms);
         if (t.unref) t.unref();
@@ -245,6 +246,13 @@ const ready = (async () => {
         require('./objects/verify-job').start();                   // scheduled copy verification (bounded batches; never deletes)
         require('./jobs/worker').start().catch((err) => console.warn('[Jobs] worker did not start:', err.message));   // media_jobs worker (light + heavy lanes; proposals wait for their owner)
         require('./objects/owner-subject-job').start();            // owner_subject for objects that name only an app-local owner (asks Network)
+        // Usage readings → Billing (plan T5 step 14): off by default (MEDIA_BILLING_INTERVAL_MS=0 starts nothing).
+        // With an interval it aggregates each closed UTC hour/day into platform.usage-sample@1 readings and relays
+        // them to billing.usage.record; without OV_BILLING_URL or OV_OAUTH_CLIENT_SECRET they stay queued.
+        if (config.billing.intervalMs > 0) {
+            billing = require('./billing').createMediaBilling({ db: db.getDb(), config: config.billing, networkUrl: config.network.internalUrl });
+            billing.start();
+        }
         // Descriptor watchdog: a leak here once pinned 80 GB of deleted recordings to the disk.
         every(5 * 60 * 1000, () => {
             try {
@@ -346,6 +354,7 @@ const ready = (async () => {
             () => require('./objects/verify-job').stop(),
             () => require('./jobs/worker').stop(),
             () => require('./objects/owner-subject-job').stop(),
+            () => (billing ? billing.stop() : undefined),
             () => auth.stopJwksRefresh(),
             () => require('./events')._reset(),
             () => { const v = require('./actor-limits').valkey(); if (v) v.close().catch(() => {}); },
