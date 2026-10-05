@@ -94,8 +94,23 @@ const express = require('express');
         r = await get('/llms.txt');
         assert.strictEqual(r.status, 200);
         assert.ok(r.body.startsWith('# OpenVibe.Media') && r.body.includes('https://media.test/sitemap.xml') && r.body.includes('AI clip'));
+        assert.ok(r.body.includes('https://media.test/llms-full.txt'), 'the map links the full-text file');
         assert.ok(!/\bfree\b/i.test(r.body), 'no cost claims');
         console.log('✅ /llms.txt maps the site');
+
+        // ── llms-full.txt ──
+        r = await get('/llms-full.txt');
+        assert.strictEqual(r.status, 200);
+        assert.ok(r.headers['content-type'].startsWith('text/plain'));
+        assert.ok(r.body.startsWith('# OpenVibe.Media'), 'the llms.txt header');
+        assert.ok(r.body.includes('### Games public') && r.body.includes('URL: https://media.test/v/1'), 'the full text of each indexable VOD page');
+        assert.ok(r.body.includes('### Games clip') && r.body.includes('URL: https://media.test/c/11'), 'and each indexable clip page');
+        assert.ok(r.body.includes('### Media index') && r.body.includes('URL: https://media.test/\n'), 'the index itself');
+        for (const never of ['/v/2', '/v/3', '/v/4', '/v/5', '/v/6', '/v/7', '/v/8', '/c/12', '/c/13', '/c/14', '/c/15']) {
+            assert.ok(!r.body.includes(`URL: https://media.test${never}`), `${never} is not in llms-full`);
+        }
+        assert.strictEqual((await get('/llms-full.txt')).body, r.body, 'deterministic');
+        console.log('✅ /llms-full.txt: the full text of the index and every indexable watch page, and only those');
 
         // ── Watch pages: VideoObject on public pages; AI clips noindex, no Person, based on the VOD ──
         const ldOf = (html) => { const m = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html); return m ? JSON.parse(m[1]) : null; };

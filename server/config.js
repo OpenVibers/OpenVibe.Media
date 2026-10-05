@@ -142,6 +142,10 @@ const config = {
         internalUrl: (process.env.OV_NETWORK_INTERNAL_URL || 'http://127.0.0.1:4000').replace(/\/$/, ''),
     },
 
+    // IndexNow (openvibe-shared/indexnow): a key makes search engines recrawl a public page when it
+    // appears or changes (the key file is served at /<key>.txt). Unset: off, no key file, nothing sent.
+    indexnow: { key: String(process.env.INDEXNOW_KEY || '').trim() },
+
     apps: {
         // JSON array: [{app_id, name, api_key, webhook_url, webhook_secret, allowed_origins, quota_bytes}]
         seedJson: process.env.MEDIA_APPS_SEED || '',

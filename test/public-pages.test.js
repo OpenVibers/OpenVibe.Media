@@ -37,10 +37,13 @@ const http = require('http');
     assert.ok(html.includes('<link rel="canonical" href="https://openvibe.live/vod/42">'), 'Live-owned VOD is canonical on Live');
     assert.ok(html.includes('<meta name="robots" content="noindex, follow">'));
     assert.ok(/\/shared\/theme-loader\.js\?v=[0-9a-f]{12}/.test(html), 'this site\'s own pinned Frame files');
-    assert.ok(html.indexOf('theme-loader.js') < html.indexOf('<style>'), 'theme-loader runs before the styles');
+    // The shell loads the theme-loader eagerly (no defer) inside <head>, so it applies the user's
+    // theme before the first paint; the page palette rides in the shell's extra head.
+    assert.ok(/<script src="[^"]*theme-loader\.js\?v=[0-9a-f]{12}"><\/script>/.test(html), 'theme-loader is eager, before the first paint');
+    assert.ok(/\/shared\/web-runtime\.js\?v=[0-9a-f]{12}/.test(html), 'the shared web runtime from this site\'s own pinned copy');
     assert.ok(/\/shared\/navbar\.js\?v=[0-9a-f]{12}/.test(html) && /\/shared\/footer\.js\?v=[0-9a-f]{12}/.test(html), 'the Frame from this site\'s own pinned copy');
     assert.ok(html.includes('"service":"media"') && html.includes('"history":{"type":"vod","title":"Late night <build>"}'.replace('<', '\\u003c')));
-    assert.ok(html.includes('"variant":"compact"'));
+    assert.ok(html.includes('data-variant="compact"'), 'the server-rendered footer is compact');
     assert.ok(html.includes('<meta property="og:type" content="video.other">'));
     assert.ok(html.includes('<meta property="og:video" content="https://media.test/v/42?raw=1">'));
     assert.ok(html.includes('<meta name="twitter:card" content="summary_large_image">'));
