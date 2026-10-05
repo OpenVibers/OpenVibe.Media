@@ -134,8 +134,8 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   form over chunk URIs is not used, so URIs, signed playlists and caches stay as they were. Purge, VOD delete, holds
   and the orphan report see a chunk through the rows that name it (each location deleted once, every row kept while its
   chunk's delete fails). All of it behind `MEDIA_HLS_ENABLED`; no schema change (F3.1's columns carry it). A finished
-  `object.cmaf` queues it by itself (`objects/timeline-queue.js`; `dedupeActive` and key `object.pack:<id>`, so a rerun
-  joins the pack it made), so packing follows the cut without an operator.
+  `object.cmaf` queues it by itself (`objects/timeline-queue.js`; `dedupeActive`, so a rerun while a pack is active joins
+  it and a later cut queues a new one), so packing follows the cut without an operator.
 - **F3.c, shipped: the timeline queued by itself, signed playlists, the MP4 fallback.** A recording's finalize queues
   `object.cmaf` for its object once it is ready (`server/objects/timeline-queue.js`; `dedupeActive` and the idempotency
   key `object.cmaf:<id>`, so a second finalize joins the same job; a queue error is logged, never fails the finalize),

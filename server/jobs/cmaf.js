@@ -193,8 +193,9 @@ async function run(job, ctx) {
             }
             const segs = rows.filter((x) => x.seq > 0);
             // Packing follows the cut by itself (F3): once the rows and their bytes are committed, object.pack is
-            // queued once per object (dedupeActive and its idempotency key, objects/timeline-queue.js). A queue error
-            // never fails the cut (the timeline is already published); a run whose upload failed is left to its retry.
+            // queued for the object (dedupeActive joins an active pack; a later cut queues a new one,
+            // objects/timeline-queue.js). A queue error never fails the cut (the timeline is already published); a run
+            // whose upload failed is left to its retry.
             try { await require('../objects/timeline-queue').queuePack(job.app_id, src.id); }
             catch (err) { console.warn(`[Cmaf] ${job.id}: pack queue failed: ${err.message}`); }
             return {

@@ -2,8 +2,9 @@
 // The timeline queued by itself and signed playlists (F3.c; docs/media-fabric.md §3): a finalized VOD queues exactly one
 // object.cmaf (a second finalize joins it); nothing is queued with MEDIA_HLS_ENABLED off, for a non-media object or once
 // a timeline exists; GET …/download?format=json queues it lazily for an older VOD. queuePack queues one object.pack for
-// a cut (a later call joins it); nothing is queued with MEDIA_HLS_ENABLED off or for a non-media object. A playlist
-// token (purpose 'hls', MEDIA_HLS_PLAYLIST_TTL_S, clamped to 12 h) outlives the 1 h download token, is accepted only by
+// a cut (a later call while it is active joins it; a later cut after it finished queues a new one); nothing is queued
+// with MEDIA_HLS_ENABLED off or for a non-media object. A playlist token (purpose 'hls', MEDIA_HLS_PLAYLIST_TTL_S,
+// clamped to 12 h) outlives the 1 h download token, is accepted only by
 // the HLS routes and is carried onto the segment URIs; a download signature still opens the HLS routes. format=mp4
 // queues object.remux once while the remux variant is missing and answers the variant's signed URL once it exists.
 const assert = require('assert');
@@ -121,9 +122,9 @@ const express = require('express');
         const packJobs = await jobs('object.pack', cut);
         assert.strictEqual(packJobs.length, 1);
         assert.deepStrictEqual([packJobs[0].status, packJobs[0].created_by, packJobs[0].idempotency_key, packJobs[0].app_id],
-            ['queued', 'system:timeline', `object.pack:${cut}`, 'live']);
-        assert.strictEqual(await queuePack('live', cut), packId, 'a later call answers the same job');
-        assert.strictEqual((await jobs('object.pack', cut)).length, 1, 'a re-run dedupes');
+            ['queued', 'system:timeline', null, 'live'], 'no idempotency key: dedupeActive is what joins an active pack');
+        assert.strictEqual(await queuePack('live', cut), packId, 'a later call while it is active answers the same job');
+        assert.strictEqual((await jobs('object.pack', cut)).length, 1, 'an active pack is joined, not duplicated');
         assert.strictEqual(await queuePack('live', pdf), null);
         assert.strictEqual(await queuePack('live', 'med_NOPE'), null);
         assert.strictEqual((await jobs('object.pack', pdf)).length, 0, 'a non-media or missing object: nothing queued');

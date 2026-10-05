@@ -9,8 +9,8 @@
  *
  * queuePack(appId, objectId) enqueues `object.pack` once a cut's rows are committed (server/jobs/cmaf.js), so packing
  * follows the cut by itself instead of an operator's hand. Nothing happens (null) with MEDIA_HLS_ENABLED off or for a
- * missing or non-media object. One job per object: dedupeActive joins a queued or running pack, and the idempotency key
- * `object.pack:<id>` answers a later call with the same job. → the job id, or null.
+ * missing or non-media object. One job at a time per object: dedupeActive joins a queued or running pack, so a rerun
+ * while it is active joins it and a later cut queues a new one. → the job id, or null.
  */
 'use strict';
 
@@ -39,7 +39,7 @@ async function queuePack(appId, objectId) {
     const params = require('../jobs/pack').spec.validate({ appId, obj, params: {} });
     const r = await queue.enqueue({
         appId, type: 'object.pack', objectId: obj.id, params,
-        dedupeActive: true, idempotencyKey: `object.pack:${obj.id}`, createdBy: 'system:timeline',
+        dedupeActive: true, createdBy: 'system:timeline',
     });
     if (r.created) require('../jobs/worker').kick();
     return r.job ? r.job.id : null;

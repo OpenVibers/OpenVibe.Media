@@ -7,7 +7,8 @@
 // F3.3: object.pack concatenates the durable segments into a chunk, each row naming its byte range; a packed segment is
 // served as a ranged read of the chunk (from this node or the durable copy) with the original bytes; a rerun packs
 // nothing; the per-segment copies are gone; the durable provider comes from the placement router; private stays private.
-// A finished object.cmaf queues object.pack by itself (one per object; a rerun joins it).
+// A finished object.cmaf queues object.pack by itself: a rerun while a pack is active joins it, a later cut queues a
+// new one.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -156,7 +157,7 @@ const { spawn, spawnSync } = require('child_process');
         const packJobs = async (objectId) => (await queue.list('live', { type: 'object.pack', objectId })).jobs;
         const autoPack = await packJobs(pub);
         assert.strictEqual(autoPack.length, 1, 'a finished object.cmaf queues exactly one object.pack');
-        assert.deepStrictEqual([autoPack[0].created_by, autoPack[0].idempotency_key], ['system:timeline', `object.pack:${pub}`]);
+        assert.deepStrictEqual([autoPack[0].created_by, autoPack[0].idempotency_key], ['system:timeline', null], 'no idempotency key: dedupeActive is what joins an active pack');
         assert.ok(await waitFor(async () => ['succeeded', 'failed'].includes((await queue.get(autoPack[0].id)).status)), 'the queued pack runs');
 
         // ── The playlists come from the rows ──
@@ -201,7 +202,12 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(j2.result.uploaded, 0);
         assert.strictEqual(JSON.stringify(await timeline.list(pub)), JSON.stringify(rows), 'the rows are as they were (job_id, updated_at too)');
         assert.deepStrictEqual(rows.map((r) => fs.statSync(r.local_path).mtimeMs), mtimes, 'no segment rewritten');
-        assert.strictEqual((await packJobs(pub)).length, 1, 'a cmaf rerun joins the pack, it does not add another');
+        // The first pack finished, so the rerun is not joined: a later cut queues a new object.pack.
+        const secondPack = await packJobs(pub);
+        assert.strictEqual(secondPack.length, 2, 'a cut after the pack finished queues a new object.pack');
+        assert.ok(secondPack.some((p) => p.id === autoPack[0].id), 'the finished pack is kept');
+        const rerunPack = secondPack.find((p) => p.id !== autoPack[0].id);
+        assert.ok(await waitFor(async () => ['succeeded', 'failed'].includes((await queue.get(rerunPack.id)).status)), 'the rerun\'s pack runs too');
 
         // ── F3.3: durable segments (stubbed B2/R2), the provider chosen by the placement router ──
         const pack = require('../server/jobs/pack');
@@ -219,7 +225,13 @@ const { spawn, spawnSync } = require('child_process');
         const realRoute = router.route;
         const purposes = [];
         router.route = async (opts) => { purposes.push(opts.purpose); return realRoute(opts); };
-        const j3 = await runJob(pub, { segment_seconds: 2 });
+        // Pause the worker: the cut's own object.pack (queued below) must stay queued while the unpacked rows are
+        // asserted, and it is run explicitly at the packing step.
+        worker.stop();
+        const j3r = await call('POST', '/api/v2/live/jobs', { body: { type: 'object.cmaf', object_id: pub, params: { segment_seconds: 2 } } });
+        assert.strictEqual(j3r.status, 202, JSON.stringify(j3r.body));
+        assert.ok(await worker.runNow(j3r.body.job.id), 'the cut runs directly while the worker is paused');
+        const j3 = queue.jobPublic(await queue.get(j3r.body.job.id));
         assert.strictEqual(j3.status, 'succeeded', JSON.stringify(j3.error));
         assert.deepStrictEqual([j3.result.uploaded, j3.result.durable, j3.result.rows.updated], [5, 5, 5], JSON.stringify(j3.result));
         assert.ok(purposes.includes('durable'), 'object.cmaf asks the placement router for its provider');
@@ -245,10 +257,17 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(JSON.stringify(await timeline.list(pub)), JSON.stringify(durableRows));
         assert.strictEqual(fs.existsSync(path.join(process.env.OBJECTS_PATH, '.jobs', 'mjob_PACKABORT')), false);
 
-        // ── Packing: one chunk, each row its byte range, the per-segment copies deleted ──
-        const jp = await runJob(pub, { target_seconds: 10 }, 'object.pack');
+        // ── Packing: the pack the cut queued (still queued while the worker was paused) makes one chunk, each row its
+        // byte range, the per-segment copies deleted ──
+        const cutPack = (await packJobs(pub))[0];
+        assert.ok(cutPack && cutPack.status === 'queued' && cutPack.idempotency_key == null, 'the cut queued a pack of its own');
+        assert.ok(await worker.runNow(cutPack.id), 'the cut\'s pack runs');
+        const jp = queue.jobPublic(await queue.get(cutPack.id));
         assert.strictEqual(jp.status, 'succeeded', JSON.stringify(jp.error));
         assert.deepStrictEqual([jp.result.packs, jp.result.segments, jp.result.removed_segments, jp.result.left_behind, jp.result.provider], [1, 4, 4, 0, 'b2'], JSON.stringify(jp.result));
+        // Resume the worker for the rerun cases below.
+        await worker.start();
+        worker.kick();
         const packed = await timeline.list(pub);
         assert.strictEqual(JSON.stringify(packed[0]), JSON.stringify(durableRows[0]), 'the init segment is not packed');
         const chunkId = packed[1].packed_object_id;
