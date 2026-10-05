@@ -151,12 +151,26 @@ const fmtUsd = (v) => `$${Number(Number(v).toPrecision(4))}`;
 /** What each class's present R2 copies cost a month at list price, gross of R2's account-wide free tier: { video: 0.12, image: 0, ... }. */
 async function hotSpend() {
     const out = Object.fromEntries(storagePolicy.CLASSES.map((c) => [c, 0]));
-    // One row per copy: classification needs each object's own metadata (an app-declared class), which a
-    // GROUP BY kind, mime_type would drop. R2 copies are the hot cache, so the row count stays modest.
-    const rows = await db.all(`SELECT o.kind, o.mime_type, o.metadata, COALESCE(l.size_bytes, o.size_bytes, 0)::bigint AS bytes
-        FROM media_locations l JOIN media_objects o ON o.id = l.object_id
-        WHERE l.provider = 'r2' AND l.state = 'present'`);
-    for (const r of rows) out[storagePolicy.classOf(r)] += hotUsdPerMonth(r.bytes);
+    // Aggregate in SQL: one row per (declared class, kind, mime_type) group, not per copy — a copy carries up to
+    // 16 KB of metadata, and R2 copies (the hot cache) run to many thousands; the groups are a few dozen. The three
+    // metadata keys classOf() reads are extracted here with the SQLite-compatible json_extract() the migrations
+    // define over the text metadata column (guard with json_valid, so unreadable JSON declares nothing, as
+    // declaredClass() does), lower-cased and trimmed like normalizeClass(), and summed per group. classOf() then
+    // maps each group's representative fields to its class — the one place the rules live.
+    const rows = await db.all(`SELECT grp.kind, grp.mime_type, grp.declared_class, grp.declared_media_class, grp.declared_placement_class,
+                SUM(grp.bytes)::bigint AS bytes
+            FROM (SELECT o.kind, o.mime_type,
+                    CASE WHEN json_valid(o.metadata) THEN lower(trim(json_extract(o.metadata, '$.class'))) END AS declared_class,
+                    CASE WHEN json_valid(o.metadata) THEN lower(trim(json_extract(o.metadata, '$.media_class'))) END AS declared_media_class,
+                    CASE WHEN json_valid(o.metadata) THEN lower(trim(json_extract(o.metadata, '$.placement_class'))) END AS declared_placement_class,
+                    COALESCE(l.size_bytes, o.size_bytes, 0) AS bytes
+                  FROM media_locations l JOIN media_objects o ON o.id = l.object_id
+                  WHERE l.provider = 'r2' AND l.state = 'present') grp
+            GROUP BY grp.kind, grp.mime_type, grp.declared_class, grp.declared_media_class, grp.declared_placement_class`);
+    for (const r of rows) {
+        out[storagePolicy.classOf({ kind: r.kind, mime_type: r.mime_type,
+            metadata: { class: r.declared_class, media_class: r.declared_media_class, placement_class: r.declared_placement_class } })] += hotUsdPerMonth(r.bytes);
+    }
     return out;
 }
 

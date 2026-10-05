@@ -796,6 +796,23 @@ const crypto = require('crypto');
         const spendAfter = await tiering.hotSpend();
         assert.ok(Math.abs(spendAfter['game-asset'] - (spendBefore['game-asset'] + gasPrice)) < 1e-12, `the game-asset copy spends on game-asset: ${JSON.stringify(spendAfter)}`);
         assert.ok(Math.abs(spendAfter.download - spendBefore.download) < 1e-12, 'and not on download, which its mime type alone would say');
+        // hotSpend aggregates in SQL: several copies in one (declared class, kind, mime type) group come back as
+        // one row with their bytes summed, rather than one row each carrying the copy's whole metadata.
+        for (let i = 0; i < 3; i++) await inR2(await addObject({ meta: { class: 'backup' } }), 30);
+        const realAll = db.all;
+        let groupedRows = null;
+        db.all = async (sql, params) => { const rows = await realAll.call(db, sql, params); if (/SUM\(grp\.bytes\)/.test(sql)) groupedRows = rows; return rows; };
+        const groupedSpend = await tiering.hotSpend();
+        db.all = realAll;
+        const group = groupedRows.filter((r) => r.declared_class === 'backup' && r.kind === 'file' && r.mime_type === 'application/octet-stream');
+        const groupCopies = await db.get(`SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(l.size_bytes, o.size_bytes, 0)), 0)::bigint AS bytes
+            FROM media_locations l JOIN media_objects o ON o.id = l.object_id
+            WHERE l.provider = 'r2' AND l.state = 'present' AND o.kind = 'file' AND o.mime_type = 'application/octet-stream'
+              AND lower(trim(json_extract(o.metadata, '$.class'))) = 'backup'`);
+        assert.ok(Number(groupCopies.n) >= 3, `several copies in the group (${groupCopies.n})`);
+        assert.strictEqual(group.length, 1, 'the copies are grouped into one row');
+        assert.strictEqual(Number(group[0].bytes), Number(groupCopies.bytes), 'their bytes are summed in that row');
+        assert.ok(Math.abs(groupedSpend.backup - tiering.hotUsdPerMonth(groupCopies.bytes)) < 1e-12, 'the class spend is the summed group');
         // A demotion spends the class's own budget too.
         const attR2 = await addObject({ meta: { class: 'attachment' } });
         const dlR2 = await addObject();

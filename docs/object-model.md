@@ -925,9 +925,11 @@ Each pass rotates the popularity counts, then:
 `download`, `game-asset`, `attachment`, `backup`), and each class has its own per-sweep budgets, minimum
 residency, hysteresis band and optional monthly R2 storage ceiling in `media.storage_policy`. `kind` and
 `mime_type` decide `video` and `image` (video/audio and their kinds, image and its kinds); everything else is
-`download` unless the app declared a class for the object in its metadata: `metadata.class`, or the explicit
-`media_class` / `placement_class`, any of the six, which wins over kind and mime type (a name outside the six
-is ignored). The declared class is what the sweep's eligibility, ranking and budgets read, and the class's
+`download` unless the app declared `game-asset`, `attachment` or `backup` for the object in its metadata:
+`metadata.class`, or the explicit `media_class` / `placement_class`. A declaration is honoured only when kind
+and mime type would say `download`, so content alone decides `video` and `image` (budgets and ceilings are
+global per class, so a declaration could otherwise bill a video to another class's); any other name is ignored.
+The declared class is what the sweep's eligibility, ranking and budgets read, and the class's
 R2 copies are what its ceiling counts, so a ceiling on `game-asset` refuses that class alone.
 
 **Promotion** (`tiering.promote`): refused when the object is held, not ready, a sandbox object, or its

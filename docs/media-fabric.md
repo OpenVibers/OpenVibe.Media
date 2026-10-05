@@ -261,10 +261,15 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   repeated the same day is logged once but still counts, and a dry-run demotion checks its canonical copy like a live
   one before it frees any projected cost). Every native object classifies into one of the six classes, so a budget,
   hysteresis band or ceiling set on any of them acts on that class's objects: `kind` and `mime_type` decide `video`
-  and `image` (everything else is `download`), and an app may declare any of the six for one of its objects in the
-  object's metadata — `metadata.class`, or the explicit `media_class` / `placement_class` — which wins over both. A
-  declared name outside the six is ignored and the kind and mime type decide. An `attachment` or `backup` object
-  therefore promotes and demotes under its own budget, and a `game-asset` ceiling refuses that class alone.
+  and `image` (everything else is `download`), and an app may declare **`game-asset`, `attachment` or `backup`** for
+  one of its objects in the object's metadata — `metadata.class`, or the explicit `media_class` / `placement_class`.
+  A declaration is honoured only when kind and mime type would otherwise say `download`, so content alone decides
+  `video` and `image`: a name outside those three (a `video` or `image` declaration included, or one on a video or
+  image object) is ignored and kind and mime type decide. The declaration is limited this way because budgets,
+  hysteresis bands and R2 ceilings are global per class — without the limit any app could declare a class on a large
+  video and spend another class's budget, starving or filling it, and be billed for it in the sweep's spend
+  (`hotSpend()`). An `attachment` or `backup` object therefore promotes and demotes under its own budget, and a
+  `game-asset` ceiling refuses that class alone.
 
 ## 7. Delivery: sticky, measured, canaried
 

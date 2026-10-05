@@ -106,9 +106,13 @@ function classPolicy(name) {
 
 // An app may declare its object's class in the object's metadata: `class`, or the explicit `media_class` /
 // `placement_class`. Only one of CLASSES counts; anything else is ignored and the kind and mime type decide.
-// A declared class wins over both: the app knows the object's role (a game-asset pack, an attachment, a
-// backup blob) better than its content type does.
+// A declaration is honoured only when kind and mime type would otherwise classify the object as `download`,
+// and only to one of DECLARABLE_CLASSES: the roles content cannot express. Video and image are decided by
+// content, never declared. Budgets, hysteresis bands and R2 ceilings are global per class, so letting a
+// declaration win unconditionally would let one app put a large video on another class's budget, starve that
+// class, and be billed for it in the sweep's spend (server/objects/tiering.js hotSpend()).
 const DECLARED_KEYS = ['class', 'media_class', 'placement_class'];
+const DECLARABLE_CLASSES = ['game-asset', 'attachment', 'backup'];
 
 /** A known class name (case-folded), or null for anything else. */
 function normalizeClass(value) {
@@ -132,14 +136,8 @@ function declaredClass(obj) {
     return null;
 }
 
-/**
- * The placement class of a native object: an app-declared class, else video/audio → video, image/thumbnail →
- * image, everything else → download. All six classes (CLASSES) act in the one sweep: this decides each object's
- * hysteresis band, per-sweep budget and R2 storage ceiling.
- */
-function classOf(obj) {
-    const declared = declaredClass(obj);
-    if (declared) return declared;
+/** What kind and mime type alone decide: video/audio → video, image/thumbnail → image, everything else → download. */
+function classFromContent(obj) {
     const kind = obj && obj.kind;
     if (kind === 'vod' || kind === 'clip') return 'video';
     if (kind === 'thumbnail' || kind === 'screenshot' || kind === 'avatar') return 'image';
@@ -147,6 +145,20 @@ function classOf(obj) {
     if (major === 'video' || major === 'audio') return 'video';
     if (major === 'image') return 'image';
     return 'download';
+}
+
+/**
+ * The placement class of a native object: video/audio → video, image/thumbnail → image, everything else →
+ * download, unless the app declared one of DECLARABLE_CLASSES (game-asset, attachment, backup) for it and the
+ * content alone would say download. All six classes (CLASSES) act in the one sweep: this decides each object's
+ * hysteresis band, per-sweep budget and R2 storage ceiling. A declared class never overrides content, so one
+ * app cannot bill a video or image to another class's global budget, band or ceiling.
+ */
+function classOf(obj) {
+    const base = classFromContent(obj);
+    if (base !== 'download') return base;
+    const declared = declaredClass(obj);
+    return declared && DECLARABLE_CLASSES.includes(declared) ? declared : base;
 }
 
 function budgetFor(name) {
