@@ -292,7 +292,8 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
         };
         const vods = await db.listVods(req.appId, filters);
         const total = await db.countVods(req.appId, filters);
-        res.json({ vods: (await Promise.all(vods.map(async v => await vodPublic(v, { readiness: true })))), total, limit, offset, hasMore: offset + vods.length < total });
+        const hls = await require('../objects/hls').discoveryMany(vods);
+        res.json({ vods: (await Promise.all(vods.map(async v => await vodPublic(v, { readiness: true, hls: hls.get(String(v.object_id)) || null })))), total, limit, offset, hasMore: offset + vods.length < total });
     } catch (err) {
         console.error('[VOD] List error:', err.message);
         res.status(500).json({ error: 'Failed to list VODs' });

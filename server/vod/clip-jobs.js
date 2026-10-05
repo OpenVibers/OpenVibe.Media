@@ -40,7 +40,7 @@ let _timer = null, _busy = false;
 function freeBytes() {
     try { const st = fs.statfsSync(path.resolve(config.vod.path)); return Number(st.bavail) * Number(st.bsize); } catch { return 0; }
 }
-async function _clipPublic(clip) { try { return await require('./clips-routes').clipPublic(clip); } catch { return clip; } }
+async function _clipPublic(clip) { try { return await require('./clips-routes').clipPublic(clip, { hls: false }); } catch { return clip; } }
 
 const RECUT_CAP_MS = 30 * 60 * 1000;         // one clip can never hold the queue longer than this
 

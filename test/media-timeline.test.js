@@ -468,6 +468,35 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual((await get(`/o/${pub}/master.m3u8${signed.search}`)).status, 200, 'a public object needs no signature');
         assert.strictEqual((await call('GET', `/api/v2/live/objects/${pub}/download?format=json`)).body.hls_url, `${config.publicUrl}/o/${pub}/master.m3u8`);
 
+        // ── The shared discovery (objects/hls.js) the v1 VOD/clip shapes read answers exactly as /download does ──
+        const hls = require('../server/objects/hls');
+        assert.deepStrictEqual(await hls.discovery(pub), { hls_url: `${config.publicUrl}/o/${pub}/master.m3u8` }, 'an open object with a timeline: the plain master URL');
+        const privHls = new URL((await hls.discovery(priv)).hls_url);
+        assert.strictEqual(privHls.pathname, `/o/${priv}/master.m3u8`, 'a private object: the signed master URL');
+        assert.ok(privHls.searchParams.get('exp') && privHls.searchParams.get('sig'), 'with a playlist token');
+        assert.strictEqual(await hls.discovery('med_NOPE'), null, 'a missing object answers nothing');
+
+        // ── A sandbox tenant's object: signed, never the plain URL — per-row and batched alike ──
+        {
+            await db.ensureProjectTenant('prj_hls_sandbox', 'sandbox', 1024 * 1024);
+            const sb = await model.createObject({ app_id: 'prj_hls_sandbox-sandbox', visibility: 'public', lifecycle_status: 'ready', kind: 'file', mime_type: 'video/mp4', size_bytes: 1 });
+            await timeline.replace(sb, 'source', [row(0, 0, 0, 500), row(1, 0, 3000, 30000)]);
+            const plain = `${config.publicUrl}/o/${sb}/master.m3u8`;
+            const signing = require('../server/objects/signing');
+            const one = await hls.discovery(sb);
+            const u = new URL(one.hls_url);
+            assert.strictEqual(u.pathname, `/o/${sb}/master.m3u8`, 'the sandbox object\'s playlist URL names its master');
+            assert.ok(u.searchParams.get('exp') && u.searchParams.get('sig'), 'a sandbox object is signed');
+            assert.ok(signing.verifyPlaylist(sb, u.searchParams.get('exp'), u.searchParams.get('sig')), 'the signature verifies');
+            assert.notStrictEqual(one.hls_url, plain, 'a sandbox object never gets the plain URL');
+            assert.ok(one.hls_expires_at, 'and carries its expiry');
+            const many = await hls.discoveryMany([{ object_id: sb }, { object_id: pub }]);
+            assert.strictEqual(many.get(String(pub)).hls_url, `${config.publicUrl}/o/${pub}/master.m3u8`, 'the batch leaves a production object plain');
+            const bu = new URL(many.get(String(sb)).hls_url);
+            assert.ok(bu.searchParams.get('sig') && many.get(String(sb)).hls_url !== plain, 'and signs the sandbox object in the batch too');
+            assert.ok(many.get(String(sb)).hls_expires_at, 'the batched sandbox answer carries its expiry');
+        }
+
         // ── MEDIA_HLS_ENABLED off: the routes 404, the job is refused, the download answer is as before ──
         config.hls.enabled = false;
         assert.strictEqual((await get(`/o/${pub}/master.m3u8`)).status, 404);
