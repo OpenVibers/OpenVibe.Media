@@ -451,12 +451,17 @@ router.delete('/:id', tenantAuth({ verb: 'delete' }), async (req, res) => {
             require('./vod-storage').deleteVodObjects(clip).catch(err =>
                 console.warn(`[Clips] Remote object cleanup failed for clip ${clip.id}:`, err.message));
         }
-        // A timeline clip's own bytes are its media_timeline rows (F3.5/F3.6): remove them and the edge bytes they
-        // name. A location another object's rows still name — a materialized clip's interior, the source's segments —
-        // is kept (timeline.removeObject, F3.4), so deleting a clip never deletes its source's bytes.
-        if (clip.storage_provider === 'timeline' && clip.object_id) {
-            await require('../objects/timeline').removeObject(clip.object_id)
-                .catch(err => console.warn(`[Clips] Timeline cleanup failed for clip ${clip.id}:`, err.message));
+        // The clip's own bytes are its media_timeline rows (F3.5/F3.6): remove them and the bytes only it names. A
+        // location another object's rows still name — a materialized clip's interior, the source's segments — is kept
+        // (timeline.removeObject, F3.4), so deleting a clip never deletes its source's bytes. Every clip object is
+        // asked, not only a `timeline` one: a materialized clip that got a file of its own keeps its provider 'local'
+        // while its rows are still there (removeObject returns early when it has none, so a normal file clip is a no-op).
+        if (clip.object_id) {
+            const tl = await require('../objects/timeline').removeObject(clip.object_id)
+                .catch(err => { console.warn(`[Clips] Timeline cleanup failed for clip ${clip.id}:`, err.message); return null; });
+            // A durable delete that failed keeps its rows (removeObject) so it is not lost; the clips row (and its
+            // object) go below, and the hourly object sweep retries the rows for a projected object whose row is gone.
+            if (tl && tl.pending) console.warn(`[Clips] Clip ${clip.id}: ${tl.pending} timeline segment row(s) kept — their durable copy could not be deleted; the object sweep retries`);
         }
 
         await db.run('DELETE FROM clips WHERE id = ?', [clip.id]);   // its object is marked deleted by the row-delete trigger, same statement

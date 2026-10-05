@@ -106,7 +106,14 @@ const { spawn, spawnSync } = require('child_process');
             assert.strictEqual((pl.match(/#EXT-X-DISCONTINUITY/g) || []).length, 2, 'exactly two discontinuities');
             assert.strictEqual((pl.match(/#EXTINF:/g) || []).length, 3, 'every segment is listed once');
         }
-        console.log('✅ mediaPlaylist: byte-for-byte without edge inits; two discontinuities with the right maps with them');
+        {
+            // A rendition that produced an init and no media row still emits its EXT-X-MAP, byte for byte as before.
+            const frozenNoSeg = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-TARGETDURATION:1', '#EXT-X-MEDIA-SEQUENCE:1',
+                '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-INDEPENDENT-SEGMENTS', '#EXT-X-MAP:URI="init.mp4"', '#EXT-X-ENDLIST', ''].join('\n');
+            assert.strictEqual(timeline.mediaPlaylist([hrow(0, 0, 0)]), frozenNoSeg,
+                'an init with no segments still emits its EXT-X-MAP');
+        }
+        console.log('✅ mediaPlaylist: byte-for-byte without edge inits; two discontinuities with the right maps with them; an init-only rendition keeps its map');
 
         // ── clipRows refuses a virtual clip over a materialized one (the simplest correct choice) ──
         {
@@ -501,6 +508,122 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(cuts.length, 3, 'a source without a timeline re-encodes in full');
         cutter.cutClipFile = realCut;
         console.log('✅ flag off, or a source without a timeline: the full re-encode stays exactly as it was');
+
+        // ── Review follow-ups: a materialized clip re-cut to a file (1), its renditions (2), its end_time (3),
+        //    the pending durable delete on delete (4) and the pin's lock order (5) ──
+        {
+            // Finding 3: a window whose head snaps back to its segment boundary (start within EDGE_MS after it) and
+            // whose tail cuts. plan.originMs < startTime, so the old startTime + duration overshot the snapped end.
+            const seg3 = srcSegs[1];
+            const boundary3 = Number(seg3.start_ms);
+            const start3 = boundary3 + 50;
+            const end3 = mid(srcSegs[4]);
+            const plan3 = mat.planWindow(srcRows, start3, end3);
+            assert.ok(plan3 && plan3.originMs === boundary3 && plan3.endMs === end3,
+                `the head snaps back to ${boundary3} and the tail cuts at ${end3}: ${plan3 && JSON.stringify([plan3.originMs, plan3.endMs])}`);
+            r = await freshClip({ vod_id: vodId, start_s: start3 / 1000, end_s: end3 / 1000, materialize: true, title: 'Snapped start' });
+            assert.strictEqual(r.status, 202, JSON.stringify(r.body));
+            const snapId = r.body.id;
+            assert.strictEqual((await runClip(r.body.job_id)).status, 'succeeded');
+            const snap = await db.getClipById(snapId);
+            const snapObj = snap.object_id;
+            assert.strictEqual(Number(snap.end_time), plan3.endMs / 1000, 'finding 3: end_time is the snapped end');
+            assert.notStrictEqual(Number(snap.end_time), start3 / 1000 + plan3.durationMs / 1000, 'finding 3: not the drifted sum');
+            assert.strictEqual(Number(snap.duration_seconds), plan3.durationMs / 1000, 'the duration is the planned window');
+            console.log('✅ finding 3: end_time equals the snapped end, not startTime + duration');
+
+            const ownRows = (await timeline.list(snapObj, 'source')).filter((x) => String(x.key || '').startsWith(`${snapObj}/source/`));
+            assert.ok(ownRows.length >= 2, 'the clip has its own edge rows');
+            assert.ok(ownRows.every((x) => fs.existsSync(x.local_path) && blobStore.has(`b2:${x.key}`)), 'the edge bytes exist before the re-cut');
+
+            // Finding 2: with renditions on, a materialized clip queues none — its job could not read a file it has not got.
+            const tq = require('../server/objects/timeline-queue');
+            const hls = require('../server/objects/hls');
+            const wasRenditions = config.hls.renditions;
+            config.hls.renditions = true;
+            assert.strictEqual(config.hls.renditions, true, 'renditions really are on');
+            assert.strictEqual(tq.isVirtualClip(await model.getObject(snapObj)), true, 'the clip object is recognised as playing without a file');
+            assert.strictEqual(await tq.queueRendition('live', snapObj), null, 'finding 2: queueRendition queues nothing');
+            await hls.discoveryForObject(await model.getObject(snapObj));
+            assert.strictEqual((await db.all("SELECT id FROM media_jobs WHERE job_type = 'rendition.create' AND object_id = ?", [snapObj])).length, 0,
+                'finding 2: the lazy HLS path queues nothing either');
+            config.hls.renditions = wasRenditions;
+            console.log('✅ finding 2: a materialized clip queues no rendition');
+
+            // Finding 1: re-cut to a file drops the timeline rows, the edge bytes and the materialized marker; the
+            // stale playlist stops being served and /c/:id answers the file.
+            const wasMaterialized = config.hls.materialized;
+            config.hls.materialized = false;
+            const realCut2 = cutter.cutClipFile;
+            const cutFile2 = path.join(process.env.CLIPS_PATH, 'snap-recut.webm');
+            cutter.cutClipFile = async () => { fs.writeFileSync(cutFile2, Buffer.alloc(4096, 9)); return { ok: true, filePath: cutFile2, duration: plan3.durationMs / 1000 }; };
+            r = await call('POST', `/api/v1/live/clips/${snapId}/recut`, { materialize: true });
+            assert.strictEqual(r.status, 202, JSON.stringify(r.body));
+            assert.strictEqual((await runClip(r.body.job_id)).status, 'succeeded');
+            cutter.cutClipFile = realCut2;
+            config.hls.materialized = wasMaterialized;
+            const recut1 = await db.getClipById(snapId);
+            assert.deepStrictEqual([recut1.file_path, recut1.storage_provider], [cutFile2, 'local'], 'the clip is now a file clip');
+            assert.strictEqual((await timeline.list(snapObj, 'source')).length, 0, 'finding 1: no timeline rows remain');
+            const md1 = model.parseJson((await model.getObject(snapObj)).metadata, {});
+            assert.strictEqual(md1.materialized, undefined, 'finding 1: metadata.materialized is gone');
+            assert.strictEqual(md1.virtual, undefined, 'and it is no longer marked virtual');
+            assert.ok(ownRows.every((x) => !fs.existsSync(x.local_path) && !blobStore.has(`b2:${x.key}`)), 'finding 1: the edge bytes are deleted');
+            assert.strictEqual((await get(`/o/${snapObj}/source/init-head.mp4`)).status, 404, 'finding 1: HLS no longer serves the stale rows');
+            const played = await get(`/c/${snapId}`);
+            assert.strictEqual(played.status, 200, 'finding 1: /c/:id serves the file');
+            assert.ok(!String(played.location || '').includes('master.m3u8'), 'finding 1: and not the stale playlist');
+            console.log('✅ finding 1: re-cutting a materialized clip to a file releases its rows, edge bytes and marker');
+
+            // Finding 1 (DELETE): the route asks removeObject whenever the clip has an object_id, not only when its
+            // provider is 'timeline' (a materialized clip re-cut to a file keeps provider 'local' with rows left).
+            const dd = path.join(path.resolve(process.env.OBJECTS_PATH), '.timeline', 'live', snapObj, 'source');
+            fs.mkdirSync(dd, { recursive: true });
+            const leftover = path.join(dd, '000001.m4s');
+            fs.writeFileSync(leftover, Buffer.from('leftover'));
+            await db.run(`INSERT INTO media_timeline (object_id, rendition, seq, ${timeline.FIELDS.join(', ')})
+                    VALUES (?, 'source', 1, ${timeline.FIELDS.map(() => '?').join(', ')})`,
+                [snapObj, '000001.m4s', 0, 1000, 0, 'snap/leftover', leftover, null, null, null, 8, sha(Buffer.from('leftover')), 'local', null]);
+            assert.strictEqual((await timeline.list(snapObj, 'source')).length, 1, 'a row is planted for a non-timeline clip');
+            assert.strictEqual((await call('DELETE', `/api/v1/live/clips/${snapId}`)).status, 200);
+            assert.strictEqual((await timeline.list(snapObj, 'source')).length, 0, 'finding 1: DELETE removes the rows of a clip whose provider is not timeline');
+            assert.ok(!fs.existsSync(leftover), 'finding 1: and its bytes');
+            console.log('✅ finding 1: DELETE calls removeObject for any clip with an object_id');
+
+            // Finding 4: a durable delete that fails on clip delete is logged, and the object sweep retries it.
+            r = await freshClip({ vod_id: vodId, start_s: 12, end_s: 16, title: 'Pending delete' });
+            assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+            const pendId = r.body.id;
+            const pendObj = (await db.getClipById(pendId)).object_id;
+            const pendKey = 'f4/pending-segment';
+            const pendBytes = Buffer.from('pending-durable-bytes');
+            blobStore.set(`b2:${pendKey}`, pendBytes);
+            await db.run(`INSERT INTO media_timeline (object_id, rendition, seq, ${timeline.FIELDS.join(', ')})
+                    VALUES (?, 'source', 1, ${timeline.FIELDS.map(() => '?').join(', ')})`,
+                [pendObj, '000001.m4s', 0, 1000, 0, pendKey, null, 'b2', null, null, pendBytes.length, sha(pendBytes), 'durable', null]);
+            const realDelete = vodStorage.deleteObject;
+            vodStorage.deleteObject = async (p, k) => (p === 'b2' && k === pendKey ? false : realDelete(p, k));
+            const logged = [];
+            const warn = console.warn;
+            console.warn = (...a) => { logged.push(a.join(' ')); };
+            let del;
+            try { del = await call('DELETE', `/api/v1/live/clips/${pendId}`); } finally { console.warn = warn; vodStorage.deleteObject = realDelete; }
+            assert.strictEqual(del.status, 200, JSON.stringify(del.body));
+            assert.ok(logged.some((w) => /timeline segment row\(s\) kept/.test(w)), `finding 4: the pending delete is logged: ${logged.join(' | ')}`);
+            assert.strictEqual((await timeline.list(pendObj, 'source')).length, 1, 'finding 4: the row survives with its key');
+            assert.ok(!(await db.get('SELECT 1 AS x FROM clips WHERE id = ?', [pendId])), 'the clip row is gone');
+            const swept = await timeline.sweepPendingRemovals();
+            assert.ok(swept.objects >= 1 && swept.removed >= 1, `finding 4: the object sweep retries it: ${JSON.stringify(swept)}`);
+            assert.strictEqual((await timeline.list(pendObj, 'source')).length, 0, 'finding 4: the retry drops the row');
+            assert.ok(!blobStore.has(`b2:${pendKey}`), 'finding 4: and its durable bytes');
+            console.log('✅ finding 4: a pending durable delete is logged and the object sweep retries it');
+
+            // Finding 5: the pin's locking read takes the source rows in seq order (the order markPacked and a source
+            // DELETE lock them), so it cannot deadlock with them.
+            const matSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'vod', 'clip-materialize.js'), 'utf8');
+            assert.ok(/seq IN \([\s\S]*\) ORDER BY seq FOR SHARE/.test(matSrc), 'finding 5: the locking select is ORDER BY seq');
+            console.log('✅ finding 5: the pin locks the source rows ORDER BY seq');
+        }
 
         // ── Deletion: the clip's rows and edge bytes go; the source's bytes stay; and vice versa ──
         const edgeAssets = [bySeq.get(-1), bySeq.get(-2), bySeq.get(1), bySeq.get(tailSeq)];

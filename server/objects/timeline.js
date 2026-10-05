@@ -241,6 +241,29 @@ async function removeObject(objectId) {
 }
 
 /**
+ * Retry the byte deletion of a projected object whose row is gone. removeObject reinserts a row whose durable copy
+ * could not be deleted (its `pending`), and purgeExpired (model.js, whose pending handling this mirrors: the rows are
+ * the record and a later pass retries) reaches only native objects. This is the pass that reaches a deleted clip's or
+ * VOD's leftover rows, and the hourly object sweep (server/index.js) calls it. Held objects are skipped, as every
+ * other delete path refuses them. → { objects, removed, pending }.
+ */
+async function sweepPendingRemovals({ limit = 200 } = {}) {
+    const rows = await db.all(`SELECT o.id FROM media_objects o
+        WHERE o.lifecycle_status = 'deleted' AND o.legacy_ref IS NOT NULL
+          AND EXISTS (SELECT 1 FROM media_timeline t WHERE t.object_id = o.id)
+          AND NOT EXISTS (SELECT 1 FROM clips c WHERE c.object_id = o.id)
+          AND NOT EXISTS (SELECT 1 FROM vods v WHERE v.object_id = o.id)
+        ORDER BY o.id LIMIT ?`, [Math.max(1, Number(limit) || 200)]);
+    let removed = 0, pending = 0;
+    for (const row of rows) {
+        if (await require('./model').isHeld(row.id)) continue;
+        const out = await removeObject(row.id);
+        removed += out.removed; pending += out.pending;
+    }
+    return { objects: rows.length, removed, pending };
+}
+
+/**
  * Point rows at the chunk they were packed into, in one transaction. `updates` = [{ row, key, local_path,
  * durable_provider, packed_object_id, byte_offset }]; the location is the segment's old key (content-addressed, versioned
  * by its sha), and EVERY row of any object that names it with the same sha256 — the source's, and a clip's over it —
@@ -329,6 +352,9 @@ function mediaPlaylist(rows, { query = '' } = {}) {
     const target = Math.max(1, ...segs.map((r) => Math.ceil((Number(r.end_ms) - Number(r.start_ms)) / 1000)));
     const lines = ['#EXTM3U', '#EXT-X-VERSION:7', `#EXT-X-TARGETDURATION:${target}`, `#EXT-X-MEDIA-SEQUENCE:${segs.length ? Number(segs[0].seq) : 1}`,
         '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-INDEPENDENT-SEGMENTS'];
+    // A rendition with an init but no media row still emits its EXT-X-MAP (the pre-edge-init behaviour, byte for
+    // byte): the loop below would not reach it, so a rendition that produced an init and nothing else keeps its map.
+    if (!segs.length && baseInit) lines.push(`#EXT-X-MAP:URI="${withQuery(baseInit.name, query)}"`);
     let prevInit = null;
     for (const [i, r] of segs.entries()) {
         const init = initOf(r);
@@ -392,6 +418,6 @@ function clipRows(rows, startMs, endMs) {
 
 module.exports = {
     SOURCE, INIT_NAME, HEAD_INIT, TAIL_INIT, FIELDS, localRoot, localPathFor, keyFor, segmentName,
-    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, namedElsewhere, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
+    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, namedElsewhere, deleteBytes, removeObject, sweepPendingRemovals, markPacked, durableProvider, locationsOf,
     mediaPlaylist, masterPlaylist, clipRows,
 };

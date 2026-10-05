@@ -214,7 +214,9 @@ async function pinRows({ clipObjectId, sourceObjectId, rows, sourceRows = [], jo
     await db.getDb().tx(async () => {
         if (sourceRows.length) {
             const seqs = sourceRows.map((r) => Number(r.seq));
-            const got = await db.all(`SELECT * FROM media_timeline WHERE object_id = ? AND rendition = ? AND seq IN (${seqs.map(() => '?').join(', ')}) FOR SHARE`,
+            // ORDER BY seq: the same order the packer and a source removal lock a source's rows in, so a pin cannot
+            // deadlock with them on the rows it takes FOR SHARE (a deadlock is retried twice, then fails the job).
+            const got = await db.all(`SELECT * FROM media_timeline WHERE object_id = ? AND rendition = ? AND seq IN (${seqs.map(() => '?').join(', ')}) ORDER BY seq FOR SHARE`,
                 [sourceObjectId, timeline.SOURCE, ...seqs]);
             const bySeq = new Map(got.map((r) => [Number(r.seq), r]));
             for (const want of sourceRows) {

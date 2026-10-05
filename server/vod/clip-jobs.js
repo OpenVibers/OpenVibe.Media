@@ -88,7 +88,7 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null
         try { mat = await require('./clip-materialize').materialize({ job, ctx, clip, vod }); }
         catch (err) { return await fail(clipId, clip, attempt, err.message, { viaJob, hopeless: !!err.permanent }); }
         if (mat && mat.ok) {
-            await markMaterialized(clip, { duration: mat.duration, startTime });
+            await markMaterialized(clip, { duration: mat.duration, startTime, endMs: mat.end_ms });
             console.log(`[Clips] Clip ${clipId} materialized over vod ${clip.vod_id}'s timeline (${startTime.toFixed(1)}-${(startTime + mat.duration).toFixed(1)}s, attempt ${attempt})`);
             await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clipId));
             return { ok: true, duration_seconds: mat.duration };
@@ -116,11 +116,23 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null
     // object and its event in one transaction (webhooks.announce), then the webhook.
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
     await announce(clip.app_id, 'clip.ready', {
-        change: async () => await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL,
-            storage_provider = CASE WHEN storage_provider = 'timeline' THEN 'local' ELSE storage_provider END WHERE id = ?`,
-            [cut.filePath, cut.duration, startTime + cut.duration, clipId])),
+        change: async () => {
+            await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL,
+                storage_provider = CASE WHEN storage_provider = 'timeline' THEN 'local' ELSE storage_provider END WHERE id = ?`,
+                [cut.filePath, cut.duration, startTime + cut.duration, clipId]));
+            // A clip that had been materialized and now has a file of its own is no longer timeline-backed: project()
+            // would otherwise preserve metadata.materialized (the clips row has no column to derive it from).
+            await db.run(`UPDATE media_objects SET metadata = (COALESCE(NULLIF(metadata, ''), '{}')::jsonb - 'materialized')::text,
+                updated_at = ov_now() WHERE id = ?`, [clip.object_id]);
+        },
         payload: async () => await _clipPublic(await db.getClipById(clipId)),
     });
+    // The file supersedes any rows a previous materialization left. removeObject drops the clip's rows after the
+    // commit and deletes only the edge locations no other object's rows still name (F3.4) — the source's interior
+    // bytes stay. No rows is a no-op, so the ordinary file cut is unchanged.
+    const tl = await require('../objects/timeline').removeObject(clip.object_id)
+        .catch(err => { console.warn(`[Clips] Clip ${clipId} timeline cleanup failed: ${err.message}`); return null; });
+    if (tl && tl.pending) console.warn(`[Clips] Clip ${clipId}: ${tl.pending} timeline segment row(s) kept — their durable copy could not be deleted; the object sweep retries`);
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
     // A public, person-made clip that just became ready is indexable: announce its watch page and the sitemap.
     await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clipId));
@@ -133,11 +145,14 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null
  * object's metadata gains materialized: true, and clipProjection keeps virtual: true beside it, so readiness,
  * playableSql and the verify job treat it as they treat a virtual clip.
  */
-async function markMaterialized(clip, { duration, startTime }) {
+async function markMaterialized(clip, { duration, startTime, endMs }) {
     await announce(clip.app_id, 'clip.ready', {
         change: async () => await objects().withObject('clip', clip.id, async () => {
+            // end_time is the planned (snapped) end in source seconds, not startTime + duration: an edge that snapped
+            // back to its segment boundary, or a window clamped to the first segment, made originMs < startTime, so the
+            // old sum overshot the end and every re-cut started from the drifted value.
             await db.run(`UPDATE clips SET file_path = NULL, storage_provider = 'timeline', duration_seconds = ?, end_time = ?,
-                status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?`, [duration, startTime + duration, clip.id]);
+                status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?`, [duration, endMs / 1000, clip.id]);
             await db.run(`UPDATE media_objects SET metadata = jsonb_set(COALESCE(NULLIF(metadata, ''), '{}')::jsonb, '{materialized}', 'true'::jsonb)::text,
                 updated_at = ov_now() WHERE id = ?`, [clip.object_id]);
         }),

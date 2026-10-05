@@ -73,6 +73,15 @@ async function queuePack(appId, objectId, { rendition = null } = {}) {
 function renditionNames() { return require('../jobs/rendition').renditionNames(); }
 
 /**
+ * Whether an object is a clip that plays without a file of its own: a virtual clip (F3.5) or a materialized one
+ * (F3.6), both given metadata.virtual by clipProjection. rendition.create needs a file (resolveSource answers null
+ * without file_path), so neither one can ever be cut a rendition.
+ */
+function isVirtualClip(obj) {
+    return !!obj && obj.kind === 'clip' && require('./model').parseJson(obj.metadata, {}).virtual === true;
+}
+
+/**
  * Queue `rendition.create` for each rung the object does not have yet (one, '720p'), joined per object and rendition.
  * `rendition` names a single rung instead of the whole ladder. → the first job id, or null when nothing was queued.
  */
@@ -83,8 +92,9 @@ async function queueRendition(appId, objectId, { rendition = null } = {}) {
     // A held object is left alone (as the rendition job itself refuses it): queue nothing, so a hold does not burn jobs.
     if (await require('./model').isHeld(obj.id)) return null;
     const timeline = require('./timeline');
-    // A virtual clip (no timeline of its own) plays its source's window: it gets no rendition of its own.
-    if (obj.kind === 'clip' && !await timeline.has(obj.id)) return null;
+    // A clip that plays without a file of its own gets no rendition of its own: a virtual clip (no rows, F3.5) plays
+    // its source's window; a materialized one (own rows over the source's bytes, F3.6) has no file to transcode from.
+    if (isVirtualClip(obj) || (obj.kind === 'clip' && !await timeline.has(obj.id))) return null;
     const queue = require('../jobs/queue');
     const names = rendition ? [String(rendition)] : renditionNames();
     const srcVer = sourceVersion(await timeline.list(obj.id, timeline.SOURCE));
@@ -102,4 +112,4 @@ async function queueRendition(appId, objectId, { rendition = null } = {}) {
     return first;
 }
 
-module.exports = { queueCmaf, queuePack, queueRendition };
+module.exports = { queueCmaf, queuePack, queueRendition, isVirtualClip };
