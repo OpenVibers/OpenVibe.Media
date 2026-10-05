@@ -49,12 +49,10 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
         await rejects(toAvatar(await sharp({ create: { width: 8, height: 8, channels: 3, background: '#000' } }).png().toBuffer()), /too small/, 'tiny images are refused');
 
         // ── Shared paste storage: the screenshots dir and the slug have one source ──
-        // (server/pastes/storage.js — the avatar ingest no longer takes them from the paste router)
-        assert.ok(!require.cache[require.resolve('../server/pastes/routes')], 'requiring the avatar ingest does not load the paste routes');
+        // (server/pastes/storage.js — the paste router is gone, the avatar ingest reads the leaf directly)
         const storage = require('../server/pastes/storage');
         const config = require('../server/config');
         assert.strictEqual(storage.SCREENSHOTS_DIR, path.join(config.pastes.path, 'screenshots'), 'avatars keep landing in the paste screenshots directory');
-        assert.strictEqual(storage.SCREENSHOTS_DIR, require('../server/pastes/routes').SCREENSHOTS_DIR, 'the paste routes share that one directory');
         const slugA = await storage.generateSlug();
         const slugB = await storage.generateSlug();
         for (const s of [slugA, slugB]) assert.match(s, /^[a-z]+-[a-z]+-[0-9]{2}$/, `slug shape: ${s}`);

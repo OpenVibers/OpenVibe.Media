@@ -54,8 +54,10 @@ const clipUpload = multer({
 });
 
 // { readiness: true } (API responses) adds the object's readiness levels (server/objects/readiness.js);
-// the clip.ready / clip.failed payloads leave them out, as vodPublic's do.
-async function clipPublic(clip, { readiness = false } = {}) {
+// the clip.ready / clip.failed payloads leave them out, as vodPublic's do. `hls` selects the playlist
+// fields: undefined = discover them for this row (a single-item read), false = omit them (an event payload
+// must never carry a signed URL into the outbox), an object = the answer a list route already batched.
+async function clipPublic(clip, { readiness = false, hls } = {}) {
     if (!clip) return null;
     const out = {
         unique_views: clip.unique_views || 0,
@@ -91,6 +93,13 @@ async function clipPublic(clip, { readiness = false } = {}) {
         view_count: clip.view_count || 0,
         created_at: clip.created_at,
     };
+    // The HLS master playlist of the clip's object, when it has one (objects/hls.js): the same field and access rules as
+    // GET /o/:id/download?format=json — unsigned for an open object, a signed playlist (+ hls_expires_at) for a private
+    // or sandbox one. Absent with MEDIA_HLS_ENABLED off, before the object is ready, and until its timeline (or, for a
+    // virtual clip, its source's window) has a segment; object.cmaf is queued for a materialized clip that has none.
+    // Never throws.
+    if (hls === undefined) Object.assign(out, await require('../objects/hls').discovery(clip.object_id) || {});
+    else if (hls) Object.assign(out, hls);
     if (readiness) out.readiness = await require('../objects/readiness').forRow(clip);
     return out;
 }
@@ -329,7 +338,8 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
         };
         const clips = await db.listClips(req.appId, filters);
         const total = await db.countClips(req.appId, filters);
-        res.json({ clips: (await Promise.all(clips.map(async c => await clipPublic(c, { readiness: true })))), total, limit, offset, hasMore: offset + clips.length < total });
+        const hls = await require('../objects/hls').discoveryMany(clips);
+        res.json({ clips: await Promise.all(clips.map(async c => await clipPublic(c, { readiness: true, hls: hls.get(String(c.object_id)) || null }))), total, limit, offset, hasMore: offset + clips.length < total });
     } catch (err) {
         console.error('[Clips] List error:', err.message);
         res.status(500).json({ error: 'Failed to list clips' });

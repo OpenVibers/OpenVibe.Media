@@ -7,7 +7,8 @@ OpenVibe.Live predecessor. Owns VOD ingest/recording, storage tiering
 (local → Backblaze B2 → Cloudflare R2), clips, generic files, the canonical
 object model and thumbnails, for all OpenVibe apps (`live`, `games`, `tools`,
 `network`, `community`) and developer projects. Pastes moved to OpenVibe.Community
-on 2026-09-22; Media's paste API is read-only and writes answer 410 ([Pastes](#pastes)).
+on 2026-09-22; Media's read-only paste API is gone (T10 step 2) and it serves only the
+frozen rows and old screenshots ([Pastes](#pastes)).
 
 Implements **Media API v1** from `../CONTRACTS.md`.
 
@@ -44,7 +45,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.21.2 (tokens, events outbox, per-actor limits),
+- `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.28.0 (tokens, events outbox, per-actor limits),
   `openvibe-shared` v2.5.0, pinned by release tarball
 
 ## Capabilities
@@ -89,7 +90,7 @@ server/
   vod/vod-storage.js     local/B2/R2 tiering, presigned playback, sweep, CLI
   vod/health-scanner.js  probe/decode/master-recovery primitives
   vod/health-job.js      background health scan + quarantine cleanup + master sweep
-  pastes/routes.js       /api/v1/:app/pastes (read-only; writes answer 410 pastes.moved)
+  pastes/storage.js      screenshot dir + slug minting kept after the pastes API was retired
   files/routes.js        /api/v1/:app/files
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
@@ -114,7 +115,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v2.5.0, openvibe-contracts v0.79.0, openvibe-sdk v0.21.2: pinned release tarballs, installed by npm)
+(openvibe-shared v2.5.0, openvibe-contracts v0.79.0, openvibe-sdk v0.28.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -160,7 +161,7 @@ Credential types on `/api/v1/:app/...`:
    constant time against the app's stored hash. A key is only valid for its
    own `:app` segment; presenting another app's key returns **403**.
 2. **Network user JWT** (browser endpoints only — chunks/complete, clips,
-   pastes, files, thumbnails) — RS256, verified **offline** against the JWKS
+   files, thumbnails) — RS256, verified **offline** against the JWKS
    public key fetched from `OV_NETWORK_URL/api/.well-known/jwks` at boot
    (cached, refreshed every 6 h). `aud` must include `openvibe.media` when
    present. If the request carries an `Origin` header it must be in the app's
@@ -193,7 +194,7 @@ namespaces are `app.<project_id>` (production) and `app.<project_id>.sandbox`, w
   named in a URL. Nothing is created unless the token's `project_id` is the path's project and the
   token holds the route's capability.
 - App tokens reach only these tenants and only the capability routes (files, objects v2 without
-  retention holds). VODs, clips, pastes, thumbnails, assets, stats and admin refuse them.
+  retention holds). VODs, clips, thumbnails, assets, stats and admin refuse them.
 - **Sandbox tokens** (`env: sandbox`) are accepted on these routes only; everywhere else they get
   `401 token.sandbox_refused`.
 - **Sandbox content is never public.** `/f/:key` and `/o/:id` answer 404 for it unless the URL
@@ -232,7 +233,7 @@ MEDIA_APP_KEYS="live:key1,games:key2"
 | POST | `/vods/:id/chunks` | multipart `chunk` (+`segmentId`), user JWT ok — browser MediaRecorder append flow |
 | POST | `/vods/:id/complete` | finalize chunked upload (user JWT ok) |
 | POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, webhook |
-| GET | `/vods/:id` | `{ id, title, status, duration, playback_url, thumbnail_url, storage_provider, readiness, … }` (`readiness`: [below](#readiness)) |
+| GET | `/vods/:id` | `{ id, title, status, duration, playback_url, hls_url, thumbnail_url, storage_provider, readiness, … }` (`readiness`: [below](#readiness); `hls_url`, with `hls_expires_at` when signed: the object's master playlist with `MEDIA_HLS_ENABLED`, docs/media-fabric.md §3) |
 | GET | `/vods?limit&offset&user_id&stream_id&managed_stream_id&include_private&order&since` | list; `include_private` app-key only; `order` = newest\|oldest\|views; `since` = created at or after (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC) |
 | PUT | `/vods/:id` | `{ title?, description?, visibility? }` |
 | DELETE | `/vods/:id` | deletes local + B2 + R2 objects + row |
@@ -270,7 +271,7 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 | method | path | notes |
 |---|---|---|
 | POST | `/clips` | `{ vod_id, start_s, end_s, title?, description?, user_id?, visibility?, auto_generated?, materialize? }` → over a VOD with a CMAF timeline (`MEDIA_HLS_ENABLED`): a **virtual** clip, **201** ready at once (the clip, `storage_provider: 'timeline'`), played as HLS over the source's segments (`/c/:id` redirects to its playlist); with `materialize: true` or no timeline → **202** `{ id, status: 'processing', job_id }`; cut (`clip.cut`) runs in background (from the local file or a presigned B2/R2 URL); duplicate windows are deduplicated; live recordings are clamped to flushed footage. Multipart `video` = direct upload of an already-cut blob → **201** ready |
-| GET | `/clips/:id` | status: `processing | ready | failed` |
+| GET | `/clips/:id` | status: `processing | ready | failed`; with `MEDIA_HLS_ENABLED` also `hls_url` (and `hls_expires_at` when signed) — the clip's playlist over its own timeline or, virtual, its source's window (docs/media-fabric.md §4) |
 | POST | `/clips/:id/recut` | `{ materialize? }` → a file-less clip over a timeline turns virtual (200, the clip); otherwise (or `materialize: true`) **202** `{ id, status, job_id }` (`clip.cut`; a virtual clip stays ready while it is cut) |
 | GET | `/clips?limit&offset&vod_id&stream_id&user_id&channel_user_id&hide_self&include_private&order&auto_generated&status&since` | list; `channel_user_id` = clipped-channel owner; `include_private` app-key only; `auto_generated=1\|0` = cut by the app's automation (AI auto-clips) or made by a person; `status=ready` = playable clips only; `since` as for VODs |
 | PUT | `/clips/:id` | `{ title?, visibility?, auto_generated? }` (`auto_generated` app key only, 403 when acting for a user) |
@@ -278,9 +279,10 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 
 ### Pastes
 
-**Read-only since the move:** OpenVibe.Community owns pastes (since
-2026-09-22). The paste API here answers reads only: every other method
-(POST, PUT, DELETE, …) answers 410 `{ "code": "pastes.moved" }` for every app.
+**The API is gone:** OpenVibe.Community owns pastes (since 2026-09-22) and Media's
+read-only paste app API was retired in T10 step 2 — `/api/v1/:app/pastes` is
+unmounted, so every method there answers 404. No paste is created, read, listed or
+deleted through Media any more.
 `PASTES_MOVED_TO=https://openvibe.community` turns `/p/:slug` and its text
 `/raw` into 301s to Community. Screenshot bytes are still served from here, and
 new screenshots are uploaded to the token-only `community` tenant.
@@ -288,15 +290,16 @@ Paste screenshot and avatar objects (`legacy:<app>:paste:<slug>`,
 `legacy:<app>:avatar:<slug>`) are frozen with them: their v1 route is gone and
 `DELETE /api/v2/:app/objects/:id` answers 409 `media.object.legacy_managed`, so
 Media has no API that deletes them.
-An unauthenticated write still answers 401 before the 410. `GET /pastes/config`
-reports the old limits for information only.
+
+`server/pastes/storage.js` stays as a leaf: the avatar ingest still mints slugs
+and writes screenshots into the same directory, and burn-after-read removes a
+screenshot's bytes (skipping a held row).
 
 | method | path | notes |
 |---|---|---|
-| GET | `/pastes?limit&offset&type&search&user_id` | public list |
-| GET | `/pastes/config` | paste limits (`maxSizeKb`, `cooldownSeconds`, `maxPerUserPerDay`, `todayCount`, …) |
-| GET | `/pastes/:slug` | full paste (private: owner/app only) |
-| GET | `/pastes/:slug/comments` | threaded comments |
+| GET | `/p/:slug` | 301 to OpenVibe.Community when `PASTES_MOVED_TO` is set; otherwise the old page |
+| GET | `/p/:slug/raw` | 301 to Community; image pastes 302 to their screenshot |
+| GET | `/p/:slug/screenshot` | frozen screenshot bytes (unknown/private slugs 301 to Community) |
 
 AI summary/tags columns remain for imported rows.
 
@@ -411,7 +414,7 @@ release now in production as the next N-1 (`npm run n-1:record [ref]`) and commi
 Express `trust proxy` is `loopback` (`server/client-ip.js`): `req.ip` is the `X-Forwarded-For` that the
 local nginx set when the request came through it, and the socket address for anyone else. A caller
 that reaches port 4100 directly cannot choose its IP by sending `X-Forwarded-For` or
-`CF-Connecting-IP` itself. View counting, paste limits and the live-frame rate limit read `req.ip`,
+`CF-Connecting-IP` itself. View counting and the live-frame rate limit read `req.ip`,
 never the headers (`test/trust-proxy.test.js`).
 
 ## Per-actor limits
@@ -460,7 +463,7 @@ Counters are per process (a restart forgets them). `test/actor-limits.test.js`.
 | `GET /live/:sel/transcript.json` | **transcript + AI timeline API** — full audio-transcription log and AI overview timeline. `:sel` = slot id / slot slug → slot-scoped sessions; **`@username`** → user-scoped (all their slots, works while offline). Returns `{ live, current, sessions[] (each: ai_overview, transcript, duration…), streamer (overview + stream memories), user }`. `?limit=1..50` sessions (default 10), `?app=`. Cached **30s** (that's the rate limit), CORS-open. |
 | `GET /live/:sel/chat-insight.json` | **chat insight API** — a user's chat-related AI insight/timeline (`:sel` = `@username` or numeric user id): today-vs-alltime chat overviews, condensed memory, event timeline, plus their streamer overview + stream memories when they stream. Proxied from the app's public chat-AI API over loopback; cached **30s**, CORS-open. |
 | `GET /v/:id/transcript.json` | **VOD transcript API** — transcript + AI overview for one existing VOD id (`{ vod_id, title, duration_seconds, ai_overview, transcript, ai_analyzed_at }`). Private VODs → 404. Cached 30s, CORS-open. |
-| `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8`, `/o/:id/source/{init.mp4,NNNNNN.m4s}` | segment-native video (F3.1), only with `MEDIA_HLS_ENABLED=1` (off by default; off, these 404): HLS playlists written from the object's `media_timeline` rows (VOD, `#EXT-X-ENDLIST`) and its CMAF segments (Range; a segment packed by `object.pack` (F3.3) is a byte range of its chunk). Same check as `GET /o/:id` (and, like it, no `Access-Control-Allow-Origin` on a private or sandbox answer): private and sandbox objects only with the object's `?exp&sig` (`/api/v2/:app/objects/:id/download?format=json` → `hls_url`, a playlist token valid `MEDIA_HLS_PLAYLIST_TTL_S` (6 h; 60 s to 12 h) that no other route accepts; a download signature works too), carried onto every URI; deleted 410. The `object.cmaf` job makes the timeline; a recording's finalize queues it, and `download?format=json` queues it for an object that has none yet. `noindex` |
+| `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8`, `/o/:id/source/{init.mp4,NNNNNN.m4s}` | segment-native video (F3.1), only with `MEDIA_HLS_ENABLED=1` (off by default; off, these 404): HLS playlists written from the object's `media_timeline` rows (VOD, `#EXT-X-ENDLIST`) and its CMAF segments (Range; a segment packed by `object.pack` (F3.3) is a byte range of its chunk). Same check as `GET /o/:id` (and, like it, no `Access-Control-Allow-Origin` on a private or sandbox answer): private and sandbox objects only with the object's `?exp&sig` (`/api/v2/:app/objects/:id/download?format=json` → `hls_url`, a playlist token valid `MEDIA_HLS_PLAYLIST_TTL_S` (6 h; 60 s to 12 h) that no other route accepts; a download signature works too), carried onto every URI; deleted 410. The `object.cmaf` job makes the timeline; a recording's finalize queues it, and `download?format=json` queues it for an object that has none yet; the v1 VOD and clip answers carry the same `hls_url` (and `hls_expires_at` when signed). `noindex` |
 | `GET /robots.txt` | crawler policy (`openvibe-shared/seo.robotsTxt`: AI and search crawlers named, `/api/`, `/auth/`, `/internal/`, `/o/`, `/metrics`, `/live/`, `/me` disallowed) and the sitemap |
 | `GET /sitemap.xml` | the media index and the watch pages Media is the canonical home of: public, playable VODs and clips of apps other than Live (Live lists its own `/vod` and `/clip` pages), never AI clips, private, unlisted, sandbox, recording or failed items; thumbnails as image entries. Every listed page renders `index, follow` |
 | `GET /llms.txt` | a map of the site for language-model crawlers |
@@ -477,7 +480,7 @@ Private items (and legacy rows with no visibility and `is_public = 0`) answer
 exactly like a missing id — the same 404 and body — unless the request bears the
 owning app's API key, optionally acting for the owner via `X-OV-User-Id`. That holds
 for the watch page, the bytes, `transcript.json`, the legacy `/api/thumbnails` redirect
-and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`, `/pastes/:slug`)
+and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`)
 apply it to an app acting for someone other than the owner. A call acting for a user writes
 only that user's VODs and clips (update, delete, ingest, chunks, finalize, re-cut, thumbnail):
 someone else's private one is the missing answer, anything else 403. The media index lists a

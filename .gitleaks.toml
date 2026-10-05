@@ -15,3 +15,9 @@ description = "Throwaway app keys the local smoke test provisions for its own te
 condition = "AND"
 paths = ['''^scripts/smoke-test\.sh$''']
 regexes = ['''^(smoke-[a-z]+-key-[0-9]+|wrong-key)$''']
+
+[[allowlists]]
+description = "Made-up INTERNAL_API_KEY in an older owner-subject test (test/owner-subject.test.js, removed with X-Internal-Key in 809b06b); the full-history scan still reads it. It opens nothing"
+condition = "AND"
+paths = ['''^test/owner-subject\.test\.js$''']
+regexes = ['''^internal-key-0123456789abcdef$''']

@@ -4,7 +4,9 @@ Roadmap Wave 4 turns Media from predecessor-shaped VOD/clip/file tables into one
 platform. Every stored blob is a **media object** with an id `med_<ULID>`. The inherited
 `vods`, `clips`, `files` and screenshot `pastes` rows stay as they are, and each one is now a typed
 projection over an object through its `object_id` column. Pastes moved to OpenVibe.Community on
-2026-09-22: Media keeps the frozen `pastes` rows and their screenshot/avatar objects, read-only. Every existing URL and v1 response is
+2026-09-22: Media keeps the frozen `pastes` rows and their screenshot/avatar objects, read-only, and
+its v1 pastes API was retired in T10 step 2 (`/api/v1/:app/pastes` is unmounted; only the public
+`/p/:slug` routes remain). Other existing URLs and v1 responses are
 unchanged. New code talks to objects through the [v2 API](#object-api-v2).
 
 Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`, `invariant.js`,
@@ -119,7 +121,7 @@ after the outcome event.
 | clip cut / re-cut result | clips routes and `clip-jobs`, inside the clip.ready / clip.failed transaction |
 | file upload | `db.createFile` |
 | thumbnail generate / upload | `thumbnail-service`, `POST /thumbnails` |
-| screenshot upload / update / censor | none since pastes moved to OpenVibe.Community (2026-09-22): the paste API is read-only and writes answer 410 `pastes.moved` |
+| screenshot upload / update / censor | none since pastes moved to OpenVibe.Community (2026-09-22): the paste API was retired in T10 step 2 (`/api/v1/:app/pastes` is unmounted) |
 | avatar ingest | `avatars/ingest` |
 | tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep, `migrateLegacy`: the copy the move verified is marked `present` in the same transaction |
 
@@ -505,11 +507,11 @@ While any hold applies:
 
 - **No delete path works.**
   - v2 `DELETE` answers 409.
-  - The v1 deletes for vods, clips and files, and the admin bulk delete, answer 409 or report `held` (paste deletes answer 410 `pastes.moved` for every paste since the move).
+  - The v1 deletes for vods, clips and files, and the admin bulk delete, answer 409 or report `held` (the paste API was retired in T10 step 2, so a paste row is only ever deleted by SQL, which the trigger refuses).
   - Quarantine cleanup and the boot junk sweep skip the object.
   - Finalize never deletes a held recording that turned out empty (no file, or zero bytes): it keeps the row and the file and settles it as failed (`missing_file` / `zero_byte`, quarantined, `vod.failed`).
   - `deleteVodObjects` keeps the bytes.
-  - Paste screenshot removal no longer exists (the paste API is read-only since pastes moved to OpenVibe.Community).
+  - Paste screenshot removal is only the burn-after-read path in `server/pastes/storage.js`, which skips a held row.
   - A `BEFORE DELETE` trigger on each projected table, plus a trigger on `media_objects.lifecycle_status`, refuses the change, so paths nobody has hooked are still covered. The triggers are the `_v2` ones (clip-aware); an older database has its first-version guards replaced at start.
 - **No tier move.** `moveToCold`, `moveToHot`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }` (the admin moves answer it, R2 moves are logged as `refused`), and the sweep counts these as `skippedHeld` instead of errors. A held native object is never promoted to or demoted from the R2 cache either (logged as `refused`; a hold placed while its bytes were being copied wins, and the unrecorded copy is removed). A hold freezes an object's placement: `moveToHot` is refused too, because restoring flips the row to local and drops an R2 copy. A clip cut from a held VOD in B2/R2 is cut from the cloud copy instead of fetching the VOD home. Row updates that only record where the bytes already are (the sweep finding a local file gone while B2 has the copy, the legacy-tier migration) still happen: they move nothing.
 
