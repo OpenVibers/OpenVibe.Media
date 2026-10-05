@@ -28,7 +28,7 @@ const path = require('path');
     assert.strictEqual(demand.bucketOf(T0 + B), T0 / B + 1);
     assert.strictEqual(demand.region(), 'local');
     assert.strictEqual(demand.counterKey('local', 7, 'obj-a'), 'demand:local:7:obj-a');
-    assert.strictEqual(demand.counterKey('local', 7, 'obj-a', '000001.m4s'), 'demand:local:7:obj-a:000001.m4s');
+    assert.strictEqual(demand.counterKey('local', 7, 'obj-a', '000001.m4s'), 'demand:local:7:obj-a', 'counterKey has no segment axis');
     assert.strictEqual(demand.hotKey('local', 7), 'hot:local:7');
     assert.strictEqual(demand.segKey('local', 7, 'obj-a'), 'hot:local:7:obj-a');
     assert.strictEqual(demand.KEY_TTL_S, 7200);
@@ -75,6 +75,16 @@ const path = require('path');
             async expire(k, s) { calls.push(['expire', k, s]); ttls.set(k, s); return 1; },
             async zincrby(k, by, m) { calls.push(['zincrby', k, by, m]); const z = zsets.get(k) || new Map(); z.set(m, (z.get(m) || 0) + by); zsets.set(k, z); return String(z.get(m)); },
             async zrange(k, start, stop, ws) { assert.deepStrictEqual([start, stop, ws], [0, -1, 'WITHSCORES']); return [...(zsets.get(k) || new Map())].flatMap(([m, n]) => [m, String(n)]); },
+            async zscore(k, m) { calls.push(['zscore', k, m]); const z = zsets.get(k); return z && z.has(m) ? String(z.get(m)) : null; },
+            async zremrangebyrank(k, start, stop) {
+                calls.push(['zremrangebyrank', k, start, stop]);
+                const z = zsets.get(k); if (!z) return 0;
+                const sorted = [...z.entries()].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1));
+                const len = sorted.length, s = start < 0 ? Math.max(0, len + start) : start, e = stop < 0 ? len + stop : stop;
+                let removed = 0;
+                for (let i = s; i <= Math.min(e, len - 1); i++) { z.delete(sorted[i][0]); removed++; }
+                return removed;
+            },
             async mget(...keys) { return keys.map((k) => (store.has(k) ? String(store.get(k)) : null)); },
             async set(k, v, ex, s, nx) { assert.deepStrictEqual([ex, s, nx], ['EX', demand.ANNOUNCE_S, 'NX']); if (store.has(k)) return null; store.set(k, v); ttls.set(k, s); return 'OK'; },
             async del(k) { store.delete(k); return 1; },
@@ -95,21 +105,50 @@ const path = require('path');
     assert.strictEqual(calls.filter((c) => c[0] === 'expire' && c[1] === ck).length, 1, 'TTL set on the first hit only');
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0 })), { 'obj-a': 2, 'obj-b': 1 });
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-a', 'obj-b'] })), { 'obj-a': 2, 'obj-b': 1 });
-    // A segment read writes the segment counter and the object's per-segment set, and the object total with them.
+    // A segment read moves the object's per-segment set and the object total with it — no per-segment counter key.
     demand.record({ objectId: 'obj-a', segment: '000001.m4s', now: T0 });
     demand.record({ objectId: 'obj-a', segment: '000001.m4s', now: T0 });
     demand.record({ objectId: 'obj-a', segment: '000002.m4s', now: T0 });
     await new Promise((resolve) => setImmediate(resolve));
-    const sk = `ov:media:demand:local:${b}:obj-a:000001.m4s`, gk = `ov:media:hot:local:${b}:obj-a`;
-    assert.strictEqual(store.get(sk), 2);
+    const gk = `ov:media:hot:local:${b}:obj-a`;
+    assert.ok(!store.has(`ov:media:demand:local:${b}:obj-a:000001.m4s`), 'no per-segment counter key');
     assert.deepStrictEqual([...zsets.get(gk)], [['000001.m4s', 2], ['000002.m4s', 1]]);
-    assert.strictEqual(ttls.get(sk), 7200);
     assert.strictEqual(ttls.get(gk), 7200);
-    assert.strictEqual(calls.filter((c) => c[0] === 'expire' && c[1] === sk).length, 1, 'TTL set on the first segment hit only');
+    assert.strictEqual(calls.filter((c) => c[0] === 'expire' && c[1] === gk).length, 2, 'TTL set once per new segment member');
+    assert.strictEqual(calls.filter((c) => c[0] === 'zremrangebyrank' && c[1] === gk && c[3] === -(demand.TOP_N + 1)).length, 2, 'the capped set is trimmed when a new member arrives');
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0 })), { 'obj-a': 5, 'obj-b': 1 }, 'the object total grew by its segments');
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-a'], segment: '000001.m4s' })), { 'obj-a': 2 });
     assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, segment: '000001.m4s' })), { 'obj-a': 2 }, 'the segment axis without an object list');
-    console.log('✅ Valkey keys ov:media:demand:<region>:<bucket>:<id>[:<segment>] and ov:media:hot:<region>:<bucket>[:<id>], TTL 7200 s');
+    console.log('✅ Valkey keys ov:media:demand:<region>:<bucket>:<id> and ov:media:hot:<region>:<bucket>[:<id>], TTL 7200 s');
+
+    // 3b. Bounded keys: 1000 segment reads of one object leave one per-object set of at most TOP_N members and no
+    // per-segment counter keys, and the object total stays exact (every read bumps it).
+    calls.length = 0; store.clear(); zsets.clear();
+    const hotB = demand.bucketOf(T0), hotGk = `ov:media:hot:local:${hotB}:obj-hot`, hotCk = `ov:media:demand:local:${hotB}:obj-hot`;
+    for (let i = 0; i < 1000; i++) demand.record({ objectId: 'obj-hot', segment: `${String(i + 1).padStart(6, '0')}.m4s`, now: T0 });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(zsets.size, 2, 'the region object set and one per-object segment set, nothing per segment');
+    assert.ok(zsets.has(hotGk));
+    assert.strictEqual(zsets.get(`ov:media:hot:local:${hotB}`).size, 1, 'the region object set holds the one object');
+    assert.strictEqual(zsets.get(hotGk).size, demand.TOP_N, 'the segment set is capped at TOP_N');
+    assert.strictEqual([...store.keys()].filter((k) => k.startsWith('ov:media:demand:')).length, 1, 'only the object counter key');
+    assert.strictEqual(store.get(hotCk), 1000, 'the object total stays exact');
+    assert.ok([...store.keys()].every((k) => !/\.m4s$/.test(k)), 'no per-segment counter key');
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-hot'] })), { 'obj-hot': 1000 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-hot'], segment: '001000.m4s' })), { 'obj-hot': 1 }, 'a surviving segment reads from the set');
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-hot'], segment: '000001.m4s' })), { 'obj-hot': 0 }, 'an evicted segment is gone');
+    // The in-process fallback is bounded the same way: one object counter and one capped segment set.
+    demand.useValkey(null);
+    demand._reset();
+    for (let i = 0; i < 1000; i++) demand.record({ objectId: 'obj-hot', segment: `${String(i + 1).padStart(6, '0')}.m4s`, now: T0 });
+    assert.deepStrictEqual(Object.fromEntries(await demand.hotness({ now: T0, objectIds: ['obj-hot'] })), { 'obj-hot': 1000 });
+    let present = 0;
+    for (let i = 1; i <= 1000; i++) {
+        if ((await demand.hotness({ now: T0, objectIds: ['obj-hot'], segment: `${String(i).padStart(6, '0')}.m4s` })).get('obj-hot')) present++;
+    }
+    assert.strictEqual(present, demand.TOP_N, 'the fallback keeps only TOP_N segments');
+    console.log('✅ 1000 segment reads stay bounded: one capped set per object, object total exact, fallback bounded');
+    demand.useValkey(fake);
 
     // 4. The router records one hit per served viewer read; none for a derive job or when nothing is served.
     const file = path.join(tmp, 'objects', 'obj-r');
@@ -125,8 +164,8 @@ const path = require('path');
     await router.route({ locations: served.locations, objectId: 'obj-sg', segment: '000002.m4s', purpose: 'playback' });
     await new Promise((resolve) => setImmediate(resolve));
     const incrKeys = calls.filter((c) => c[0] === 'incr').map((c) => c[1]);
-    assert.deepStrictEqual(incrKeys.map((k) => k.split(':').pop()), ['obj-r', 'obj-v', 'obj-sg', '000002.m4s']);
-    assert.ok(incrKeys.some((k) => k.endsWith(':obj-sg:000002.m4s')), 'the segment key carries the object and the segment');
+    assert.deepStrictEqual(incrKeys.map((k) => k.split(':').pop()), ['obj-r', 'obj-v', 'obj-sg'], 'one object counter per served read, no per-segment counter');
+    assert.ok(calls.some((c) => c[0] === 'zincrby' && c[1].endsWith(':obj-sg') && c[3] === '000002.m4s'), 'the segment read names the object and the segment in its per-object set');
     console.log('✅ router: one demand hit per served playback/download, none for derive or no copy, segments named');
 
     // 5. A failing Valkey (rejecting, throwing, hanging) leaves the read path untouched.
@@ -214,6 +253,6 @@ const path = require('path');
     stub.close();
     await db.close();
     fs.rmSync(tmp, { recursive: true, force: true });
-    console.log('placement-demand: all six cases passed');
+    console.log('placement-demand: all seven cases passed');
     process.exit(0);
 })().catch((err) => { console.error(err); process.exit(1); });

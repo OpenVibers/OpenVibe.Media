@@ -234,12 +234,13 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   job) adds one best-effort hit in Valkey (`server/placement/demand.js`): a counter `demand:<region>:<bucket>:<object_id>`
   and the region's hot sorted set `hot:<region>:<bucket>` (object id → reads), both under `VALKEY_PREFIX` with a 2 h TTL;
   `<bucket>` is the 5-minute bucket number (`floor(epoch_ms / 300000)`). A read of a timeline segment (`GET
-  /o/:id/source/:name`) carries the segment name, adding the segment counter
-  `demand:<region>:<bucket>:<object_id>:<segment>` and the per-object segment set `hot:<region>:<bucket>:<object_id>`
-  (segment → reads), so a hot beginning reads apart from a cold middle; the object counter moves on every read either
+  /o/:id/source/:name`) carries the segment name, moving that segment's member in the per-object segment set
+  `hot:<region>:<bucket>:<object_id>` (segment → reads; capped at `TOP_N` members, 2 h TTL), so a hot beginning reads
+  apart from a cold middle without a key per segment; the object counter moves on every read either
   way, so the object is the sum over its segments (plus whole-object reads) and `hotness()` — the sweep's eligibility —
-  is unchanged. `hotness({ segment })` reads one segment (per object, or across the region's objects). The region is one
-  per deployment (`MEDIA_DEMAND_REGION`, default `local`); per-viewer regions wait for an edge-provided header.
+  is unchanged. `hotness({ segment })` reads one segment (per object, or across the region's hottest `TOP_N` objects).
+  The region is one per deployment (`MEDIA_DEMAND_REGION`, default `local`); per-viewer regions wait for an
+  edge-provided header.
   `hotness()` sums the last 12 buckets (one hour). The writes are fire-and-forget: a slow, failing or absent Valkey never
   delays or fails a read (without Valkey the counts stay in-process, both axes). The per-segment placement decision
   (which minutes of a VOD sit on R2/edge) stays open; F2 records the demand it will read.

@@ -781,7 +781,7 @@ const publicRouter = express.Router();
 // Like GET /o/:id, a private or sandbox answer carries no Access-Control-Allow-Origin; a public one may be read cross-origin.
 // A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
-const SEGMENT_NAME = /^(init\.mp4|\d{6,}\.m4s)$/;
+const SEGMENT_NAME = /^(init\.mp4|\d{6,9}\.m4s)$/;
 const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 
 /**
