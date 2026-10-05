@@ -51,6 +51,7 @@ const { spawn, spawnSync } = require('child_process');
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const waitFor = async (fn, ms = 60000) => { const end = Date.now() + ms; while (Date.now() < end) { if (await fn()) return true; await sleep(25); } return false; };
     const sha = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+    const size = (file) => { const r = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file], { encoding: 'utf8' }); return r.stdout.trim(); };
     const hasFfmpeg = spawnSync('ffmpeg', ['-version']).status === 0;
 
     (async () => {
@@ -302,6 +303,44 @@ const { spawn, spawnSync } = require('child_process');
             assert.deepStrictEqual([s.status, sha(s.buf)], [200, r.sha256], `${r.name} served from the durable chunk`);
         }
         fs.renameSync(`${packed[1].local_path}.away`, packed[1].local_path);
+
+        // ── Sprites come from the timeline (F3.1): each frame from the row covering its instant, decoded from the
+        // packed chunk's byte range, never the source. The seek layout and the player contract are unchanged ──
+        const { spriteLayout } = require('../server/jobs/previews');
+        const brightness = (file) => {
+            const r = spawnSync('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'scale=1:1,format=gray', '-f', 'rawvideo', '-'], { encoding: null, maxBuffer: 1 << 20 });
+            return r.stdout && r.stdout.length ? r.stdout[r.stdout.length - 1] : -1;
+        };
+        const sr = await runJob(pub, {}, 'object.sprite');
+        assert.strictEqual(sr.status, 'succeeded', JSON.stringify(sr.error));
+        assert.deepStrictEqual(sr.result.sprite, spriteLayout(7, { frames: 100, columns: 10, tile_width: 160 }), 'the timeline sheet keeps the seek layout');
+        assert.deepStrictEqual([sr.result.sprite.count, sr.result.sprite.interval_seconds, sr.result.sprite.columns], [3, 2.333, 3]);
+        const so = await model.getObject(sr.result.object_id);
+        assert.deepStrictEqual([so.kind, so.mime_type, so.visibility], ['asset', 'image/jpeg', 'private']);
+        assert.strictEqual(size((await model.listLocations(so.id))[0].key), '480,90', 'the image is the layout: 3 × 160 by 1 × 90');
+        assert.deepStrictEqual(model.parseJson(so.metadata, {}).sprite, sr.result.sprite, 'the layout is in the metadata');
+        assert.strictEqual((await model.getVariant(pub, 'sprite')).derived_object_id, so.id);
+        assert.ok(brightness((await model.listLocations(so.id))[0].key) > 30, 'real frames from the rows, not black tiles');
+
+        // The source file gone: the seek path could not run at all, yet the rows' bytes cut the same sheet.
+        const pubFile = path.join(process.env.VOD_PATH, 'public.mp4');
+        fs.renameSync(pubFile, `${pubFile}.away`);
+        const sr2 = await runJob(pub, { frames: 4, columns: 2, tile_width: 96 }, 'object.sprite');
+        assert.strictEqual(sr2.status, 'succeeded', JSON.stringify(sr2.error));
+        assert.deepStrictEqual([sr2.result.sprite.count, sr2.result.sprite.rows, sr2.result.sprite.columns], [3, 2, 2], 'the same layout from rows, with no source to seek');
+        assert.strictEqual(size((await model.listLocations(sr2.result.object_id))[0].key), '192,108');
+        fs.renameSync(`${pubFile}.away`, pubFile);
+
+        // A source with no timeline uses the old seek path (and writes no rows).
+        const plainFile = path.join(process.env.VOD_PATH, 'plain.mp4');
+        fs.copyFileSync(src, plainFile);
+        const plain = await model.createObject({ app_id: 'live', owner_user_id: 5, visibility: 'private', lifecycle_status: 'ready', kind: 'file', mime_type: 'video/mp4', size_bytes: fs.statSync(plainFile).size });
+        await model.upsertLocation(plain, { provider: 'local', key: plainFile, state: 'present', size_bytes: fs.statSync(plainFile).size, verified: true });
+        assert.strictEqual(await timeline.has(plain), false);
+        const sp = await runJob(plain, { frames: 4, columns: 2, tile_width: 96 }, 'object.sprite');
+        assert.strictEqual(sp.status, 'succeeded', JSON.stringify(sp.error));
+        assert.deepStrictEqual([sp.result.sprite.count, sp.result.sprite.columns, sp.result.sprite.rows], [3, 2, 2], 'the seek path lays out the sheet the same way');
+        assert.strictEqual(await timeline.has(plain), false, 'and writes no timeline rows');
 
         // ── A rerun packs nothing; a cmaf rerun keeps the packed rows ──
         const jp2 = await runJob(pub, { target_seconds: 10 }, 'object.pack');

@@ -149,9 +149,16 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   `-movflags +faststart` for an MP4 source; the container stays the source's) as a signed URL, or queues the remux
   (`dedupeActive`) and answers `202 { job_id }` while it is missing.
 - **F3.5, shipped: virtual and materialized clips over the timeline (§4).**
+- **F3.1 sprites, shipped: a sprite sheet from the timeline.** `object.sprite` (with `MEDIA_HLS_ENABLED`) cuts its
+  frames from the object's `media_timeline` rows instead of seeking the source: each sample time picks the row covering
+  it (`timeline.segmentAt`) and one frame is decoded from that row's bytes — this node's segment file, or a packed row's
+  byte range in its chunk, with the init segment prepended — checked against the row's sha256. A packed long VOD is
+  never decoded end to end. The layout (`sprite: { count, interval_seconds, columns, rows, tile_width, tile_height }`)
+  and metadata are the seek path's, so the player contract is unchanged. A source without a timeline, or with
+  `MEDIA_HLS_ENABLED` off, keeps the one-fast-seek-per-frame path; captions stay with AI's `media.analyze`.
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
   live segments and its upload-lag metric, a materialized clip that references the source's chunks (chunk reference
-  counts, boundary-only re-encode), sprites and captions on it, segment-bucket demand, and Live's player
+  counts, boundary-only re-encode), captions on the timeline, segment-bucket demand, and Live's player
   moving to HLS. Renditions are F4.
 
 ## 4. Clips reuse the source
@@ -330,8 +337,9 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
 - **F3 segment-native video:** the timeline index and the CMAF/HLS source representation of finished video (F3.1,
   shipped; §3), packing into ~60 s chunks (F3.3, shipped; §3), the timeline queued at finalize (and lazily on
   download), signed playlists outliving a download URL and the faststart MP4 fallback (F3.c, shipped; §3), virtual and
-  materialized clips (F3.5, shipped; §4); still open: live DVR from OpenRe (CMAF/HLS recording with the growing
-  playlist), materialized clips referencing the source's chunks, sprites and captions on the
+  materialized clips (F3.5, shipped; §4) and sprite sheets cut from the timeline's rows (F3.1, shipped; §3); still
+  open: live DVR from OpenRe (CMAF/HLS recording with the growing
+  playlist), materialized clips referencing the source's chunks, captions on the
   timeline, segment-bucket demand; Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
   VODs, compute placement.
