@@ -110,6 +110,16 @@ const express = require('express');
             assert.ok(!r.body.includes(`URL: https://media.test${never}`), `${never} is not in llms-full`);
         }
         assert.strictEqual((await get('/llms-full.txt')).body, r.body, 'deterministic');
+        // Memoized: a second build inside the 10-minute TTL reuses the first without touching the database.
+        {
+            const crawl = require('../server/public/crawl');
+            const realAll = db.all; let calls = 0;
+            db.all = (...a) => { calls++; return realAll(...a); };
+            try {
+                assert.strictEqual(await crawl.llmsFullTxt(), r.body, 'the cached body is returned');
+                assert.strictEqual(calls, 0, 'a cached /llms-full.txt is rebuilt without another query');
+            } finally { db.all = realAll; }
+        }
         console.log('✅ /llms-full.txt: the full text of the index and every indexable watch page, and only those');
 
         // ── Watch pages: VideoObject on public pages; AI clips noindex, no Person, based on the VOD ──

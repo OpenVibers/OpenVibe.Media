@@ -149,10 +149,21 @@ function footerOptions(footer) {
 }
 
 /**
+ * openvibe-shared/shell (v2.10.0) loads footer.js but only boots the navbar: without this call the
+ * server-rendered footer keeps its placeholder "shipped" line (shipped.js is loaded by footer.js's
+ * init) and the client never re-renders with the site's links. Same options as the SSR footer, so it
+ * rebuilds the same DOM; footer.js is deferred, so it has run by DOMContentLoaded when this fires.
+ */
+function footerBootScript(footer) {
+    return `<script>window.addEventListener('DOMContentLoaded', function () { try { OpenVibeFooter.init(${jsonForScript(footerOptions(footer))}); } catch (e) { /* footer optional */ } });</script>`;
+}
+
+/**
  * The scripts that mount the navbar + footer, after the page content so a
  * slow Network never blocks the body. Used by the hand-written browse index
  * (server/public/browse.js); the shell pages get the same navbar options through
- * shell.page() and the footer rendered by frame.footer.
+ * shell.page() plus footerBootScript() (the shell does not initialise the footer),
+ * and the footer is rendered by frame.footer.
  */
 function frameScripts({ history, footer } = {}) {
     const navOpts = navOptions({ history });
@@ -207,7 +218,7 @@ function page({ seo, css = '', body, history, footer }) {
         type: seo.ogType,
         robots: seo.robots || 'index, follow',
         jsonLd: seo.jsonLd,
-        head: extraHead(seo, css),
+        head: extraHead(seo, css) + footerBootScript(footer),
         body: `<div id="navbar-mount"></div>\n<main>\n${body}\n</main>`,
         navLinks: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }],
         navbar: navOptions({ history }),

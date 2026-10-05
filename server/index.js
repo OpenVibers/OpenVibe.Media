@@ -95,8 +95,18 @@ const ready = (async () => {
     // key file is not mounted and nothing is sent. When set, GET /<key>.txt is the key file engines
     // fetch before they accept a ping; the module owns the batching and the POST itself. The host and
     // key are operator configuration (MEDIA_PUBLIC_URL / INDEXNOW_KEY), never a tenant or a user URL.
-    const indexnow = createIndexNow({ host: config.publicUrl, key: config.indexnow.key });
+    // A malformed key (createIndexNow refuses anything but 8–128 alphanumerics) disables IndexNow
+    // instead of crashing the service at boot; the watch-page transitions still call the notifier,
+    // which no-ops while disabled.
+    let indexnow;
+    try {
+        indexnow = createIndexNow({ host: config.publicUrl, key: config.indexnow.key });
+    } catch (err) {
+        console.warn(`[IndexNow] disabled: ${err.message}`);
+        indexnow = createIndexNow({ host: config.publicUrl, key: '' });
+    }
     app.locals.indexnow = indexnow;
+    require('./indexnow-notify').use(indexnow);
     if (indexnow.enabled) app.use(indexnow.keyFile);
 
     // ── Visitor sign-in (OAuth client `media` on the Network; same module as Community/Tools) ──

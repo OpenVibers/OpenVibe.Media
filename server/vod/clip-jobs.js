@@ -100,6 +100,8 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false } = {}) {
         payload: async () => await _clipPublic(await db.getClipById(clipId)),
     });
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
+    // A public, person-made clip that just became ready is indexable: announce its watch page and the sitemap.
+    await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clipId));
     return { ok: true, duration_seconds: cut.duration };
 }
 
@@ -158,6 +160,8 @@ async function makeVirtual(clipId, win) {
         payload: async () => await _clipPublic(await db.getClipById(clipId)),
     });
     console.log(`[Clips] Clip ${clipId} virtual over vod ${clip.vod_id}'s timeline (${startTime.toFixed(1)}-${endTime.toFixed(1)}s)`);
+    // A public, person-made clip that just became ready is indexable: announce its watch page and the sitemap.
+    await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clipId));
     return { ok: true, duration_seconds: endTime - startTime };
 }
 

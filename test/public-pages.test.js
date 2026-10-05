@@ -44,6 +44,12 @@ const http = require('http');
     assert.ok(/\/shared\/navbar\.js\?v=[0-9a-f]{12}/.test(html) && /\/shared\/footer\.js\?v=[0-9a-f]{12}/.test(html), 'the Frame from this site\'s own pinned copy');
     assert.ok(html.includes('"service":"media"') && html.includes('"history":{"type":"vod","title":"Late night <build>"}'.replace('<', '\\u003c')));
     assert.ok(html.includes('data-variant="compact"'), 'the server-rendered footer is compact');
+    // openvibe-shared/shell v2.10.0 boots the navbar but not the footer; page-frame adds the init so
+    // the "shipped X ago" line fills and the site's links survive a client render.
+    assert.ok(html.includes('OpenVibeFooter.init('), 'the footer is initialised client-side');
+    assert.ok(html.includes('"mount":"#ov-footer"') && html.includes('"updates":"/updates"') && html.includes('"variant":"compact"'),
+        'the footer init carries the mount, this site\'s log and the compact variant');
+    assert.ok(html.includes('"links":[{"heading":"Media"'), 'and the site\'s own footer links');
     assert.ok(html.includes('<meta property="og:type" content="video.other">'));
     assert.ok(html.includes('<meta property="og:video" content="https://media.test/v/42?raw=1">'));
     assert.ok(html.includes('<meta name="twitter:card" content="summary_large_image">'));
@@ -99,6 +105,10 @@ const http = require('http');
         assert.strictEqual(r.status, 200);
         assert.ok(r.headers['content-type'].startsWith('text/html'));
         assert.ok(r.body.includes('Router VOD') && r.body.includes('id="navbar-mount"'));
+        // No Content-Security-Policy on a page response today: the shell composes inline scripts
+        // (theme boot, navbar/runtime boot, footer init), so adding a policy later must allow them.
+        assert.ok(!('content-security-policy' in r.headers), 'watch pages carry no CSP header');
+        assert.ok(/\/shared\/web-runtime\.js\?v=[0-9a-f]{12}/.test(r.body), 'the page ships the shell\'s web-runtime.js');
         r = await get('/v/42?raw=1', nav);
         assert.strictEqual(r.status, 404, 'bytes path (no file on disk → 404 JSON), not the page');
         assert.ok(r.headers['content-type'].startsWith('application/json'));

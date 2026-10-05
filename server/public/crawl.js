@@ -21,6 +21,7 @@ const readiness = require('../objects/readiness');
 const MAX_URLS = 45000;          // under the 50,000-URL sitemap limit
 const LLMS_FULL_MAX_BYTES = 512 * 1024;   // cap an /llms-full.txt over every watch page
 const MAX_FULL_PAGES = 2000;     // rows considered for the full-text file (rendering every page at once is unbounded)
+const LLMS_FULL_TTL_MS = 10 * 60 * 1000;   // a cold /llms-full.txt renders up to 2000 pages; serve one build for 10 minutes
 const LLMS_SUMMARY = 'The media service of the OpenVibe network: it stores and serves recorded live streams (VODs), clips, thumbnails, screenshots and files for the network\'s apps.';
 const router = express.Router();
 
@@ -137,8 +138,15 @@ async function indexableWatchRows(limit = MAX_URLS) {
  * by the same pages.renderWatchPage the browser gets and stripped to text. Pages are rendered only
  * until the byte cap is passed, so a large estate cannot make the request unbounded; any that remain
  * become the standard "(truncated: N more pages …)" line.
+ *
+ * A cold build walks up to 2000 rows and renders each page, so the result is memoized in memory for
+ * ten minutes (one bounded entry; a restart starts empty). Crawlers ask for this file far more often
+ * than the estate changes.
  */
+let _llmsFull = { at: 0, body: null };
+
 async function llmsFullTxt() {
+    if (_llmsFull.body != null && Date.now() - _llmsFull.at < LLMS_FULL_TTL_MS) return _llmsFull.body;
     const base = config.publicUrl;
     const rows = await indexableWatchRows(MAX_FULL_PAGES);
     const watchPages = [];
@@ -153,7 +161,7 @@ async function llmsFullTxt() {
         bytes += Buffer.byteLength(html);
         if (bytes > LLMS_FULL_MAX_BYTES) break;   // the cap is already passed; stop rendering the rest
     }
-    return seo.llmsFull({
+    const body = seo.llmsFull({
         site: { name: 'OpenVibe.Media', url: base },
         summary: LLMS_SUMMARY,
         base,
@@ -163,6 +171,8 @@ async function llmsFullTxt() {
             { title: 'Watch pages', pages: watchPages },
         ],
     });
+    _llmsFull = { at: Date.now(), body };
+    return body;
 }
 
 function send(res, type, body) {
