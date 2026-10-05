@@ -36,7 +36,8 @@
  *
  * Public bytes: GET /o/:id (publicRouter) — public/unlisted objects openly,
  * private ones only with a valid ?exp&sig from /download. With MEDIA_HLS_ENABLED, the object's timeline as HLS
- * under the same check: /o/:id/master.m3u8, /o/:id/source/index.m3u8, /o/:id/source/{init.mp4,NNNNNN.m4s}.
+ * under the same check: /o/:id/master.m3u8, /o/:id/source/index.m3u8,
+ * /o/:id/source/{init.mp4,init-head.mp4,init-tail.mp4,NNNNNN.m4s}.
  */
 'use strict';
 
@@ -692,6 +693,17 @@ router.get('/:id/download', read, limits('media.object.download'), async (req, r
  */
 async function downloadMp4(req, res, obj) {
     if (!require('../jobs/derive').isMediaObject(obj)) return problem(res, 400, 'media.object.not_media', 'Only video and audio objects have an MP4 download');
+    // A timeline-only clip (a virtual one, or a materialized clip whose bytes are its persisted media_timeline rows)
+    // has no file for a remux to read: answer its HLS playlist instead of queueing a job that cannot read its input
+    // (docs/materialized-clips.md §Downloads, the interim rule until object.remux gains a timeline input branch).
+    const md = model.parseJson(obj.metadata, {});
+    if (obj.kind === 'clip' && md.virtual === true) {
+        const info = await hls.discoveryForObject(obj);
+        if (info && info.hls_url) {
+            if (['1', 'true'].includes(String(req.query.redirect || ''))) return res.redirect(302, info.hls_url);
+            return res.json({ ...info, url: info.hls_url, expires_at: info.hls_expires_at || null, public: !info.hls_expires_at });
+        }
+    }
     const variant = await model.getVariant(obj.id, 'remux');
     const mp4 = variant && await model.getObject(variant.derived_object_id);
     if (mp4 && mp4.lifecycle_status === 'ready') {
@@ -780,7 +792,9 @@ const publicRouter = express.Router();
 // Like GET /o/:id, a private or sandbox answer carries no Access-Control-Allow-Origin; a public one may be read cross-origin.
 // A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
-const SEGMENT_NAME = /^(init\.mp4|\d{6,9}\.m4s)$/;
+// A rendition's seq 0 init plus the two edge inits of a materialized clip's source rendition (negative seq,
+// docs/materialized-clips.md F3.6); every init row (seq <= 0) is served as video/mp4, a media segment as iso.segment.
+const SEGMENT_NAME = /^(init\.mp4|init-head\.mp4|init-tail\.mp4|\d{6,9}\.m4s)$/;
 const RENDITION_NAME = /^[a-z0-9_-]{1,32}$/;
 const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 // clipWindow/timelineOf (a clip's window over its source, and the rows its playlists are written from) live in
@@ -884,7 +898,7 @@ async function sendSlice(req, res, { file, url, offset, length, headers }) {
  */
 async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
     const timeline = require('./timeline');
-    const mime = Number(row.seq) === 0 ? 'video/mp4' : 'video/iso.segment';
+    const mime = Number(row.seq) <= 0 ? 'video/mp4' : 'video/iso.segment';
     const headers = { 'Content-Type': mime, 'Cache-Control': closed ? 'private, no-store' : 'public, max-age=3600' };
     const packed = !!row.packed_object_id;
     const slice = { offset: Number(row.byte_offset), length: Number(row.byte_length), headers };

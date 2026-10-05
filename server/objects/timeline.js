@@ -25,6 +25,12 @@
  * object.pack re-keys every row that names a packed segment's old location (same sha256) to the chunk in the same
  * transaction, so a clip follows its source into the chunk and the per-segment location is freed only once nothing names
  * it. A source's own purge deletes its rows; the shared bytes go when the last naming object does.
+ *
+ * Materialized clips (docs/materialized-clips.md, F3.6): a clip's own rows copy the source's interior segments (same
+ * location and sha256, renumbered and relative to the clip) and name their edge inits as rows with negative seq
+ * (-1 init-head.mp4, -2 init-tail.mp4; init_name on a media row says which init it decodes with, NULL meaning the
+ * rendition's seq 0 init, as every pre-F3.6 row does). The rows are written by the pinning transaction in
+ * vod/clip-materialize.js, never by replace(); replace() still drops negative-seq rows a new plan does not carry.
  */
 'use strict';
 
@@ -35,7 +41,11 @@ const db = require('../db/database');
 
 const SOURCE = 'source';
 const INIT_NAME = 'init.mp4';
-const FIELDS = ['name', 'start_ms', 'end_ms', 'keyframe_ms', 'key', 'local_path', 'durable_provider', 'packed_object_id', 'byte_offset', 'byte_length', 'sha256', 'durability'];
+// The re-encoded edges of a materialized clip (docs/materialized-clips.md, F3.6): their own init segments, rows with
+// negative seq (-1 head, -2 tail) so they never collide with the media segments or the rendition's seq 0 init.
+const HEAD_INIT = 'init-head.mp4';
+const TAIL_INIT = 'init-tail.mp4';
+const FIELDS = ['name', 'start_ms', 'end_ms', 'keyframe_ms', 'key', 'local_path', 'durable_provider', 'packed_object_id', 'byte_offset', 'byte_length', 'sha256', 'durability', 'init_name'];
 
 function localRoot() { return path.join(path.resolve(config.objects.path), '.timeline'); }
 /** `version` names the immutable set of bytes (the sha's prefix): a re-cut lands beside the old one instead of on it. */
@@ -114,8 +124,15 @@ async function replace(objectId, rendition, rows, { jobId = null, expect = null,
             [objectId, rendition, r.seq, ...FIELDS.map((f) => r[f] ?? null), jobId]);
             out[prev ? 'updated' : 'inserted']++;
         }
-        const last = rows.reduce((m, r) => Math.max(m, r.seq), -1);
-        out.removed = (await db.run('DELETE FROM media_timeline WHERE object_id = ? AND rendition = ? AND seq > ?', [objectId, rendition, last])).changes || 0;
+        const last = rows.reduce((m, r) => Math.max(m, Number(r.seq)), -1);
+        // The negative-seq edge inits of a materialized clip are not "past the end": a row (positive or negative) not
+        // in the new set goes. A replace that carries no edge init drops the ones an earlier plan wrote.
+        const negatives = rows.map((r) => Number(r.seq)).filter((seq) => seq < 0);
+        const tail = negatives.length
+            ? `(seq > ? OR (seq < 0 AND seq NOT IN (${negatives.map(() => '?').join(', ')})))`
+            : '(seq > ? OR seq < 0)';
+        out.removed = (await db.run(`DELETE FROM media_timeline WHERE object_id = ? AND rendition = ? AND ${tail}`,
+            [objectId, rendition, last, ...negatives])).changes || 0;
         if (dropOtherRenditions) {
             dropped = await db.all('SELECT * FROM media_timeline WHERE object_id = ? AND rendition <> ?', [objectId, rendition]);
             if (dropped.length) await db.run('DELETE FROM media_timeline WHERE object_id = ? AND rendition <> ?', [objectId, rendition]);
@@ -224,6 +241,29 @@ async function removeObject(objectId) {
 }
 
 /**
+ * Retry the byte deletion of a projected object whose row is gone. removeObject reinserts a row whose durable copy
+ * could not be deleted (its `pending`), and purgeExpired (model.js, whose pending handling this mirrors: the rows are
+ * the record and a later pass retries) reaches only native objects. This is the pass that reaches a deleted clip's or
+ * VOD's leftover rows, and the hourly object sweep (server/index.js) calls it. Held objects are skipped, as every
+ * other delete path refuses them. → { objects, removed, pending }.
+ */
+async function sweepPendingRemovals({ limit = 200 } = {}) {
+    const rows = await db.all(`SELECT o.id FROM media_objects o
+        WHERE o.lifecycle_status = 'deleted' AND o.legacy_ref IS NOT NULL
+          AND EXISTS (SELECT 1 FROM media_timeline t WHERE t.object_id = o.id)
+          AND NOT EXISTS (SELECT 1 FROM clips c WHERE c.object_id = o.id)
+          AND NOT EXISTS (SELECT 1 FROM vods v WHERE v.object_id = o.id)
+        ORDER BY o.id LIMIT ?`, [Math.max(1, Number(limit) || 200)]);
+    let removed = 0, pending = 0;
+    for (const row of rows) {
+        if (await require('./model').isHeld(row.id)) continue;
+        const out = await removeObject(row.id);
+        removed += out.removed; pending += out.pending;
+    }
+    return { objects: rows.length, removed, pending };
+}
+
+/**
  * Point rows at the chunk they were packed into, in one transaction. `updates` = [{ row, key, local_path,
  * durable_provider, packed_object_id, byte_offset }]; the location is the segment's old key (content-addressed, versioned
  * by its sha), and EVERY row of any object that names it with the same sha256 — the source's, and a clip's over it —
@@ -297,15 +337,33 @@ const secs = (ms) => (Number(ms) / 1000).toFixed(3);
 /** `?exp=…&sig=…` carried onto every URI of a signed playlist, so a private object's segments pass the same check. */
 function withQuery(uri, query) { return query ? `${uri}?${query}` : uri; }
 
-/** The media playlist of a finished rendition: VOD, ENDLIST, one EXTINF per segment with its timeline duration. */
+/**
+ * The media playlist of a finished rendition: VOD, ENDLIST, one EXTINF per segment with its timeline duration. Each
+ * media segment decodes with the init its init_name names (a materialized clip's re-encoded edges), else the
+ * rendition's seq 0 init: EXT-X-MAP for the first segment, and #EXT-X-DISCONTINUITY + a fresh #EXT-X-MAP before any
+ * segment whose init differs from the previous segment's (docs/materialized-clips.md §Playlist). A playlist without
+ * edge inits comes out byte for byte as it did before.
+ */
 function mediaPlaylist(rows, { query = '' } = {}) {
     const segs = rows.filter((r) => Number(r.seq) > 0);
-    const init = rows.find((r) => Number(r.seq) === 0);
+    const baseInit = rows.find((r) => Number(r.seq) === 0) || null;
+    const namedInits = new Map(rows.filter((r) => Number(r.seq) < 0).map((r) => [r.name, r]));
+    const initOf = (r) => (r.init_name ? (namedInits.get(r.init_name) || { name: r.init_name }) : baseInit);
     const target = Math.max(1, ...segs.map((r) => Math.ceil((Number(r.end_ms) - Number(r.start_ms)) / 1000)));
     const lines = ['#EXTM3U', '#EXT-X-VERSION:7', `#EXT-X-TARGETDURATION:${target}`, `#EXT-X-MEDIA-SEQUENCE:${segs.length ? Number(segs[0].seq) : 1}`,
         '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-INDEPENDENT-SEGMENTS'];
-    if (init) lines.push(`#EXT-X-MAP:URI="${withQuery(init.name, query)}"`);
-    for (const r of segs) lines.push(`#EXTINF:${secs(Number(r.end_ms) - Number(r.start_ms))},`, withQuery(r.name, query));
+    // A rendition with an init but no media row still emits its EXT-X-MAP (the pre-edge-init behaviour, byte for
+    // byte): the loop below would not reach it, so a rendition that produced an init and nothing else keeps its map.
+    if (!segs.length && baseInit) lines.push(`#EXT-X-MAP:URI="${withQuery(baseInit.name, query)}"`);
+    let prevInit = null;
+    for (const [i, r] of segs.entries()) {
+        const init = initOf(r);
+        const name = init ? init.name : null;
+        if (i === 0) { if (name) lines.push(`#EXT-X-MAP:URI="${withQuery(name, query)}"`); }
+        else if (name && name !== prevInit) lines.push('#EXT-X-DISCONTINUITY', `#EXT-X-MAP:URI="${withQuery(name, query)}"`);
+        lines.push(`#EXTINF:${secs(Number(r.end_ms) - Number(r.start_ms))},`, withQuery(r.name, query));
+        prevInit = name;
+    }
     lines.push('#EXT-X-ENDLIST', '');
     return lines.join('\n');
 }
@@ -341,8 +399,14 @@ function masterPlaylist(renditions, { query = '' } = {}) {
  * local_path, durable_provider, packed_object_id and byte_* stay the source's, so a segment serves from the source's
  * bytes (or its packed chunk), and its name, the playlist URI, never changes. A segment straddling an edge is served
  * whole: a virtual clip's edges are the source's segment boundaries (a materialized clip cuts exactly).
+ *
+ * A materialized clip's rows carry negative-seq edge inits and per-segment init_name: a virtual clip over it would
+ * decode its edges with the wrong init, so building one is refused (the simplest correct answer, §Schema of
+ * docs/materialized-clips.md). Rows made only of copies of source rows (a clip whose window sits on boundaries) carry
+ * no edge init and still work.
  */
 function clipRows(rows, startMs, endMs) {
+    if (rows.some((r) => Number(r.seq) < 0 || (r.init_name && r.init_name !== INIT_NAME))) return [];
     const init = rows.find((r) => Number(r.seq) === 0);
     const segs = rows
         .filter((r) => Number(r.seq) > 0 && Number(r.end_ms) > startMs && Number(r.start_ms) < endMs)
@@ -353,7 +417,7 @@ function clipRows(rows, startMs, endMs) {
 }
 
 module.exports = {
-    SOURCE, INIT_NAME, FIELDS, localRoot, localPathFor, keyFor, segmentName,
-    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, namedElsewhere, deleteBytes, removeObject, markPacked, durableProvider, locationsOf,
+    SOURCE, INIT_NAME, HEAD_INIT, TAIL_INIT, FIELDS, localRoot, localPathFor, keyFor, segmentName,
+    list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, namedElsewhere, deleteBytes, removeObject, sweepPendingRemovals, markPacked, durableProvider, locationsOf,
     mediaPlaylist, masterPlaylist, clipRows,
 };

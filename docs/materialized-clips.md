@@ -1,6 +1,7 @@
 # Materialized clips over the source's bytes (F3.6, design)
 
-**Status:** design, 2026-10-05 (plan T4, `docs/media-fabric.md` §4 "Materialized clip"). It replaces the full
+**Status:** implemented (behind `MEDIA_MATERIALIZED_CLIPS`, off by default), 2026-10-05 (plan T4,
+`docs/media-fabric.md` §4 "Materialized clip"). It replaces the full
 re-encode of `clip.cut` (`server/vod/clip-cutter.js`, libvpx at about 3.3× realtime) with a clip whose interior
 segments **name the source's bytes** and whose two edges are re-encoded. It depends on F3.4 (PR #35, merged
 2026-10-05): any number of objects may name one location, a location's bytes are deleted only when no row of any

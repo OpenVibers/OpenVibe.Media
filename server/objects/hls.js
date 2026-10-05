@@ -131,7 +131,9 @@ async function discoveryForObject(obj) {
             return null;
         }
         // The source timeline exists: queue any missing rendition (F4) so the master playlist can list it next time.
-        if (!tl.window) await queueRenditionsOnce(obj);
+        // A clip that plays without a file of its own (a virtual or materialized one) is never queued one — the job
+        // would fail with media_unavailable — so the lazy path leaves it alone, as queueRendition itself does.
+        if (!tl.window && !require('./timeline-queue').isVirtualClip(obj)) await queueRenditionsOnce(obj);
         return playlistFor(obj, await isOpen(obj));
     } catch (err) {
         console.warn(`[HLS] Discovery failed for ${obj.id}:`, err.message);

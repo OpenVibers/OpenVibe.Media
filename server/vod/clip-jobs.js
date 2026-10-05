@@ -13,6 +13,9 @@
  *                                   file; ready at once (storage_provider 'timeline') and played as its window of
  *                                   the source's segments. clip.cut is the materialized path (asked for, or no
  *                                   timeline); materializing a virtual clip keeps it playing until the file is in.
+ *   materialize (F3.6)              with MEDIA_HLS_ENABLED + MEDIA_MATERIALIZED_CLIPS on and a source timeline, the
+ *                                   cut keeps the source's interior segments (copied rows) and re-encodes only the
+ *                                   two edges (vod/clip-materialize.js); the full re-encode is unchanged otherwise.
  *   start()                         sweeper: every 3 min, failed clips that still have
  *                                   attempts left are re-cut (or turned virtual, as a recut is,
  *                                   when the source now has a timeline). From the second attempt on, a
@@ -57,7 +60,7 @@ async function recutClip(clipId, opts = {}) {
     return result;
 }
 
-async function _recutClip(clipId, { reason = 'recut', viaJob = false } = {}) {
+async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null, ctx = null } = {}) {
     const clip = await db.getClipById(clipId);
     if (!clip) return { ok: false, error: 'Clip not found' };
     if (!clip.vod_id) return { ok: false, error: 'Clip has no source VOD' };
@@ -70,6 +73,27 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false } = {}) {
     // Row and object (back to uploading) together. A virtual clip being materialized stays ready and playing meanwhile.
     if (isVirtual(clip)) await db.run('UPDATE clips SET cut_attempts = ?, cut_next_at = NULL WHERE id = ?', [attempt, clipId]);
     else await objects().withObject('clip', clipId, async () => await db.run("UPDATE clips SET status = 'processing', cut_attempts = ?, cut_next_at = NULL WHERE id = ?", [attempt, clipId]));
+
+    const startTime = Number(clip.start_time) || 0;
+    const duration = Math.max(1, (Number(clip.end_time) || 0) - startTime);
+
+    // Materialized clips (docs/materialized-clips.md, F3.6): with MEDIA_HLS_ENABLED + MEDIA_MATERIALIZED_CLIPS and a
+    // source that has a source-rendition timeline, the clip's interior rows reference the source's segments and only
+    // its two edges are re-encoded — the VOD's own file is not needed. materialize() answers null when the path does
+    // not apply (flag off, no timeline, an empty window, not under a job), and the full re-encode below runs exactly
+    // as before. A failed or racing attempt goes through fail() like a failed cut: the job retries, and a virtual
+    // clip being materialized keeps playing.
+    if (job && config.hls.enabled && config.hls.materialized) {
+        let mat = null;
+        try { mat = await require('./clip-materialize').materialize({ job, ctx, clip, vod }); }
+        catch (err) { return await fail(clipId, clip, attempt, err.message, { viaJob, hopeless: !!err.permanent }); }
+        if (mat && mat.ok) {
+            await markMaterialized(clip, { duration: mat.duration, startTime, endMs: mat.end_ms });
+            console.log(`[Clips] Clip ${clipId} materialized over vod ${clip.vod_id}'s timeline (${startTime.toFixed(1)}-${(startTime + mat.duration).toFixed(1)}s, attempt ${attempt})`);
+            await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clipId));
+            return { ok: true, duration_seconds: mat.duration };
+        }
+    }
 
     // Attempt 2+: bring a cloud-stored VOD home first when the disk can take it.
     let source = await vodStorage.resolveMediaSource(vod);
@@ -86,31 +110,64 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false } = {}) {
     }
     if (!source) return await fail(clipId, clip, attempt, 'VOD media unavailable (not on disk and no cloud copy)', { viaJob });
 
-    const startTime = Number(clip.start_time) || 0;
-    const duration = Math.max(1, (Number(clip.end_time) || 0) - startTime);
     const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
     if (!cut.ok) return await fail(clipId, clip, attempt, cut.error, { viaJob });
     // Thumbnail first (the clip.ready payload carries it), then the ready transition, the clip's
     // object and its event in one transaction (webhooks.announce), then the webhook.
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
     await announce(clip.app_id, 'clip.ready', {
-        change: async () => await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL,
-            storage_provider = CASE WHEN storage_provider = 'timeline' THEN 'local' ELSE storage_provider END WHERE id = ?`,
-            [cut.filePath, cut.duration, startTime + cut.duration, clipId])),
+        change: async () => {
+            await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL,
+                storage_provider = CASE WHEN storage_provider = 'timeline' THEN 'local' ELSE storage_provider END WHERE id = ?`,
+                [cut.filePath, cut.duration, startTime + cut.duration, clipId]));
+            // A clip that had been materialized and now has a file of its own is no longer timeline-backed: project()
+            // would otherwise preserve metadata.materialized (the clips row has no column to derive it from).
+            await db.run(`UPDATE media_objects SET metadata = (COALESCE(NULLIF(metadata, ''), '{}')::jsonb - 'materialized')::text,
+                updated_at = ov_now() WHERE id = ?`, [clip.object_id]);
+        },
         payload: async () => await _clipPublic(await db.getClipById(clipId)),
     });
+    // The file supersedes any rows a previous materialization left. removeObject drops the clip's rows after the
+    // commit and deletes only the edge locations no other object's rows still name (F3.4) — the source's interior
+    // bytes stay. No rows is a no-op, so the ordinary file cut is unchanged.
+    const tl = await require('../objects/timeline').removeObject(clip.object_id)
+        .catch(err => { console.warn(`[Clips] Clip ${clipId} timeline cleanup failed: ${err.message}`); return null; });
+    if (tl && tl.pending) console.warn(`[Clips] Clip ${clipId}: ${tl.pending} timeline segment row(s) kept — their durable copy could not be deleted; the object sweep retries`);
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
     // A public, person-made clip that just became ready is indexable: announce its watch page and the sitemap.
     await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clipId));
     return { ok: true, duration_seconds: cut.duration };
 }
 
+/**
+ * The materialized ready transition (docs/materialized-clips.md step 4): row, object and clip.ready in one
+ * transaction. file_path stays NULL and storage_provider stays 'timeline' (it has no location of its own); the
+ * object's metadata gains materialized: true, and clipProjection keeps virtual: true beside it, so readiness,
+ * playableSql and the verify job treat it as they treat a virtual clip.
+ */
+async function markMaterialized(clip, { duration, startTime, endMs }) {
+    await announce(clip.app_id, 'clip.ready', {
+        change: async () => await objects().withObject('clip', clip.id, async () => {
+            // end_time is the planned (snapped) end in source seconds, not startTime + duration: an edge that snapped
+            // back to its segment boundary, or a window clamped to the first segment, made originMs < startTime, so the
+            // old sum overshot the end and every re-cut started from the drifted value.
+            await db.run(`UPDATE clips SET file_path = NULL, storage_provider = 'timeline', duration_seconds = ?, end_time = ?,
+                status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ?`, [duration, endMs / 1000, clip.id]);
+            await db.run(`UPDATE media_objects SET metadata = jsonb_set(COALESCE(NULLIF(metadata, ''), '{}')::jsonb, '{materialized}', 'true'::jsonb)::text,
+                updated_at = ov_now() WHERE id = ?`, [clip.object_id]);
+        }),
+        payload: async () => await _clipPublic(await db.getClipById(clip.id)),
+    });
+}
+
 /** A failed attempt. Under a job the queue schedules the retry, so nothing is left for the sweeper. */
-async function fail(clipId, clip, attempt, error, { viaJob = false } = {}) {
+async function fail(clipId, clip, attempt, error, { viaJob = false, hopeless: hopelessOverride = null } = {}) {
     const msg = String(error || 'cut failed').slice(0, 500);
     // Nothing to retry when the source itself has no footage there (empty recording, window
-    // past the end of what was captured): give up now instead of burning the whole ladder.
-    const hopeless = /No decodable footage|Error opening input: End of file|Source VOD no longer exists|Invalid data found when processing input/i.test(msg);
+    // past the end of what was captured): give up now instead of burning the whole ladder. A materialize
+    // error that was permanent (codec_unsupported) is passed through as hopeless the same way.
+    const hopeless = hopelessOverride != null ? hopelessOverride
+        : /No decodable footage|Error opening input: End of file|Source VOD no longer exists|Invalid data found when processing input/i.test(msg);
     const more = !viaJob && attempt < MAX_ATTEMPTS && !hopeless;
     const mins = BACKOFF_MIN[Math.min(attempt - 1, BACKOFF_MIN.length - 1)];
     const nextAt = more ? new Date(Date.now() + mins * 60000).toISOString().replace('T', ' ').slice(0, 19) : null;
@@ -238,11 +295,11 @@ const spec = {
         if (!Number.isInteger(id) || id < 1) throw new (require('../jobs/queue').JobError)('media.job.invalid', 'clip.cut needs params.clip_id', { permanent: true });
         return { clip_id: id, reason: String((params && params.reason) || 'cut').slice(0, 40) };
     },
-    async run(job) {
+    async run(job, ctx) {
         const { JobError } = require('../jobs/queue');
         const clip = await db.getClipById(job.params.clip_id);
         if (!clip || clip.app_id !== job.app_id) throw new JobError('not_found', 'The clip no longer exists', { permanent: true });
-        const r = await recutClip(clip.id, { reason: job.params.reason || 'cut', viaJob: true });
+        const r = await recutClip(clip.id, { reason: job.params.reason || 'cut', viaJob: true, job, ctx });
         if (!r.ok) throw new JobError('clip_cut_failed', r.error || 'cut failed', { permanent: !!r.hopeless });
         return { clip_id: clip.id, status: 'ready', duration_seconds: r.duration_seconds ?? null };
     },
