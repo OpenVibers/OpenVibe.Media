@@ -259,8 +259,12 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   only the moves made; `projected` also counts the dry runs, and the ceiling (and `inputs.budget.usd_per_month`) is held
   against it, so dry runs (gate off) are refused as a live sweep would be, without changing `spend` (a dry run
   repeated the same day is logged once but still counts, and a dry-run demotion checks its canonical copy like a live
-  one before it frees any projected cost). Native objects classify only as `video`, `image` or `download` today, so a ceiling (or budget)
-  set on `game-asset`, `attachment` or `backup` decides nothing yet.
+  one before it frees any projected cost). Every native object classifies into one of the six classes, so a budget,
+  hysteresis band or ceiling set on any of them acts on that class's objects: `kind` and `mime_type` decide `video`
+  and `image` (everything else is `download`), and an app may declare any of the six for one of its objects in the
+  object's metadata — `metadata.class`, or the explicit `media_class` / `placement_class` — which wins over both. A
+  declared name outside the six is ignored and the kind and mime type decide. An `attachment` or `backup` object
+  therefore promotes and demotes under its own budget, and a `game-asset` ceiling refuses that class alone.
 
 ## 7. Delivery: sticky, measured, canaried
 
@@ -324,7 +328,9 @@ metric. Budgets per class and provider with a forecast; `media.provider.cost_thr
   decision log with class and reason, the events above, Valkey rollups of demand (F2.4, shipped) and the sweep's
   eligibility on them with per-class hysteresis and a PostgreSQL fallback (F2.5, shipped), the provider-class gate
   and per-class monthly R2 storage ceilings on its moves (F2.6, shipped), the move cleanup job and its alert after
-  three failures (§6, shipped). Still open in F2: every class (not only native objects ↔ R2) through the one sweep.
+  three failures (§6, shipped). Every storage class (all six) now acts in the one sweep: native objects classify by
+  kind and mime type, or by a class the app declares in the object's metadata (§6, shipped). Still open in F2: the
+  projected objects (VODs and clips) keep their own tiering path (`media_tier_decisions`) instead of the sweep.
 - **F3 segment-native video:** the timeline index and the CMAF/HLS source representation of finished video (F3.1,
   shipped; §3), packing into ~60 s chunks (F3.3, shipped; §3), the timeline queued at finalize (and lazily on
   download), signed playlists outliving a download URL and the faststart MP4 fallback (F3.c, shipped; §3), virtual and

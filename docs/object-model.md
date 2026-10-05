@@ -209,7 +209,7 @@ All routes live under `/api/v2/:app/objects`.
 
 | method | path | notes |
 |---|---|---|
-| POST | `/` | init. `{ namespace (default the tenant's root; a name below it, full or relative), kind, visibility (default private), mime_type, size_bytes, filename, content_hash (expected sha256), metadata (≤ 16 KB), user_id, upload_ttl (60-86400 s), multipart, part_size }` returns 201 `{ id, object, upload: { method: 'PUT', url, token, expires_at, max_bytes, content_type, complete_url, multipart_url } }`. `url` is a [presigned PUT URL](#presigned-uploads). With `multipart: true` (required above `MEDIA_OBJECT_MAX_MB`): `method: 'multipart'`, `url: null`, and `upload.multipart` is the new [session](#multipart-uploads). Checks at init: `size_bytes` against `MEDIA_OBJECT_MAX_MB` (single part) or `MEDIA_MULTIPART_MAX_MB` (413), the namespace's policy (422 `media.namespace.policy_denied`, 413 `media.object.too_large`), every quota from the namespace up to the tenant including reservations (413 `media.quota.exceeded` / `media.quota.objects_exceeded`; the declared size is then reserved), the public-size invariant (422) and the [content type](#content-types) for the kind (415 `media.object.unsupported_type`) |
+| POST | `/` | init. `{ namespace (default the tenant's root; a name below it, full or relative), kind, visibility (default private), mime_type, size_bytes, filename, content_hash (expected sha256), metadata (≤ 16 KB; `metadata.class` declares the object's storage class, see [Tiering of native objects](#tiering-of-native-objects)), user_id, upload_ttl (60-86400 s), multipart, part_size }` returns 201 `{ id, object, upload: { method: 'PUT', url, token, expires_at, max_bytes, content_type, complete_url, multipart_url } }`. `url` is a [presigned PUT URL](#presigned-uploads). With `multipart: true` (required above `MEDIA_OBJECT_MAX_MB`): `method: 'multipart'`, `url: null`, and `upload.multipart` is the new [session](#multipart-uploads). Checks at init: `size_bytes` against `MEDIA_OBJECT_MAX_MB` (single part) or `MEDIA_MULTIPART_MAX_MB` (413), the namespace's policy (422 `media.namespace.policy_denied`, 413 `media.object.too_large`), every quota from the namespace up to the tenant including reservations (413 `media.quota.exceeded` / `media.quota.objects_exceeded`; the declared size is then reserved), the public-size invariant (422) and the [content type](#content-types) for the kind (415 `media.object.unsupported_type`) |
 | POST | `/:id/upload-url` | a fresh presigned single-PUT URL for an uploading object (`{ ttl }` 60-86400 s) |
 | PUT | `/:id/content` | the bytes, single part. Auth is the upload token (`?token=` from init, or `X-Upload-Token`) or the usual credential. Streams to disk computing sha256. Refuses more than the declared size or the limit (413; an object declared above `MEDIA_OBJECT_MAX_MB` goes multipart), a size mismatch (400), quota overrun (413), a type that does not suit the kind (415) and a PUT while a multipart session is open (409). Stored at `OBJECTS_PATH/<app>/<id>` with a verified local location. Mounted ahead of the JSON body parser, so any Content-Type is taken as raw bytes; the Content-Type becomes `mime_type` when init set none. Can be repeated while the object is `uploading` |
 | POST | `/:id/complete` | checks the expected hash (422 `media.object.hash_mismatch`), the invariant, the quota and the bytes against the type (415 `media.object.content_mismatch`). Sets `ready` and sends the `media.object.uploaded` webhook. Also accepts the upload token |
@@ -920,6 +920,15 @@ Each pass rotates the popularity counts, then:
    The scan pages through every eligible object (sandbox tenants filtered in the query) and keeps the best
    500, so no class is crowded out of its budget by a most-viewed prefix.
    Budgets and minimum residency are per class (`media.storage_policy`); a refusal or back-off spends no slot.
+
+**Classes.** Every native object is classified into one of the six storage classes (`video`, `image`,
+`download`, `game-asset`, `attachment`, `backup`), and each class has its own per-sweep budgets, minimum
+residency, hysteresis band and optional monthly R2 storage ceiling in `media.storage_policy`. `kind` and
+`mime_type` decide `video` and `image` (video/audio and their kinds, image and its kinds); everything else is
+`download` unless the app declared a class for the object in its metadata: `metadata.class`, or the explicit
+`media_class` / `placement_class`, any of the six, which wins over kind and mime type (a name outside the six
+is ignored). The declared class is what the sweep's eligibility, ranking and budgets read, and the class's
+R2 copies are what its ceiling counts, so a ceiling on `game-asset` refuses that class alone.
 
 **Promotion** (`tiering.promote`): refused when the object is held, not ready, a sandbox object, or its
 canonical copy is not verified on record (present, checked, not contradicted, and the object has a

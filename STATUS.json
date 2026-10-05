@@ -37,8 +37,9 @@
     "placement demand rollups on Valkey (F2.4): reads per object × region × 5-minute bucket, hotness over the hour, media.object.hot once per object per hour",
     "tiering on demand (F2.5): the object sweep promotes and demotes on the hour's Valkey reads against per-class hysteresis bands, one MGET per page, falling back to the daily PostgreSQL counts for a whole sweep when Valkey fails",
     "placement constraints (F2.6): sweep moves refused while their provider fails its class (breaker or probe), and a per-class monthly R2 storage ceiling (maxHotUsdPerMonth) applied in value order, each explained in the decision's inputs",
+    "every storage class in the native-object sweep: kind and mime type classify video/image/download, an app may declare game-asset/attachment/backup (or any of the six) in the object's metadata (metadata.class, or media_class/placement_class), and each class spends its own per-sweep budget, hysteresis band and R2 storage ceiling",
     "segment-native video (F3.1, behind MEDIA_HLS_ENABLED): the media_timeline index, the object.cmaf job (CMAF/fMP4 segments of a finished video on its own keyframes, sha256 and durability per row, idempotent) and HLS playlists written from the timeline at /o/:id/master.m3u8 under the object's access checks",
     "packing after finalize (F3.3, behind MEDIA_HLS_ENABLED): the object.pack job concatenates durable segments into ~60 s chunk objects verified by sha256, each media_timeline row naming its byte range; the segment route serves a packed segment as a ranged read of its chunk; the per-segment keys are deleted once the chunk is durable; segment providers come from the placement router"
   ],
-  "updated": "2026-10-03"
+  "updated": "2026-10-04"
 }

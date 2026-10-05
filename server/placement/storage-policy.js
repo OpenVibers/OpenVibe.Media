@@ -104,8 +104,42 @@ function classPolicy(name) {
     return settings().classes[name];
 }
 
-/** The placement class of a native object: video/audio → video, image/thumbnail → image, everything else → download. */
+// An app may declare its object's class in the object's metadata: `class`, or the explicit `media_class` /
+// `placement_class`. Only one of CLASSES counts; anything else is ignored and the kind and mime type decide.
+// A declared class wins over both: the app knows the object's role (a game-asset pack, an attachment, a
+// backup blob) better than its content type does.
+const DECLARED_KEYS = ['class', 'media_class', 'placement_class'];
+
+/** A known class name (case-folded), or null for anything else. */
+function normalizeClass(value) {
+    if (value == null || typeof value === 'object') return null;
+    const name = String(value).trim().toLowerCase();
+    return CLASSES.includes(name) ? name : null;
+}
+
+/** The class an app declared for the object — its metadata as an object or its JSON text — or null. */
+function declaredClass(obj) {
+    if (!obj) return null;
+    const direct = normalizeClass(obj.class);
+    if (direct) return direct;
+    let md = obj.metadata;
+    if (typeof md === 'string') { try { md = JSON.parse(md); } catch { return null; } }
+    if (!md || typeof md !== 'object') return null;
+    for (const key of DECLARED_KEYS) {
+        const name = normalizeClass(md[key]);
+        if (name) return name;
+    }
+    return null;
+}
+
+/**
+ * The placement class of a native object: an app-declared class, else video/audio → video, image/thumbnail →
+ * image, everything else → download. All six classes (CLASSES) act in the one sweep: this decides each object's
+ * hysteresis band, per-sweep budget and R2 storage ceiling.
+ */
 function classOf(obj) {
+    const declared = declaredClass(obj);
+    if (declared) return declared;
     const kind = obj && obj.kind;
     if (kind === 'vod' || kind === 'clip') return 'video';
     if (kind === 'thumbnail' || kind === 'screenshot' || kind === 'avatar') return 'image';

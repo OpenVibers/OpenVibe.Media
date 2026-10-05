@@ -151,9 +151,11 @@ const fmtUsd = (v) => `$${Number(Number(v).toPrecision(4))}`;
 /** What each class's present R2 copies cost a month at list price, gross of R2's account-wide free tier: { video: 0.12, image: 0, ... }. */
 async function hotSpend() {
     const out = Object.fromEntries(storagePolicy.CLASSES.map((c) => [c, 0]));
-    const rows = await db.all(`SELECT o.kind, o.mime_type, SUM(COALESCE(l.size_bytes, o.size_bytes, 0))::bigint AS bytes
+    // One row per copy: classification needs each object's own metadata (an app-declared class), which a
+    // GROUP BY kind, mime_type would drop. R2 copies are the hot cache, so the row count stays modest.
+    const rows = await db.all(`SELECT o.kind, o.mime_type, o.metadata, COALESCE(l.size_bytes, o.size_bytes, 0)::bigint AS bytes
         FROM media_locations l JOIN media_objects o ON o.id = l.object_id
-        WHERE l.provider = 'r2' AND l.state = 'present' GROUP BY o.kind, o.mime_type`);
+        WHERE l.provider = 'r2' AND l.state = 'present'`);
     for (const r of rows) out[storagePolicy.classOf(r)] += hotUsdPerMonth(r.bytes);
     return out;
 }
