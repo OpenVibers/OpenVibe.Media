@@ -46,7 +46,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
 - `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.32.0 (tokens, events outbox, usage readings, per-actor limits),
-  `openvibe-shared` v2.5.0, pinned by release tarball
+  `openvibe-shared` v2.10.0, pinned by release tarball
 
 ## Capabilities
 
@@ -110,12 +110,14 @@ server/
                          invariant.scan (proposes split/remux), object.split, object.remux, object.waveform, object.sprite,
                          object.cmaf (CMAF/HLS segments of a finished video into media_timeline; MEDIA_HLS_ENABLED),
                          object.pack (durable segments packed into ~60 s chunk objects; MEDIA_HLS_ENABLED),
+                         rendition.create (an on-demand 720p H.264/AAC rendition of a media object into media_timeline;
+                         MEDIA_HLS_ENABLED + MEDIA_RENDITIONS),
                          vod.finalize (orphans and failed finalizes, with backoff),
                          vod.duration.reconcile (stored vs measured durations, local and B2/R2),
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v2.5.0, openvibe-contracts v0.79.0, openvibe-sdk v0.32.0: pinned release tarballs, installed by npm)
+(openvibe-shared v2.10.0, openvibe-contracts v0.79.0, openvibe-sdk v0.32.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -497,10 +499,11 @@ aggregated and stay queued. The runbook is `docs/cutover-media-billing-readings.
 | `GET /live/:sel/transcript.json` | **transcript + AI timeline API** — full audio-transcription log and AI overview timeline. `:sel` = slot id / slot slug → slot-scoped sessions; **`@username`** → user-scoped (all their slots, works while offline). Returns `{ live, current, sessions[] (each: ai_overview, transcript, duration…), streamer (overview + stream memories), user }`. `?limit=1..50` sessions (default 10), `?app=`. Cached **30s** (that's the rate limit), CORS-open. |
 | `GET /live/:sel/chat-insight.json` | **chat insight API** — a user's chat-related AI insight/timeline (`:sel` = `@username` or numeric user id): today-vs-alltime chat overviews, condensed memory, event timeline, plus their streamer overview + stream memories when they stream. Proxied from the app's public chat-AI API over loopback; cached **30s**, CORS-open. |
 | `GET /v/:id/transcript.json` | **VOD transcript API** — transcript + AI overview for one existing VOD id (`{ vod_id, title, duration_seconds, ai_overview, transcript, ai_analyzed_at }`). Private VODs → 404. Cached 30s, CORS-open. |
-| `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8`, `/o/:id/source/{init.mp4,NNNNNN.m4s}` | segment-native video (F3.1), only with `MEDIA_HLS_ENABLED=1` (off by default; off, these 404): HLS playlists written from the object's `media_timeline` rows (VOD, `#EXT-X-ENDLIST`) and its CMAF segments (Range; a segment packed by `object.pack` (F3.3) is a byte range of its chunk). Same check as `GET /o/:id` (and, like it, no `Access-Control-Allow-Origin` on a private or sandbox answer): private and sandbox objects only with the object's `?exp&sig` (`/api/v2/:app/objects/:id/download?format=json` → `hls_url`, a playlist token valid `MEDIA_HLS_PLAYLIST_TTL_S` (6 h; 60 s to 12 h) that no other route accepts; a download signature works too), carried onto every URI; deleted 410. The `object.cmaf` job makes the timeline; a recording's finalize queues it, and `download?format=json` queues it for an object that has none yet; the v1 VOD and clip answers carry the same `hls_url` (and `hls_expires_at` when signed). `noindex` |
+| `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8`, `/o/:id/source/{init.mp4,NNNNNN.m4s}`, `/o/:id/<rendition>/…` | segment-native video (F3.1), only with `MEDIA_HLS_ENABLED=1` (off by default; off, these 404): HLS playlists written from the object's `media_timeline` rows (VOD, `#EXT-X-ENDLIST`) and its CMAF segments (Range; a segment packed by `object.pack` (F3.3) is a byte range of its chunk). The master playlist lists one variant per rendition whose rows exist — the `source` cut plus, with `MEDIA_RENDITIONS=1`, an on-demand 720p rung cut by `rendition.create` and queued lazily by this route and by `download?format=json` (F4 slice 1, docs/media-fabric.md §5). Same check as `GET /o/:id` (and, like it, no `Access-Control-Allow-Origin` on a private or sandbox answer): private and sandbox objects only with the object's `?exp&sig` (`/api/v2/:app/objects/:id/download?format=json` → `hls_url`, a playlist token valid `MEDIA_HLS_PLAYLIST_TTL_S` (6 h; 60 s to 12 h) that no other route accepts; a download signature works too), carried onto every URI; deleted 410. The `object.cmaf` job makes the timeline; a recording's finalize queues it, and `download?format=json` queues it for an object that has none yet; the v1 VOD and clip answers carry the same `hls_url` (and `hls_expires_at` when signed). `noindex` |
 | `GET /robots.txt` | crawler policy (`openvibe-shared/seo.robotsTxt`: AI and search crawlers named, `/api/`, `/auth/`, `/internal/`, `/o/`, `/metrics`, `/live/`, `/me` disallowed) and the sitemap |
 | `GET /sitemap.xml` | the media index and the watch pages Media is the canonical home of: public, playable VODs and clips of apps other than Live (Live lists its own `/vod` and `/clip` pages), never AI clips, private, unlisted, sandbox, recording or failed items; thumbnails as image entries. Every listed page renders `index, follow` |
 | `GET /llms.txt` | a map of the site for language-model crawlers |
+| `GET /llms-full.txt` | the same map plus the full text of the index and the newest watch pages Media is the canonical home of (`openvibe-shared/seo.llmsFull`; rendering stops at 512 KB, and any further pages become its "truncated" line) |
 | `GET /live/:sel/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot, extracted from its in-progress recording. `:sel` = slot id (`1`), slot **slug** (`whip`), or **`@username`** (that streamer's top-viewed live slot; slug/username resolve via the app's `/api/streams` listing, cached 5s). Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`; internal base URLs from `APP_INTERNAL_URLS` JSON env or `LIVE_APP_INTERNAL_URL`). Cached **5s per slot** (that cache is the rate limit), CORS-open for external APIs/bots/dashboards. Not live → **404 with a styled OFFLINE card** (real JPEG bytes — dev pipelines decode the body as image/jpeg) so `<img>` embeds degrade nicely (`?format=json` for JSON errors); `503` + card when live but a frame can't be cut. |
 
 Watch pages (`/v/:id`, `/c/:id` on a browser navigation) offer a player only when the item's

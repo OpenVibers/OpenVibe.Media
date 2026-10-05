@@ -6,8 +6,9 @@
 //   - POST /api/v1/:app/vods/:id/ingest/rtmp makes ffmpeg pull an app-supplied rtmp_url, which must name an
 //     allow-listed host:port (MEDIA_RTMP_PULL_ALLOW; test/rtmp-allowlist.test.js has the URL grammar).
 // Every other outbound request goes to an operator-configured address (Network, Events, Live's internal
-// URL, B2/R2, an app's webhook_url from MEDIA_APPS_SEED). The inventory below fails when a new outbound
-// call appears in server/ until it is classified here, and no route lets a tenant set a webhook URL.
+// URL, B2/R2, an app's webhook_url from MEDIA_APPS_SEED, IndexNow's fixed api.indexnow.org from
+// INDEXNOW_KEY). The inventory below fails when a new outbound call appears in server/ until it is
+// classified here, and no route lets a tenant set a webhook URL.
 // No test here needs the network: literals and internal names are refused before DNS, and DNS answers
 // and the socket are stubbed.
 const assert = require('assert');
@@ -69,7 +70,13 @@ const https = require('https');
         assert.deepStrictEqual(sqlWriters, ['server/db/database.js'], 'only db.upsertApp writes an app\'s webhook_url');
         assert.deepStrictEqual(upserters, ['server/auth.js'], 'and only app seeding calls it');
         assert.ok(/function seedApps[\s\S]*upsertApp\(/.test(fs.readFileSync(path.join(ROOT, 'server/auth.js'), 'utf8')), 'from seedApps');
-        console.log(`✅ outbound inventory: ${found.size} files, one user-chosen address (avatar ingest); webhook URLs are operator-set`);
+        // IndexNow (openvibe-shared/indexnow, wired in server/index.js): the only outbound request made
+        // from a dependency. Its endpoint is the fixed api.indexnow.org and host/key are operator config
+        // (MEDIA_PUBLIC_URL / INDEXNOW_KEY) — never a tenant or a user-supplied URL, and no route reaches it.
+        const idxSrc = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
+        assert.ok(idxSrc.includes('createIndexNow(') && idxSrc.includes('host: config.publicUrl') && idxSrc.includes('key: config.indexnow.key'),
+            'IndexNow is wired from operator config (host/key), the one outbound dependency');
+        console.log(`✅ outbound inventory: ${found.size} files, one user-chosen address (avatar ingest); webhook URLs are operator-set; IndexNow posts to the fixed api.indexnow.org`);
     }
 
     const ingest = require('../server/avatars/ingest');

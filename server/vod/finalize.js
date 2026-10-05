@@ -401,6 +401,9 @@ async function _doFinalize(vodId, opts) {
     } catch (err) {
         console.warn(`[VOD] Timeline queue failed for vod ${vodId}:`, err.message);
     }
+    // The recording is finished (and, when it is public and not a sandbox's, indexable): tell the
+    // engines about its watch page and the sitemap (server/indexnow-notify.js).
+    await require('../indexnow-notify').pingWatch('vod', ready);
     console.log(`[VOD] Finalized: vod ${vodId}, ${stored}s (${durationSource}), ${(stat.size / 1024 / 1024).toFixed(1)}MB`);
     return ready;
 }

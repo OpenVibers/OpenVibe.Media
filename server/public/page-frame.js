@@ -1,16 +1,20 @@
 /**
- * OpenVibe.Media — the shell every server-rendered page shares.
+ * OpenVibe.Media — the shared layout for every server-rendered page (the T11 sweep).
  *
- * One place for: the OpenVibe Frame (openvibe.network's theme-loader before
- * paint, navbar + footer after), the SEO head (title, description, canonical,
- * robots, Open Graph, Twitter card, JSON-LD) and the page palette, which
- * reads the shared theme tokens (--bg-primary, --accent, …) that
- * theme-loader.js sets on <html> and falls back to the default Vibe palette.
+ * `page()` composes the document through openvibe-shared/shell: the shell owns the doctype and <head>
+ * (openvibe-shared/seo: title, description, canonical, robots, Open Graph/Twitter, JSON-LD), the
+ * theme-loader before paint, the deferred web runtime/navbar/footer, the no-JavaScript nav and the
+ * shared footer. This module supplies what the shell does not: the site's navbar options (sign-in,
+ * history, the account menu's "Your media"), the server-rendered footer's links, the app icon, the
+ * Open Graph video tags and the page palette, which reads the shared theme tokens (--bg-primary,
+ * --accent, …) that theme-loader.js sets on <html> and falls back to the default Vibe palette.
  */
 'use strict';
 
 const config = require('../config');
 const ovServe = require('openvibe-shared/serve');
+const shell = require('openvibe-shared/shell');
+const appIcon = require('openvibe-shared/app-icon');
 
 const NETWORK_URL = (config.network && config.network.url) || 'https://openvibe.network';
 const SITE_NAME = 'OpenVibe.Media';
@@ -64,44 +68,25 @@ function fmtDate(dt) {
 }
 
 /**
- * The <head> a page needs: shared theme before paint, then the SEO set.
- *   title, description, canonical (absolute), robots, image (absolute),
- *   ogType, jsonLd (array of objects), video ({ url, type, width, height }).
+ * The site-specific <head> additions the shared shell does not own: the app icon, the page palette,
+ * and the Open Graph video tags (openvibe-shared/seo has no video fields). `page()` passes this as
+ * `shell.page`'s `head`, so the shell still owns title, description, canonical, robots, og/twitter
+ * mirroring and JSON-LD.
  */
-function headTags(seo) {
-    const title = esc(seo.title);
-    const description = esc(snip(seo.description, 300));
+function extraHead(seo, css) {
     const image = seo.image || DEFAULT_OG_IMAGE;
-    const twitterCard = seo.twitterCard || 'summary_large_image';
-    const tags = [
-        '<meta charset="utf-8">',
-        '<meta name="viewport" content="width=device-width, initial-scale=1">',
-        `<title>${title}</title>`,
-        `<meta name="description" content="${description}">`,
-        // Applies the user's theme to <html> synchronously; must run before any CSS paints.
-        require('openvibe-shared/app-icon').headTags({ site: 'media', iconBase: '/assets' }),
-        `<script src="${ovServe.url('theme-loader.js')}" defer></script>`,
-        seo.canonical ? `<link rel="canonical" href="${esc(seo.canonical)}">` : '',
-        `<meta name="robots" content="${esc(seo.robots || 'index, follow')}">`,
-        `<meta property="og:site_name" content="${SITE_NAME}">`,
-        `<meta property="og:type" content="${esc(seo.ogType || 'website')}">`,
-        `<meta property="og:title" content="${title}">`,
-        `<meta property="og:description" content="${description}">`,
-        seo.canonical ? `<meta property="og:url" content="${esc(seo.canonical)}">` : '',
-        `<meta property="og:image" content="${esc(image)}">`,
+    const videoTags = seo.video && seo.video.url ? [
+        `<meta property="og:video" content="${esc(seo.video.url)}">`,
+        `<meta property="og:video:secure_url" content="${esc(seo.video.url)}">`,
+        seo.video.type ? `<meta property="og:video:type" content="${esc(seo.video.type)}">` : '',
+    ].filter(Boolean).join('\n') : '';
+    return [
+        appIcon.headTags({ site: 'media', iconBase: '/assets' }),
+        `<style>${baseCss()}${css}</style>`,
+        videoTags,
+        // The default share card is 1200×630; a media thumbnail carries its own dimensions.
         image === DEFAULT_OG_IMAGE ? '<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">' : '',
-        seo.video && seo.video.url ? [
-            `<meta property="og:video" content="${esc(seo.video.url)}">`,
-            `<meta property="og:video:secure_url" content="${esc(seo.video.url)}">`,
-            seo.video.type ? `<meta property="og:video:type" content="${esc(seo.video.type)}">` : '',
-        ].join('\n') : '',
-        `<meta name="twitter:card" content="${esc(twitterCard)}">`,
-        `<meta name="twitter:title" content="${title}">`,
-        `<meta name="twitter:description" content="${description}">`,
-        `<meta name="twitter:image" content="${esc(image)}">`,
-        ...(seo.jsonLd || []).map(obj => `<script type="application/ld+json">${jsonForScript(obj)}</script>`),
-    ];
-    return tags.filter(Boolean).join('\n');
+    ].filter(Boolean).join('\n');
 }
 
 /** Page palette on the shared theme tokens (fallback: the default Vibe theme). */
@@ -141,23 +126,48 @@ function baseCss() {
 }
 
 /**
- * The scripts that mount the navbar + footer, after the page content so a
- * slow Network never blocks the body.
+ * openvibe-shared/shell's `navbar` option: this site's OpenVibeNavbar.init config.
  *   history  { type, title } → recorded to the signed-in user's network history
- *   footer   { variant: 'full' | 'compact', links: [{ heading, items: [{ label, href }] }] }
  */
-function frameScripts({ history, footer } = {}) {
+function navOptions({ history } = {}) {
     const navOpts = { service: 'media', apiBase: NETWORK_URL, silentLogin: `${config.publicUrl}/auth/login?silent=1&next={url}`, fedcmLogin: `${config.publicUrl}/auth/fedcm`, loginUrl: `${config.publicUrl}/auth/login?next={url}`, logoutUrl: '/auth/logout?next={path}', sessionUrl: '/auth/me' };
     if (history) navOpts.history = history;
     // The account menu's section for this site: the signed-in person's own media (server/me/, WS-G task 12).
     navOpts.menu = { before: [{ id: 'media-mine', label: 'Your media', href: '/me', icon: 'fa-photo-film' }] };
-    const footOpts = {
+    return navOpts;
+}
+
+/** openvibe-shared/shell's `footer` option (openvibe-shared/frame.footer on the server). */
+function footerOptions(footer) {
+    return {
         service: 'media',
         variant: (footer && footer.variant) || 'compact',
         links: (footer && footer.links) || defaultFooterLinks(),
         mount: '#ov-footer',
         updates: '/updates',   // the footer's "shipped X ago" line and Updates link open this site's log
     };
+}
+
+/**
+ * openvibe-shared/shell (v2.10.0) loads footer.js but only boots the navbar: without this call the
+ * server-rendered footer keeps its placeholder "shipped" line (shipped.js is loaded by footer.js's
+ * init) and the client never re-renders with the site's links. Same options as the SSR footer, so it
+ * rebuilds the same DOM; footer.js is deferred, so it has run by DOMContentLoaded when this fires.
+ */
+function footerBootScript(footer) {
+    return `<script>window.addEventListener('DOMContentLoaded', function () { try { OpenVibeFooter.init(${jsonForScript(footerOptions(footer))}); } catch (e) { /* footer optional */ } });</script>`;
+}
+
+/**
+ * The scripts that mount the navbar + footer, after the page content so a
+ * slow Network never blocks the body. Used by the hand-written browse index
+ * (server/public/browse.js); the shell pages get the same navbar options through
+ * shell.page() plus footerBootScript() (the shell does not initialise the footer),
+ * and the footer is rendered by frame.footer.
+ */
+function frameScripts({ history, footer } = {}) {
+    const navOpts = navOptions({ history });
+    const footOpts = footerOptions(footer);
     return `<script src="${ovServe.url('navbar.js')}" defer></script>
 <script src="${ovServe.url('footer.js')}" defer></script>
 <script>
@@ -189,29 +199,42 @@ function defaultFooterLinks() {
 }
 
 /**
- * A whole document: `seo` → headTags, `css` extra styles, `body` the <main>
- * contents, `history` / `footer` → frameScripts.
+ * A whole document, composed by openvibe-shared/shell: `seo` maps onto the shell's SEO options
+ * (title, description, canonical, robots, image, og type, JSON-LD), `css` adds the page styles and
+ * `body` is the <main> contents. The shell emits the theme-loader/web-runtime/navbar/footer scripts,
+ * the no-JavaScript nav and the shared footer; `history` and `footer` become the navbar init options
+ * and the server-rendered footer. The site's app icon, palette and Open Graph video tags ride in
+ * through the shell's `head`.
  */
 function page({ seo, css = '', body, history, footer }) {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-${headTags(seo)}
-<style>${baseCss()}${css}</style>
-</head>
-<body>
-<div id="navbar-mount"></div>${require('openvibe-shared/frame').noscriptNav({ name: 'OpenVibe.Media', links: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }] })}
-<main>
-${body}
-</main>
-${require('openvibe-shared/frame').footer({ service: 'media', variant: 'compact', updates: '/updates' })}
-${frameScripts({ history, footer })}
-</body>
-</html>`;
+    const html = shell.page({
+        name: SITE_NAME,
+        lang: 'en',
+        title: seo.title,
+        siteName: SITE_NAME,
+        description: seo.description,
+        canonical: seo.canonical,
+        image: seo.image || DEFAULT_OG_IMAGE,
+        type: seo.ogType,
+        robots: seo.robots || 'index, follow',
+        jsonLd: seo.jsonLd,
+        head: extraHead(seo, css) + footerBootScript(footer),
+        body: `<div id="navbar-mount"></div>\n<main>\n${body}\n</main>`,
+        navLinks: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }],
+        navbar: navOptions({ history }),
+        footer: footerOptions(footer),
+    });
+    // The shell picks the card from whether a large image is present; a page can ask for the small
+    // card explicitly (the paste viewer, a screenshot-less paste). seo.headTags has no override, so
+    // swap the one tag it emitted after the fact.
+    if (seo.twitterCard && seo.twitterCard !== 'summary_large_image') {
+        return html.replace('<meta name="twitter:card" content="summary_large_image">', `<meta name="twitter:card" content="${esc(seo.twitterCard)}">`);
+    }
+    return html;
 }
 
 module.exports = {
     NETWORK_URL, SITE_NAME, DEFAULT_OG_IMAGE, APP_PUBLIC_URLS, appUrl,
     esc, abs, snip, isoDate, isoDuration, fmtDuration, fmtDate, jsonForScript,
-    headTags, baseCss, frameScripts, defaultFooterLinks, page, DEFAULT_THEME_CSS,
+    extraHead, baseCss, frameScripts, navOptions, footerOptions, defaultFooterLinks, page, DEFAULT_THEME_CSS,
 };

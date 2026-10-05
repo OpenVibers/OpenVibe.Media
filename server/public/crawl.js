@@ -1,5 +1,5 @@
 /**
- * OpenVibe.Media — crawler files at the origin: /robots.txt, /sitemap.xml, /llms.txt.
+ * OpenVibe.Media — crawler files at the origin: /robots.txt, /sitemap.xml, /llms.txt, /llms-full.txt.
  *
  * The sitemap lists the pages search engines may index here: the media index (/) and the watch
  * pages of public, ready VODs and clips that Media is the canonical home of (pages.watchIndexable:
@@ -19,6 +19,10 @@ const pages = require('./pages');
 const readiness = require('../objects/readiness');
 
 const MAX_URLS = 45000;          // under the 50,000-URL sitemap limit
+const LLMS_FULL_MAX_BYTES = 512 * 1024;   // cap an /llms-full.txt over every watch page
+const MAX_FULL_PAGES = 2000;     // rows considered for the full-text file (rendering every page at once is unbounded)
+const LLMS_FULL_TTL_MS = 10 * 60 * 1000;   // a cold /llms-full.txt renders up to 2000 pages; serve one build for 10 minutes
+const LLMS_SUMMARY = 'The media service of the OpenVibe network: it stores and serves recorded live streams (VODs), clips, thumbnails, screenshots and files for the network\'s apps.';
 const router = express.Router();
 
 const iso = (v) => {
@@ -79,7 +83,7 @@ function llmsTxt() {
     const base = config.publicUrl;
     return seo.llmsTxt({
         name: 'OpenVibe.Media',
-        summary: 'The media service of the OpenVibe network: it stores and serves recorded live streams (VODs), clips, thumbnails, screenshots and files for the network\'s apps.',
+        summary: LLMS_SUMMARY,
         details: [
             'Most media here belongs to OpenVibe.Live, whose /vod/:id and /clip/:id pages are the canonical pages for it (chat, transcript, the streamer\'s channel); the watch pages here point there.',
             'Clips marked "AI clip" were picked and cut automatically from a stream, not made by a person.',
@@ -89,6 +93,7 @@ function llmsTxt() {
             { title: 'Browse', links: [
                 { title: 'Media index', url: `${base}/`, note: 'every public video, clip, image and file, newest first, each linking to its source page' },
                 { title: 'Sitemap', url: `${base}/sitemap.xml`, note: 'the watch pages Media is the canonical home of' },
+                { title: 'Full text', url: `${base}/llms-full.txt`, note: 'those same pages with their full text, for language models' },
             ] },
             { title: 'URLs', links: [
                 { title: 'VOD watch page', url: `${base}/v/{id}`, note: 'a page for browsers; ?raw=1 returns the video bytes' },
@@ -104,6 +109,72 @@ function llmsTxt() {
     });
 }
 
+/**
+ * The indexable watch pages with the fields a watch page renders, newest first: the same set the
+ * sitemap lists (WATCH_WHERE, pages.watchIndexable, no sandbox tenant). Used by /llms-full.txt,
+ * which bounds how many it will render (`limit`).
+ */
+async function indexableWatchRows(limit = MAX_URLS) {
+    const sandbox = await sandboxApps();
+    const out = [];
+    const base = 'id, app_id, visibility, is_public, title, description, ai_overview, thumbnail_url, file_path, duration_seconds, view_count, created_at';
+    for (const kind of ['vod', 'clip']) {
+        const table = kind === 'vod' ? 'vods' : 'clips';
+        // vods has no auto_generated column (only clips do); pages.watchIndexable reads it for clips.
+        const cols = kind === 'clip' ? `${base}, auto_generated` : base;
+        const rows = await db.all(`SELECT ${cols} FROM ${table} WHERE ${WATCH_WHERE[kind]} ORDER BY created_at DESC LIMIT ?`, [limit]);
+        for (const row of rows) {
+            if (sandbox.has(row.app_id) || !pages.watchIndexable(kind, row)) continue;
+            out.push({ kind, row });
+        }
+    }
+    out.sort((a, b) => String(b.row.created_at || '').localeCompare(String(a.row.created_at || '')));
+    return out.slice(0, limit);
+}
+
+/**
+ * /llms-full.txt (openvibe-shared/seo.llmsFull): the /llms.txt header, then the full text of the
+ * public media pages — the index and the newest watch pages Media is the canonical home of, rendered
+ * by the same pages.renderWatchPage the browser gets and stripped to text. Pages are rendered only
+ * until the byte cap is passed, so a large estate cannot make the request unbounded; any that remain
+ * become the standard "(truncated: N more pages …)" line.
+ *
+ * A cold build walks up to 2000 rows and renders each page, so the result is memoized in memory for
+ * ten minutes (one bounded entry; a restart starts empty). Crawlers ask for this file far more often
+ * than the estate changes.
+ */
+let _llmsFull = { at: 0, body: null };
+
+async function llmsFullTxt() {
+    if (_llmsFull.body != null && Date.now() - _llmsFull.at < LLMS_FULL_TTL_MS) return _llmsFull.body;
+    const base = config.publicUrl;
+    const rows = await indexableWatchRows(MAX_FULL_PAGES);
+    const watchPages = [];
+    let bytes = 0;
+    for (const { kind, row } of rows) {
+        const html = pages.renderWatchPage(kind, row);
+        watchPages.push({
+            title: String(row.title || (kind === 'vod' ? `VOD #${row.id}` : `Clip #${row.id}`)),
+            url: `${base}/${kind === 'vod' ? 'v' : 'c'}/${row.id}`,
+            html,
+        });
+        bytes += Buffer.byteLength(html);
+        if (bytes > LLMS_FULL_MAX_BYTES) break;   // the cap is already passed; stop rendering the rest
+    }
+    const body = seo.llmsFull({
+        site: { name: 'OpenVibe.Media', url: base },
+        summary: LLMS_SUMMARY,
+        base,
+        maxBytes: LLMS_FULL_MAX_BYTES,
+        sections: [
+            { title: 'Browse', pages: [{ title: 'Media index', url: `${base}/`, text: 'Every public video, clip, image and file on OpenVibe.Media, newest first, each linking to its source page in the app that made it.' }] },
+            { title: 'Watch pages', pages: watchPages },
+        ],
+    });
+    _llmsFull = { at: Date.now(), body };
+    return body;
+}
+
 function send(res, type, body) {
     res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
     res.type(type).send(body);
@@ -111,6 +182,14 @@ function send(res, type, body) {
 
 router.get('/robots.txt', (req, res) => send(res, 'text/plain', robotsTxt()));
 router.get('/llms.txt', (req, res) => send(res, 'text/plain', llmsTxt()));
+router.get('/llms-full.txt', async (req, res) => {
+    try {
+        send(res, 'text/plain', await llmsFullTxt());
+    } catch (err) {
+        console.error('[Public] llms-full error:', err.message);
+        res.status(500).type('text/plain').send('llms-full unavailable');
+    }
+});
 router.get('/sitemap.xml', async (req, res) => {
     try {
         send(res, 'application/xml', seo.sitemapXml([{ loc: `${config.publicUrl}/`, changefreq: 'hourly' }, ...await sitemapEntries()]));
@@ -126,3 +205,5 @@ module.exports.WATCH_WHERE = WATCH_WHERE;
 module.exports.sandboxApps = sandboxApps;
 module.exports.robotsTxt = robotsTxt;
 module.exports.llmsTxt = llmsTxt;
+module.exports.llmsFullTxt = llmsFullTxt;
+module.exports.indexableWatchRows = indexableWatchRows;

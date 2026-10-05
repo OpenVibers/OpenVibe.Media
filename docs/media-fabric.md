@@ -233,6 +233,17 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
 - **codec economics:** for a viral VOD, an AV1 rendition is produced when the egress/CDN bytes it saves exceed its encode
   cost; for a cold VOD, never;
 - compute is placed by the Compute fabric (cheapest available CPU/GPU, `openvibe-sdk/placement`).
+- **F4 slice 1, shipped: an on-demand rendition.** When a client asks a ready media object's master playlist or its
+  JSON download and a ladder rung is missing, `rendition.create` (heavy) is queued lazily — one job per object and
+  rendition, an idempotency key answering a later request with the same job. This slice ships one extra rung, `720p`
+  (H.264/AAC, libx264), transcoded from the source (or its timeline) with the source timeline's segment boundaries
+  forced as keyframes so a switch lands on one; a source already 720p or smaller is skipped, and a source with no video
+  stream is refused. The rows are published exactly as the source cut's (content-addressed placement, the placement
+  router's durable provider, one transaction, then the previous cut's unnamed bytes deleted; object.pack is queued for
+  the rendition) and the source object is untouched. Behind `MEDIA_RENDITIONS`, which also needs `MEDIA_HLS_ENABLED`:
+  off by default, no new rendition is cut or queued (one already produced keeps serving). The master playlist lists a
+  rendition only once its rows exist, and the variant plays at `/o/:id/<rendition>/index.m3u8`. Keep-vs-regenerate
+  economics, AV1 and compute placement stay open.
 
 ## 6. Placement: one engine, every class, down to the segment bucket
 
@@ -397,7 +408,8 @@ reads are metered by CDN logs. Nothing here bills delivery.
   playlist), materialized clips referencing the source's chunks, captions on the
   timeline (the demand rollups already record reads per timeline segment, F2.4); Live's player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
-  VODs, compute placement.
+  VODs, compute placement. (Slice 1 shipped: one on-demand 720p rung, queued by the master playlist / JSON download
+  and cut into the timeline; the economics, AV1 and compute placement are still open.)
 - **F5 multi-CDN delivery:** Bunny path (B2 origin), R2 custom-domain path, OpenVibe edge first up to capacity, route
   epochs, canary shifts with auto-revert, player QoE beacons, seek SLOs.
 - **F6 cost truth:** bill imports, forecasts, budget guards, the owner dashboard.

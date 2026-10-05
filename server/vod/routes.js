@@ -374,6 +374,8 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
             }
             if (visibility !== undefined) await db.setVodVisibility(vod.id, visibility);
         });
+        // Made public (or already public): its watch page and the sitemap are indexable now.
+        if (visibility !== undefined) await require('../indexnow-notify').pingWatch('vod', await db.getVodById(vod.id));
         res.json({ vod: await vodPublic(await db.getVodById(vod.id, req.appId), { readiness: true }) });
     } catch (err) {
         console.error('[VOD] Update error:', err.message);

@@ -91,6 +91,9 @@ const config = {
         enabled: ['1', 'true', 'on'].includes(String(process.env.MEDIA_HLS_ENABLED || '').toLowerCase()),
         // Lifetime of a signed playlist (purpose 'hls', accepted only by the HLS routes): 60 s to 12 h, 6 h by default.
         playlistTtlS: Math.min(43200, Math.max(60, intEnv('MEDIA_HLS_PLAYLIST_TTL_S', 21600))),
+        // On-demand renditions (docs/media-fabric.md §5/F4): the rendition.create job and the extra master-playlist
+        // variants. Also needs `enabled`; off by default, so no new rendition is cut or queued (an existing one serves).
+        renditions: ['1', 'true', 'on'].includes(String(process.env.MEDIA_RENDITIONS || '').toLowerCase()),
     },
 
     jobs: {
@@ -153,6 +156,10 @@ const config = {
         clientSecret: process.env.OV_OAUTH_CLIENT_SECRET || '',
         timeoutMs: intEnv('MEDIA_BILLING_TIMEOUT_MS', 10000),
     },
+
+    // IndexNow (openvibe-shared/indexnow): a key makes search engines recrawl a public page when it
+    // appears or changes (the key file is served at /<key>.txt). Unset: off, no key file, nothing sent.
+    indexnow: { key: String(process.env.INDEXNOW_KEY || '').trim() },
 
     apps: {
         // JSON array: [{app_id, name, api_key, webhook_url, webhook_secret, allowed_origins, quota_bytes}]
