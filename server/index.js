@@ -328,17 +328,20 @@ const ready = (async () => {
     if (drill.enabled) server.once('error', (err) => { console.error(`[Drill] HTTP server: ${err.message}`); process.exit(1); });
 
     // SIGTERM/SIGINT (openvibe-sdk/service; docs/service.md's handles family): stopping() turns true at
-    // once, the recorder drains first (beforeDrain runs while the server still takes connections, so a
-    // recording gets VOD_STOP_GRACE_MS to flush trailers), then the background handles stop, the events
-    // outbox is reset and the database closes. The whole stop is bounded at 70 s — the systemd unit's
-    // TimeoutStopSec (deploy/systemd/openvibe-media.service) — and Media exits 0 past the deadline, like
-    // the 5 s family. A step that throws is logged and the stop goes on: the try/catch the hand-written
-    // shutdown carried lives in the kit now.
+    // once, the recorder stops first, then the background handles stop, the events outbox is reset and the
+    // database closes. The recorder is the first `stop` step so it runs before the worker and the pollers,
+    // as the hand-written shutdown ran it: stopAll() signals FFmpeg, which then gets VOD_STOP_GRACE_MS to
+    // flush trailers. The drain gets 60 s so in-flight uploads and large downloads are not cut at the kit's
+    // 4 s default; the whole stop is bounded at 70 s, the systemd unit's TimeoutStopSec (80 s) leaving room
+    // (deploy/systemd/openvibe-media.service). Media exits 0 past the deadline, like the 5 s family. A step
+    // that throws is logged and the stop goes on: the try/catch the hand-written shutdown carried lives in
+    // the kit now.
     gracefulStop({
         name: 'Media',
         server,
-        beforeDrain: () => recorder.stopAll(),
+        drainMs: 60000,
         stop: [
+            () => recorder.stopAll(),
             () => vodStorage.stop(),
             () => healthJob.stop(),
             () => require('./objects/verify-job').stop(),

@@ -1,11 +1,12 @@
 'use strict';
 /**
  * openvibe-sdk/service in Media (plan B4): the SIGTERM/SIGINT shutdown is the kit's gracefulStop, not
- * the hand-written shutdown()/process.on pair it replaces. It drains the server for the default 4 s,
- * then runs the stop steps (the recorder drained first in beforeDrain, the tiering sweep, health job,
- * verify job, job worker, owner-subject job, JWKS refresher and events outbox stopped, the actor-limits
- * Valkey closed, the timers cleared), then closes the database; the whole stop is bounded at 70 s like
- * the systemd unit, and Media exits 0 past the deadline. A failing step is logged and the stop goes on.
+ * the hand-written shutdown()/process.on pair it replaces. It runs the stop steps (the recorder first —
+ * stopAll() signalling FFmpeg before the worker and pollers stop — the tiering sweep, health job, verify
+ * job, job worker, owner-subject job, JWKS refresher and events outbox stopped, the actor-limits Valkey
+ * closed, the timers cleared), drains the server for 60 s so in-flight uploads and large downloads are
+ * not cut at the kit's 4 s default, then closes the database; the whole stop is bounded at 70 s like the
+ * systemd unit, and Media exits 0 past the deadline. A failing step is logged and the stop goes on.
  * The static half reads server/index.js; the behavioural half drives gracefulStop with the same option
  * shape Media passes, with exports stubbed (/mirrors OpenVibe.Sources/test/service-kit.test.js).
  */
@@ -17,6 +18,27 @@ const { gracefulStop } = require('openvibe-sdk/service');
 
 const source = fs.readFileSync(path.join(__dirname, '../server/index.js'), 'utf8');
 const quiet = { log() {}, warn() {}, error() {} };
+
+// Slice a balanced (...) / [...] starting at `from` (source[from] is the opener), so the static checks
+// read the whole gracefulStop call without depending on character offsets.
+function balanced(source, from, open, close) {
+    let depth = 0;
+    for (let i = from; i < source.length; i++) {
+        if (source[i] === open) depth++;
+        else if (source[i] === close) { depth--; if (depth === 0) return source.slice(from, i + 1); }
+    }
+    throw new Error(`unbalanced ${open} at ${from}`);
+}
+function gracefulStopCall(source) {
+    const at = source.indexOf('gracefulStop(');
+    assert.ok(at > 0, 'server/index.js calls gracefulStop');
+    return balanced(source, at + 'gracefulStop'.length, '(', ')');
+}
+function optionArray(call, name) {
+    const m = call.match(new RegExp(`\\b${name}:\\s*\\[`));
+    assert.ok(m, `the gracefulStop call has a ${name} array`);
+    return balanced(call, m.index + m[0].length - 1, '[', ']');
+}
 
 // A tiny local runner, as in OpenVibe.Sources/test/service-kit.test.js: `node test/service-kit.test.js`
 // prints one line per case and exits 1 on the first failure.
@@ -43,16 +65,19 @@ t('server/index.js imports gracefulStop from openvibe-sdk/service and owns no si
     assert.doesNotMatch(source, /shuttingDown/, 'the guard that made a second signal a no-op is the kit\'s now');
 });
 
-t("the one stop names Media, drains the recorder first, keeps every handle, and uses the 70 s deadline / exit 0", () => {
-    const at = source.indexOf('gracefulStop(');
-    assert.ok(at > 0, 'server/index.js calls gracefulStop');
-    const call = source.slice(at, at + 1600);
+t("the one stop names Media, stops the recorder first, keeps every handle, and uses the 60 s drain / 70 s deadline / exit 0", () => {
+    const call = gracefulStopCall(source);
     assert.match(call, /name: 'Media'/);
+    assert.match(call, /drainMs: 60000/, "a 60 s drain (VOD_STOP_GRACE_MS) so in-flight uploads/large downloads are not cut at the kit's 4 s default");
     assert.match(call, /deadlineMs: 70000/, 'the 70 s stop the systemd unit leaves room for (TimeoutStopSec=80)');
     assert.match(call, /deadlineExitCode: 0/, 'Media exits 0 past the deadline, like the 5 s family');
-    assert.match(call, /beforeDrain: \(\) => recorder\.stopAll\(\)/, 'recordings drain while the server still takes connections');
     assert.match(call, /close: \[\(\) => db\.close\(\)\]/);
-    // Every handle the hand-written shutdown carried is a stop step now.
+    assert.doesNotMatch(call, /beforeDrain/, 'the recorder is a stop step now, not beforeDrain (the kit runs beforeDrain after stop)');
+
+    // The recorder stops first, before every other handle — the order the hand-written shutdown ran.
+    const stop = optionArray(call, 'stop');
+    const recorderAt = stop.indexOf('recorder.stopAll()');
+    assert.ok(recorderAt > 0, 'recorder.stopAll() is a stop step');
     for (const step of [
         'vodStorage.stop()',
         'healthJob.stop()',
@@ -63,11 +88,15 @@ t("the one stop names Media, drains the recorder first, keeps every handle, and 
         "require('./events')._reset()",
         "require('./actor-limits').valkey()",
         'clearInterval(t)',
-    ]) assert.ok(call.includes(step), `the stop still names ${step}`);
+    ]) {
+        const stepAt = stop.indexOf(step);
+        assert.ok(stepAt > 0, `the stop still names ${step}`);
+        assert.ok(recorderAt < stepAt, `recorder.stopAll() runs before ${step}`);
+    }
     assert.doesNotMatch(source, /deadlineExitCode: 1/);
 });
 
-t('the stop runs stop → beforeDrain → close, drains the server, and exits 0 exactly once', async () => {
+t('the stop runs the recorder first, drains the server, then closes, and exits 0 exactly once', async () => {
     // Media passes no handles, so a step that throws is logged and the stop goes on (the try/catch the
     // old shutdown carried); the exit code stays the deadline's 0 either way.
     for (const fails of [false, true]) {
@@ -79,15 +108,18 @@ t('the stop runs stop → beforeDrain → close, drains the server, and exits 0 
         let exited = null;
         const kit = gracefulStop({
             name: 'Media', server, signals: false,
-            stop: [() => { order.push('stop'); if (fails) throw new Error('worker'); }],
-            beforeDrain: () => { order.push(server.listening ? 'beforeDrain while listening' : 'beforeDrain too late'); },
+            drainMs: 60000,
+            stop: [
+                () => { order.push(server.listening ? 'recorder while listening' : 'recorder too late'); if (fails) throw new Error('recorder'); },
+                () => { order.push('worker'); },
+            ],
             close: [() => { order.push(server.listening ? 'close while listening' : 'close after drain'); }],
             deadlineMs: 70000, deadlineExitCode: 0,
             exit: (c) => { exited = c; exits++; },
             log: { log() {}, warn: (m) => warns.push(m), error() {} },
         });
         const [code, again] = await Promise.all([kit.stop('SIGTERM'), kit.stop('SIGINT')]);
-        assert.deepStrictEqual(order, ['stop', 'beforeDrain while listening', 'close after drain'], 'beforeDrain is the last moment the server listens; close runs after the drain');
+        assert.deepStrictEqual(order, ['recorder while listening', 'worker', 'close after drain'], 'the recorder stops first while the server still listens; close runs after the drain');
         assert.strictEqual(code, 0, 'Media exits 0 past the deadline and on a logged step failure');
         assert.strictEqual(again, code, 'a second signal changes nothing');
         assert.strictEqual(exited, 0);
