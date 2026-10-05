@@ -7,6 +7,7 @@
 // F3.3: object.pack concatenates the durable segments into a chunk, each row naming its byte range; a packed segment is
 // served as a ranged read of the chunk (from this node or the durable copy) with the original bytes; a rerun packs
 // nothing; the per-segment copies are gone; the durable provider comes from the placement router; private stays private.
+// A finished object.cmaf queues object.pack by itself (one per object; a rerun joins it).
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -151,6 +152,13 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(JSON.stringify([await model.getObject(pub), await model.listLocations(pub)]), before, 'the source is untouched');
         assert.strictEqual(fs.readdirSync(path.join(process.env.OBJECTS_PATH, '.jobs')).length, 0, 'the work directory is removed');
 
+        // ── The finished cut queues object.pack by itself, once (the worker runs it; no provider yet, so it packs nothing) ──
+        const packJobs = async (objectId) => (await queue.list('live', { type: 'object.pack', objectId })).jobs;
+        const autoPack = await packJobs(pub);
+        assert.strictEqual(autoPack.length, 1, 'a finished object.cmaf queues exactly one object.pack');
+        assert.deepStrictEqual([autoPack[0].created_by, autoPack[0].idempotency_key], ['system:timeline', `object.pack:${pub}`]);
+        assert.ok(await waitFor(async () => ['succeeded', 'failed'].includes((await queue.get(autoPack[0].id)).status)), 'the queued pack runs');
+
         // ── The playlists come from the rows ──
         const master = await get(`/o/${pub}/master.m3u8`);
         assert.strictEqual(master.status, 200);
@@ -193,6 +201,7 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual(j2.result.uploaded, 0);
         assert.strictEqual(JSON.stringify(await timeline.list(pub)), JSON.stringify(rows), 'the rows are as they were (job_id, updated_at too)');
         assert.deepStrictEqual(rows.map((r) => fs.statSync(r.local_path).mtimeMs), mtimes, 'no segment rewritten');
+        assert.strictEqual((await packJobs(pub)).length, 1, 'a cmaf rerun joins the pack, it does not add another');
 
         // ── F3.3: durable segments (stubbed B2/R2), the provider chosen by the placement router ──
         const pack = require('../server/jobs/pack');
@@ -294,6 +303,12 @@ const { spawn, spawnSync } = require('child_process');
 
         // ── A private object: anonymous readers get nothing; the signed playlist carries its signature on ──
         assert.strictEqual((await runJob(priv)).status, 'succeeded');
+        // The finished cut queued object.pack by itself; a durable provider is up now, so it packs.
+        const autoPriv = await packJobs(priv);
+        assert.strictEqual(autoPriv.length, 1, 'the private cut queues one object.pack');
+        assert.ok(await waitFor(async () => ['succeeded', 'failed'].includes((await queue.get(autoPriv[0].id)).status)), 'the queued pack runs');
+        const autoPrivDone = queue.jobPublic(await queue.get(autoPriv[0].id));
+        assert.deepStrictEqual([autoPrivDone.status, autoPrivDone.result.packs], ['succeeded', 1], JSON.stringify(autoPrivDone));
         for (const p of ['master.m3u8', 'source/index.m3u8', 'source/init.mp4', 'source/000001.m4s']) assert.strictEqual((await get(`/o/${priv}/${p}`)).status, 404, `anonymous ${p}`);
         const dl = await call('GET', `/api/v2/live/objects/${priv}/download?format=json`);
         assert.strictEqual(dl.status, 200);
@@ -308,7 +323,7 @@ const { spawn, spawnSync } = require('child_process');
         assert.strictEqual((await get(`/o/${priv}/source/000001.m4s${signed.search}`)).status, 200);
         assert.strictEqual(sm.headers.get('access-control-allow-origin'), null, 'no CORS on a private playlist, as on GET /o/:id');
         const jpp = await runJob(priv, { target_seconds: 10 }, 'object.pack');
-        assert.deepStrictEqual([jpp.status, jpp.result.packs], ['succeeded', 1], JSON.stringify(jpp));
+        assert.deepStrictEqual([jpp.status, jpp.result.packs], ['succeeded', 0], 'already packed by the cut: the rerun packs nothing');
         const privRows = await timeline.list(priv);
         assert.ok(privRows[1].packed_object_id);
         assert.strictEqual((await get(`/o/${priv}/source/000002.m4s`)).status, 404, 'a packed private segment needs the signature');

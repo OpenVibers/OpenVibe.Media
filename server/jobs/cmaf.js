@@ -5,7 +5,8 @@
  * no re-encode) into fragmented-MP4 segments cut on the source's own keyframes (variable duration), init.mp4 plus
  * 000001.m4s, …, stored under the object's `source/` prefix and indexed in media_timeline (objects/timeline.js), one
  * row per segment with its times, size, sha256 and durability. The source object is never touched: its bytes,
- * locations, visibility, metadata and lifecycle stay as they are.
+ * locations, visibility, metadata and lifecycle stay as they are. Once the rows are committed, `object.pack` is queued
+ * (objects/timeline-queue.js) so packing follows the cut by itself.
  *
  *   params { segment_seconds }   the target segment length, 1-10 (4): a segment ends at the first keyframe after it
  *   result { source_id, rendition: 'source', segments, duration_ms, bytes, durable, local_only,
@@ -191,6 +192,11 @@ async function run(job, ctx) {
                 throw new JobError('upload_failed', `${failed.length} segment(s) not durable yet (${failed[0].slice(0, 200)}); a retry uploads only those`, { retryAfterS: 600 });
             }
             const segs = rows.filter((x) => x.seq > 0);
+            // Packing follows the cut by itself (F3): once the rows and their bytes are committed, object.pack is
+            // queued once per object (dedupeActive and its idempotency key, objects/timeline-queue.js). A queue error
+            // never fails the cut (the timeline is already published); a run whose upload failed is left to its retry.
+            try { await require('../objects/timeline-queue').queuePack(job.app_id, src.id); }
+            catch (err) { console.warn(`[Cmaf] ${job.id}: pack queue failed: ${err.message}`); }
             return {
                 source_id: src.id, rendition, segments: segs.length, duration_ms: segs[segs.length - 1].end_ms,
                 bytes: rows.reduce((a, x) => a + x.byte_length, 0),

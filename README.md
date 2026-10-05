@@ -111,7 +111,8 @@ server/
                          object.pack (durable segments packed into ~60 s chunk objects; MEDIA_HLS_ENABLED),
                          vod.finalize (orphans and failed finalizes, with backoff),
                          vod.duration.reconcile (stored vs measured durations, local and B2/R2),
-                         storage.orphans.scan (monthly storage orphan report, service-wide, report only)
+                         storage.orphans.scan (monthly storage orphan report, service-wide, report only),
+                         storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
 (openvibe-shared v2.5.0, openvibe-contracts v0.79.0, openvibe-sdk v0.21.2: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)

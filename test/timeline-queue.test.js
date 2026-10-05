@@ -1,10 +1,11 @@
 'use strict';
 // The timeline queued by itself and signed playlists (F3.c; docs/media-fabric.md §3): a finalized VOD queues exactly one
 // object.cmaf (a second finalize joins it); nothing is queued with MEDIA_HLS_ENABLED off, for a non-media object or once
-// a timeline exists; GET …/download?format=json queues it lazily for an older VOD. A playlist token (purpose 'hls',
-// MEDIA_HLS_PLAYLIST_TTL_S, clamped to 12 h) outlives the 1 h download token, is accepted only by the HLS routes and is
-// carried onto the segment URIs; a download signature still opens the HLS routes. format=mp4 queues object.remux once
-// while the remux variant is missing and answers the variant's signed URL once it exists.
+// a timeline exists; GET …/download?format=json queues it lazily for an older VOD. queuePack queues one object.pack for
+// a cut (a later call joins it); nothing is queued with MEDIA_HLS_ENABLED off or for a non-media object. A playlist
+// token (purpose 'hls', MEDIA_HLS_PLAYLIST_TTL_S, clamped to 12 h) outlives the 1 h download token, is accepted only by
+// the HLS routes and is carried onto the segment URIs; a download signature still opens the HLS routes. format=mp4
+// queues object.remux once while the remux variant is missing and answers the variant's signed URL once it exists.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -27,7 +28,7 @@ const express = require('express');
     const model = require('../server/objects/model');
     const timeline = require('../server/objects/timeline');
     const signing = require('../server/objects/signing');
-    const { queueCmaf } = require('../server/objects/timeline-queue');
+    const { queueCmaf, queuePack } = require('../server/objects/timeline-queue');
     const tools = require('../server/vod/media-tools');
     const thumbService = require('../server/thumbnails/thumbnail-service');
     const vodStorage = require('../server/vod/vod-storage');
@@ -108,6 +109,25 @@ const express = require('express');
         assert.strictEqual(await queueCmaf('live', cut), null);
         assert.strictEqual((await jobs('object.cmaf', cut)).length, 0, 'a timeline already there: nothing queued');
         console.log('✅ nothing queued with the flag off, for a non-media or missing object, or once the timeline exists');
+
+        // ── queuePack: a cut queues one object.pack, a re-run joins it; flag off or non-media queue nothing ──
+        const packOff = await media();
+        config.hls.enabled = false;
+        assert.strictEqual(await queuePack('live', packOff), null);
+        config.hls.enabled = true;
+        assert.strictEqual((await jobs('object.pack', packOff)).length, 0, 'flag off: nothing queued');
+        const packId = await queuePack('live', cut);
+        assert.ok(packId && /^mjob_/.test(packId), 'a cut queues one object.pack');
+        const packJobs = await jobs('object.pack', cut);
+        assert.strictEqual(packJobs.length, 1);
+        assert.deepStrictEqual([packJobs[0].status, packJobs[0].created_by, packJobs[0].idempotency_key, packJobs[0].app_id],
+            ['queued', 'system:timeline', `object.pack:${cut}`, 'live']);
+        assert.strictEqual(await queuePack('live', cut), packId, 'a later call answers the same job');
+        assert.strictEqual((await jobs('object.pack', cut)).length, 1, 'a re-run dedupes');
+        assert.strictEqual(await queuePack('live', pdf), null);
+        assert.strictEqual(await queuePack('live', 'med_NOPE'), null);
+        assert.strictEqual((await jobs('object.pack', pdf)).length, 0, 'a non-media or missing object: nothing queued');
+        console.log('✅ queuePack: a cut queues one object.pack, a re-run joins it; flag off or non-media queues nothing');
 
         // ── Playlist tokens: own purpose, outlive the download token, up to the configured TTL ──
         const pl = new URL(signing.signedPlaylistUrl(cut).url);

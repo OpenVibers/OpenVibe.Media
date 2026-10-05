@@ -38,7 +38,7 @@
     "tiering on demand (F2.5): the object sweep promotes and demotes on the hour's Valkey reads against per-class hysteresis bands, one MGET per page, falling back to the daily PostgreSQL counts for a whole sweep when Valkey fails",
     "placement constraints (F2.6): sweep moves refused while their provider fails its class (breaker or probe), and a per-class monthly R2 storage ceiling (maxHotUsdPerMonth) applied in value order, each explained in the decision's inputs",
     "segment-native video (F3.1, behind MEDIA_HLS_ENABLED): the media_timeline index, the object.cmaf job (CMAF/fMP4 segments of a finished video on its own keyframes, sha256 and durability per row, idempotent) and HLS playlists written from the timeline at /o/:id/master.m3u8 under the object's access checks",
-    "packing after finalize (F3.3, behind MEDIA_HLS_ENABLED): the object.pack job concatenates durable segments into ~60 s chunk objects verified by sha256, each media_timeline row naming its byte range; the segment route serves a packed segment as a ranged read of its chunk; the per-segment keys are deleted once the chunk is durable; segment providers come from the placement router"
+    "packing after finalize (F3.3, behind MEDIA_HLS_ENABLED): the object.pack job concatenates durable segments into ~60 s chunk objects verified by sha256, each media_timeline row naming its byte range; the segment route serves a packed segment as a ranged read of its chunk; the per-segment keys are deleted once the chunk is durable; segment providers come from the placement router; a finished object.cmaf queues object.pack by itself (dedupeActive, idempotency key object.pack:<id>)"
   ],
-  "updated": "2026-10-03"
+  "updated": "2026-10-04"
 }

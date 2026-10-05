@@ -133,7 +133,9 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   durable chunk, since a redirect cannot carry the range) under the same check and signature; the `EXT-X-BYTERANGE`
   form over chunk URIs is not used, so URIs, signed playlists and caches stay as they were. Purge, VOD delete, holds
   and the orphan report see a chunk through the rows that name it (each location deleted once, every row kept while its
-  chunk's delete fails). All of it behind `MEDIA_HLS_ENABLED`; no schema change (F3.1's columns carry it).
+  chunk's delete fails). All of it behind `MEDIA_HLS_ENABLED`; no schema change (F3.1's columns carry it). A finished
+  `object.cmaf` queues it by itself (`objects/timeline-queue.js`; `dedupeActive` and key `object.pack:<id>`, so a rerun
+  joins the pack it made), so packing follows the cut without an operator.
 - **F3.c, shipped: the timeline queued by itself, signed playlists, the MP4 fallback.** A recording's finalize queues
   `object.cmaf` for its object once it is ready (`server/objects/timeline-queue.js`; `dedupeActive` and the idempotency
   key `object.cmaf:<id>`, so a second finalize joins the same job; a queue error is logged, never fails the finalize),
@@ -149,7 +151,7 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
 - **F3.5, shipped: virtual and materialized clips over the timeline (§4).**
   **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
   live segments and its upload-lag metric, a materialized clip that references the source's chunks (chunk reference
-  counts, boundary-only re-encode), sprites and captions on it, queuing `object.pack` after the cut by itself, segment-bucket demand, and Live's player
+  counts, boundary-only re-encode), sprites and captions on it, segment-bucket demand, and Live's player
   moving to HLS. Renditions are F4.
 
 ## 4. Clips reuse the source
