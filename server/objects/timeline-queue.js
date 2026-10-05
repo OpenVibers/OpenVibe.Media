@@ -1,11 +1,16 @@
 /**
- * OpenVibe.Media — queue the timeline of a finished video (docs/media-fabric.md §3, F3.c)
+ * OpenVibe.Media — queue a finished video's timeline and its packing (docs/media-fabric.md §3, F3)
  *
  * queueCmaf(appId, objectId) enqueues `object.cmaf` for a ready media object that has no source timeline yet: from the
  * finalize of a recording (server/vod/finalize.js), and lazily from GET …/download?format=json so a VOD older than F3.1
  * gets one on its first request. Nothing happens (null) with MEDIA_HLS_ENABLED off, for a missing, unready or non-media
  * object, or once the timeline exists. One job per object: dedupeActive joins a queued or running cut, and the
  * idempotency key `object.cmaf:<id>` answers a later call with the same job. → the job id, or null.
+ *
+ * queuePack(appId, objectId) enqueues `object.pack` once a cut's rows are committed (server/jobs/cmaf.js), so packing
+ * follows the cut by itself instead of an operator's hand. Nothing happens (null) with MEDIA_HLS_ENABLED off or for a
+ * missing or non-media object. One job at a time per object: dedupeActive joins a queued or running pack, so a rerun
+ * while it is active joins it and a later cut queues a new one. → the job id, or null.
  */
 'use strict';
 
@@ -26,4 +31,18 @@ async function queueCmaf(appId, objectId, { segment_seconds = null } = {}) {
     return r.job ? r.job.id : null;
 }
 
-module.exports = { queueCmaf };
+async function queuePack(appId, objectId) {
+    if (!config.hls.enabled || !appId || !objectId) return null;
+    const obj = await require('./model').getObject(objectId);
+    if (!obj || !require('../jobs/derive').isMediaObject(obj)) return null;
+    const queue = require('../jobs/queue');
+    const params = require('../jobs/pack').spec.validate({ appId, obj, params: {} });
+    const r = await queue.enqueue({
+        appId, type: 'object.pack', objectId: obj.id, params,
+        dedupeActive: true, createdBy: 'system:timeline',
+    });
+    if (r.created) require('../jobs/worker').kick();
+    return r.job ? r.job.id : null;
+}
+
+module.exports = { queueCmaf, queuePack };
