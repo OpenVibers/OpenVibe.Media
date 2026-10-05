@@ -37,8 +37,10 @@ function isFinalizing(vodId) {
 
 // Public shape of a vod row for API responses + webhooks. { readiness: true } (API responses) adds the
 // object's readiness levels (server/objects/readiness.js); webhook payloads leave them out (their shape
-// predates the object model and stays as it is).
-async function vodPublic(vod, { readiness = false } = {}) {
+// predates the object model and stays as it is). `hls` selects the playlist fields: undefined = discover
+// them for this row (a single-item read), false = omit them (an event payload must never carry a signed
+// URL into the outbox), an object = the answer the list route already batched (objects/hls.discoveryMany).
+async function vodPublic(vod, { readiness = false, hls } = {}) {
     if (!vod) return null;
     const out = {
         unique_views: vod.unique_views || 0,
@@ -82,7 +84,8 @@ async function vodPublic(vod, { readiness = false } = {}) {
     // GET /o/:id/download?format=json — unsigned for an open object, a signed playlist (+ hls_expires_at) for a private
     // or sandbox one. Absent with MEDIA_HLS_ENABLED off, before the object is ready, and until its timeline exists
     // (object.cmaf is queued for it, idempotently). Never throws.
-    Object.assign(out, await require('../objects/hls').discovery(vod.object_id) || {});
+    if (hls === undefined) Object.assign(out, await require('../objects/hls').discovery(vod.object_id) || {});
+    else if (hls) Object.assign(out, hls);
     if (readiness) out.readiness = await require('../objects/readiness').forRow(vod);
     return out;
 }
@@ -123,7 +126,7 @@ function rebuildWebmFromMaster(masterPath, webmPath) {
  */
 async function _commitVodOutcome(vod, event, change, row = async () => await db.getVodById(vod.id)) {
     try {
-        return (await announce(vod.app_id, event, { change: async () => await objects().withObject('vod', vod.id, change), payload: async () => await vodPublic(row()) })).data;
+        return (await announce(vod.app_id, event, { change: async () => await objects().withObject('vod', vod.id, change), payload: async () => await vodPublic(row(), { hls: false }) })).data;
     } catch (err) {
         console.error(`[VOD] vod ${vod.id}: ${event} not committed:`, err.message);
         return null;
@@ -388,7 +391,7 @@ async function _doFinalize(vodId, opts) {
     await announce(vod.app_id, 'vod.ready', {
         change: async () => await objects().withObject('vod', vodId, async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
             [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId])),
-        payload: async () => await vodPublic(await db.getVodById(vodId)),
+        payload: async () => await vodPublic(await db.getVodById(vodId), { hls: false }),
     });
     const ready = await db.getVodById(vodId);
     // Segment-native video (MEDIA_HLS_ENABLED): the finished recording's timeline is cut by object.cmaf. A queue error

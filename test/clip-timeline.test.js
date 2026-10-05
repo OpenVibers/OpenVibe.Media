@@ -132,6 +132,84 @@ const express = require('express');
         assert.ok(vlist.body.vods.find((v) => v.id === vodId).hls_url, 'the VOD list carries hls_url too');
         console.log('✅ GET /vods/:id: hls_url signed for a private VOD, plain for a public one, and it plays');
 
+        // ── A list read is a constant number of timeline queries and never queues object.cmaf (F3.c review) ──
+        // The HLS fields of a page come from objects/hls.discoveryMany: one batched timeline query, not one per row,
+        // and a list is not the place to queue object.cmaf (finalize and /download already do).
+        {
+            const timelineQueue = require('../server/objects/timeline-queue');
+            const realQueueCmaf = timelineQueue.queueCmaf;
+            const realAll = db.all;
+            let queued = 0;
+            let timelineQueries = 0;
+            timelineQueue.queueCmaf = async (...a) => { queued++; return await realQueueCmaf(...a); };
+            db.all = async (sql, params) => { if (/media_timeline/.test(sql)) timelineQueries++; return await realAll(sql, params); };
+            const bulk = [];
+            try {
+                for (let i = 0; i < 6; i++) {
+                    const oid = await model.createObject({ app_id: 'live', owner_user_id: 5, visibility: 'public', lifecycle_status: 'ready', kind: 'vod', mime_type: 'video/mp4', size_bytes: 1 });
+                    const vid = (await db.run('INSERT INTO vods (app_id, object_id, title, visibility, is_public) VALUES (?, ?, ?, ?, 1) RETURNING id', ['live', oid, `Bulk ${i}`, 'public'])).lastInsertRowid;
+                    bulk.push({ vid, oid });
+                }
+                await timeline.replace(bulk[0].oid, 'source', src);   // one of them has a timeline
+
+                timelineQueries = 0;
+                const one = await call('GET', '/api/v1/live/vods?limit=1&include_private=1');
+                assert.strictEqual(one.status, 200, JSON.stringify(one.body));
+                const q1 = timelineQueries;
+                timelineQueries = 0;
+                const many = await call('GET', '/api/v1/live/vods?limit=50&include_private=1');
+                assert.ok(many.body.vods.length >= 4, `the page lists the bulk VODs (${many.body.vods.length})`);
+                assert.strictEqual(timelineQueries, q1, `a page of ${many.body.vods.length} VODs runs the same number of timeline queries as one`);
+                assert.strictEqual(timelineQueries, 1, 'exactly one batched timeline query answers the page');
+                assert.strictEqual(queued, 0, 'a list request never queues object.cmaf');
+                const withHls = many.body.vods.find((v) => v.id === bulk[0].vid);
+                assert.strictEqual(withHls.hls_url, `${config.publicUrl}/o/${bulk[0].oid}/master.m3u8`, 'the batched answer reaches the row');
+            } finally {
+                db.all = realAll;
+                timelineQueue.queueCmaf = realQueueCmaf;
+            }
+        }
+
+        // ── A single-item read still queues object.cmaf for a timeline-less object, deduped per process ──
+        {
+            const timelineQueue = require('../server/objects/timeline-queue');
+            const realQueueCmaf = timelineQueue.queueCmaf;
+            let calls = 0;
+            timelineQueue.queueCmaf = async (...a) => { calls++; return await realQueueCmaf(...a); };
+            try {
+                const fresh = await db.createVod({ app_id: 'live', title: 'No timeline', visibility: 'private' });
+                const freshId = fresh.lastInsertRowid;
+                await db.run("UPDATE media_objects SET lifecycle_status = 'ready' WHERE id = ?", [(await db.getVodById(freshId, 'live')).object_id]);
+                assert.strictEqual((await call('GET', `/api/v1/live/vods/${freshId}`)).status, 200);
+                assert.strictEqual((await call('GET', `/api/v1/live/vods/${freshId}`)).status, 200);
+                assert.strictEqual(calls, 1, 'two immediate reads queue object.cmaf once (10-minute in-process dedupe)');
+            } finally {
+                timelineQueue.queueCmaf = realQueueCmaf;
+            }
+        }
+
+        // ── An event payload never carries a playlist URL (F3.c review): announce() feeds the durable outbox ──
+        // vodPublic also shapes vod.ready and _clipPublic shapes clip.ready/clip.failed; a private VOD's signed
+        // hls_url would otherwise sit in the outbox for up to 12 h and reach every subscriber.
+        {
+            const events = require('../server/events');
+            const realRecord = events.record;
+            const captured = [];
+            events.record = async (event, appId, data) => { captured.push({ event, data }); return await realRecord(event, appId, data); };
+            try {
+                // The private source's timeline now exists, so a second finalize announces vod.ready with it present.
+                assert.ok(await finalizeVod(vodId), 'the second finalize settles');
+                const vodReady = captured.filter((e) => e.event === 'vod.ready').pop();
+                assert.ok(vodReady, 'vod.ready was announced');
+                assert.ok(!('hls_url' in vodReady.data) && !('hls_expires_at' in vodReady.data), 'a vod.ready payload never carries a playlist URL');
+            } finally {
+                events.record = realRecord;
+            }
+            // Positive control: the private VOD's own API shape still answers a signed playlist.
+            const api = await call('GET', `/api/v1/live/vods/${vodId}`);
+            assert.ok(api.body.hls_url && new URL(api.body.hls_url).searchParams.get('sig'), 'the API shape still answers a signed hls_url');
+        }
+
         // ── A clip over it is virtual: ready at once, no clip.cut ──
         r = await call('POST', '/api/v1/live/clips', { vod_id: vodId, start_s: 5, end_s: 11, visibility: 'private', title: 'Virtual' });
         assert.strictEqual(r.status, 201, JSON.stringify(r.body));
@@ -256,6 +334,30 @@ const express = require('express');
         assert.ok(!('hls_url' in (await call('GET', `/api/v1/live/clips/${clipId}`)).body), 'flag off: the clip omits hls_url');
         config.hls.enabled = true;
         console.log('✅ MEDIA_HLS_ENABLED off: clips are cut as before');
+
+        // ── A clip.ready payload likewise never carries the (signed) playlist URL ──
+        {
+            const clipJobs = require('../server/vod/clip-jobs');
+            const payloadClip = (await db.createClip({ app_id: 'live', vod_id: vodId, user_id: 5, title: 'Payload', file_path: null, start_time: 16.5, end_time: 18.5,
+                duration_seconds: 2, is_public: 0, visibility: 'private', status: 'processing' })).lastInsertRowid;
+            const win = await clipJobs.timelineWindow(await db.getVodById(vodId), 16.5, 18.5);
+            assert.ok(win, 'a window over the source timeline');
+            const events = require('../server/events');
+            const realRecord = events.record;
+            const captured = [];
+            events.record = async (event, appId, data) => { captured.push({ event, data }); return await realRecord(event, appId, data); };
+            try {
+                await clipJobs.makeVirtual(payloadClip, win);
+            } finally {
+                events.record = realRecord;
+            }
+            const clipReady = captured.filter((e) => e.event === 'clip.ready').pop();
+            assert.ok(clipReady, 'clip.ready was announced');
+            assert.ok(!('hls_url' in clipReady.data) && !('hls_expires_at' in clipReady.data), 'a clip.ready payload never carries a playlist URL');
+            // Positive control: the clip's API shape still answers a signed playlist.
+            const api = await require('../server/vod/clips-routes').clipPublic(await db.getClipById(payloadClip), { readiness: true });
+            assert.ok(api.hls_url && new URL(api.hls_url).searchParams.get('sig'), 'the clip API shape still answers a signed hls_url');
+        }
 
         server.close();
         fs.rmSync(tmp, { recursive: true, force: true });
