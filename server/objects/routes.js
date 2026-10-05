@@ -778,7 +778,7 @@ const publicRouter = express.Router();
 // Like GET /o/:id, a private or sandbox answer carries no Access-Control-Allow-Origin; a public one may be read cross-origin.
 // A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
-const SEGMENT_NAME = /^(init\.mp4|\d{6,}\.m4s)$/;
+const SEGMENT_NAME = /^(init\.mp4|\d{6,9}\.m4s)$/;
 const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 // clipWindow/timelineOf (a clip's window over its source, and the rows its playlists are written from) live in
 // objects/hls.js, shared with the v1 VOD/clip discovery.
@@ -883,11 +883,13 @@ publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, { obj, closed })
     const headers = { 'Content-Type': mime, 'Cache-Control': closed ? 'private, no-store' : 'public, max-age=3600' };
     const packed = !!row.packed_object_id;
     const slice = { offset: Number(row.byte_offset), length: Number(row.byte_length), headers };
-    // The router ranks this node's copy and the durable one (no viewer demand counted per segment: segment-bucket demand
-    // comes later). A local file is streamed; a remote unpacked segment is a redirect to a short presigned URL; a remote
-    // packed one is read as a byte range of its chunk here, since a redirect cannot carry the segment's range.
+    // The router ranks this node's copy and the durable one, and the served read counts as demand for the object and
+    // its segment (the timeline's own bucket): a hot beginning is visible apart from a cold middle. A local file is
+    // streamed; a remote unpacked segment is a redirect to a short presigned URL; a remote packed one is read as a byte
+    // range of its chunk here, since a redirect cannot carry the segment's range.
     const router = require('../placement/router');
-    const decision = await router.route({ locations: timeline.locationsOf(row), purpose: 'playback', session: router.sessionFor(req, `${obj.id}/source`),
+    const decision = await router.route({ locations: timeline.locationsOf(row), objectId: obj.id, segment: name,
+        purpose: 'playback', session: router.sessionFor(req, `${obj.id}/source`),
         contentType: mime, expiresIn: 300, presign: !packed });
     for (const loc of decision.candidates || []) {
         if (loc.provider === 'local') {
