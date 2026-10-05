@@ -52,7 +52,9 @@ const crypto = require('crypto');
         const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith('.js')) for (const m of fs.readFileSync(p, 'utf8').matchAll(/process\.env\.([A-Z0-9_]+)/g)) names.add(m[1]); } };
         walk(path.join(ROOT, 'server'));
         for (const line of fs.readFileSync(path.join(ROOT, '.env.example'), 'utf8').split('\n')) { const m = /^\s*#?\s*([A-Z][A-Z0-9_]+)=/.exec(line); if (m) names.add(m[1]); }
-        const secretish = [...names].filter(n => /SECRET|_KEY$|_KEYS$|KEY_ID$|TOKEN|PASSWORD|PASSWD|CREDENTIAL|_SEED$|PRIVATE/.test(n) && !/_(S|MS|MB|GB|MIN|HOURS|DAYS)$/.test(n));   // not the numeric settings (MEDIA_UPLOAD_TOKEN_TTL_S)
+        // Public by protocol, not secrets: an IndexNow key is served at /<key>.txt for search engines to verify.
+        const PUBLIC_BY_DESIGN = new Set(['INDEXNOW_KEY']);
+        const secretish = [...names].filter(n => /SECRET|_KEY$|_KEYS$|KEY_ID$|TOKEN|PASSWORD|PASSWD|CREDENTIAL|_SEED$|PRIVATE/.test(n) && !/_(S|MS|MB|GB|MIN|HOURS|DAYS)$/.test(n) && !PUBLIC_BY_DESIGN.has(n));   // not the numeric settings (MEDIA_UPLOAD_TOKEN_TTL_S)
         assert.ok(secretish.length >= 10, `found the secret variables (${secretish})`);
         for (const n of secretish) assert.ok(Object.prototype.hasOwnProperty.call(SECRET_ENV, n), `${n} is read by the service: give it a sentinel in test/security-secrets.test.js`);
     }

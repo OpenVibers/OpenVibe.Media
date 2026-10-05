@@ -46,7 +46,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
 - `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.28.0 (tokens, events outbox, per-actor limits),
-  `openvibe-shared` v2.5.0, pinned by release tarball
+  `openvibe-shared` v2.10.0, pinned by release tarball
 
 ## Capabilities
 
@@ -115,7 +115,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v2.5.0, openvibe-contracts v0.79.0, openvibe-sdk v0.28.0: pinned release tarballs, installed by npm)
+(openvibe-shared v2.10.0, openvibe-contracts v0.79.0, openvibe-sdk v0.28.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -467,6 +467,7 @@ Counters are per process (a restart forgets them). `test/actor-limits.test.js`.
 | `GET /robots.txt` | crawler policy (`openvibe-shared/seo.robotsTxt`: AI and search crawlers named, `/api/`, `/auth/`, `/internal/`, `/o/`, `/metrics`, `/live/`, `/me` disallowed) and the sitemap |
 | `GET /sitemap.xml` | the media index and the watch pages Media is the canonical home of: public, playable VODs and clips of apps other than Live (Live lists its own `/vod` and `/clip` pages), never AI clips, private, unlisted, sandbox, recording or failed items; thumbnails as image entries. Every listed page renders `index, follow` |
 | `GET /llms.txt` | a map of the site for language-model crawlers |
+| `GET /llms-full.txt` | the same map plus the full text of the index and the newest watch pages Media is the canonical home of (`openvibe-shared/seo.llmsFull`; rendering stops at 512 KB, and any further pages become its "truncated" line) |
 | `GET /live/:sel/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot, extracted from its in-progress recording. `:sel` = slot id (`1`), slot **slug** (`whip`), or **`@username`** (that streamer's top-viewed live slot; slug/username resolve via the app's `/api/streams` listing, cached 5s). Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`; internal base URLs from `APP_INTERNAL_URLS` JSON env or `LIVE_APP_INTERNAL_URL`). Cached **5s per slot** (that cache is the rate limit), CORS-open for external APIs/bots/dashboards. Not live → **404 with a styled OFFLINE card** (real JPEG bytes — dev pipelines decode the body as image/jpeg) so `<img>` embeds degrade nicely (`?format=json` for JSON errors); `503` + card when live but a frame can't be cut. |
 
 Watch pages (`/v/:id`, `/c/:id` on a browser navigation) offer a player only when the item's

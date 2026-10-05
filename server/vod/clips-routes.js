@@ -424,7 +424,11 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
             if (req.authType !== 'app') return res.status(403).json({ error: 'auto_generated is set by the app only' });
             await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]));
         }
-        if (visibility !== undefined) await db.setClipVisibility(clip.id, visibility);
+        if (visibility !== undefined) {
+            await db.setClipVisibility(clip.id, visibility);
+            // Made public (or already public): its watch page and the sitemap are indexable now.
+            await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clip.id));
+        }
         res.json({ clip: await clipPublic(await db.getClipById(clip.id, req.appId), { readiness: true }) });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update clip' });
