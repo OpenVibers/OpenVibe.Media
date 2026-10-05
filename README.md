@@ -45,7 +45,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.28.0 (tokens, events outbox, per-actor limits),
+- `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.32.0 (tokens, events outbox, usage readings, per-actor limits),
   `openvibe-shared` v2.10.0, pinned by release tarball
 
 ## Capabilities
@@ -117,7 +117,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v2.10.0, openvibe-contracts v0.79.0, openvibe-sdk v0.28.0: pinned release tarballs, installed by npm)
+(openvibe-shared v2.10.0, openvibe-contracts v0.79.0, openvibe-sdk v0.32.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -439,6 +439,40 @@ before the route does any work, and one `[Limits]` log line and `media_rate_limi
 
 Never limited: `/healthz`, `/api/ready`, `/release.json`, `/metrics`, the signed `/internal/events` deliveries.
 Counters are per process (a restart forgets them). `test/actor-limits.test.js`.
+
+## Usage readings → Billing
+
+Media's storage usage goes to OpenVibe.Billing as one `platform.usage-sample@1` reading per (project, subject,
+tier) where a project's work is billable (`server/billing.js`, plan T5 step 14):
+
+| metric (`resource`) | what | period | unit | provider |
+|---|---|---|---|---|
+| `gb-month` | bytes stored: every present copy in `media_locations`, summed by tier, counted once when more than one object names a location and billed to the oldest owner, as that day's share of a GB-month | closed UTC day | `GB` | the tier (`local`/`b2`/`r2`) |
+
+**Media emits `gb-month` only.** `gib-delivered` is deliberately not emitted: `demand.record()` counts `route()`
+calls, not bytes, so reads × `size_bytes` would bill aborted downloads and range reads in full, would bill
+presigned B2/R2 redirects Media never serves, and would miss HLS segment reads. It comes back once responses are
+metered by the bytes actually written (`sendSlice`/`streamFileWithRange`) and redirected reads are metered by CDN
+logs. Nothing here bills delivery.
+
+Only the newest closed UTC day is aggregated, because the query reads `media_locations`' current state: a day
+missed while the service was down is not billed (a reading never claims today's state for an older day).
+
+First-party traffic (a tenant with no project) and sandbox tenants are never recorded; an object without an
+`owner_subject` is still stored with its project (Billing leaves it unrated until it names a user subject).
+The SDK reporter (`openvibe-sdk/usage createUsageReporter`) queues each reading idempotency-keyed in
+`billing_readings` inside the aggregation's transaction and relays it to Billing's `POST /api/v1/usage`
+(`billing.usage.record`) with Media's Network service token (`clientId` `media`, audience `openvibe.billing`;
+OpenVibe.Network grants exactly that). A relay that cannot reach Billing (no grant, a missing route, a timeout,
+backpressure, a 401/403/404/408/425/429 or a 5xx) stays pending with backoff across restarts; only Billing
+refusing the reading itself (any other 4xx) is marked rejected and never retried, so nothing is billed twice.
+A stored reading is never edited (a trigger). Re-aggregating a day inserts nothing
+(`billing_periods`).
+
+**Off by default.** `MEDIA_BILLING_INTERVAL_MS=0` (the default) starts no timer and aggregates nothing; a
+restore drill starts nothing at all. Turn it on with `MEDIA_BILLING_INTERVAL_MS` plus `OV_BILLING_URL` and,
+only if it differs, `OV_BILLING_AUDIENCE`; without a billing URL or `OV_OAUTH_CLIENT_SECRET` readings are
+aggregated and stay queued. The runbook is `docs/cutover-media-billing-readings.md`; `test/billing.test.js`.
 
 ## Health, readiness and metrics
 

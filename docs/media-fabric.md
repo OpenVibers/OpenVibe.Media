@@ -378,6 +378,14 @@ request/playback → telemetry → Events → {Hotness, Health, Cost} engines �
 (GraphQL), B2 usage reports, Bunny statistics API are imported daily, compared with the estimate, and the gap is a
 metric. Budgets per class and provider with a forecast; `media.provider.cost_threshold` at 90 % shifts non-critical traffic.
 
+**Media's own usage readings (plan T5 step 14):** Media emits `gb-month` — one `platform.usage-sample@1` reading per
+(project, subject, tier) per closed UTC day, that day's share of a GB-month from the present `media_locations` copies
+(`server/billing.js`, off by default with `MEDIA_BILLING_INTERVAL_MS`). `gib-delivered` is deliberately not emitted:
+`demand.record()` counts `route()` calls, not bytes, so reads × `size_bytes` would bill aborted downloads and range
+reads in full, would bill presigned B2/R2 redirects Media never serves, and would miss HLS segment reads. It comes
+back once responses are metered by the bytes actually written (`sendSlice`/`streamFileWithRange`) and redirected
+reads are metered by CDN logs. Nothing here bills delivery.
+
 ## 10. Build order
 
 - **F1 foundation (shipped):** provider registry + capability probes; `media.cost_tiers` + per-class budgets in a revisioned
