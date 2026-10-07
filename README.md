@@ -733,3 +733,9 @@ fixtures (`npm run n-1:record`).
 
 Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the
 restart; afterwards `sudo ovhost rollback media --to <sha>`.
+
+<!-- versions:start -->
+- openvibe-contracts: v0.112.0
+- openvibe-sdk: v0.32.0
+- openvibe-shared: v2.13.0
+<!-- versions:end -->
