@@ -45,7 +45,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.79.0, `openvibe-sdk` v0.32.0 (tokens, events outbox, usage readings, per-actor limits),
+- `openvibe-contracts` v0.107.0, `openvibe-sdk` v0.32.0 (tokens, events outbox, usage readings, per-actor limits),
   `openvibe-shared` v2.10.0, pinned by release tarball
 
 ## Capabilities
@@ -55,6 +55,10 @@ namespace against the token's `ns`): `media.object.upload`, `media.object.read`,
 `media.object.delete`, `media.upload.create`, `media.derivative.create`, `media.derivative.read`,
 `media.lifecycle.read` and `media.lifecycle.transition`. First-party apps also use their tenant API
 key ([Tenancy & auth](#tenancy--auth)).
+
+| Capability | Audience | Route | Notes |
+|---|---|---|---|
+| `media.resource.read` | first-party | `GET /api/v1/resources`, `GET /api/v1/resources/:ovrn` | the authority resource index ([Resource index](#resource-index-apiv1resources-first-party)). Its manifest is `planned` in openvibe-contracts until Network grants it after this deploys; the route already enforces it (a Network service token holding it, loopback, audience `openvibe.media`) |
 
 Called elsewhere, as the service principal `media` (the OAuth client `media`):
 
@@ -93,6 +97,7 @@ server/
   pastes/storage.js      screenshot dir + slug minting kept after the pastes API was retired
   files/routes.js        /api/v1/:app/files
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
+  registry/resource-index.js  the authority resource index (/api/v1/resources; common.resource-summary@1, ADR-048)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
   public/routes.js       public /v /c /p /t /f
   me/                    the object explorer: /me and /api/v2/me (a signed-in person's own objects, uploads,
@@ -379,6 +384,37 @@ stage every deletion and visibility change in the transaction that makes it, whi
 envelopes inside Media's own transactions (projection sync, `announce()`, soft delete), so those
 commit with their change, and the relay drains anything else. No visibility event for an object
 that is deleted; none for sandbox tenants. `test/object-events.test.js`.
+
+## Resource index (`/api/v1/resources`, first-party)
+
+Media's authority resource index (ADR-048 §3, plan T13 step 8): the resources Media owns, as
+`common.resource-summary@1` — the shape OpenVibe.Services fans out over and merges. It lists Media's
+**objects alone** (`kind` `media.object`, id `med_<ULID>`, the `media_objects` table): v1 vods, clips and
+files are projections over objects (bigint ids) and are never listed.
+
+```
+GET /api/v1/resources[?project=<prj_ id>&kind=<kind>&cursor=<opaque>&limit=<n>]  → common.resource-list-result@1
+GET /api/v1/resources/:ovrn                                                       → common.resource-summary@1
+```
+
+| Param | Meaning |
+|---|---|
+| `project` | the tenancy boundary: a `prj_` id. Only that project's rows answer (its production and sandbox tenants); never another project's. Omitted, the first-party caller sees every Media resource |
+| `kind` | `media.object` (the only kind Media owns). An unknown kind is an empty page, not an error |
+| `cursor` | opaque keyset cursor from the previous page's `next_cursor`, ordered by id |
+| `limit` | page size, default 100, max 1000 |
+
+Auth is a Network service token holding `media.resource.read`, loopback only (audience `openvibe.media`;
+`server/service-guard.js`) — the same first-party check as the other internal routes. No token is
+401, a token without the capability 403. A bad query is 400 `resources.bad_query`; an unknown or
+unnameable resource is 404 `resources.unknown_resource`.
+
+An object's `project_id` is its tenant's (`apps.project_id`); a first-party tenant (`live`, …) has none, so
+its objects carry no `project_id` and no `ovrn`. The summary's `ovrn` is composed by openvibe-contracts'
+`contracts.resources.nameOf` — the one formatter — so it is present exactly when the object has a project
+(`ovrn:media:<project_id>:object/<med_…>`); `GET /api/v1/resources/:ovrn` reads one by that name, and only a
+resource whose computed name equals the one asked for answers. `owner` is a `subject-ref` when the object
+stores a `usr_` owner. `test/resource-index.test.js`.
 
 ## Restore drills (`MEDIA_DRILL=1`)
 
