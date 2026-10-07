@@ -45,7 +45,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.107.0, `openvibe-sdk` v0.32.0 (tokens, events outbox, usage readings, per-actor limits),
+- `openvibe-contracts` v0.112.0, `openvibe-sdk` v0.32.0 (tokens, events outbox, usage readings, per-actor limits),
   `openvibe-shared` v2.13.0, pinned by release tarball
 
 ## Capabilities
@@ -58,7 +58,7 @@ key ([Tenancy & auth](#tenancy--auth)).
 
 | Capability | Audience | Route | Notes |
 |---|---|---|---|
-| `media.resource.read` | first-party | `GET /api/v1/resources`, `GET /api/v1/resources/:ovrn` | the authority resource index ([Resource index](#resource-index-apiv1resources-first-party)). Its manifest is `planned` in openvibe-contracts until Network grants it after this deploys; the route already enforces it (a Network service token holding it, loopback, audience `openvibe.media`) |
+| `media.resource.read` | first-party | `GET /api/v1/resources`, `GET /api/v1/resources/:ovrn` | the authority resource index ([Resource index](#resource-index-apiv1resources-first-party)). Active in openvibe-contracts since 0.108.0; the route enforces it (a Network service token holding it, loopback, audience `openvibe.media`) |
 
 Called elsewhere, as the service principal `media` (the OAuth client `media`):
 
@@ -125,7 +125,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v2.13.0, openvibe-contracts v0.79.0, openvibe-sdk v0.32.0: pinned release tarballs, installed by npm)
+(openvibe-shared v2.13.0, openvibe-contracts v0.112.0, openvibe-sdk v0.32.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -733,3 +733,9 @@ fixtures (`npm run n-1:record`).
 
 Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not answer 2xx after the
 restart; afterwards `sudo ovhost rollback media --to <sha>`.
+
+<!-- versions:start -->
+- openvibe-contracts: v0.112.0
+- openvibe-sdk: v0.32.0
+- openvibe-shared: v2.13.0
+<!-- versions:end -->
