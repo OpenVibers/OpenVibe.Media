@@ -1,10 +1,9 @@
 'use strict';
-// Paste storage plumbing, shared by the public paste routes and the avatar ingest
+// Paste storage plumbing, shared by the public screenshot route and the avatar ingest
 // (which stores every avatar as an unlisted screenshot paste): where a paste's
-// screenshot bytes land, how a slug is minted (checked against the pastes table, so
-// two writes never get the same one), and how a burn-after-read screenshot is
-// removed. A leaf module — requiring it pulls in neither a router nor anything that
-// mounts one.
+// screenshot bytes land and how a slug is minted (checked against the pastes table,
+// so two writes never get the same one). A leaf module — requiring it pulls in
+// neither a router nor anything that mounts one.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -64,16 +63,4 @@ async function generateSlug(attempts = 0) {
     return slug;
 }
 
-// Fully remove a paste's screenshot from local disk AND any legacy B2 object.
-// A held screenshot keeps its bytes (the row delete that follows is refused by the hold trigger).
-async function removePasteScreenshot(paste) {
-    if (!paste) return;
-    const objects = require('../objects/model');
-    if (await objects.isHeldRow(paste.object_id !== undefined ? paste : await db.get('SELECT object_id FROM pastes WHERE id = ?', [paste.id]))) return;
-    if (paste.screenshot_path) {
-        try { fs.unlinkSync(paste.screenshot_path); } catch { /* ignore */ }
-    }
-    try { require('../vod/vod-storage').deleteLegacyPasteScreenshot(paste.id).catch(() => {}); } catch { /* ignore */ }
-}
-
-module.exports = { SCREENSHOTS_DIR, generateSlug, removePasteScreenshot };
+module.exports = { SCREENSHOTS_DIR, generateSlug };

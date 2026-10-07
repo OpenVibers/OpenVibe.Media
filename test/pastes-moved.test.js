@@ -1,7 +1,9 @@
 'use strict';
 // Pastes moved to OpenVibe.Community: Media's read-only paste API is retired (T10 step 2), so
-// /api/v1/:app/pastes is unmounted and every method there answers 404. The public /p/:slug page
-// and its text still 301 to Community when PASTES_MOVED_TO is set, and screenshot bytes are served here.
+// /api/v1/:app/pastes is unmounted and every method there answers 404. The public /p/:slug and
+// /p/:slug/raw routes are unconditional 301s to Community — no env var needed (the default is
+// config.pastes.movedTo) and no row is read: a known, missing or private slug all go there.
+// Screenshot bytes are still served here.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -10,6 +12,7 @@ const http = require('http');
 const express = require('express');
 
 (async () => {
+    delete process.env.PASTES_MOVED_TO;   // the redirect must not depend on it
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-moved-'));
     const db = require('../server/db/database');
     await db.upsertApp({ app_id: 'live', api_key: 'live-key' });
@@ -38,20 +41,26 @@ const express = require('express');
         assert.strictEqual(r.status, 404, 'no paste-read route remains');
         assert.strictEqual(await pasteCount(), rows, 'nothing creates a paste');
 
-        // Before the redirect switch: the pages are served here.
-        assert.strictEqual((await get('/p/text-1')).status, 200);
-        assert.strictEqual(await (await get('/p/text-1/raw')).text(), 'hello');
-
-        process.env.PASTES_MOVED_TO = 'https://openvibe.community/';
+        // The page and its text are Community's: a permanent 301, with no env var set.
         r = await get('/p/text-1');
-        assert.strictEqual(r.status, 301); assert.strictEqual(r.headers.get('location'), 'https://openvibe.community/p/text-1');
+        assert.deepStrictEqual([r.status, r.headers.get('location')], [301, 'https://openvibe.community/p/text-1']);
         r = await get('/p/text-1/raw');
-        assert.strictEqual(r.status, 301); assert.strictEqual(r.headers.get('location'), 'https://openvibe.community/p/text-1/raw');
-        r = await get('/p/shot-1/raw');
-        assert.strictEqual(r.status, 302); assert.strictEqual(r.headers.get('location'), '/p/shot-1/screenshot', 'image pastes keep their local bytes');
+        assert.deepStrictEqual([r.status, r.headers.get('location')], [301, 'https://openvibe.community/p/text-1/raw'], 'the raw suffix is preserved');
+
+        // No row read: a slug that has no row at all — a paste made in Community since the move — and a
+        // slug with characters an app could put in a link both redirect the same way.
+        r = await get('/p/no-such-slug');
+        assert.deepStrictEqual([r.status, r.headers.get('location')], [301, 'https://openvibe.community/p/no-such-slug']);
+        r = await get('/p/no-such-slug/raw');
+        assert.deepStrictEqual([r.status, r.headers.get('location')], [301, 'https://openvibe.community/p/no-such-slug/raw']);
+        r = await get('/p/a%2Fb%20c');
+        assert.strictEqual(r.status, 301);
+        assert.strictEqual(r.headers.get('location'), 'https://openvibe.community/p/a%2Fb%20c', 'the slug is URL-encoded, never interpolated raw');
+
+        // The frozen rows still serve their screenshot bytes (Live/Community still link them).
         r = await get('/p/shot-1/screenshot');
         assert.strictEqual(r.status, 200, 'screenshot bytes are still served here');
-        assert.ok(await db.getPasteBySlug('text-1'), 'no read deletes anything after the switch');
+        assert.ok(await db.getPasteBySlug('text-1'), 'no request deletes anything');
 
         server.close();
         fs.rmSync(tmp, { recursive: true, force: true });

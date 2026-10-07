@@ -7,9 +7,8 @@
  *   instead: player, title, source link and full SEO. wantsHtmlPage() draws
  *   that line; ?raw=1 always yields the bytes.
  *
- *   /p/:slug is a thin viewer. Pastes are canonical on OpenVibe.Community,
- *   which renders them from this API, so the page here points there
- *   (canonical + noindex) and stays useful for direct links.
+ *   /p/:slug has no page here: pastes live on OpenVibe.Community and the
+ *   route is a 301 (see public/routes.js).
  */
 'use strict';
 
@@ -189,77 +188,4 @@ function renderWatchPage(kind, record, readiness = null) {
     });
 }
 
-/** /p/:slug — thin viewer; the page's home is OpenVibe.Community. */
-function renderPastePage(paste) {
-    const slug = String(paste.slug);
-    const title = snip(paste.title || 'Untitled', 120);
-    const isScreenshot = paste.type === 'screenshot' && paste.screenshot_path;
-    const self = `${config.publicUrl}/p/${encodeURIComponent(slug)}`;
-    const communityUrl = `${appUrl('community')}/p/${encodeURIComponent(slug)}`;
-    const screenshotUrl = `${self}/screenshot`;
-    const language = paste.language || 'text';
-    const description = snip(paste.ai_summary || (isScreenshot ? (paste.content || `Screenshot "${title}" shared on the OpenVibe network.`) : (paste.content || `${language} paste shared on the OpenVibe network.`)), 200);
-    const created = isoDate(paste.created_at);
-    const updated = isoDate(paste.updated_at) || created;
-    const tags = (() => { try { const t = JSON.parse(paste.ai_tags || '[]'); return Array.isArray(t) ? t.map(String).slice(0, 12) : []; } catch { return String(paste.ai_tags || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 12); } })();
-
-    const ld = isScreenshot
-        ? {
-            '@context': 'https://schema.org', '@type': 'ImageObject',
-            name: title, description, url: communityUrl, contentUrl: screenshotUrl, mainEntityOfPage: communityUrl,
-            ...(created ? { datePublished: created } : {}), ...(updated ? { dateModified: updated } : {}),
-            ...(tags.length ? { keywords: tags.join(', ') } : {}),
-            publisher: { '@type': 'Organization', name: 'OpenVibe', url: NETWORK_URL },
-        }
-        : {
-            '@context': 'https://schema.org', '@type': 'Article',
-            headline: title, description, url: communityUrl, mainEntityOfPage: communityUrl,
-            ...(created ? { datePublished: created } : {}), ...(updated ? { dateModified: updated } : {}),
-            ...(tags.length ? { keywords: tags.join(', ') } : {}),
-            genre: language === 'text' ? 'Text paste' : `${language} code paste`,
-            isAccessibleForFree: true,
-            hasPart: { '@type': 'CreativeWork', name: title, encodingFormat: 'text/plain', url: `${self}/raw` },
-            publisher: { '@type': 'Organization', name: 'OpenVibe', url: NETWORK_URL },
-        };
-
-    const content = isScreenshot
-        ? `<figure class="shot"><img src="${esc(screenshotUrl)}" alt="${esc(title)}" loading="lazy"></figure>
-  ${paste.content ? `<p class="desc">${esc(paste.content)}</p>` : ''}`
-        : `<pre class="code" data-language="${esc(language)}"><code>${esc(paste.content || '')}</code></pre>`;
-
-    const metaBits = [
-        esc(language),
-        `${Number(paste.views || 0).toLocaleString('en-US')} views`,
-        paste.unique_views != null ? `${Number(paste.unique_views).toLocaleString('en-US')} unique` : null,
-        fmtDate(paste.created_at) || null,
-        isScreenshot ? null : `<a href="${esc(`/p/${encodeURIComponent(slug)}/raw`)}">raw</a>`,
-    ].filter(Boolean);
-
-    const body = `
-  <p class="note">This paste lives on <a href="${esc(communityUrl)}">OpenVibe.Community</a> — comments, likes and forks are there. This is the plain viewer.</p>
-  <h1>${esc(title)}</h1>
-  <p class="meta">${metaBits.map(b => `<span>${b}</span>`).join('<span aria-hidden="true">·</span>')}</p>
-  ${content}
-  <div class="actions"><a class="btn" href="${esc(communityUrl)}">Open on OpenVibe.Community</a></div>`;
-
-    const css = `
-  .code { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.2rem; overflow-x: auto; white-space: pre; font: 13px/1.5 ui-monospace, 'Cascadia Code', Menlo, monospace; margin: 0 0 1rem; }
-  .shot { margin: 0 0 1rem; }
-  .shot img { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); }`;
-
-    return pageFrame.page({
-        seo: {
-            title: `${title} — ${SITE_NAME}`, description,
-            // Canonical on Community: search engines index the paste there, not here.
-            canonical: communityUrl, robots: 'noindex, follow',
-            image: isScreenshot ? screenshotUrl : undefined, ogType: 'article',
-            twitterCard: isScreenshot ? 'summary_large_image' : 'summary',
-            jsonLd: [ld],
-        },
-        css, body,
-        history: { type: 'paste', title },
-        footer: { variant: 'compact' },
-    });
-}
-
-module.exports = { wantsHtmlPage, renderWatchPage, renderPastePage, sourcePage, watchIndexable, isAiClip };
+module.exports = { wantsHtmlPage, renderWatchPage, sourcePage, watchIndexable, isAiClip };

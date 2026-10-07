@@ -511,7 +511,7 @@ While any hold applies:
   - Quarantine cleanup and the boot junk sweep skip the object.
   - Finalize never deletes a held recording that turned out empty (no file, or zero bytes): it keeps the row and the file and settles it as failed (`missing_file` / `zero_byte`, quarantined, `vod.failed`).
   - `deleteVodObjects` keeps the bytes.
-  - Paste screenshot removal is only the burn-after-read path in `server/pastes/storage.js`, which skips a held row.
+  - A paste screenshot has no removal path left at all: the paste API and, with it, the burn-after-read delete went in T10.
   - A `BEFORE DELETE` trigger on each projected table, plus a trigger on `media_objects.lifecycle_status`, refuses the change, so paths nobody has hooked are still covered. The triggers are the `_v2` ones (clip-aware); an older database has its first-version guards replaced at start.
 - **No tier move.** `moveToCold`, `moveToHot`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }` (the admin moves answer it, R2 moves are logged as `refused`), and the sweep counts these as `skippedHeld` instead of errors. A held native object is never promoted to or demoted from the R2 cache either (logged as `refused`; a hold placed while its bytes were being copied wins, and the unrecorded copy is removed). A hold freezes an object's placement: `moveToHot` is refused too, because restoring flips the row to local and drops an R2 copy. A clip cut from a held VOD in B2/R2 is cut from the cloud copy instead of fetching the VOD home. Row updates that only record where the bytes already are (the sweep finding a local file gone while B2 has the copy, the legacy-tier migration) still happen: they move nothing.
 
