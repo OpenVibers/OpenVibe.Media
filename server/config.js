@@ -40,6 +40,10 @@ const config = {
     },
     pastes: {
         path: process.env.PASTES_PATH || './data/pastes',
+        // OpenVibe.Community is the paste authority (2026-09-22): Media's /p/:slug and
+        // /p/:slug/raw only redirect there. The origin of Community's paste URLs; the
+        // default keeps the redirect working with no env var set.
+        movedTo: String(process.env.PASTES_MOVED_TO || 'https://openvibe.community').replace(/\/+$/, ''),
     },
     assets: {
         path: process.env.ASSETS_PATH || './data/assets',

@@ -1,7 +1,7 @@
 'use strict';
 // Privacy: anyone who may not see a private item gets exactly the answer a missing id gets.
 // A 403 ("This media is private"), a 410, or a redirect that happens only for real items all
-// confirm that the item exists. Covers the public serving routes (/v /c /o /p/:slug/raw,
+// confirm that the item exists. Covers the public serving routes (/v /c /o /p/:slug,
 // /v/:id/transcript.json, legacy /api/thumbnails) and the v1 detail routes when an app acts
 // for one of its users (X-OV-User-Id).
 const assert = require('assert');
@@ -148,23 +148,18 @@ const http = require('http');
         assert.strictEqual((await get(s.url.replace('https://media.test', ''))).status, 410, 'with a valid signature the lifecycle answer is fine');
         console.log('✅ /o: private objects look missing before any lifecycle answer');
 
-        // ── Paste raw: no redirect or answer that singles out a private paste ──
-        await same(['/p/priv-text/raw'], ['/p/no-such/raw'], 'private text paste looks missing');
-        await same(['/p/priv-shot/raw'], ['/p/no-such/raw'], 'private screenshot paste: no redirect to its screenshot');
-        assert.strictEqual((await get('/p/pub-text/raw')).text, 'hello', 'public paste raw still serves');
-        process.env.PASTES_MOVED_TO = 'https://community.test';
-        r = await get('/p/no-such/raw');
-        assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/no-such/raw'], 'moved: every slug goes to Community');
-        r = await get('/p/priv-shot/raw');
-        assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/priv-shot/raw'], 'moved: a private screenshot is not bounced to /screenshot');
+        // ── Paste routes: every slug is a 301 to Community, so private, public and missing answer in
+        //    exactly the same shape and Media reads no row at all ──
+        const redirectsTo = async (p) => { const x = await get(p); assert.strictEqual(x.status, 301, `${p} redirects`); return x.location; };
+        assert.strictEqual(await redirectsTo('/p/priv-text'), 'https://openvibe.community/p/priv-text', 'a private paste page redirects like any other slug');
+        assert.strictEqual(await redirectsTo('/p/no-such'), 'https://openvibe.community/p/no-such', 'a missing slug goes to Community too');
+        assert.strictEqual(await redirectsTo('/p/pub-text'), 'https://openvibe.community/p/pub-text', 'and so does a public one');
+        assert.strictEqual(await redirectsTo('/p/priv-text/raw'), 'https://openvibe.community/p/priv-text/raw', 'raw keeps the suffix; nothing singles out a private paste');
         // /p/:slug/screenshot: a slug Media doesn't hold (pastes made in Community since the move, whose
         // screenshots hero moments linked here) goes to Community; a private one answers the same way.
-        r = await get('/p/no-such/screenshot');
-        assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/no-such/screenshot'], 'moved: an unknown screenshot slug goes to Community');
-        r = await get('/p/priv-shot/screenshot');
-        assert.deepStrictEqual([r.status, r.location], [301, 'https://community.test/p/priv-shot/screenshot'], 'moved: a private screenshot looks like an unknown one');
-        delete process.env.PASTES_MOVED_TO;
-        console.log('✅ /p/:slug/raw: private looks missing');
+        assert.strictEqual(await redirectsTo('/p/no-such/screenshot'), 'https://openvibe.community/p/no-such/screenshot', 'an unknown screenshot slug goes to Community');
+        assert.strictEqual(await redirectsTo('/p/priv-shot/screenshot'), 'https://openvibe.community/p/priv-shot/screenshot', 'a private screenshot looks like an unknown one');
+        console.log('✅ /p/:slug: private looks missing (every slug redirects)');
 
         // ── v1 detail routes when the app acts for a user ──
         await same(['/api/v1/live/vods/2', asUser(77)], ['/api/v1/live/vods/999', asUser(77)], 'acting non-owner: private VOD looks missing');

@@ -1,6 +1,6 @@
 'use strict';
 // The public pages: /v and /c watch pages on browser navigation (bytes otherwise),
-// the paste viewer's Community canonical, and the OpenVibe Frame + SEO on all of them.
+// the paste redirect to Community, and the OpenVibe Frame + SEO on the pages.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -68,28 +68,13 @@ const http = require('http');
     const unlisted = pages.renderWatchPage('clip', { ...vod, id: 8, app_id: 'games', visibility: 'unlisted' });
     assert.ok(unlisted.includes('content="noindex, follow"'), 'unlisted never indexes');
 
-    // ── Paste viewer: canonical on Community, noindex, Article JSON-LD ──
-    const paste = { slug: 'abc-123', title: 'hello.js', type: 'paste', content: 'console.log("hi")', language: 'javascript', views: 3, unique_views: 2, created_at: '2026-09-01 10:00:00', updated_at: '2026-09-02 10:00:00', ai_tags: '["js","demo"]' };
-    const ph = pages.renderPastePage(paste);
-    assert.ok(ph.includes('<link rel="canonical" href="https://openvibe.community/p/abc-123">'));
-    assert.ok(ph.includes('<meta name="robots" content="noindex, follow">'));
-    assert.ok(ph.includes('href="https://openvibe.community/p/abc-123"'), 'header links to the Community page');
-    assert.ok(ph.includes('console.log(&quot;hi&quot;)'));
-    assert.ok(ph.includes('"history":{"type":"paste","title":"hello.js"}'));
-    const pld = JSON.parse(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(ph)[1]);
-    assert.strictEqual(pld['@type'], 'Article');
-    assert.strictEqual(pld.mainEntityOfPage, 'https://openvibe.community/p/abc-123');
-    assert.strictEqual(pld.keywords, 'js, demo');
-    const shot = pages.renderPastePage({ ...paste, slug: 'img-1', type: 'screenshot', screenshot_path: '/x/y.png', content: 'a caption' });
-    assert.ok(shot.includes('<meta property="og:image" content="https://media.test/p/img-1/screenshot">'));
-    assert.ok(shot.includes('"@type":"ImageObject"'));
-    assert.ok(!/\bfree\b/i.test(html + ph + shot + pageFrame.baseCss()), 'no cost claims in served HTML');
+    // Paste pages are Community's: there is no viewer here (public/routes.js only redirects).
+    assert.ok(!/\bfree\b/i.test(html + pageFrame.baseCss()), 'no cost claims in served HTML');
 
     // ── End to end through the router: navigation → page, ?raw=1 → bytes path ──
     const express = require('express');
     const raw = db.getDb();
     await raw.prepare(`INSERT INTO vods (id, app_id, title, file_path, is_public, visibility, duration_seconds) OVERRIDING SYSTEM VALUE VALUES (?, ?, ?, ?, 1, 'public', 10) RETURNING id`).run(42, 'live', 'Router VOD', '/nonexistent/vod-42.mp4');
-    await raw.prepare(`INSERT INTO pastes (slug, app_id, title, type, content, language, visibility) VALUES (?, 'live', 'P', 'paste', 'x', 'text', 'public') RETURNING id`).run('slug1');
     const app = express();
     app.use('/', require('../server/public/routes'));
     const server = app.listen(0);
@@ -115,8 +100,7 @@ const http = require('http');
         r = await get('/v/42', { accept: 'video/webm,video/ogg,video/*;q=0.9,*/*;q=0.5', 'sec-fetch-dest': 'video' });
         assert.strictEqual(r.status, 404, 'a <video> element never gets HTML');
         r = await get('/p/slug1', nav);
-        assert.strictEqual(r.status, 200);
-        assert.ok(r.body.includes('https://openvibe.community/p/slug1'));
+        assert.deepStrictEqual([r.status, r.headers.location], [301, 'https://openvibe.community/p/slug1'], 'the paste page is a redirect, no row needed');
         r = await get('/og-image.png', {});
         assert.strictEqual(r.status, 200);
         assert.strictEqual(r.headers['content-type'], 'image/png');

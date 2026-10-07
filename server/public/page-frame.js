@@ -225,8 +225,8 @@ function page({ seo, css = '', body, history, footer }) {
         footer: footerOptions(footer),
     });
     // The shell picks the card from whether a large image is present; a page can ask for the small
-    // card explicitly (the paste viewer, a screenshot-less paste). seo.headTags has no override, so
-    // swap the one tag it emitted after the fact.
+    // card explicitly (the account pages). seo.headTags has no override, so swap the one tag it
+    // emitted after the fact.
     if (seo.twitterCard && seo.twitterCard !== 'summary_large_image') {
         return html.replace('<meta name="twitter:card" content="summary_large_image">', `<meta name="twitter:card" content="${esc(seo.twitterCard)}">`);
     }

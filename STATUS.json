@@ -20,7 +20,7 @@
     "media.lifecycle.transition"
   ],
   "capabilitiesRegistered": true,
-  "pastes": "OpenVibe.Community is the paste authority since 2026-09-22 (PASTES_MOVED_TO); Media's read-only paste API is deleted (T10 step 2: /api/v1/:app/pastes is unmounted), /p/:slug 301s to Community and Media serves screenshot bytes only",
+  "pastes": "OpenVibe.Community is the paste authority since 2026-09-22 (PASTES_MOVED_TO, default https://openvibe.community); Media's read-only paste API is deleted (T10 step 2: /api/v1/:app/pastes is unmounted) and /p/:slug and /p/:slug/raw are unconditional 301s there (no row read), so Media serves only the frozen rows' screenshot bytes",
   "deployed": true,
   "deployment": "Public at https://openvibe.media: deployed with `sudo ovhost deploy media` (restart refused while a VOD records; --wait-idle), /opt/openvibe.media, unit openvibe-media on 127.0.0.1:4100 behind the openvibe.media nginx vhost, principal media.",
   "features": [

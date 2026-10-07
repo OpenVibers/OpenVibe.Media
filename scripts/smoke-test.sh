@@ -105,7 +105,7 @@ echo "$HDRS" | head -1 | grep -q ' 206 ' && ok "Range request → 206 Partial Co
 echo "$HDRS" | grep -qi '^content-range: bytes 0-99/' && ok "Content-Range header present" || bad "Content-Range header"
 echo "$HDRS" | grep -qi '^x-robots-tag: noindex' && ok "/v is noindex" || bad "/v noindex header"
 
-echo "-- pastes: API retired (OpenVibe.Community owns pastes), public routes still serve"
+echo "-- pastes: API retired (OpenVibe.Community owns pastes), /p/:slug redirects there"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/live/pastes" -H "$AUTH" -H 'Content-Type: application/json' \
     -d '{"title":"Smoke paste","content":"hello from the smoke test"}')
 check "paste create → 404 (no route)" "404" "$CODE"
@@ -114,6 +114,9 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/live/pastes"
 check "screenshot paste create → 404" "404" "$CODE"
 CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/live/pastes" -H "$AUTH")
 check "paste list → 404" "404" "$CODE"
+PHDRS=$(curl -s -D - -o /dev/null "$BASE/p/any-slug-at-all")
+echo "$PHDRS" | head -1 | grep -q ' 301 ' && ok "GET /p/:slug → 301 to Community" || bad "GET /p/:slug ($(echo "$PHDRS" | head -1))"
+echo "$PHDRS" | grep -qi "^location: https://openvibe.community/p/any-slug-at-all" && ok "/p/:slug Location names Community" || bad "/p/:slug Location"
 
 echo "-- admin storage: overview + vod listing"
 R=$(curl -s "$BASE/api/v1/live/admin/storage" -H "$AUTH")

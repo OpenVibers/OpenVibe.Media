@@ -197,8 +197,14 @@ const crypto = require('crypto');
             await same([`/c/${privClip}`, { ...h, ...key('games-key') }], ['/c/999999', { ...h, ...key('games-key') }], 'another app\'s key is nobody special on /c');
             await same([`/c/${privClip}`, { ...h, ...asUser(77) }], ['/c/999999', { ...h, ...asUser(77) }], 'another user on /c');
         }
-        await same(['/p/priv-page', nav], ['/p/no-such-paste', nav], 'a private paste page looks missing');
-        await same(['/p/priv-page', { ...nav, ...asUser(77) }], ['/p/no-such-paste', { ...nav, ...asUser(77) }], 'a private paste page, for another user');
+        // The paste page is a 301 to Community for every slug: a private one is indistinguishable from
+        // an unknown one, and no identity changes that — Media reads no row on this route.
+        for (const h of [nav, { ...nav, ...asUser(77) }, { ...nav, ...key('games-key') }]) {
+            let r = await get('/p/priv-page', h);
+            assert.deepStrictEqual([r.status, r.location], [301, 'https://openvibe.community/p/priv-page'], 'a private paste page redirects to Community');
+            r = await get('/p/no-such-paste', h);
+            assert.deepStrictEqual([r.status, r.location], [301, 'https://openvibe.community/p/no-such-paste'], 'an unknown slug redirects the same way');
+        }
         await same([`/api/v1/games/vods/${pubVod}`, key('games-key')], ['/api/v1/games/vods/999999', key('games-key')], 'another app cannot read this app\'s VOD by id');
         await same([`/api/v1/games/clips/${privClip}`, key('games-key')], ['/api/v1/games/clips/999999', key('games-key')], 'nor its clip');
         const projected = await raw.prepare('SELECT id, visibility FROM media_objects WHERE legacy_ref IS NOT NULL AND id IN (SELECT object_id FROM vods WHERE id IN (?, ?) UNION SELECT id FROM media_objects WHERE legacy_ref ILIKE ? OR legacy_ref ILIKE ?)')

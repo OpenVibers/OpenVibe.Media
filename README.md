@@ -7,8 +7,8 @@ OpenVibe.Live predecessor. Owns VOD ingest/recording, storage tiering
 (local → Backblaze B2 → Cloudflare R2), clips, generic files, the canonical
 object model and thumbnails, for all OpenVibe apps (`live`, `games`, `tools`,
 `network`, `community`) and developer projects. Pastes moved to OpenVibe.Community
-on 2026-09-22; Media's read-only paste API is gone (T10 step 2) and it serves only the
-frozen rows and old screenshots ([Pastes](#pastes)).
+on 2026-09-22; Media's read-only paste API is gone (T10 step 2), `/p/:slug` only
+redirects there and it serves the frozen rows' old screenshots ([Pastes](#pastes)).
 
 Implements **Media API v1** from `../CONTRACTS.md`.
 
@@ -288,23 +288,24 @@ lossless `.master.mkv` recovery archive. A `.seekable` sidecar is remuxed every
 read-only paste app API was retired in T10 step 2 — `/api/v1/:app/pastes` is
 unmounted, so every method there answers 404. No paste is created, read, listed or
 deleted through Media any more.
-`PASTES_MOVED_TO=https://openvibe.community` turns `/p/:slug` and its text
-`/raw` into 301s to Community. Screenshot bytes are still served from here, and
-new screenshots are uploaded to the token-only `community` tenant.
+`/p/:slug` and `/p/:slug/raw` are unconditional **301s** to Community: the target
+is `config.pastes.movedTo` (`PASTES_MOVED_TO`, default `https://openvibe.community`,
+so the redirect never depends on an env var) and no row is read — a private or
+missing slug redirects exactly like a public one. Screenshot bytes are still served
+from here, and new screenshots are uploaded to the token-only `community` tenant.
 Paste screenshot and avatar objects (`legacy:<app>:paste:<slug>`,
 `legacy:<app>:avatar:<slug>`) are frozen with them: their v1 route is gone and
 `DELETE /api/v2/:app/objects/:id` answers 409 `media.object.legacy_managed`, so
 Media has no API that deletes them.
 
 `server/pastes/storage.js` stays as a leaf: the avatar ingest still mints slugs
-and writes screenshots into the same directory, and burn-after-read removes a
-screenshot's bytes (skipping a held row).
+and writes screenshots into the same directory.
 
 | method | path | notes |
 |---|---|---|
-| GET | `/p/:slug` | 301 to OpenVibe.Community when `PASTES_MOVED_TO` is set; otherwise the old page |
-| GET | `/p/:slug/raw` | 301 to Community; image pastes 302 to their screenshot |
-| GET | `/p/:slug/screenshot` | frozen screenshot bytes (unknown/private slugs 301 to Community) |
+| GET | `/p/:slug` | always 301 to OpenVibe.Community — pastes live there; no row is read |
+| GET | `/p/:slug/raw` | always 301 to Community's `/p/:slug/raw`; the suffix is preserved |
+| GET | `/p/:slug/screenshot` | frozen screenshot bytes; unknown/private slugs 301 to Community |
 
 AI summary/tags columns remain for imported rows.
 
@@ -493,8 +494,8 @@ aggregated and stay queued. The runbook is `docs/cutover-media-billing-readings.
 |---|---|
 | `GET /v/:id` | VOD playback — local stream with Range support, live-DVR `.seekable` sidecar while recording, or **302** to a presigned B2/R2 URL. `X-Robots-Tag: noindex`. Also accepts a legacy **file basename** (old `/api/vods/file/<name>` URLs; clip basenames resolve too) |
 | `GET /c/:id` | clip playback, same logic, `noindex` |
-| `GET /p/:slug` | server-rendered paste HTML page; with `PASTES_MOVED_TO` set (production since 2026-09-22) a 301 to OpenVibe.Community, the canonical home for pastes |
-| `GET /p/:slug/raw` | `text/plain` |
+| `GET /p/:slug` | **301** to OpenVibe.Community, the canonical home for pastes since 2026-09-22 (every slug, found or not) |
+| `GET /p/:slug/raw` | **301** to Community's raw text |
 | `GET /p/:slug/screenshot` | paste screenshot image |
 | `GET /t/:id` | thumbnail (id = filename), `noindex` |
 | `GET /f/:key` | file with stored Content-Type + Range, `noindex` |

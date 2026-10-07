@@ -7,8 +7,8 @@
  *                        NAVIGATING here gets a watch page instead (see
  *                        pages.js — ?raw=1 always yields the bytes).
  * GET /c/:id             clip playback (same tiering/range logic + watch page)
- * GET /p/:slug           paste viewer — canonical on OpenVibe.Community
- * GET /p/:slug/raw       paste raw text
+ * GET /p/:slug           301 to OpenVibe.Community — pastes live there now
+ * GET /p/:slug/raw       301 to OpenVibe.Community's raw text
  * GET /p/:slug/screenshot paste screenshot image
  * GET /t/:id             thumbnails (id = filename)
  * GET /f/:key            files with correct Content-Type + Range
@@ -17,8 +17,8 @@
  *                        the watch pages Media is canonical for (public, not Live's, not AI clips)
  *
  * /v /c /t /f bytes carry X-Robots-Tag: noindex — the owning app has the
- * canonical page (the watch page says so with rel=canonical). The paste
- * viewer is noindex too: Community owns that URL now.
+ * canonical page (the watch page says so with rel=canonical). Paste pages
+ * redirect away: Community owns that URL now.
  */
 'use strict';
 
@@ -27,6 +27,7 @@ const ovServe = require('openvibe-shared/serve');
 const cache = require('openvibe-shared/cache-policy');
 const path = require('path');
 const fs = require('fs');
+const config = require('../config');
 const db = require('../db/database');
 const tools = require('../vod/media-tools');
 const { optionalIdentity } = require('../auth');
@@ -521,74 +522,16 @@ router.get('/f/:key', async (req, res) => {
 
 // ── Pastes ───────────────────────────────────────────────────
 
-// The page itself is rendered in pages.js (thin viewer; canonical on Community).
-// Pastes moved to OpenVibe.Community (roadmap Wave 5, PASTES_MOVED_TO): the page and its text are
-// Community's now, so send people there. Screenshot bytes keep being served from here.
-const movedTo = () => String(process.env.PASTES_MOVED_TO || '').replace(/\/$/, '');
+// Pastes live on OpenVibe.Community (the paste authority since 2026-09-22). Media holds the
+// frozen rows but serves nothing from them for these two routes: every slug — found, missing
+// or private — is a permanent 301 to Community's own /p/<slug> (and its /raw). Screenshot
+// bytes keep being served from here.
+const movedTo = () => config.pastes.movedTo;
+const communityPasteUrl = (slug, suffix = '') => `${movedTo()}/p/${encodeURIComponent(String(slug))}${suffix}`;
 
-router.get('/p/:slug', optionalIdentity, async (req, res) => {
-    if (movedTo()) return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(req.params.slug)}`);
-    try {
-        const paste = await db.getPasteBySlug(String(req.params.slug));
-        if (!paste) return res.status(404).send('Paste not found');
+router.get('/p/:slug', (req, res) => res.redirect(301, communityPasteUrl(req.params.slug)));
 
-        // Unlisted pastes stay reachable by direct link (that's the point).
-        // Private pastes: owning app/user only.
-        if (paste.visibility === 'private' && !canAccessPrivate(paste, req)) {
-            return res.status(404).send('Paste not found');
-        }
-
-        // Count the view (visit-based, cooldown, owner excluded). Burn-after-read pastes
-        // keep the literal every-read counter — one read is the whole point of them.
-        const isOwner = req.userId != null && paste.user_id === req.userId;
-        if (!isOwner) {
-            if (paste.burn_after_read) { await db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]); paste.views += 1; }
-            else { const r = await views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id }); if (r.view_count != null) { paste.views = r.view_count; paste.unique_views = r.unique_views; } }
-        }
-
-        // Burn-after-read: allow one non-owner read, then delete.
-        if (paste.burn_after_read && !isOwner && paste.views > 1) {
-            await require('../pastes/storage').removePasteScreenshot(paste);
-            await db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
-            return res.status(410).send('This paste has been burned after reading.');
-        }
-
-        res.set('Cache-Control', cache.htmlHeaders({ private: true }));
-        res.type('html').send(pages.renderPastePage(paste));
-    } catch (err) {
-        console.error('[Public] /p error:', err.message);
-        res.status(500).send('Error');
-    }
-});
-
-router.get('/p/:slug/raw', async (req, res) => {
-    try {
-        const found = await db.getPasteBySlug(String(req.params.slug));
-        // A private paste answers exactly like a missing slug (no redirect that proves it exists).
-        const paste = found && found.visibility !== 'private' ? found : null;
-        // Image pastes have no raw text — bounce to the screenshot (stale
-        // consumers stored /raw URLs for hero-moment images).
-        if (paste && paste.type === 'screenshot') {
-            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
-            return res.redirect(302, `/p/${encodeURIComponent(paste.slug)}/screenshot`);
-        }
-        // Moved: every slug goes to Community, found or not, like /p/:slug.
-        if (movedTo()) return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(String(req.params.slug))}/raw`);
-        if (!paste || paste.type !== 'paste') return res.status(404).send('Not found');
-
-        // Burn after read
-        if (paste.burn_after_read && paste.views > 0) {
-            await db.run('DELETE FROM pastes WHERE id = ?', [paste.id]);
-            return res.status(410).send('This paste has been burned after reading.');
-        }
-
-        if (paste.burn_after_read) await db.run('UPDATE pastes SET views = views + 1 WHERE id = ?', [paste.id]);
-        else await views.recordView('paste', paste.id, { req, ownerUserId: paste.user_id });
-        res.type('text/plain').send(paste.content);
-    } catch {
-        res.status(500).send('Error');
-    }
-});
+router.get('/p/:slug/raw', (req, res) => res.redirect(301, communityPasteUrl(req.params.slug, '/raw')));
 
 router.get('/p/:slug/screenshot', async (req, res) => {
     if (drill.refuseBytes(res)) return;
