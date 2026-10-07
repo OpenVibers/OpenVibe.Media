@@ -590,17 +590,6 @@
   },
   {
    "method": "GET",
-   "path": "/p/n1paste",
-   "auth": "anon",
-   "accept": "html",
-   "status": 200,
-   "kind": "html",
-   "from": [
-    "page /"
-   ]
-  },
-  {
-   "method": "GET",
    "path": "/updates",
    "auth": "anon",
    "accept": "html",
@@ -701,17 +690,6 @@
    "kind": "json",
    "from": [
     "page /c/1"
-   ]
-  },
-  {
-   "method": "GET",
-   "path": "/p/n1paste/raw",
-   "auth": "anon",
-   "accept": "html",
-   "status": 200,
-   "kind": "text",
-   "from": [
-    "page /p/n1paste"
    ]
   },
   {

@@ -90,7 +90,8 @@ module.exports = {
     ],
     forms: true,
     keep: () => true,
-    crawl: ['/', '/browse', '/v/1', '/c/1', '/p/n1paste', '/me', '/updates'],
+    // /p/:slug left the crawl on 2026-10-07: Media only 301s pastes to OpenVibe.Community now (T4/T10).
+    crawl: ['/', '/browse', '/v/1', '/c/1', '/me', '/updates'],
     origins: ['https://openvibe.media'],
     /** Values for template expressions, first match wins (the rows SEED writes). */
     samples: [
