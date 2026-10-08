@@ -1,7 +1,7 @@
 'use strict';
 /**
  * GET /limits.json (roadmap WS-N task 7): the limits a developer project meets here, read from the
- * running configuration, so OpenVibe.Codes' limits page (openvibe.codes/docs/limits) shows what is
+ * running configuration, so OpenVibe.Services' limits page (openvibe.services/docs/limits) shows what is
  * enforced and never restates it. Public: these are the defaults a project's tenant starts with; an
  * operator's per-namespace quota (scripts/namespaces.js) is not here.
  *
