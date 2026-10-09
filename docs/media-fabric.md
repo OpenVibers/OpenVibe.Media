@@ -69,7 +69,7 @@ med_xyz/{720p,480p,360p,av1-…}/…               derivatives, rebuildable
 med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
 ```
 
-- **Live → DVR → VOD without a conversion step.** OpenRe segments continuously; the playlist grows while live (seek
+- **Live → DVR → VOD without a conversion step.** OpenRestream segments continuously; the playlist grows while live (seek
   anywhere from the start to the live edge) and gets `#EXT-X-ENDLIST` at the end. Live latency modes: WebRTC (sub-second,
   SFU), LL-HLS (partial segments, ~2–4 s), HLS DVR. When the SFU nears capacity, new viewers move to LL-HLS.
 - **Write-behind durability for live.** A segment lands on the ingest node's NVMe first (served from RAM/NVMe for the
@@ -187,7 +187,7 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   never decoded end to end. The layout (`sprite: { count, interval_seconds, columns, rows, tile_width, tile_height }`)
   and metadata are the seek path's, so the player contract is unchanged. A source without a timeline, or with
   `MEDIA_HLS_ENABLED` off, keeps the one-fast-seek-per-frame path; captions stay with AI's `media.analyze`.
-  **Still open in F3:** the growing live/DVR playlist written as OpenRe segments (F3.2), write-behind durability for
+  **Still open in F3:** the growing live/DVR playlist written as OpenRestream segments (F3.2), write-behind durability for
   live segments and its upload-lag metric, captions on the timeline, and Live's player moving to HLS. Segment-bucket
   demand (F2.4) now records reads per timeline segment; deciding placement per segment stays F5's. Renditions are F4.
 
@@ -361,7 +361,7 @@ request/playback → telemetry → Events → {Hotness, Health, Cost} engines �
 
 - **One telemetry sample schema** (`openvibe.telemetry.sample@1`: service, project, resource, provider, node, region,
   operation, bytes, duration, ttfb, throughput, status, cache status, cost estimate, route epoch, trace id), shared by
-  Media, OpenRe, Host, AI, Events and Compute.
+  Media, OpenRestream, Host, AI, Events and Compute.
 - **Aggregation, not rows per request:** nginx JSON access logs and player beacons are folded into rolling Valkey
   counters (EWMA + p50/p95/p99 over 10 s, 1 min, 5 min, 1 h, 24 h), HyperLogLog for unique viewers, sorted sets for the
   top-N hot objects and buckets; PostgreSQL gets 5-minute rollups per object × region × bucket; raw samples go to
@@ -416,7 +416,7 @@ reads are metered by CDN logs. Nothing here bills delivery.
   shipped; §3), packing into ~60 s chunks (F3.3, shipped; §3), the timeline queued at finalize (and lazily on
   download), signed playlists outliving a download URL and the faststart MP4 fallback (F3.c, shipped; §3), virtual and
   materialized clips (F3.5/F3.6, shipped; §4) and sprite sheets cut from the timeline's rows (F3.1, shipped; §3); still
-  open: live DVR from OpenRe (CMAF/HLS recording with the growing
+  open: live DVR from OpenRestream (CMAF/HLS recording with the growing
   playlist), captions on the timeline (the demand rollups already record reads per timeline segment, F2.4); Live's
   player moves to HLS.
 - **F4 reactive derivatives:** on-demand renditions and image variants, keep-vs-regenerate economics, AV1 for viral
