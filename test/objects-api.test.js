@@ -104,6 +104,12 @@ const crypto = require('crypto');
         r = await call('GET', local(signed), { bearer: null });
         assert.deepStrictEqual([r.status, r.text, r.headers.get('content-type'), r.headers.get('x-content-type-options'), r.headers.get('cache-control')], [200, 'hello world', 'text/plain', 'nosniff', 'private, no-store']);
         assert.strictEqual(r.headers.get('content-disposition'), 'inline; filename="hello.txt"');
+        // A stored name outside Latin-1 (a legacy file's original_name, a derive job's metadata) still serves:
+        // an ASCII fallback plus filename*=, not a 500 from Node's header check.
+        await db.run('UPDATE media_objects SET metadata = ? WHERE id = ?', [JSON.stringify({ filename: '日本.txt' }), id]);
+        r = await call('GET', local(signed), { bearer: null });
+        assert.deepStrictEqual([r.status, r.text, r.headers.get('content-disposition')], [200, 'hello world', `inline; filename="__.txt"; filename*=UTF-8''${encodeURIComponent('日本.txt')}`]);
+        await db.run('UPDATE media_objects SET metadata = ? WHERE id = ?', [JSON.stringify({ filename: 'hello.txt' }), id]);
         r = await call('GET', local(signed).replace(/sig=[^&]+/, 'sig=AAAA'), { bearer: null });
         assert.strictEqual(r.status, 404, 'tampered signature');
         const past = now - 10;

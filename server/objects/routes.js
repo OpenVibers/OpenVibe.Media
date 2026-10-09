@@ -56,6 +56,7 @@ const hls = require('./hls');
 const ctypes = require('./content-type');
 const multipart = require('./multipart');
 const namespaces = require('./namespaces');
+const { contentDisposition } = require('./disposition');
 const { tenantAuth, tenantCors, tenantPath, namespaceGrant } = require('../auth');
 const { announce } = require('../webhooks');
 const { limits } = require('../actor-limits');
@@ -977,13 +978,12 @@ publicRouter.get('/:id', async (req, res) => {
 
         const mime = obj.mime_type || 'application/octet-stream';
         const md = model.parseJson(obj.metadata, {});
-        const name = String(md.filename || obj.id).replace(/["\\\r\n]/g, '_');
         const headers = {
             'Content-Type': mime,
             'X-Content-Type-Options': 'nosniff',
             'X-Robots-Tag': 'noindex',
             'Cache-Control': obj.visibility === 'private' || sandbox ? 'private, no-store' : 'public, max-age=3600',
-            'Content-Disposition': `${INLINE.test(mime) ? 'inline' : 'attachment'}; filename="${name}"`,
+            'Content-Disposition': contentDisposition(md.filename || obj.id, { inline: INLINE.test(mime) }),
         };
         // A viewer of a native object, counted once a day without being identified (objects/popularity.js); the
         // object tiering reads these counts. Sandbox objects are never tiered, so they are not counted.
