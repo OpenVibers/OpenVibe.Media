@@ -1,5 +1,5 @@
 'use strict';
-// Service tokens on Media's v1 tenant API (plan T4 / decision D8): Live and OpenRe stop presenting
+// Service tokens on Media's v1 tenant API (plan T4 / decision D8): Live and OpenRestream stop presenting
 // Media's `live` app key (MEDIA_API_KEY) and present a Network service token for audience
 // openvibe.media instead. Media must serve them identically.
 //

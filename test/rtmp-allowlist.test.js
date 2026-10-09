@@ -51,7 +51,7 @@ const express = require('express');
     ];
     for (const bad of refused) assert.strictEqual(checkRtmpUrl(bad).ok, false, `refused: ${JSON.stringify(bad)}`);
     assert.ok(/not an allowed RTMP ingest/.test(checkRtmpUrl('rtmp://10.0.0.5:1935/live/k').error));
-    assert.ok(checkRtmpUrl('rtmp://ingest.openre.stream:1936/live/k', ['ingest.openre.stream:1936']).ok, 'the list is configuration (OpenRe on 1936, say)');
+    assert.ok(checkRtmpUrl('rtmp://ingest.openre.stream:1936/live/k', ['ingest.openre.stream:1936']).ok, 'the list is configuration (OpenRestream on 1936, say)');
     console.log('✅ only allow-listed host:port pairs with a plain URL shape pass');
 
     (async () => {
