@@ -43,6 +43,8 @@ router.post('/:kind/:id', tenantAuth({ verb: 'write', allowUser: true }), upload
     try {
         const kind = String(req.params.kind || '').toLowerCase();
         const id = String(req.params.id);
+        // The id names a file (stream-<app>-<id>.jpg): Express decodes %2f in a route param, so only a plain id passes.
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return res.status(400).json({ error: 'Invalid id' });
         const imageData = _imageFromRequest(req);
 
         // ── Live stream thumbnail (upload from the owning app's broadcaster) ──

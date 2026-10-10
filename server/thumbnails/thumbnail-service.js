@@ -231,8 +231,10 @@ function _removeOldThumb(oldUrl, newUrl) {
  */
 function saveLiveThumbnail(appId, streamId, imageData) {
     try {
+        if (!/^[A-Za-z0-9_-]{1,64}$/.test(String(streamId)) || !/^[A-Za-z0-9_-]{1,64}$/.test(String(appId))) return null;
         const filename = `stream-${appId}-${streamId}.jpg`;
         const outPath = path.join(THUMB_DIR, filename);
+        if (path.dirname(path.resolve(outPath)) !== path.resolve(THUMB_DIR)) return null;
 
         // Rate-limit rewrites (the predecessor's client-write cooldown)
         try {
