@@ -1,7 +1,7 @@
 'use strict';
 /**
  * Media's side of the N-1 harness (test/n-1/harness.js): its clients, how a release boots and is
- * seeded, where its SQL lives. Used by scripts/n-1-record.js (on N-1, in a temporary worktree) and by
+ * seeded. Used by scripts/n-1-record.js (on N-1, in a temporary worktree) and by
  * test/n-1.test.js (on this checkout), so both boot and seed the same way.
  *
  * Media's clients: its server-rendered pages (/, /browse, /v, /c, /p, /me: an open tab holds the page
@@ -28,32 +28,14 @@ function freePort() {
 }
 
 /** A clean environment: the release's storage under dataDir; nothing from the caller's shell but PATH and HOME. */
-function baseEnv(dbPath, dataDir, extra) {
-    const env = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR || '/tmp', NODE_ENV: 'test', DB_PATH: dbPath, MEDIA_PUBLIC_URL: 'https://openvibe.media', ...extra };
+function baseEnv(dataDir, extra) {
+    const env = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR || '/tmp', NODE_ENV: 'test', MEDIA_PUBLIC_URL: 'https://openvibe.media', ...extra };
     for (const s of STORAGE) { const [k, d] = s.split(':'); env[k] = path.join(dataDir, d); fs.mkdirSync(env[k], { recursive: true }); }
     return env;
 }
 
-const SEED = `
-    console.log = () => {}; console.warn = () => {};
-    const fs = require('fs'); const path = require('path');
-    const db = require('./server/db/database');
-    db.getDb();
-    try { require('./server/views/service').ensureSchema(); } catch (e) { /* older release */ }
-    db.upsertApp({ app_id: 'live', name: 'OpenVibe.Live', api_key: ${JSON.stringify(APP_BEARER)} });
-    const put = (dir, name) => { const f = path.join(process.env[dir], name); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'bytes of ' + name); return f; };
-    db.run("INSERT INTO vods (app_id, user_id, title, file_path, file_size, thumbnail_url, duration_seconds, is_public, visibility) VALUES ('live', 1, 'N-1 VOD', ?, 18, '/t/vod-1-1.jpg', 60, 1, 'public')", [put('VOD_PATH', 'vod-1.mp4')]);
-    db.run("INSERT INTO clips (app_id, vod_id, user_id, title, file_path, duration_seconds, status, is_public, visibility) VALUES ('live', 1, 1, 'N-1 clip', ?, 10, 'ready', 1, 'public')", [put('CLIPS_PATH', 'clip-1.mp4')]);
-    db.run("INSERT INTO pastes (app_id, slug, type, title, content, visibility) VALUES ('live', 'n1paste', 'paste', 'N-1 paste', 'hello from N-1', 'public')");
-    db.run("INSERT INTO files (key, app_id, original_name, size, mime) VALUES ('n1file.txt', 'live', 'n1file.txt', 17, 'text/plain')");
-    put('FILES_PATH', 'live/n1file.txt'); put('THUMBNAILS_PATH', 'vod-1-1.jpg');
-    try { require('./server/objects/backfill').backfill({ onlyMissing: true }); } catch (e) { /* older release */ }
-    db.close();
-`;
-
-// A release on PostgreSQL (ADR-035: migrations/): its database is an embedded PGlite directory under dataDir, which
+// The release's database is an embedded PGlite directory under dataDir, which
 // the seed and then the drill-mode boot open one after the other (never both at once).
-const isPg = (dir) => fs.existsSync(path.join(dir, 'migrations'));
 const pgDir = (dataDir) => path.join(dataDir, 'pglite');
 const SEED_PG = `
     console.log = () => {}; console.warn = () => {};
@@ -105,23 +87,19 @@ module.exports = {
         [/^n$/, '1'],
     ],
 
-    sqlDirs: ['server'],
-    ledgerTables: [],
-
     /** Seeds a database with the release in `dir` (opening it migrates first). */
-    seed({ dir, dbPath, dataDir }) {
-        const pg = isPg(dir);
-        const r = spawnSync(process.execPath, ['-e', pg ? SEED_PG : SEED], { cwd: dir, encoding: 'utf8', timeout: 120000,
-            env: baseEnv(dbPath, dataDir, pg ? { MEDIA_PGLITE_DIR: pgDir(dataDir), N1_DATA: dataDir } : {}) });
+    seed({ dir, dataDir }) {
+        const r = spawnSync(process.execPath, ['-e', SEED_PG], { cwd: dir, encoding: 'utf8', timeout: 120000,
+            env: baseEnv(dataDir, { MEDIA_PGLITE_DIR: pgDir(dataDir), N1_DATA: dataDir }) });
         if (r.status !== 0) throw new Error(`seeding failed:\n${String(r.stderr || '').slice(-2000)}`);
     },
 
     /** Boots the release in `dir` → { url, headers(auth), close() }; 'user' is the SDK's app key. */
-    async boot({ dir, dbPath, dataDir, sqlOut = '' }) {
+    async boot({ dir, dataDir }) {
         const port = await freePort();
         const child = spawn(process.execPath, ['-r', PRELOAD, 'server/index.js'], {
             cwd: dir,
-            env: baseEnv(dbPath, dataDir, { MEDIA_DRILL: '1', HOST: '127.0.0.1', PORT: String(port), N1_SQL_OUT: sqlOut, ...(isPg(dir) ? { MEDIA_PGLITE_DIR: pgDir(dataDir) } : {}) }),
+            env: baseEnv(dataDir, { MEDIA_DRILL: '1', HOST: '127.0.0.1', PORT: String(port), MEDIA_PGLITE_DIR: pgDir(dataDir) }),
             stdio: ['ignore', 'pipe', 'pipe'],
         });
         let log = '';
@@ -137,13 +115,7 @@ module.exports = {
         }
         // The seeded VOD's object (ids are random): the SDK's object calls address it.
         let object = null;
-        if (isPg(dir)) {
-            try { object = JSON.parse(fs.readFileSync(path.join(dataDir, 'n1-ids.json'), 'utf8')).object; } catch { /* not seeded */ }
-        } else try {
-            const Database = require('better-sqlite3');
-            const d = new Database(dbPath, { readonly: true, fileMustExist: true });
-            try { object = (d.prepare("SELECT id FROM media_objects WHERE kind = 'vod' ORDER BY created_at, id LIMIT 1").get() || {}).id || null; } finally { d.close(); }
-        } catch { /* an older release without media_objects */ }
+        try { object = JSON.parse(fs.readFileSync(path.join(dataDir, 'n1-ids.json'), 'utf8')).object; } catch { /* not seeded */ }
         return {
             url,
             ids: { object },

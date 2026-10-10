@@ -443,12 +443,11 @@ and checks each point.
 ## N-1: the previous release against this one
 
 `test/n-1.test.js` (roadmap WS-P task 11, in `npm test`) boots this checkout in the drill sandbox
-(with writes let through) on a database the previous release created, so this release's migrations
-run over it, and replays `test/fixtures/n-1/`: every call the previous release's clients make (the
+(with writes let through) on an embedded PGlite database and replays `test/fixtures/n-1/`: every call the previous release's clients make (the
 openvibe-sdk media and objects clients with an app key, the object explorer, and every player URL,
 link, script and form of the `/`, `/browse`, `/v`, `/c`, `/p`, `/me` and `/updates` pages it served),
-each answered compatibly (status, JSON, the response fields the client reads). Then every SQL statement
-the previous release runs must still prepare on the migrated schema. After each deploy, record the
+each answered compatibly (status, JSON, the response fields the client reads). Every PostgreSQL migration
+the previous release ran must still be present and unchanged. After each deploy, record the
 release now in production as the next N-1 (`npm run n-1:record [ref]`) and commit the fixtures.
 
 ## Client addresses
@@ -647,7 +646,7 @@ Decisions:
 The storage engine's CLI:
 
 ```
-node server/vod/vod-storage.js check|migrate-legacy|drain [targetPct]
+node server/vod/vod-storage.js check|drain [targetPct]
 ```
 
 Background jobs wired in `index.js`: tiering sweep, VOD health job (probe scan,
