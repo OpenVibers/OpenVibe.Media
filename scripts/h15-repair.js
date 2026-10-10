@@ -142,7 +142,6 @@ const { execFile } = require('child_process');
             }
             // The database's own safety net is PostgreSQL's point-in-time recovery (pgBackRest); <file.json> is this run's undo.
             if (fs.existsSync(BACKUP)) usage(`${BACKUP} already exists; pick a new --backup name`);
-            const dbCopy = null;
             const changes = [];
             for (const step of steps) {
                 if (step.action === 'lost') continue;
@@ -154,10 +153,10 @@ const { execFile } = require('child_process');
                 const { file, ...s } = step;
                 changes.push(await h15.apply(h, s, step.facts));
             }
-            Object.assign(record, { applied: true, backup: dbCopy, changes });
+            Object.assign(record, { applied: true, changes });
             fs.writeFileSync(BACKUP, JSON.stringify(record, null, 2));
             for (const c of changes) console.log(`${c.object_id} ${c.action}: ${c.skipped ? `skipped (${c.skipped})` : 'applied'}`);
-            console.log(`\nApplied. Rollback file: ${BACKUP}; database copy: ${copyPath}`);
+            console.log(`\nApplied. Rollback file: ${BACKUP} (the database's own safety net is point-in-time recovery)`);
             return 0;
         } finally {
             fs.rmSync(tmp, { recursive: true, force: true });
