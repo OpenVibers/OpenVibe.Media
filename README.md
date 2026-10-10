@@ -46,7 +46,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
 - `openvibe-contracts` v0.127.0, `openvibe-sdk` v0.35.1 (tokens, events outbox, usage readings, per-actor limits),
-  `openvibe-shared` v2.20.3, pinned by release tarball
+  `openvibe-shared` v2.20.4, pinned by release tarball
 
 ## Capabilities
 
@@ -125,7 +125,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v2.20.3, openvibe-contracts v0.127.0, openvibe-sdk v0.35.1: pinned release tarballs, installed by npm)
+(openvibe-shared v2.20.4, openvibe-contracts v0.127.0, openvibe-sdk v0.35.1: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -736,5 +736,5 @@ restart; afterwards `sudo ovhost rollback media --to <sha>`.
 <!-- versions:start -->
 - openvibe-contracts: v0.127.0
 - openvibe-sdk: v0.35.1
-- openvibe-shared: v2.20.3
+- openvibe-shared: v2.20.4
 <!-- versions:end -->
