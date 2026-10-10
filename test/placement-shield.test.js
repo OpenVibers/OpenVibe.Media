@@ -45,7 +45,7 @@ const assert = require('assert');
     assert.match(edgeConf, /proxy_set_header X-Media-Shield-Host \$server_name;/, 'the edge block vouches for itself');
     assert.match(mainConf, /proxy_set_header X-Media-Shield-Host "";/, 'openvibe.media clears the header a client could send through Cloudflare');
     for (const c of [edgeConf, mainConf]) assert.match(c, /proxy_set_header X-Forwarded-Host "";/);
-    for (const d of ['client_max_body_size 4096m;', 'proxy_read_timeout 3600s;', 'location = /metrics { return 404; }']) assert.ok(edgeConf.includes(d), `the edge block has ${d}`);
+    for (const d of ['client_max_body_size 4096m;', 'proxy_read_timeout 3600s;', 'location ~* ^/metrics(/|$) { return 404; }']) assert.ok(edgeConf.includes(d), `the edge block has ${d}`);
     assert.match(conf('media-shield.http.conf'), /allow 127\.0\.0\.1;\s*deny all;/, 'only loopback may refresh the cache');
 
     // send(): the route's headers plus the internal redirect, an empty 200.
