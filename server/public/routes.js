@@ -111,6 +111,7 @@ function streamFileWithRange(req, res, filePath, extraHeaders = {}) {
             'Accept-Ranges': 'bytes',
             'Content-Length': chunkSize,
             'Content-Type': contentType,
+            'X-Content-Type-Options': 'nosniff',
             ...extraHeaders,
         });
         sendFileStream(res, filePath, { start, end: Math.min(end, stat.size - 1) });
@@ -119,6 +120,7 @@ function streamFileWithRange(req, res, filePath, extraHeaders = {}) {
             'Content-Length': stat.size,
             'Content-Type': contentType,
             'Accept-Ranges': 'bytes',
+            'X-Content-Type-Options': 'nosniff',
             ...extraHeaders,
         });
         sendFileStream(res, filePath);
@@ -355,8 +357,16 @@ router.get('/a/:id', async (req, res) => {
         const a = await db.getAssetById(parseInt(req.params.id, 10));
         if (!a || !a.file_path || !fs.existsSync(a.file_path)) return res.status(404).json({ error: 'Not found' });
         // Content is replaced under the same URL on re-upload — cache a day, not immutable.
+        // An asset's type is the uploader's word (a streamer's emote or sound, through an app): only images (never
+        // SVG), audio and video are shown inline, anything else downloads, and the bytes never run as a page on this
+        // origin (nosniff, a sandboxing CSP).
+        const mime = a.mime || 'application/octet-stream';
+        const inline = /^(image\/(?!svg)|audio\/|video\/)/i.test(mime);
         streamFileWithRange(req, res, a.file_path, {
-            'Content-Type': a.mime || 'application/octet-stream',
+            'Content-Type': mime,
+            'Content-Disposition': inline ? 'inline' : 'attachment',
+            'Content-Security-Policy': "default-src 'none'; sandbox",
+            'X-Content-Type-Options': 'nosniff',
             'Cache-Control': 'public, max-age=86400',
             'Access-Control-Allow-Origin': '*',
             'X-Robots-Tag': 'noindex',
