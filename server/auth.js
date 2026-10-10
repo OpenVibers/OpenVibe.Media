@@ -5,8 +5,10 @@
  *   1. App API key — `Authorization: Bearer <app_api_key>` (server-to-server).
  *      Constant-time hash compare against the `apps` row; a key is ONLY valid
  *      for its own `:app` path segment.
- *   2. Network user JWT — RS256, verified OFFLINE against the JWKS public key
- *      fetched from OV_NETWORK_URL at boot (cached, refreshed periodically).
+ *   2. Network user JWT — RS256, verified OFFLINE (openvibe-sdk/auth verifyUserToken) against Network's keys:
+ *      createNetworkKeys over OV_NETWORK_URL's JWKS, loaded at boot (retried every 30 s until it loads,
+ *      refreshed every 15 minutes, a rotation followed on an unknown kid). The same keys verify service
+ *      tokens and the site sign-in (server/user-auth.js).
  *      Browser endpoints additionally check the Origin header against the
  *      app's allowed_origins list.
  *
@@ -20,84 +22,45 @@
 'use strict';
 
 const crypto = require('crypto');
-const { serviceAuth, capabilities, http } = require('openvibe-contracts');
+const contracts = require('openvibe-contracts');
+const sdkAuth = require('openvibe-sdk/auth');
 const db = require('./db/database');
 const config = require('./config');
 
-// ── JWKS → PEM (offline user-JWT verification) ───────────────
+const { capabilities, http } = contracts;
 
-let _networkPublicKeyPem = null;
-let _jwksTimer = null;
+// ── Network keys (offline user-JWT and service-token verification) ──
 
-async function fetchNetworkPublicKey() {
-    const url = `${config.network.url}/api/.well-known/jwks`;
-    try {
-        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-        if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
-        const body = await res.json();
-        const jwk = (body.keys || []).find(k => k.kty === 'RSA') || (body.keys || [])[0];
-        if (jwk) {
-            const keyObj = crypto.createPublicKey({ key: jwk, format: 'jwk' });
-            _networkPublicKeyPem = keyObj.export({ type: 'spki', format: 'pem' });
-        } else if (typeof body.public_key === 'string' && body.public_key.includes('BEGIN')) {
-            // Network's inherited endpoint shape: { public_key: <PEM>, algorithm }
-            _networkPublicKeyPem = crypto.createPublicKey(body.public_key).export({ type: 'spki', format: 'pem' });
-        } else {
-            throw new Error('JWKS contained no keys');
-        }
-        console.log('[Auth] Network JWKS public key loaded');
-        return _networkPublicKeyPem;
-    } catch (err) {
-        console.warn(`[Auth] Could not fetch JWKS from ${url}: ${err.message} — user-JWT auth unavailable until it loads`);
-        return null;
+// Created here, fetched only by startJwksRefresh() at boot (never in a drill) or by the first verification.
+let keys = sdkAuth.createNetworkKeys({ network: config.network.url, log: console });
+
+/** Network's keys, for server/user-auth.js (the site sign-in verifies with the same ones). */
+function networkKeys() { return keys; }
+
+/** Boot: load the keys now, retry every 30 s while Network boots, refresh every 15 minutes. */
+function startJwksRefresh() { keys.start().catch(() => { /* logged by the JWKS client */ }); }
+
+/** Whether the Network keys have loaded (user JWTs and service tokens verify only once they have). */
+function jwksLoaded() { return keys.loaded(); }
+
+function stopJwksRefresh() { keys.stop(); }
+
+/** One fetch now: the keys, or null. */
+async function fetchNetworkPublicKey() { return await keys.refresh(); }
+
+/**
+ * A Network session token for this service, or null: RS256, issuer, expiry, never a service principal or a typed
+ * token (openvibe-sdk/auth verifyUserToken), and `aud` must include openvibe.media when it is present.
+ */
+async function verifyUserJwt(token) {
+    if (!token) return null;
+    let payload;
+    try { payload = await sdkAuth.verifyUserToken(String(token), { ...keys.verifyOptions, issuer: config.network.url }); } catch { return null; }
+    if (payload.aud) {
+        const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+        if (!aud.includes('openvibe.media')) return null;
     }
-}
-
-function startJwksRefresh() {
-    // Until the key loads, retry every 30s — Network may still be booting
-    // (user-JWT auth is down for browsers the whole time the key is missing).
-    const tryLoad = () => fetchNetworkPublicKey().then((pem) => {
-        if (!pem) setTimeout(tryLoad, 30 * 1000).unref?.();
-    }).catch(() => { setTimeout(tryLoad, 30 * 1000).unref?.(); });
-    tryLoad();
-    _jwksTimer = setInterval(() => fetchNetworkPublicKey().catch(() => {}), 6 * 60 * 60 * 1000);
-    if (_jwksTimer.unref) _jwksTimer.unref();
-}
-
-/** Whether the Network public key has loaded (user JWTs and service tokens verify only once it has). */
-function jwksLoaded() { return !!_networkPublicKeyPem; }
-
-function stopJwksRefresh() {
-    if (_jwksTimer) { clearInterval(_jwksTimer); _jwksTimer = null; }
-}
-
-/** Verify an RS256 user JWT offline. Returns the payload or null. */
-function verifyUserJwt(token) {
-    if (!_networkPublicKeyPem || !token) return null;
-    const parts = String(token).split('.');
-    if (parts.length !== 3) return null;
-    try {
-        const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
-        if (header.alg !== 'RS256') return null;
-        const ok = crypto.verify(
-            'RSA-SHA256',
-            Buffer.from(`${parts[0]}.${parts[1]}`),
-            _networkPublicKeyPem,
-            Buffer.from(parts[2], 'base64url')
-        );
-        if (!ok) return null;
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
-        if (payload.exp && Date.now() / 1000 > payload.exp) return null;
-        if (payload.iss && payload.iss !== config.network.url) return null;
-        // aud must include this service when present.
-        if (payload.aud) {
-            const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-            if (!aud.includes('openvibe.media')) return null;
-        }
-        return payload;
-    } catch {
-        return null;
-    }
+    return payload;
 }
 
 /**
@@ -105,14 +68,13 @@ function verifyUserJwt(token) {
  * Returns { ok, claims } or { ok: false, code, reason }. `acceptSandbox` is true only on the
  * developer-project tenant routes; everywhere else an env=sandbox token is token.sandbox_refused.
  */
-function verifyServiceTokenResult(token, { acceptSandbox = false } = {}) {
-    if (!_networkPublicKeyPem) return { ok: false, code: 'token.unavailable', reason: 'Network signing key not loaded yet' };
-    return serviceAuth.verifyServiceToken(token, { publicKey: _networkPublicKeyPem, issuer: config.network.url, audience: 'openvibe.media', acceptSandbox });
+async function verifyServiceTokenResult(token, { acceptSandbox = false } = {}) {
+    return await sdkAuth.verifyServiceToken(token, { ...keys.verifyOptions, issuer: config.network.url, audience: 'openvibe.media', contracts, acceptSandbox });
 }
 
 /** A Network-issued service token for this service (sandbox tokens refused), or null. */
-function verifyServiceToken(token) {
-    const r = verifyServiceTokenResult(token);
+async function verifyServiceToken(token) {
+    const r = await verifyServiceTokenResult(token);
     return r.ok ? r.claims : null;
 }
 
@@ -320,7 +282,7 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
         const appRoute = project && !!named && PROJECT_ID_RE.test(appId);
         let svc = null;
         if (token && token.split('.').length === 3) {
-            const r = verifyServiceTokenResult(token, { acceptSandbox: appRoute });
+            const r = await verifyServiceTokenResult(token, { acceptSandbox: appRoute });
             if (r.ok) svc = r.claims;
             else if (r.code === 'token.sandbox_refused') {
                 return problem(res, 401, 'token.sandbox_refused', 'sandbox tokens are accepted only on developer-project tenant routes (/api/v1/<project_id>/files, /api/v2/<project_id>/objects)');
@@ -394,7 +356,7 @@ function tenantAuth({ allowUser = false, capability = null, verb = null, namespa
         //
         //    Answered specifically rather than falling through to a bare 401, so anyone
         //    who builds against the old shape is told what to do instead.
-        if (allowUser && token && verifyUserJwt(token)) {
+        if (allowUser && token && await verifyUserJwt(token)) {
             return res.status(403).json({
                 error: 'A user JWT cannot identify a user here. Call from your server with '
                     + 'your app key and set X-OV-User-Id to the caller\'s id in YOUR user space.',
@@ -509,7 +471,12 @@ module.exports = {
     verifyServiceToken,
     verifyServiceTokenResult,
     PROJECT_ID_RE,
-    _setNetworkPublicKeyForTests(pem) { _networkPublicKeyPem = pem; },
+    // Tests pin a key (a PEM) instead of Network's JWKS; null goes back to the JWKS.
+    _setNetworkPublicKeyForTests(pem) {
+        keys.stop();
+        keys = pem ? sdkAuth.createNetworkKeys({ publicKey: pem }) : sdkAuth.createNetworkKeys({ network: config.network.url, log: console });
+    },
+    networkKeys,
     tenantCors,
     optionalIdentity,
     // verifyUserJwt stays internal: it proves a token is a genuine Network credential,

@@ -29,9 +29,8 @@ const https = require('https');
     // ── Inventory: every outbound call in server/, and whose address it uses ──
     const OUTBOUND = {
         'server/avatars/ingest.js': 'a person\'s picture URL: safeFetchImage, tested below',
-        'server/auth.js': 'Network JWKS (OV_NETWORK_URL)',
         'server/account-data.js': 'Network internal API (OV_NETWORK_INTERNAL_URL), fixed paths: export parts and deletion confirmations',
-        'server/user-auth.js': 'Network OAuth and JWKS (OV_NETWORK_URL / OV_NETWORK_INTERNAL_URL)',
+        'server/user-auth.js': 'Network OAuth (OV_NETWORK_URL / OV_NETWORK_INTERNAL_URL); the signing keys come from openvibe-sdk/auth',
         'server/webhooks.js': 'an app\'s webhook_url, set by the operator (MEDIA_APPS_SEED)',
         'server/thumbnails/live-frame-service.js': 'the app\'s internal URL (APP_INTERNAL_URLS), fixed path',
         'server/public/dev-data.js': 'the app\'s internal URL (APP_INTERNAL_URLS), ids and encoded names in the path',

@@ -35,6 +35,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const { OpenVibeAuthClient } = require('openvibe-shared/auth-client');
+const { verifyUserToken } = require('openvibe-sdk/auth');
 const cache = require('openvibe-shared/cache-policy');
 
 const ACCESS_COOKIE = 'ov_token';
@@ -45,59 +46,36 @@ const NEXT_COOKIE = 'ov_oauth_next';
 const SILENT_COOKIE = 'ov_oauth_silent';
 
 /**
- * Create the auth client + JWKS fetcher shared by the whole app.
- * Verification is OFFLINE: we cache the Network's RS256 public key from
- * GET /api/.well-known/jwks and verify JWTs locally on every request.
+ * Create the auth client shared by the whole app: OAuth (code and refresh grants) through OpenVibeAuthClient, and
+ * OFFLINE session verification with openvibe-sdk/auth verifyUserToken against the Network keys server/auth.js holds
+ * (loaded at boot, never in a drill). A typed token (a FedCM assertion, a realtime ticket, an export token) or a
+ * service principal is never a session here.
  */
 function createAuthClient(config) {
     const client = new OpenVibeAuthClient({
         clientId: config.oauth.clientId,
         clientSecret: config.oauth.clientSecret,
         redirectUri: config.oauth.redirectUri,
-        publicKey: null, // filled by ensureKey()
+        publicKey: null, // sessions are verified below, never by this client
         authBase: config.networkUrl,
         internalBase: config.networkInternalUrl,
     });
 
-    let lastFetch = 0;
-    async function ensureKey() {
-        if (client.publicKey) return client.publicKey;
-        // Don't hammer the Network if it's down — retry at most every 30s
-        if (Date.now() - lastFetch < 30_000) return null;
-        lastFetch = Date.now();
-        for (const base of [config.networkInternalUrl, config.networkUrl]) {
-            if (!base) continue;
-            try {
-                const res = await fetch(`${base}/api/.well-known/jwks`, { signal: AbortSignal.timeout(5000) });
-                if (!res.ok) continue;
-                const jwks = await res.json();
-                if (jwks.public_key) {
-                    client.publicKey = jwks.public_key;
-                    console.log(`[Auth] Network public key loaded from ${base} (${jwks.algorithm || 'RS256'})`);
-                    return client.publicKey;
-                }
-            } catch (err) {
-                console.warn(`[Auth] JWKS fetch failed from ${base}: ${err.message}`);
-            }
-        }
-        return null;
-    }
-
     /** Offline JWT verification. Returns decoded claims or null. */
     async function verify(token) {
         if (!token) return null;
-        await ensureKey();
-        const claims = await client.verifyToken(token);
+        let claims;
+        try {
+            claims = await verifyUserToken(String(token), { ...require('./auth').networkKeys().verifyOptions, issuer: config.networkUrl });
+        } catch {
+            return null;
+        }
         // Signed out everywhere / password changed / banned since this token was issued (WS-B task 4).
-        if (claims && require('./revocations').isRevoked(claims)) return null;
+        if (require('./revocations').isRevoked(claims)) return null;
         return claims;
     }
 
-    // Warm the key cache at boot (non-fatal if the Network is down). A restore drill asks Network
-    // for nothing (MEDIA_DRILL; its /auth routes answer 503).
-    if (!require('./drill').enabled) ensureKey().catch(() => {});
-
-    return { client, ensureKey, verify };
+    return { client, verify };
 }
 
 /** Token from Authorization header or the ov_token cookie. */
