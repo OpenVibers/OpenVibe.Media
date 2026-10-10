@@ -47,7 +47,6 @@ const SEED_PG = `
         const put = (dir, name) => { const f = path.join(process.env[dir], name); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, 'bytes of ' + name); return f; };
         await db.run("INSERT INTO vods (app_id, user_id, title, file_path, file_size, thumbnail_url, duration_seconds, is_public, visibility) VALUES ('live', 1, 'N-1 VOD', ?, 18, '/t/vod-1-1.jpg', 60, 1, 'public')", [put('VOD_PATH', 'vod-1.mp4')]);
         await db.run("INSERT INTO clips (app_id, vod_id, user_id, title, file_path, duration_seconds, status, is_public, visibility) VALUES ('live', 1, 1, 'N-1 clip', ?, 10, 'ready', 1, 'public')", [put('CLIPS_PATH', 'clip-1.mp4')]);
-        await db.run("INSERT INTO pastes (app_id, slug, type, title, content, visibility) VALUES ('live', 'n1paste', 'paste', 'N-1 paste', 'hello from N-1', 'public')");
         await db.run("INSERT INTO files (key, app_id, original_name, size, mime) VALUES ('n1file.txt', 'live', 'n1file.txt', 17, 'text/plain')");
         put('FILES_PATH', 'live/n1file.txt'); put('THUMBNAILS_PATH', 'vod-1-1.jpg');
         // N-1 releases before C-75's retirement project rows with server/objects/backfill.js; later ones with the test helper.

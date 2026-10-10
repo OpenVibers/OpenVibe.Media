@@ -137,7 +137,7 @@ const crypto = require('crypto');
             walk(tmp);
             return out.sort();
         };
-        const TABLES = ['vods', 'clips', 'files', 'pastes', 'media_objects', 'media_locations', 'media_holds', 'media_uploads', 'media_upload_parts'];
+        const TABLES = ['vods', 'clips', 'files', 'media_objects', 'media_locations', 'media_holds', 'media_uploads', 'media_upload_parts'];
         const snapshotDb = async () => Object.fromEntries((await Promise.all(TABLES.map(async t => [t, crypto.createHash('sha256').update(JSON.stringify(await raw.prepare(`SELECT * FROM ${t} ORDER BY ${t}::text`).all())).digest('hex')]))));
         const snapshotBuckets = () => JSON.stringify(Object.entries(buckets).map(([b, m]) => [b, [...m.keys()].sort()]));
         const before = { files: snapshotFiles(), db: await snapshotDb(), buckets: snapshotBuckets() };

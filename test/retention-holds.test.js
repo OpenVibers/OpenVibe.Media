@@ -58,10 +58,6 @@ const http = require('http');
     await model.sync('clip', 13);
     const vod = async (id) => await db.get('SELECT * FROM vods WHERE id = ?', [id]);
     const clip = async (id) => await db.get('SELECT * FROM clips WHERE id = ?', [id]);
-    await raw().prepare(`INSERT INTO pastes (slug, app_id, title, type, content, language, visibility, screenshot_path)
-                   VALUES ('shot1', 'live', 'S', 'screenshot', '', 'text', 'public', ?) RETURNING id`).run(file(dir('pastes/screenshots'), 'shot1.png', 20));
-    await model.sync('paste', (await db.get("SELECT id FROM pastes WHERE slug = 'shot1'")).id);
-
     const app = express();
     app.use(express.json());
     app.use('/api/v1/:app/admin/storage', require('../server/admin/routes'));
@@ -172,17 +168,6 @@ const http = require('http');
         assert.strictEqual(await vod(24), undefined, 'and still removes an unheld one');
         console.log('✅ finalize and the junk sweep settle held empty recordings instead of deleting them');
 
-        // ── A held screenshot paste: the v1 paste API is retired (T10 step 2), so the hold is
-        //    enforced by the delete trigger alone — the row, its bytes and its object stay. ──
-        const shot = await db.get("SELECT * FROM pastes WHERE slug = 'shot1'");
-        await model.placeHold({ object_id: shot.object_id, kind: 'evidence', reason: 'x' });
-        await assert.rejects(async () => await db.run("DELETE FROM pastes WHERE slug = 'shot1'"), /retention hold/, 'row SQL is refused by the trigger');
-        const probe = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/live/pastes/shot1`, { method: 'DELETE', headers: { authorization: 'Bearer live-key' }, redirect: 'manual' });
-        assert.strictEqual(probe.status, 404, 'the paste API has no delete route any more');
-        assert.ok(fs.existsSync(shot.screenshot_path) && await db.get("SELECT 1 AS x FROM pastes WHERE slug = 'shot1'"));
-        const shotObj = await model.getObject(shot.object_id);
-        assert.ok(shotObj && shotObj.lifecycle_status !== 'deleted', 'the paste keeps its object');
-        console.log('✅ a held screenshot paste: the delete trigger refuses it; row, bytes and object stay');
 
         // ── Listing and release ──
         r = await call('GET', H);

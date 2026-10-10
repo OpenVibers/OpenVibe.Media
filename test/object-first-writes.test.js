@@ -1,6 +1,6 @@
 'use strict';
 // Object-first writes (WS-G task 1, C-75 retired 2026-10-10): every write to an inherited
-// vods/clips/files/pastes row makes or updates its media_object in the SAME PostgreSQL transaction
+// vods/clips/files row makes or updates its media_object in the SAME PostgreSQL transaction
 // (objects/model.js withObject). For each main write path the object is there, linked and agreeing
 // with the row as soon as the write returns; when the object cannot be written, the row write
 // rolls back with it (neither row).
@@ -52,7 +52,7 @@ const sharp = require('sharp');
         assert.ok(row.object_id, `${label}: row names its object`);
         const obj = await model.getObject(row.object_id);
         assert.ok(obj, `${label}: object exists right after the write`);
-        const p = { vods: model.vodProjection, clips: model.clipProjection, files: model.fileProjection, pastes: model.pasteProjection }[table](row);
+        const p = { vods: model.vodProjection, clips: model.clipProjection, files: model.fileProjection }[table](row);
         for (const [field, value] of Object.entries({ kind: p.kind, visibility: p.visibility, lifecycle_status: p.lifecycle_status, size_bytes: Number(p.size_bytes) || 0, legacy_ref: p.legacy_ref, app_id: p.app_id, owner_app: p.owner_app || p.app_id, owner_user_id: p.owner_user_id })) {
             assert.strictEqual(String(obj[field] ?? ''), String(value ?? ''), `${label}: object ${field}`);
         }
@@ -184,7 +184,7 @@ const sharp = require('sharp');
         assert.strictEqual((await model.getObject(doomedObj)).lifecycle_status, 'deleted', 'a deleted row takes its object with it (trigger, same statement)');
         console.log('✅ clip writes (upload, create, re-cut ready/failed, update, delete) commit with their object');
 
-        // ── 3. Files, screenshot pastes, avatars ──
+        // ── 3. Files ──
         r = await call('POST', '/files', form('file', Buffer.from('hello object model'), 'text/plain', 'notes.txt'));
         assert.strictEqual(r.status, 201);
         const fileKey = r.body.key;
@@ -195,27 +195,7 @@ const sharp = require('sharp');
         assert.strictEqual((await call('DELETE', `/files/${encodeURIComponent(spare.body.key)}`)).status, 200);
         assert.strictEqual((await model.getObject(spareObj)).lifecycle_status, 'deleted');
 
-        // The read-only paste API is retired (T10 step 2): POST /pastes has no route and writes nothing.
-        const pastesBefore = [await count('pastes'), await count('media_objects')];
-        r = await call('POST', '/pastes', form('screenshot', png, 'image/png', 'shot.png', { title: 'Shot', visibility: 'unlisted' }));
-        assert.strictEqual(r.status, 404, 'no paste-write route remains');
-        assert.deepStrictEqual([await count('pastes'), await count('media_objects')], pastesBefore, 'a refused paste write creates neither a row nor an object');
-        // A screenshot paste row (imported before the move) still commits with its object.
-        const slug = 'shot1';
-        const shotFile = path.join(process.env.PASTES_PATH, 'shot1.png');
-        fs.writeFileSync(shotFile, png);
-        await db.withObject('paste', (x) => x.lastInsertRowid, async () => await db.run(`INSERT INTO pastes (app_id, slug, type, title, content, language, visibility, screenshot_path)
-            VALUES ('live', ?, 'screenshot', 'Shot', '', 'text', 'unlisted', ?) RETURNING id`, [slug, shotFile]));
-        ({ obj } = await linked('pastes', 'slug', slug, 'screenshot paste'));
-        assert.deepStrictEqual([obj.kind, obj.visibility, obj.legacy_ref], ['screenshot', 'unlisted', `legacy:live:paste:${slug}`]);
-
-        // Avatar ingest's write (server/avatars/ingest.js): the avatar row and its object together.
-        const avatarFile = path.join(process.env.PASTES_PATH, 'avatar.webp');
-        fs.writeFileSync(avatarFile, png);
-        const avatarId = Number((await db.withObject('paste', (x) => x.lastInsertRowid, async () => await db.run(`INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, screenshot_path, metadata)
-            VALUES ('network', 'av1', 42, 'screenshot', 'Avatar', '', 'text', 'unlisted', ?, ?) RETURNING id`, [avatarFile, JSON.stringify({ kind: 'avatar', mime_type: 'image/webp' })]))).lastInsertRowid);
-        assert.deepStrictEqual([(await linked('pastes', 'id', avatarId, 'avatar')).obj.kind, (await linked('pastes', 'id', avatarId, 'avatar')).obj.legacy_ref], ['avatar', 'legacy:network:avatar:av1']);
-        console.log('✅ file, screenshot-paste and avatar writes commit with their object; deletes mark it deleted');
+        console.log('✅ file writes commit with their object; deletes mark it deleted');
 
         // ── 4. Atomicity: an object write that fails takes the row write with it ──
         // Every object write fails (as a trigger refusing it would): the model's INSERT/UPDATE of media_objects throws.
@@ -224,8 +204,8 @@ const sharp = require('sharp');
             if (/^\s*(INSERT INTO|UPDATE) media_objects\b/.test(sql)) throw new Error('object write refused (test)');
             return await realRun(sql, params);
         };
-        const before = { vods: await count('vods'), clips: await count('clips'), files: await count('files'), pastes: await count('pastes'), objects: await count('media_objects') };
-        const unchanged = async (label) => assert.deepStrictEqual({ vods: await count('vods'), clips: await count('clips'), files: await count('files'), pastes: await count('pastes'), objects: await count('media_objects') }, before, label);
+        const before = { vods: await count('vods'), clips: await count('clips'), files: await count('files'), objects: await count('media_objects') };
+        const unchanged = async (label) => assert.deepStrictEqual({ vods: await count('vods'), clips: await count('clips'), files: await count('files'), objects: await count('media_objects') }, before, label);
 
         await assert.rejects(async () => await db.createVod({ app_id: 'live', title: 'No object' }), /object write refused/);
         await unchanged('createVod: neither row');

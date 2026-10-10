@@ -8,7 +8,7 @@ OpenVibe.Live predecessor. Owns VOD ingest/recording, storage tiering
 object model and thumbnails, for all OpenVibe apps (`live`, `games`, `tools`,
 `network`, `community`) and developer projects. Pastes moved to OpenVibe.Community
 on 2026-09-22; Media's read-only paste API is gone (T10 step 2), `/p/:slug` only
-redirects there and it serves the frozen rows' old screenshots ([Pastes](#pastes)).
+redirects there and legacy screenshots redirect to media objects ([Pastes](#pastes)).
 
 Implements **Media API v1** from `../CONTRACTS.md`.
 
@@ -35,7 +35,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
 
 ## Does not own
 
-- pastes since 2026-09-22 (OpenVibe.Community; Media keeps the frozen rows and serves old screenshots)
+- pastes since 2026-09-22 (OpenVibe.Community; Media keeps legacy screenshot files through media objects)
 - channels, streams and who a VOD belongs to (OpenVibe.Live answers lineage), identity (OpenVibe.Network)
 - AI analysis of recordings (OpenVibe.AI reads them through signed URLs)
 
@@ -94,7 +94,6 @@ server/
   vod/vod-storage.js     local/B2/R2 tiering, presigned playback, sweep, CLI
   vod/health-scanner.js  probe/decode/master-recovery primitives
   vod/health-job.js      background health scan + quarantine cleanup + master sweep
-  pastes/storage.js      screenshot dir + slug minting kept after the pastes API was retired
   files/routes.js        /api/v1/:app/files
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   registry/resource-index.js  the authority resource index (/api/v1/resources; common.resource-summary@1, ADR-048)
@@ -296,23 +295,20 @@ deleted through Media any more.
 `/p/:slug` and `/p/:slug/raw` are unconditional **301s** to Community: the target
 is `config.pastes.movedTo` (`PASTES_MOVED_TO`, default `https://openvibe.community`,
 so the redirect never depends on an env var) and no row is read — a private or
-missing slug redirects exactly like a public one. Screenshot bytes are still served
-from here, and new screenshots are uploaded to the token-only `community` tenant.
-Paste screenshot and avatar objects (`legacy:<app>:paste:<slug>`,
-`legacy:<app>:avatar:<slug>`) are frozen with them: their v1 route is gone and
-`DELETE /api/v2/:app/objects/:id` answers 409 `media.object.legacy_managed`, so
-Media has no API that deletes them.
-
-`server/pastes/storage.js` stays as a leaf: the avatar ingest still mints slugs
-and writes screenshots into the same directory.
+missing slug redirects exactly like a public one. Legacy screenshot and avatar objects are
+found by `legacy_ref` and `/p/:slug/screenshot` redirects to `/o/<id>` when they are
+public or unlisted and ready. Other slugs redirect to Community. Avatar ingest stores
+new avatars as native objects in Live's avatars namespace. Legacy files remain under
+`PASTES_PATH` and are named by their objects' local locations. Legacy screenshot and
+avatar objects are deleted through account deletion; direct v2 deletion answers 409.
 
 | method | path | notes |
 |---|---|---|
 | GET | `/p/:slug` | always 301 to OpenVibe.Community — pastes live there; no row is read |
 | GET | `/p/:slug/raw` | always 301 to Community's `/p/:slug/raw`; the suffix is preserved |
-| GET | `/p/:slug/screenshot` | frozen screenshot bytes; unknown/private slugs 301 to Community |
+| GET | `/p/:slug/screenshot` | 301 to the legacy object when public or unlisted and ready; otherwise 301 to Community |
 
-AI summary/tags columns remain for imported rows.
+Legacy paste tables remain in the database until the later contract migration, but Media does not query them.
 
 ### Files
 
@@ -339,7 +335,7 @@ directories are shared across apps) and responses carry a `note` saying so.
 
 | method | path | notes |
 |---|---|---|
-| GET | `/admin/storage` | `{ disk (df of VOD volume), database.bytes, breakdown [vods/clips/pastes/thumbnails/files dirs], vodStats/clipStats/pasteStats/fileStats (app-scoped), byProvider.{vods,clips} (count+bytes per local/b2/r2) }` |
+| GET | `/admin/storage` | `{ disk (df of VOD volume), database.bytes, breakdown [vods/clips/pastes/thumbnails/files dirs], vodStats/clipStats/fileStats (app-scoped), byProvider.{vods,clips} (count+bytes per local/b2/r2) }` |
 | GET | `/admin/storage/vods?limit&offset&sort&order&provider&tier` | detailed app VOD listing: id, title, size, provider, health, views, `last_accessed_at`, created + `fileExists`/`diskSize`/`actualTier` (disk-reconciled: local/b2/r2/missing), per-user summary. `sort` = size\|date\|duration\|tier\|views\|accessed, `order` = asc\|desc, `provider` = local\|b2\|r2 (`tier` accepts legacy hot/cold aliases) |
 | DELETE | `/admin/storage/vods/bulk` | `{ ids: [...] }` (max 200) — deletes each VOD everywhere (local + B2 + R2 + sidecars/master + thumbnail + row), app-scoped → `{ deleted, freed, results: [{id, ok, error?}] }` |
 | GET | `/admin/storage/tiers` | tiering status: settings, provider health, local disk, service-wide tier counts (`tiers`/`clipTiers`), `sweepRunning`, plus `app.{tiers, pendingOffload}` scoped to the caller |
@@ -531,7 +527,7 @@ aggregated and stay queued. The runbook is `docs/cutover-media-billing-readings.
 | `GET /c/:id` | clip playback, same logic, `noindex` |
 | `GET /p/:slug` | **301** to OpenVibe.Community, the canonical home for pastes since 2026-09-22 (every slug, found or not) |
 | `GET /p/:slug/raw` | **301** to Community's raw text |
-| `GET /p/:slug/screenshot` | paste screenshot image |
+| `GET /p/:slug/screenshot` | 301 to a ready, nonprivate legacy screenshot or avatar object; otherwise 301 to Community |
 | `GET /t/:id` | thumbnail (id = filename), `noindex` |
 | `GET /f/:key` | file with stored Content-Type + Range, `noindex` |
 | `GET /f/screenshots/:name` | paste screenshot by filename — serves straight from `PASTES_PATH/screenshots` (migrated legacy files have no files-table rows), `noindex` |
@@ -573,8 +569,7 @@ counts its viewer for the day, identifying no one (see Storage tiering).
 
 Every stored blob is a **media object** (`med_<ULID>`, `media_objects`) with one
 `media_locations` row per copy (local / B2 canonical / R2 cache, each `present`,
-`missing`, `pending` or `corrupt`). The `vods`, `clips`, `files` and screenshot
-`pastes` rows are typed projections over objects (`object_id` column); every
+`missing`, `pending` or `corrupt`). The `vods`, `clips` and `files` rows are typed projections over objects (`object_id` column); every
 existing route and response is unchanged, and the old write paths keep the
 model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
 

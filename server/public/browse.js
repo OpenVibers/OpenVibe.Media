@@ -2,10 +2,9 @@
  * OpenVibe.Media — public media index ("home page").
  *
  * Server-rendered browse UI at GET / — a mass index of every public piece of
- * media this service owns, tabbed by kind (Videos / Clips / Images / Text /
- * Thumbnails / Files), each card carrying its description / AI overview and a
- * link back to the SOURCE page in the owning app (the VOD / clip / stream /
- * paste it came from). Dependency-free: inline CSS, no client JS required.
+ * media this service owns, tabbed by kind (Videos / Clips / Thumbnails / Files).
+ * Each card carries its description / AI overview and a link to its source page
+ * in the owning app. Dependency-free: inline CSS, no client JS required.
  */
 'use strict';
 
@@ -17,7 +16,7 @@ const db = require('../db/database');
 const PAGE_SIZE = 48;
 const THUMB_DIR = path.resolve(config.thumbnails.path);
 
-// Public base URL per app for "source" links — shared with the watch/paste pages.
+// Public base URL per app for "source" links — shared with the watch pages.
 const { appUrl, DEFAULT_THEME_CSS } = require('./page-frame');
 const cache = require('openvibe-shared/cache-policy');
 const frame = require('openvibe-shared/frame');
@@ -44,17 +43,6 @@ function clipCard(c) {
         text: snip(c.description || c.ai_overview),
         view: `${config.publicUrl}/c/${c.id}`,
         source: `${appUrl(c.app_id)}/clip/${c.id}`, sourceLabel: 'Clip page',
-    };
-}
-function pasteCard(p) {
-    const isImage = p.type === 'screenshot';
-    return {
-        kind: isImage ? 'image' : 'text', title: p.title || p.slug, date: p.created_at, app: p.app_id,
-        thumb: isImage ? `${config.publicUrl}/p/${encodeURIComponent(p.slug)}/screenshot` : null,
-        text: snip(isImage ? (p.content || p.description) : p.content),
-        view: `${config.publicUrl}/p/${encodeURIComponent(p.slug)}`,
-        source: `${appUrl(p.app_id)}/p/${encodeURIComponent(p.slug)}`, sourceLabel: 'Paste page',
-        lang: p.language && p.language !== 'text' ? p.language : null,
     };
 }
 function fileCard(f) {
@@ -101,7 +89,6 @@ const V_WHERE = "is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(cli
 const C_WHERE = "COALESCE(is_public,1) = 1";
 // Developer-project tenants' files (ADR-014) are theirs to share; the gallery lists first-party files only.
 const F_WHERE = "app_id NOT IN (SELECT app_id FROM apps WHERE project_id IS NOT NULL)";
-const P_WHERE = "visibility = 'public'";
 
 // A VOD's or clip's thumbnail is listed only while the recording itself is public. The exact file name
 // is what /t/<name> serves, so listing a private or unlisted recording's thumbnail would publish a frame
@@ -146,14 +133,6 @@ async function fetchTab(tab, page) {
             total: (await db.get(`SELECT COUNT(*) c FROM clips WHERE ${C_WHERE}`)).c,
             cards: (await db.all(`SELECT * FROM clips WHERE ${C_WHERE} ${L}`)).map(clipCard),
         };
-        case 'images': return {
-            total: (await db.get(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`)).c,
-            cards: (await db.all(`SELECT * FROM pastes WHERE ${P_WHERE} AND type = 'screenshot' ${L}`)).map(pasteCard),
-        };
-        case 'text': return {
-            total: (await db.get(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`)).c,
-            cards: (await db.all(`SELECT * FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot' ${L}`)).map(pasteCard),
-        };
         case 'files': return {
             total: (await db.get(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`)).c,
             cards: (await db.all(`SELECT * FROM files WHERE ${F_WHERE} ${L}`)).map(fileCard),
@@ -176,19 +155,15 @@ async function fetchTab(tab, page) {
                 UNION ALL
                 SELECT 'clip', id, title, description, ai_overview, thumbnail_url, duration_seconds, created_at, app_id, NULL, NULL, NULL, NULL FROM clips WHERE ${C_WHERE}
                 UNION ALL
-                SELECT 'paste', id, title, NULL, NULL, NULL, NULL, created_at, app_id, slug, type, substr(COALESCE(content,''),1,300), language FROM pastes WHERE ${P_WHERE}
-                UNION ALL
                 SELECT 'asset', id, name, username, channel_username, kind, duration_seconds, created_at, app_id, NULL, NULL, NULL, NULL FROM assets
                 ORDER BY created_at DESC LIMIT ${PAGE_SIZE} OFFSET ${off}`);
             const total = (await db.get(`SELECT
                 (SELECT COUNT(*) FROM vods WHERE ${V_WHERE}) +
                 (SELECT COUNT(*) FROM clips WHERE ${C_WHERE}) +
-                (SELECT COUNT(*) FROM pastes WHERE ${P_WHERE}) +
                 (SELECT COUNT(*) FROM assets) c`)).c;
             const cards = rows.map(r => r.k === 'vod' ? vodCard({ ...r, id: r.ref })
                 : r.k === 'clip' ? clipCard({ ...r, id: r.ref })
-                : r.k === 'asset' ? assetCard({ id: r.ref, name: r.title, username: r.description, channel_username: r.ai_overview, kind: r.thumbnail_url, duration_seconds: r.duration_seconds, created_at: r.created_at, app_id: r.app_id })
-                : pasteCard({ ...r, id: r.ref }));
+                : assetCard({ id: r.ref, name: r.title, username: r.description, channel_username: r.ai_overview, kind: r.thumbnail_url, duration_seconds: r.duration_seconds, created_at: r.created_at, app_id: r.app_id }));
             return { total, cards };
         }
     }
@@ -201,20 +176,18 @@ async function tabCounts() {
     const counts = {
         videos: await c(`SELECT COUNT(*) c FROM vods WHERE ${V_WHERE}`),
         clips: await c(`SELECT COUNT(*) c FROM clips WHERE ${C_WHERE}`),
-        images: await c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND type = 'screenshot'`),
-        text: await c(`SELECT COUNT(*) c FROM pastes WHERE ${P_WHERE} AND COALESCE(type,'paste') <> 'screenshot'`),
         files: await c(`SELECT COUNT(*) c FROM files WHERE ${F_WHERE}`),
         emotes: await c("SELECT COUNT(*) c FROM assets WHERE kind = 'emote'"),
         sounds: await c("SELECT COUNT(*) c FROM assets WHERE kind = 'sound'"),
         thumbnails: (await thumbList()).length,
     };
-    counts.all = counts.videos + counts.clips + counts.images + counts.text + counts.emotes + counts.sounds;
+    counts.all = counts.videos + counts.clips + counts.emotes + counts.sounds;
     _countCache = { at: Date.now(), counts };
     return counts;
 }
 
 // ── Rendering ────────────────────────────────────────────────
-const KIND_ICON = { video: '🎬', clip: '✂️', image: '🖼️', text: '📄', thumbnail: '🏞️', file: '📦' };
+const KIND_ICON = { video: '🎬', clip: '✂️', thumbnail: '🏞️', file: '📦' };
 
 function renderCard(c) {
     const preview = c.thumb
@@ -235,7 +208,7 @@ function renderCard(c) {
 </div>`;
 }
 
-const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['images', 'Images'], ['text', 'Text'], ['emotes', 'Emotes'], ['sounds', 'Sounds'], ['thumbnails', 'Thumbnails'], ['files', 'Files']];
+const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['emotes', 'Emotes'], ['sounds', 'Sounds'], ['thumbnails', 'Thumbnails'], ['files', 'Files']];
 
 function renderPage(tab, page, data, counts) {
     const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
@@ -243,13 +216,13 @@ function renderPage(tab, page, data, counts) {
     return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>OpenVibe.Media — Media Index</title>
-<meta name="description" content="Index of all public media on the OpenVibe network — videos, clips, images, pastes, and thumbnails.">
+<meta name="description" content="Index of all public media on the OpenVibe network — videos, clips, files and thumbnails.">
 <link rel="canonical" href="${config.publicUrl}/${tab === 'all' && page === 1 ? '' : `?tab=${tab}${page > 1 ? `&page=${page}` : ''}`}">
 <meta name="robots" content="${page > 1 ? 'noindex, follow' : 'index, follow'}">
 <meta property="og:site_name" content="OpenVibe.Media">
 <meta property="og:type" content="website">
 <meta property="og:title" content="OpenVibe.Media — Media Index">
-<meta property="og:description" content="Every public file on the OpenVibe network — videos, clips, images, pastes and thumbnails.">
+<meta property="og:description" content="Every public file on the OpenVibe network — videos, clips, files and thumbnails.">
 <meta property="og:url" content="${config.publicUrl}/">
 <meta property="og:image" content="${config.publicUrl}/og-image.png">
 <meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
@@ -290,7 +263,7 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 ${require('openvibe-shared/app-icon').headTags({ site: 'media', iconBase: '/assets' })}
 </head><body>
 <div id="navbar-mount"></div>${frame.noscriptNav({ name: 'OpenVibe.Media' })}
-<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, images, pastes &amp; thumbnails from all OpenVibe sites</span></header>
+<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>
 <nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>

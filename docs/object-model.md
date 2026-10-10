@@ -2,12 +2,12 @@
 
 Roadmap Wave 4 turns Media from predecessor-shaped VOD/clip/file tables into one canonical object
 platform. Every stored blob is a **media object** with an id `med_<ULID>`. The inherited
-`vods`, `clips`, `files` and screenshot `pastes` rows stay as they are, and each one is now a typed
-projection over an object through its `object_id` column. Pastes moved to OpenVibe.Community on
-2026-09-22: Media keeps the frozen `pastes` rows and their screenshot/avatar objects, read-only, and
-its v1 pastes API was retired in T10 step 2 (`/api/v1/:app/pastes` is unmounted; only the public
-`/p/:slug` routes remain). Other existing URLs and v1 responses are
-unchanged. New code talks to objects through the [v2 API](#object-api-v2).
+`vods`, `clips` and `files` rows are typed projections over objects through their
+`object_id` columns. Pastes moved to OpenVibe.Community on 2026-09-22. Media does not
+read or write its frozen paste tables. Legacy screenshot and avatar objects are found
+by `legacy_ref`, and `/p/:slug/screenshot` redirects to `/o/<id>` for ready, nonprivate
+objects. New avatars are native objects. New code talks to objects through the
+[v2 API](#object-api-v2).
 
 Code: `server/objects/` (`model.js`, `routes.js`, `reconcile.js`, `invariant.js`,
 `signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`, `readiness.js`, `namespaces.js`,
@@ -54,12 +54,11 @@ the transitional `media.media-ref@1` legacy form in `legacy_ref`, which is uniqu
 | `clips.id` | clip | `legacy:<app>:clip:<id>` |
 | `files.key` | file | `legacy:<app>:file:<key>` |
 | screenshot paste | screenshot | `legacy:<app>:paste:<slug>` |
-| avatar (screenshot paste with `metadata.kind = 'avatar'`) | avatar | `legacy:<app>:avatar:<slug>` |
+| legacy avatar | avatar | `legacy:<app>:avatar:<slug>` |
 | `vods`/`clips.thumbnail_url` (`/t/<name>`) | thumbnail | `legacy:<app>:thumbnail:<name>` |
 
-Paste rows are frozen since pastes moved to OpenVibe.Community (2026-09-22): no new screenshot or
-avatar objects are created through Media's paste API, and the existing ones cannot be deleted
-(`DELETE` answers 409 `media.object.legacy_managed`).
+Legacy screenshot and avatar objects cannot be deleted through the direct v2 delete route
+(`DELETE` answers 409 `media.object.legacy_managed`). Account deletion removes them.
 
 Every v2 route that takes `:id` accepts either form. Native v2 objects have `legacy_ref = NULL`.
 
@@ -77,7 +76,7 @@ Every v2 route that takes `:id` accepts either form. Native v2 objects have `leg
   - Visibility: `visibility`, falling back to `is_public`, the same way playback decides.
   - Clips-only (ephemeral) recordings are never projected.
 - **file.** The local file under `FILES_PATH/<app>/<key>`. `visibility = public`, because `/f/:key` serves every file without auth. The row's sha256 becomes both `content_hash` and the location `checksum`.
-- **screenshot / avatar.** `screenshot_path`. Text pastes have no bytes and no object; paste text belongs to Community.
+- **legacy screenshot / avatar.** Their local file is named by a `media_locations` row. Text pastes belong to Community.
 - **thumbnail.** One object per vod/clip, reached through the parent's `thumbnail` variant and **updated in place** when the picture is regenerated (live recordings refresh it every couple of minutes). Visibility is `public` when the parent is public and `unlisted` otherwise, because `/t/<name>` serves anyone who has the name. An external `thumbnail_url` is skipped.
 
 The historical projection of imported rows is preserved for tests in `test/helpers/project-rows.js`. It is not a production path.
@@ -107,7 +106,7 @@ after the outcome event.
 | avatar ingest | `avatars/ingest` |
 | tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep: the copy the move verified is marked `present` in the same transaction |
 
-**Deletes need nothing more.** A PostgreSQL trigger (defined in `migrations/`, PL/pgSQL) on `vods`, `clips`, `files` and `pastes` marks the
+**Deletes need nothing more.** A PostgreSQL trigger (defined in `migrations/`, PL/pgSQL) on `vods`, `clips` and `files` marks the
 object `deleted` in the same statement whenever its row is deleted, which covers all of the
 inherited delete paths.
 
@@ -117,7 +116,7 @@ reconciliation verifies them. Two writes record something that already happened 
 database, so they never lose the row to its object: the recorder's start (ffmpeg is running) and the
 tier moves (the bytes have moved). If their combined transaction fails, the row is written alone and
 re-projected after it (`withObjectOrRow`), with a warning. After a move that removed the local file, a follow-up re-projection re-reads the disk. Columns no
-object carries (view counts, `master_file_path`, `cut_attempts`, paste likes and AI fields) are
+object carries (view counts, `master_file_path`, `cut_attempts`, other app fields) are
 written without one. `db.importLegacyRows` is the historical cutover import.
 
 ### C-75 retirement
@@ -474,11 +473,10 @@ While any hold applies:
 
 - **No delete path works.**
   - v2 `DELETE` answers 409.
-  - The v1 deletes for vods, clips and files, and the admin bulk delete, answer 409 or report `held` (the paste API was retired in T10 step 2, so a paste row is only ever deleted by SQL, which the trigger refuses).
+  - The v1 deletes for vods, clips and files, and the admin bulk delete, answer 409 or report `held` (the paste API was retired in T10 step 2).
   - Quarantine cleanup and the boot junk sweep skip the object.
   - Finalize never deletes a held recording that turned out empty (no file, or zero bytes): it keeps the row and the file and settles it as failed (`missing_file` / `zero_byte`, quarantined, `vod.failed`).
   - `deleteVodObjects` keeps the bytes.
-  - A paste screenshot has no removal path left at all: the paste API and, with it, the burn-after-read delete went in T10.
   - A `BEFORE DELETE` trigger on each projected table, plus a trigger on `media_objects.lifecycle_status`, refuses the change, so paths nobody has hooked are still covered. The triggers are the `_v2` ones (clip-aware); an older database has its first-version guards replaced at start.
 - **No tier move.** `moveToCold`, `moveToHot`, `promoteToR2` and `demoteFromR2` return `{ ok: false, held: true }` (the admin moves answer it, R2 moves are logged as `refused`), and the sweep counts these as `skippedHeld` instead of errors. A held native object is never promoted to or demoted from the R2 cache either (logged as `refused`; a hold placed while its bytes were being copied wins, and the unrecorded copy is removed). A hold freezes an object's placement: `moveToHot` is refused too, because restoring flips the row to local and drops an R2 copy. A clip cut from a held VOD in B2/R2 is cut from the cloud copy instead of fetching the VOD home. Row updates that only record where the bytes already are (the sweep finding a local file gone while B2 has the copy, the legacy-tier migration) still happen: they move nothing.
 
@@ -539,8 +537,8 @@ or a row.
 
 | section | what it lists |
 |---|---|
-| `unreferenced_local` | files under `VOD_PATH`, `CLIPS_PATH`, `THUMBNAILS_PATH`, `FILES_PATH`, `PASTES_PATH`, `OBJECTS_PATH`, `ASSETS_PATH` that no row names (`media_locations`, `vods` with their sidecars, masters and chunk segments, `clips`, `files`, `pastes`, `assets`, open upload sessions, unfinished jobs). A file whose only row is a deleted object's location counts, unless that object is native and inside its retention period, or held. Largest first, with a hint: a recorder name whose VOD row is gone, bytes of a deleted object, parts of a session that no longer exists, a temp file of an upload that never finished |
-| `unreferenced_remote` | B2/R2 keys that no `media_locations` row and no `vods`/`clips` row names; hints for `vods-orphans/` (see below), an R2 copy left behind after its VOD went back to B2, legacy paste screenshots, recorder names |
+| `unreferenced_local` | files under `VOD_PATH`, `CLIPS_PATH`, `THUMBNAILS_PATH`, `FILES_PATH`, `PASTES_PATH`, `OBJECTS_PATH`, `ASSETS_PATH` that no row names (`media_locations`, `vods` with their sidecars, masters and chunk segments, `clips`, `files`, `assets`, open upload sessions, unfinished jobs). A file whose only row is a deleted object's location counts, unless that object is native and inside its retention period, or held. Largest first, with a hint: a recorder name whose VOD row is gone, bytes of a deleted object, parts of a session that no longer exists, a temp file of an upload that never finished |
+| `unreferenced_remote` | B2/R2 keys that no `media_locations` row and no `vods`/`clips` row names; hints for `vods-orphans/` (see below), an R2 copy left behind after its VOD went back to B2, recorder names |
 | `missing` | copies the database records for objects that are not deleted, whose bytes are not there: no local file, or a key absent from its bucket's listing |
 | `multipart_local` | Media's own multipart sessions still open (`media_uploads` active or completing), with `expired` when past `expires_at` |
 | `multipart_remote` | multipart uploads the buckets still hold open (a killed upload leaves its parts stored and billed) |
@@ -600,7 +598,7 @@ that only moved to B2/R2 keeps it. Test: `test/content-hash.test.js`.
   node scripts/no-good-copy-report.js [--app live] [--json] [--out report.json]
   ```
 
-  For each object it prints the owner (app, `owner_user_id`, `owner_subject`), `legacy_ref`, the `vods`/`clips`/`files`/`pastes` rows that point at it, its relationships, variants and holds, every location with its state and `verified_at`, and the last verification. The report opens the database read-only. It exits 1 when there are any.
+  For each object it prints the owner (app, `owner_user_id`, `owner_subject`), `legacy_ref`, the `vods`/`clips`/`files` rows that point at it, its relationships, variants and holds, every location with its state and `verified_at`, and the last verification. The report opens the database read-only. It exits 1 when there are any.
 
 ## Public object-size invariant
 

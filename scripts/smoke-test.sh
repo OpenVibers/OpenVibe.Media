@@ -2,8 +2,8 @@
 # OpenVibe.Media — end-to-end smoke test.
 # Boots the service against a throwaway data dir, then exercises:
 #   vod create → chunk upload → complete → meta (duration+thumbnail) →
-#   clip cut → /v range playback → paste (+ /p page + /raw) →
-#   paste admin (screenshot censor + stats) → admin storage (overview, vod
+#   clip cut → /v range playback → retired paste API and /p redirect →
+#   admin storage (overview, vod
 #   listing, tier-settings round-trip, buckets, bulk delete) → file upload →
 #   /f fetch → bad API key rejected → cross-tenant key rejected.
 set -u

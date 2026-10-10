@@ -1,7 +1,7 @@
 /**
  * OpenVibe.Media — Database
  *
- * Lean port of the predecessor's vod/clip/paste helpers with app_id (tenant)
+ * Lean port of the predecessor's vod/clip helpers with app_id (tenant)
  * scoping on every query. PostgreSQL through openvibe-sdk/db (ADR-035); every helper is async.
 
  */
@@ -76,7 +76,7 @@ function heldSql(ref) {
 
 /**
  * Object-first write (WS-G task 1, C-75 retired 2026-10-10): run write() — a change to a projected
- * vods/clips/files/pastes row — and re-project the row's media_object in the same transaction
+ * vods/clips/files row — and re-project the row's media_object in the same transaction
  * (objects/model.js withObject). Throws, with nothing written, when either part fails.
  */
 async function withObject(kind, ids, write) {
@@ -332,9 +332,10 @@ async function getAppStats(appId) {
     return {
         vods: await c(`SELECT COUNT(*) n ${vodBase}`, [appId]),
         clips: await c(`SELECT COUNT(*) n ${clipBase}`, [appId]),
-        pastes: await c('SELECT COUNT(*) n FROM pastes WHERE app_id = ?', [appId]),
-        pasteImages: await c("SELECT COUNT(*) n FROM pastes WHERE app_id = ? AND type = 'screenshot'", [appId]),
-        pasteText: await c("SELECT COUNT(*) n FROM pastes WHERE app_id = ? AND COALESCE(type,'paste') <> 'screenshot'", [appId]),
+        // Pastes belong to Community, and Live reads them there; null keys remain for one release for N-1 clients.
+        pastes: null,
+        pasteImages: null,
+        pasteText: null,
         durationSeconds: await c(`SELECT COALESCE(SUM(duration_seconds),0) n ${vodBase}`, [appId]),
         recent: {
             vods: await win(`SELECT COUNT(*) n ${vodBase} AND created_at >= datetime('now', ?)`, [appId]),
@@ -352,7 +353,6 @@ async function getAppStats(appId) {
 const STAT_SERIES = {
     vods:   { base: "FROM vods WHERE app_id = ? AND is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0", agg: 'COUNT(*)' },
     clips:  { base: 'FROM clips WHERE app_id = ? AND COALESCE(is_public,1) = 1', agg: 'COUNT(*)' },
-    pastes: { base: 'FROM pastes WHERE app_id = ?', agg: 'COUNT(*)' },
     hours:  { base: "FROM vods WHERE app_id = ? AND is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0", agg: 'COALESCE(SUM(duration_seconds),0) / 3600.0' },
 };
 async function getAppStatSeries(appId, metric, days = 30) {
@@ -521,124 +521,6 @@ async function findDuplicateClip({ appId, streamId = null, vodId = null, startTi
     `, [...params, startTime || 0, startWindow, endTime || 0, endWindow, `-${Math.max(1, createdSinceMinutes)} minutes`]);
 }
 
-// ── Paste helpers ────────────────────────────────────────────
-
-async function getPasteBySlug(slug, appId = null) {
-    const clause = appId ? ' AND app_id = ?' : '';
-    const params = appId ? [slug, appId] : [slug];
-    return await get(`SELECT * FROM pastes WHERE slug = ?${clause}`, params);
-}
-
-async function likePaste(pasteId, userId) {
-    await run('INSERT INTO paste_likes (paste_id, user_id) VALUES (?, ?) ON CONFLICT DO NOTHING', [pasteId, userId]);
-    await run('UPDATE pastes SET likes = (SELECT COUNT(*) FROM paste_likes WHERE paste_id = ?) WHERE id = ?', [pasteId, pasteId]);
-    return await get('SELECT likes FROM pastes WHERE id = ?', [pasteId]);
-}
-
-async function unlikePaste(pasteId, userId) {
-    await run('DELETE FROM paste_likes WHERE paste_id = ? AND user_id = ?', [pasteId, userId]);
-    await run('UPDATE pastes SET likes = (SELECT COUNT(*) FROM paste_likes WHERE paste_id = ?) WHERE id = ?', [pasteId, pasteId]);
-    return await get('SELECT likes FROM pastes WHERE id = ?', [pasteId]);
-}
-
-async function hasUserLikedPaste(pasteId, userId) {
-    return !!await get('SELECT 1 FROM paste_likes WHERE paste_id = ? AND user_id = ?', [pasteId, userId]);
-}
-
-async function incrementPasteCopies(slug) {
-    return await run('UPDATE pastes SET copies = copies + 1 WHERE slug = ?', [slug]);
-}
-
-async function countUserPastesToday(appId, userId, ip) {
-    if (userId) {
-        return (await get("SELECT COUNT(*) as c FROM pastes WHERE app_id = ? AND user_id = ? AND created_at > datetime('now', '-1 day')", [appId, userId]))?.c || 0;
-    }
-    if (ip) {
-        return (await get("SELECT COUNT(*) as c FROM pastes WHERE app_id = ? AND ip_address = ? AND created_at > datetime('now', '-1 day')", [appId, ip]))?.c || 0;
-    }
-    return 0;
-}
-
-async function getLastPasteTime(appId, userId, ip) {
-    let row;
-    if (userId) {
-        row = await get('SELECT created_at FROM pastes WHERE app_id = ? AND user_id = ? ORDER BY created_at DESC LIMIT 1', [appId, userId]);
-    } else if (ip) {
-        row = await get('SELECT created_at FROM pastes WHERE app_id = ? AND ip_address = ? ORDER BY created_at DESC LIMIT 1', [appId, ip]);
-    }
-    return row ? new Date(row.created_at + (row.created_at.includes('Z') ? '' : 'Z')).getTime() : 0;
-}
-
-/** App-scoped paste stats (predecessor's admin stats shape). */
-async function getPasteStats(appId) {
-    const row = await get(`
-        SELECT COUNT(*) AS total,
-               SUM(CASE WHEN type = 'paste' THEN 1 ELSE 0 END) AS "textPastes",
-               SUM(CASE WHEN type = 'screenshot' THEN 1 ELSE 0 END) AS screenshots,
-               SUM(CASE WHEN forked_from IS NOT NULL THEN 1 ELSE 0 END) AS forks,
-               COALESCE(SUM(views), 0)::bigint AS "totalViews",
-               COALESCE(SUM(copies), 0)::bigint AS "totalCopies",
-               COALESCE(SUM(likes), 0)::bigint AS "totalLikes"
-        FROM pastes WHERE app_id = ?
-    `, [appId]) || {};
-    return {
-        total: row.total || 0,
-        textPastes: row.textPastes || 0,
-        screenshots: row.screenshots || 0,
-        forks: row.forks || 0,
-        totalViews: row.totalViews || 0,
-        totalCopies: row.totalCopies || 0,
-        totalLikes: row.totalLikes || 0,
-    };
-}
-
-// ── Paste comment helpers ────────────────────────────────────
-
-async function createPasteComment({ paste_id, user_id, parent_id, anon_name, message, ip_address }) {
-    return await run(
-        `INSERT INTO paste_comments (paste_id, user_id, parent_id, anon_name, message, ip_address)
-         VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
-        [paste_id, user_id || null, parent_id || null, anon_name || null, message, ip_address || null]
-    );
-}
-
-async function getPasteComments(pasteId, limit = 50, offset = 0) {
-    return await all(`
-        SELECT * FROM paste_comments
-        WHERE paste_id = ? AND is_deleted = 0 AND parent_id IS NULL
-        ORDER BY created_at DESC
-        LIMIT ? OFFSET ?
-    `, [pasteId, limit, offset]);
-}
-
-async function getPasteCommentReplies(parentId) {
-    return await all(`
-        SELECT * FROM paste_comments
-        WHERE parent_id = ? AND is_deleted = 0
-        ORDER BY created_at ASC
-    `, [parentId]);
-}
-
-async function getPasteCommentById(commentId) {
-    return await get('SELECT * FROM paste_comments WHERE id = ?', [commentId]);
-}
-
-async function getPasteCommentCount(pasteId) {
-    return (await get('SELECT COUNT(*) as count FROM paste_comments WHERE paste_id = ? AND is_deleted = 0', [pasteId]))?.count || 0;
-}
-
-async function deletePasteComment(commentId) {
-    return await run('UPDATE paste_comments SET is_deleted = 1, updated_at = ov_now() WHERE id = ?', [commentId]);
-}
-
-async function getRecentPasteCommentsByIp(ip, seconds = 10) {
-    return await all(`
-        SELECT * FROM paste_comments
-        WHERE ip_address = ? AND created_at > datetime('now', '-' || ? || ' seconds')
-        ORDER BY created_at DESC
-    `, [ip, seconds]);
-}
-
 // ── File helpers ─────────────────────────────────────────────
 
 // The row and its media_object in one transaction (the file is already on disk, sha256 computed by the route).
@@ -714,11 +596,6 @@ module.exports = {
     updateVodHealth, repairVodDuration, getVodsNeedingHealthScan, getQuarantinedVodsForCleanup,
     // clips
     createClip, getClipById, getClipByFileBasename, listClips, countClips, setClipVisibility, findDuplicateClip,
-    // pastes
-    getPasteBySlug, likePaste, unlikePaste, hasUserLikedPaste, incrementPasteCopies,
-    countUserPastesToday, getLastPasteTime, getPasteStats,
-    createPasteComment, getPasteComments, getPasteCommentReplies, getPasteCommentById,
-    getPasteCommentCount, deletePasteComment, getRecentPasteCommentsByIp,
     // files
     createFile, getFileByKey, listFiles, deleteFileRow, appFilesBytes,
     // migration

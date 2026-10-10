@@ -9,10 +9,9 @@ const https = require('https');
 const http = require('http');
 const express = require('express');
 
-// The end-to-end check below writes where the service writes: point the paste
-// storage at scratch before anything loads the config.
+// The end-to-end check writes native objects under scratch storage.
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-avatar-'));
-process.env.PASTES_PATH = path.join(tmp, 'pastes');
+process.env.OBJECTS_PATH = path.join(tmp, 'objects');
 process.env.MEDIA_PUBLIC_URL = 'https://media.test';
 
 (async () => {
@@ -48,19 +47,13 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
         await rejects(toAvatar(Buffer.from('<svg onload=alert(1)>not a picture</svg><script>')), /./, 'non-image bytes are refused');
         await rejects(toAvatar(await sharp({ create: { width: 8, height: 8, channels: 3, background: '#000' } }).png().toBuffer()), /too small/, 'tiny images are refused');
 
-        // ── Shared paste storage: the screenshots dir and the slug have one source ──
-        // (server/pastes/storage.js — the paste router is gone, the avatar ingest reads the leaf directly)
-        const storage = require('../server/pastes/storage');
         const config = require('../server/config');
-        assert.strictEqual(storage.SCREENSHOTS_DIR, path.join(config.pastes.path, 'screenshots'), 'avatars keep landing in the paste screenshots directory');
-        const slugA = await storage.generateSlug();
-        const slugB = await storage.generateSlug();
-        for (const s of [slugA, slugB]) assert.match(s, /^[a-z]+-[a-z]+-[0-9]{2}$/, `slug shape: ${s}`);
-        assert.notStrictEqual(slugA, slugB, 'two minted slugs differ (uniqueness is checked against the pastes table)');
 
         // ── Through the route, wired the way server/index.js wires it: { db, config } only ──
         const db = require('../server/db/database');
         const ingest = require('../server/avatars/ingest');
+        await db.upsertApp({ app_id: 'live', name: 'OpenVibe.Live', api_key: 'live-key' });
+        await require('../server/events').initWriter();
         // DNS and the socket are stubbed: nothing leaves the host.
         const realLookup = dns.promises.lookup;
         const realGet = https.get;
@@ -83,22 +76,31 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
             const first = await post({ url: 'https://pics.example/me.png', user_id: 7, username: 'ada' });
             assert.strictEqual(first.status, 200, JSON.stringify(first.body));
             assert.strictEqual(first.body.ok, true);
-            assert.match(first.body.slug, /^[a-z]+-[a-z]+-[0-9]{2}$/);
-            assert.strictEqual(first.body.url, `${config.publicUrl}/p/${first.body.slug}/screenshot`);
+            assert.match(first.body.object_id, /^med_[0-9A-HJKMNP-TV-Z]{26}$/);
+            assert.strictEqual(first.body.url, `${config.publicUrl}/o/${first.body.object_id}`);
             assert.deepStrictEqual([first.body.width, first.body.height], [512, 512]);
             assert.ok(first.body.bytes > 0);
-            const row = await db.get('SELECT * FROM pastes WHERE slug = ?', [first.body.slug]);
-            assert.ok(row, 'the avatar row was inserted');
-            assert.deepStrictEqual([row.app_id, row.user_id, row.type, row.visibility], ['network', 7, 'screenshot', 'unlisted']);
-            assert.strictEqual(row.title, 'Avatar of ada');
-            assert.ok(row.screenshot_path.startsWith(storage.SCREENSHOTS_DIR), `the file lands in the shared screenshots dir (${row.screenshot_path})`);
-            assert.deepStrictEqual((await sharp(fs.readFileSync(row.screenshot_path)).metadata()).format, 'webp', 'the bytes on disk are the re-encoded WebP');
-            assert.strictEqual(JSON.parse(row.metadata).kind, 'avatar');
-            assert.ok(row.object_id, 'the avatar row carries its media object');
-            assert.ok(await db.get('SELECT id FROM media_objects WHERE id = ?', [row.object_id]), 'and that object exists');
-            const second = await post({ url: 'https://pics.example/me2.png', user_id: 8 });
+            const check = async (body, owner) => {
+                const obj = await db.get('SELECT * FROM media_objects WHERE id = ?', [body.object_id]);
+                assert.ok(obj, 'avatar object exists');
+                const app = await db.getApp('live');
+                assert.deepStrictEqual([obj.kind, obj.app_id, obj.namespace, obj.visibility, obj.lifecycle_status, obj.owner_subject],
+                    ['avatar', 'live', `${db.rootNamespace(app)}.avatars`, 'unlisted', 'ready', owner]);
+                const loc = await db.get("SELECT * FROM media_locations WHERE object_id = ? AND provider = 'local' AND state = 'present'", [obj.id]);
+                assert.ok(loc && loc.key.startsWith(config.objects.path) && fs.existsSync(loc.key), 'present local object file');
+                const meta = await sharp(fs.readFileSync(loc.key)).metadata();
+                assert.deepStrictEqual([meta.format, meta.width, meta.height], ['webp', 512, 512]);
+                assert.ok((await db.all('SELECT envelope FROM event_outbox')).some((r) => { const e = typeof r.envelope === 'string' ? JSON.parse(r.envelope) : r.envelope; return e.event_type === 'media.object.uploaded' && JSON.stringify(e).includes(obj.id); }), 'upload event queued');
+            };
+            await check(first.body, null);
+            const subject = 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2A3';
+            const second = await post({ url: 'https://pics.example/me2.png', user_id: 8, subject });
             assert.strictEqual(second.status, 200, JSON.stringify(second.body));
-            assert.notStrictEqual(second.body.slug, first.body.slug, 'a second avatar gets its own slug');
+            assert.notStrictEqual(second.body.object_id, first.body.object_id);
+            await check(second.body, subject);
+            const invalid = await post({ url: 'https://pics.example/me3.png', user_id: 9, subject: 'not-a-subject' });
+            assert.strictEqual(invalid.status, 200, JSON.stringify(invalid.body));
+            await check(invalid.body, null);
             server.close();
         } finally {
             dns.promises.lookup = realLookup;

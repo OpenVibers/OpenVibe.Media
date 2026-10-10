@@ -22,7 +22,7 @@ const https = require('https');
 (async () => {
     const ROOT = path.join(__dirname, '..');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-ssrf-'));
-    process.env.PASTES_PATH = path.join(tmp, 'pastes');
+    process.env.OBJECTS_PATH = path.join(tmp, 'objects');
     process.env.MEDIA_PUBLIC_URL = 'https://media.test';
     delete process.env.MEDIA_RTMP_PULL_ALLOW;
 
@@ -166,7 +166,7 @@ const https = require('https');
         const express = require('express');
         const app = express();
         app.use(express.json());
-        app.post('/internal/avatar-ingest', ingest.createIngestHandler({ db, config: require('../server/config'), screenshotsDir: path.join(tmp, 'shots'), generateSlug: () => 'slug1', log: { warn() {} } }));
+        app.post('/internal/avatar-ingest', ingest.createIngestHandler({ db, config: require('../server/config'), log: { warn() {} } }));
         const server = http.createServer(app);
         await new Promise((r) => server.listen(0, '127.0.0.1', r));
         for (const url of ['https://169.254.169.254/latest/meta-data/iam/security-credentials/', 'https://[::ffff:7f00:1]/a.png', 'https://2130706433/a.png', 'https://localhost/a.png', 'https://mixed.example/a.png']) {
@@ -174,8 +174,8 @@ const https = require('https');
             const body = await r.json();
             assert.deepStrictEqual([r.status, body.ok], [422, false], `${url}: ${JSON.stringify(body)}`);
         }
-        assert.strictEqual((await db.get("SELECT COUNT(*) AS n FROM pastes WHERE app_id = 'network'")).n, 0, 'no avatar was stored');
-        assert.ok(!fs.existsSync(path.join(tmp, 'shots')) || fs.readdirSync(path.join(tmp, 'shots')).length === 0, 'no file was written');
+        assert.strictEqual((await db.get("SELECT COUNT(*) AS n FROM media_objects WHERE kind = 'avatar'")).n, 0, 'no avatar object was stored');
+        assert.ok(!fs.existsSync(require('../server/config').objects.path) || fs.readdirSync(require('../server/config').objects.path).length === 0, 'no object file was written');
         server.close();
         console.log('✅ POST /internal/avatar-ingest refuses internal URLs and stores nothing');
 

@@ -150,7 +150,7 @@ async function buildReport({ provider = 'b2', prefix = PREFIX, list = null } = {
 // ═══════════════════════════════════════════════════════════════
 //
 //   unreferenced_local   files under the data directories that no row names (media_locations, vods,
-//                        clips, files, pastes, assets, open upload sessions, unfinished jobs). A file whose
+//                        clips, files, assets, open upload sessions, unfinished jobs). A file whose
 //                        only row is a deleted object's location counts (its bytes outlived the object),
 //                        unless the object is a native one still inside its retention period, or held.
 //   unreferenced_remote  B2/R2 keys that no media_locations row or vods/clips row names
@@ -242,7 +242,6 @@ async function localReferences() {
         thumb(c.thumbnail_url);
     }
     for (const f of await db.all('SELECT key, app_id FROM files')) add(path.join(config.files.path, f.app_id, f.key));
-    for (const p of await db.all('SELECT screenshot_path FROM pastes WHERE screenshot_path IS NOT NULL')) add(p.screenshot_path);
     for (const a of await db.all('SELECT file_path FROM assets WHERE file_path IS NOT NULL')) add(a.file_path);
     const sessions = new Set((await db.all("SELECT id FROM media_uploads WHERE status IN ('active', 'completing')")).map(r => r.id));
     const jobs = new Set((await db.all("SELECT id FROM media_jobs WHERE status IN ('queued', 'running')")).map(r => r.id));
@@ -327,8 +326,6 @@ async function remoteHint(provider, key, refs) {
     if (del) return del.object_id ? `copy of deleted object ${del.object_id}${del.legacy_ref ? ` (${del.legacy_ref})` : ''}` : 'named only by a location row whose object does not exist';
     const row = refs.rows.get(key);
     if (row && provider === 'r2') return `an R2 copy of ${row.kind} ${row.id}, which is served from ${row.provider}`;
-    const shot = /paste-screenshot-(\d+)\.[a-z0-9]+$/i.exec(key);
-    if (shot) return await db.get('SELECT 1 AS x FROM pastes WHERE id = ?', [Number(shot[1])]) ? `a legacy screenshot of paste ${shot[1]}` : `a legacy screenshot of paste ${shot[1]}, whose row is gone`;
     return await recordingNameHint(path.basename(key));
 }
 

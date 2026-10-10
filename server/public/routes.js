@@ -9,7 +9,7 @@
  * GET /c/:id             clip playback (same tiering/range logic + watch page)
  * GET /p/:slug           301 to OpenVibe.Community — pastes live there now
  * GET /p/:slug/raw       301 to OpenVibe.Community's raw text
- * GET /p/:slug/screenshot paste screenshot image
+ * GET /p/:slug/screenshot 301 to the screenshot's or avatar's media object (/o/<id>), else to Community
  * GET /t/:id             thumbnails (id = filename)
  * GET /f/:key            files with correct Content-Type + Range
  * GET /og-image.png      the site's share card
@@ -532,10 +532,8 @@ router.get('/f/:key', async (req, res) => {
 
 // ── Pastes ───────────────────────────────────────────────────
 
-// Pastes live on OpenVibe.Community (the paste authority since 2026-09-22). Media holds the
-// frozen rows but serves nothing from them for these two routes: every slug — found, missing
-// or private — is a permanent 301 to Community's own /p/<slug> (and its /raw). Screenshot
-// bytes keep being served from here.
+// Pastes live on OpenVibe.Community (the paste authority since 2026-09-22): every slug — found, missing
+// or private — is a permanent 301 to Community's own /p/<slug> (and its /raw).
 const movedTo = () => config.pastes.movedTo;
 const communityPasteUrl = (slug, suffix = '') => `${movedTo()}/p/${encodeURIComponent(String(slug))}${suffix}`;
 
@@ -543,21 +541,26 @@ router.get('/p/:slug', (req, res) => res.redirect(301, communityPasteUrl(req.par
 
 router.get('/p/:slug/raw', (req, res) => res.redirect(301, communityPasteUrl(req.params.slug, '/raw')));
 
+// A screenshot or avatar made before the move is a media object now, found by the slug in its legacy ref
+// (legacy:live:paste:<slug>, legacy:live:avatar:<slug>; Live was the only tenant with pastes): a permanent
+// 301 to its /o/<id>, which serves the bytes with range and caching. Every other slug — made on Community
+// since the move, private or unknown — goes to Community's /p/<slug>/screenshot (the image, or its 404).
+const LEGACY_PASTE_APP = 'live';
+
 router.get('/p/:slug/screenshot', async (req, res) => {
     if (drill.refuseBytes(res)) return;
+    const slug = String(req.params.slug);
     try {
-        const paste = await db.getPasteBySlug(String(req.params.slug));
-        // Pastes made since the move live in Community only: send an unknown slug there, like
-        // /p/:slug and /p/:slug/raw (Community answers with the image, or its own 404). Stored
-        // hero-moment thumbnails pointed here and showed broken images.
-        if ((!paste || paste.visibility === 'private') && movedTo()) {   // private answers like missing
-            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
-            return res.redirect(301, `${movedTo()}/p/${encodeURIComponent(String(req.params.slug))}/screenshot`);
+        const model = require('../objects/model');
+        const obj = await db.get('SELECT id, visibility, lifecycle_status FROM media_objects WHERE legacy_ref IN (?, ?) LIMIT 1',
+            [model.legacyRef(LEGACY_PASTE_APP, 'paste', slug), model.legacyRef(LEGACY_PASTE_APP, 'avatar', slug)]);
+        if (obj && obj.visibility !== 'private' && obj.lifecycle_status === 'ready') {
+            res.set('Cache-Control', 'public, max-age=86400');
+            return res.redirect(301, `/o/${obj.id}`);
         }
-        if (!paste || !paste.screenshot_path) return res.status(404).send('Not found');
-        if (paste.visibility === 'private') return res.status(404).send('Not found');
-        if (!fs.existsSync(paste.screenshot_path)) return res.status(404).send('Not found');
-        streamFileWithRange(req, res, paste.screenshot_path, { 'Cache-Control': 'public, max-age=86400' });
+        if (!movedTo()) return res.status(404).send('Not found');
+        res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600 }));
+        return res.redirect(301, communityPasteUrl(slug, '/screenshot'));
     } catch {
         res.status(500).send('Error');
     }

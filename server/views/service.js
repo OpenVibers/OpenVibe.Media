@@ -1,5 +1,5 @@
 /**
- * OpenVibe.Media — view counting (owned here for every app and every content type).
+ * OpenVibe.Media — view counting (owned here for every app and supported content type).
  *
  * Two numbers per item, both maintained by this module:
  *   view_count    "views": one per VISIT. A visitor (logged-in user id, else a keyed hash of
@@ -11,14 +11,14 @@
  * Also: the owner's own views never count; obvious bots/crawlers are ignored; a single IP
  * firing view events at an absurd rate (any content) is dropped after a per-minute budget.
  *
- * Entry points: recordView() from Media's own public routes (/v /c /p) and from the
+ * Entry points: recordView() from Media's own public routes (/v /c) and from the
  * app-facing API (POST /api/v1/:app/views) that Live/Tools call for pages they render.
  */
 'use strict';
 const crypto = require('crypto');
 const db = require('../db/database');
 
-const TABLES = { vod: { table: 'vods', raw: 'view_count' }, clip: { table: 'clips', raw: 'view_count' }, paste: { table: 'pastes', raw: 'views' }, file: { table: 'files', raw: 'view_count' } };
+const TABLES = { vod: { table: 'vods', raw: 'view_count' }, clip: { table: 'clips', raw: 'view_count' }, file: { table: 'files', raw: 'view_count' } };
 const BOT_UA = /bot|crawl|spider|slurp|facebookexternalhit|preview|discordbot|twitterbot|whatsapp|telegram|curl\/|wget\/|python-requests|go-http-client|headless/i;
 
 let _secret = null;
@@ -63,7 +63,7 @@ async function _overBudget(ip) {
 
 /**
  * Record a view.
- * @param {'vod'|'clip'|'paste'|'file'} type
+ * @param {'vod'|'clip'|'file'} type
  * @param {number} id
  * @param {object} o { req?, ip?, userId?, ownerUserId?, userAgent? }
  * @returns {{ counted:boolean, unique:boolean, reason?:string, view_count?:number, unique_views?:number }}

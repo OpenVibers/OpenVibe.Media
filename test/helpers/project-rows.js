@@ -2,7 +2,7 @@
  * OpenVibe.Media — test-only legacy row projection
  *
  * One media_object (+ locations, relationships, thumbnail variant) per existing
- * vod, clip, file, screenshot/avatar paste and vod/clip thumbnail, derived by the
+ * vod, clip, file and vod/clip thumbnail, derived by the
  * same sync functions every write uses (model.withObject). Idempotent: objects are keyed by their
  * legacy ref, so a re-run updates in place and creates nothing new.
  *
@@ -24,7 +24,7 @@ function emptyCounts() {
 async function projectRows({ dryRun = false, onlyMissing = false } = {}) {
     const report = {
         started_at: new Date().toISOString(), dry_run: !!dryRun, only_missing: !!onlyMissing,
-        counts: { vod: emptyCounts(), clip: emptyCounts(), file: emptyCounts(), screenshot: emptyCounts(), avatar: emptyCounts(), thumbnail: emptyCounts() },
+        counts: { vod: emptyCounts(), clip: emptyCounts(), file: emptyCounts(), thumbnail: emptyCounts() },
         locations: { present: 0, missing: 0, pending: 0 },
         skipped: [],
         errors: [],
@@ -68,11 +68,6 @@ async function projectRows({ dryRun = false, onlyMissing = false } = {}) {
         });
         await each('files', `SELECT * FROM files${where} ORDER BY created_at, key`, async (row) => {
             tally('file', 'files', row.key, await model.syncFile(row));
-        });
-        await each('pastes', `SELECT * FROM pastes${where ? where + ' AND' : ' WHERE'} type = 'screenshot' ORDER BY id`, async (row) => {
-            const r = await model.syncPaste(row);
-            const kind = (r && r.kind) || (String(row.metadata || '').includes('"kind":"avatar"') ? 'avatar' : 'screenshot');
-            tally(kind, 'pastes', row.id, r);
         });
         if (dryRun) throw DRY;
         });

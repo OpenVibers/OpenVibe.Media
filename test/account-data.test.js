@@ -2,8 +2,7 @@
 // Account export and deletion → Media (roadmap WS-B task 7, ADR-033): through POST /internal/events (signed),
 // network.account.export_requested sends Media's part to Network (the subject's objects, VODs and clips, no storage or
 // stream keys), and network.account.deleted erases what the subject and its merged-in aliases own: native objects are
-// soft-deleted, VODs, clips and files removed with their bytes, thumbnails marked deleted; held media and frozen paste
-// screenshots are kept and counted. Media confirms with counts; a redelivery sends nothing twice, and a failed
+// soft-deleted, VODs, clips and files removed with their bytes, thumbnails marked deleted; held media is kept and counted. Media confirms with counts; a redelivery sends nothing twice, and a failed
 // confirmation is retried without erasing again.
 //   node test/account-data.test.js
 const assert = require('assert');
@@ -29,7 +28,7 @@ const path = require('path');
     await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D4', 'vod', DANA, 'legacy:live:vod:7');            // VOD: removed
     await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D5', 'clip', DANA, 'legacy:live:clip:9');          // clip: removed
     await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D6', 'thumbnail', DANA, 'legacy:live:thumb:7');    // thumbnail: marked deleted
-    await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D7', 'screenshot', DANA, 'legacy:live:paste:abc'); // frozen paste: kept
+    await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D7', 'screenshot', DANA, 'legacy:live:paste:abc'); // legacy screenshot object: deleted
     await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D8', 'file', XENA, null);                          // someone else's
     await db.prepare("INSERT INTO media_holds (object_id, kind, reason) VALUES ('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D3', 'moderation', 'report under review') RETURNING id").run();
     const vodFile = path.join(tmp, 'vod7.mp4'); fs.writeFileSync(vodFile, 'x');
@@ -63,15 +62,15 @@ const path = require('path');
             failNext = true;
             await assert.rejects(accountData.apply(del, { send }), /confirmation refused: 503/);
             const state = Object.fromEntries((await db.prepare('SELECT id, lifecycle_status AS s FROM media_objects').all()).map((r) => [r.id.slice(-2), r.s]));
-            assert.deepStrictEqual(state, { D1: 'deleted', D2: 'deleted', D3: 'ready', D4: 'deleted', D5: 'deleted', D6: 'deleted', D7: 'ready', D8: 'ready' });
+            assert.deepStrictEqual(state, { D1: 'deleted', D2: 'deleted', D3: 'ready', D4: 'deleted', D5: 'deleted', D6: 'deleted', D7: 'deleted', D8: 'ready' });
             assert.ok(!fs.existsSync(vodFile) && !fs.existsSync(clipFile), 'the bytes are gone');
             assert.strictEqual((await db.prepare('SELECT COUNT(*) AS n FROM vods').get()).n + (await db.prepare('SELECT COUNT(*) AS n FROM clips').get()).n, 0);
             assert.strictEqual(await accountData.apply(del, { send }), 'confirmed', 'the retry confirms without erasing again');
             const conf = sent[1];
             assert.strictEqual(conf.path, '/internal/account-deletions/del_01J8Z3Q4R5S6T7V8W9X0Y1Z2G1/confirmations');
             assert.ok(validate('network.account-deletion-confirmation@1', conf.body).valid, JSON.stringify(validate('network.account-deletion-confirmation@1', conf.body).errors));
-            assert.deepStrictEqual(conf.body.erased, { objects: 2, vods: 1, clips: 1, thumbnails: 1 });
-            assert.deepStrictEqual(conf.body.retained, { held_media: 1, frozen_screenshots: 1 });
+            assert.deepStrictEqual(conf.body.erased, { objects: 3, vods: 1, clips: 1, thumbnails: 1 });
+            assert.deepStrictEqual(conf.body.retained, { held_media: 1 });
             assert.strictEqual(await accountData.apply(del, { send }), 'unchanged');
             assert.strictEqual(sent.length, 2);
         } finally {

@@ -15,8 +15,7 @@
  *                                     - VODs, clips and files are removed like their delete routes do (the bytes
  *                                       everywhere, the row, and the object through the row-delete trigger);
  *                                     - the thumbnails of those VODs and clips are marked deleted.
- *                                     Kept, and counted: media under a retention hold (ADR-006), and paste screenshots
- *                                     and avatars, whose rows sit in the frozen paste tables Community took over.
+ *                                     Media under a retention hold (ADR-006) is kept and counted.
  *                                     Media then confirms with counts (POST /internal/account-deletions/:id/confirmations).
  */
 const fs = require('fs');
@@ -89,7 +88,8 @@ async function erase(db, subjects) {
                 await db.prepare("UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = COALESCE(deleted_at, ov_now()), updated_at = ov_now() WHERE id = ? AND lifecycle_status != 'deleted'").run(o.id);
                 bump(erased, 'thumbnails');
             } else {
-                bump(retained, `frozen_${o.kind}s`);   // screenshots and avatars: rows in the frozen paste tables
+                await model.softDelete(o, { by: 'account_deleted' });
+                bump(erased, 'objects');
             }
         } catch (e) {
             if (/retention hold/.test(e.message)) { bump(retained, 'held_media'); continue; }

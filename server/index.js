@@ -3,7 +3,7 @@
  *
  * Multi-tenant media service: VOD ingest/recording (RTMP pull, RTP, browser
  * chunks), local/B2/R2 storage tiering with presigned-302 playback, clips,
- * pastes, files, thumbnails, and HMAC-signed webhooks. See CONTRACTS.md
+ * files, thumbnails, legacy screenshot redirects, and HMAC-signed webhooks. See CONTRACTS.md
  * (Media API v1) and README.md.
  */
 'use strict';
@@ -129,8 +129,7 @@ const ready = (async () => {
     {
         // Loopback only. A Network service token holding media.avatar.ingest (audience openvibe.media);
         // a Bearer is judged on the token alone (401 bad, 403 no capability) and nothing else opens the
-        // route (server/service-guard.js). The handler takes its storage (screenshots dir, slug minting)
-        // from server/pastes/storage.js itself — a leaf, not a router.
+        // route (server/service-guard.js). The handler stores native avatar objects.
         app.post('/internal/avatar-ingest', require('./service-guard').guard('media.avatar.ingest'),
             require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config }));
     }
@@ -200,7 +199,7 @@ const ready = (async () => {
         }
     });
 
-    // Daily series behind a stat (vods, clips, pastes, hours) — "over time" charts in the owning app.
+    // Daily series behind a stat (vods, clips, hours) — "over time" charts in the owning app.
     app.get('/api/v1/:app/stats/series/:metric', auth.tenantAuth({ verb: 'read' }), async (req, res) => {
         try {
             const series = await db.getAppStatSeries(req.appId, String(req.params.metric), req.query.days);

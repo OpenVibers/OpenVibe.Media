@@ -1,6 +1,5 @@
 'use strict';
-// Canonical object model (roadmap Wave 4): the test helper projects every vod, clip, file, screenshot,
-// avatar and thumbnail row onto media_objects + media_locations without touching bytes or providers;
+// Canonical object model (roadmap Wave 4): the test helper projects every vod, clip, file and thumbnail row onto media_objects + media_locations without touching bytes or providers;
 // it is idempotent; the write hooks keep the model current; holds block deletion and tier moves on
 // every path; the public object-size invariant is recorded as policy.
 const assert = require('assert');
@@ -59,13 +58,7 @@ const path = require('path');
     await d.prepare("INSERT INTO clips (id, app_id, vod_id, user_id, title, file_path, status) OVERRIDING SYSTEM VALUE VALUES (2, 'live', 1, 9, 'C2', '', 'processing') RETURNING id").run();
     write(path.join(process.env.FILES_PATH, 'live', 'abc123-a.txt'), 12);
     await d.prepare("INSERT INTO files (key, app_id, user_id, original_name, size, mime, sha256) VALUES ('abc123-a.txt', 'live', 3, 'a.txt', 12, 'text/plain', ?)").run('a'.repeat(64));
-    const shot = write(path.join(process.env.PASTES_PATH, 'screenshots', 's1.png'), 40);
-    const avatar = write(path.join(process.env.PASTES_PATH, 'screenshots', 'avatar-n4.webp'), 30);
-    await d.prepare("INSERT INTO pastes (id, app_id, slug, user_id, type, title, content, visibility, screenshot_path, metadata) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 'shot-one', 2, 'screenshot', 'S', '', 'public', ?, NULL) RETURNING id").run(shot);
-    await d.prepare("INSERT INTO pastes (id, app_id, slug, user_id, type, title, content, visibility, screenshot_path, metadata) OVERRIDING SYSTEM VALUE VALUES (2, 'network', 'avatar-four', 4, 'screenshot', 'Avatar', '', 'unlisted', ?, ?) RETURNING id").run(avatar, JSON.stringify({ kind: 'avatar', mime_type: 'image/webp' }));
-    await d.prepare("INSERT INTO pastes (id, app_id, slug, type, title, content, visibility) OVERRIDING SYSTEM VALUE VALUES (3, 'live', 'text-three', 'paste', 'T', 'hello', 'public') RETURNING id").run();
-    await d.prepare("INSERT INTO pastes (id, app_id, slug, type, title, content, visibility, screenshot_path) OVERRIDING SYSTEM VALUE VALUES (4, 'live', 'shot-nopath', 'screenshot', 'S', '', 'public', NULL) RETURNING id").run();
-    const mtimes = [vodFile, clipFile, shot, avatar].map(p => fs.statSync(p).mtimeMs);
+    const mtimes = [vodFile, clipFile].map(p => fs.statSync(p).mtimeMs);
 
     // ── Dry run: a full report, nothing written ──
     const dry = await projectRows({ dryRun: true });
@@ -80,12 +73,10 @@ const path = require('path');
     assert.deepStrictEqual(r.counts.vod, { seen: 7, created: 6, updated: 0, skipped: 1 });
     assert.deepStrictEqual(r.counts.clip, { seen: 2, created: 2, updated: 0, skipped: 0 });
     assert.deepStrictEqual(r.counts.file, { seen: 1, created: 1, updated: 0, skipped: 0 });
-    assert.deepStrictEqual(r.counts.screenshot, { seen: 2, created: 1, updated: 0, skipped: 1 });
-    assert.deepStrictEqual(r.counts.avatar, { seen: 1, created: 1, updated: 0, skipped: 0 });
     assert.deepStrictEqual(r.counts.thumbnail, { seen: 2, created: 1, updated: 0, skipped: 1 });
-    assert.deepStrictEqual(r.skipped.map(s => s.reason).sort(), ['clips-only recording (ephemeral, never published)', 'external thumbnail url', 'screenshot paste without a file path']);
+    assert.deepStrictEqual(r.skipped.map(s => s.reason).sort(), ['clips-only recording (ephemeral, never published)', 'external thumbnail url']);
     assert.deepStrictEqual(r.errors, []);
-    assert.deepStrictEqual([vodFile, clipFile, shot, avatar].map(p => fs.statSync(p).mtimeMs), mtimes, 'no bytes touched');
+    assert.deepStrictEqual([vodFile, clipFile].map(p => fs.statSync(p).mtimeMs), mtimes, 'no bytes touched');
 
     const v1 = await objOf('vods', 1), v2 = await objOf('vods', 2), v3 = await objOf('vods', 3), v4 = await objOf('vods', 4), v6 = await objOf('vods', 6), v7 = await objOf('vods', 7);
     for (const o of [v1, v2, v3, v4, v6, v7]) {
@@ -119,11 +110,6 @@ const path = require('path');
 
     const f = await objOf('files', 'abc123-a.txt');
     assert.deepStrictEqual([f.kind, f.visibility, f.content_hash, f.mime_type, f.legacy_ref, (await locs(f)).local.checksum], ['file', 'public', 'a'.repeat(64), 'text/plain', 'legacy:live:file:abc123-a.txt', 'a'.repeat(64)]);
-    const s1 = await objOf('pastes', 1), av = await objOf('pastes', 2);
-    assert.deepStrictEqual([s1.kind, s1.legacy_ref, s1.size_bytes], ['screenshot', 'legacy:live:paste:shot-one', 40]);
-    assert.deepStrictEqual([av.kind, av.app_id, av.legacy_ref, av.visibility, av.mime_type], ['avatar', 'network', 'legacy:network:avatar:avatar-four', 'unlisted', 'image/webp']);
-    assert.strictEqual((await d.prepare('SELECT object_id FROM pastes WHERE id = 3').get()).object_id, null, 'text pastes have no bytes object');
-
     const tv = await model.getVariant(v1.id, 'thumbnail');
     const th = await model.getObject(tv.derived_object_id);
     assert.deepStrictEqual([th.kind, th.legacy_ref, th.visibility, (await locs(th)).local.state], ['thumbnail', 'legacy:live:thumbnail:vod-1-111.jpg', 'public', 'present']);

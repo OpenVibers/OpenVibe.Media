@@ -3,7 +3,7 @@
 // /api/v1/:app/pastes is unmounted and every method there answers 404. The public /p/:slug and
 // /p/:slug/raw routes are unconditional 301s to Community — no env var needed (the default is
 // config.pastes.movedTo) and no row is read: a known, missing or private slug all go there.
-// Screenshot bytes are still served here.
+// Legacy screenshot objects redirect to their object URLs.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -16,10 +16,8 @@ const express = require('express');
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-moved-'));
     const db = require('../server/db/database');
     await db.upsertApp({ app_id: 'live', api_key: 'live-key' });
-    const shot = path.join(tmp, 'shot.png');
-    fs.writeFileSync(shot, Buffer.from('\x89PNG\r\n\x1a\n'));
-    await db.getDb().prepare("INSERT INTO pastes (app_id, slug, type, title, content, visibility, screenshot_path) VALUES ('live', 'text-1', 'paste', 't', 'hello', 'public', NULL), ('live', 'shot-1', 'screenshot', 's', '', 'public', ?) RETURNING id").run(shot);
-
+    const objectId = 'med_01J8Z3Q4R5S6T7V8W9X0Y1Z2A3';
+    await db.run("INSERT INTO media_objects (id, app_id, namespace, kind, visibility, lifecycle_status, legacy_ref) VALUES (?, 'live', 'live', 'screenshot', 'public', 'ready', 'legacy:live:paste:shot-1')", [objectId]);
     const app = express();
     app.use(express.json());
     app.use(require('../server/public/routes'));
@@ -33,13 +31,10 @@ const express = require('express');
 
         // The app API is gone: no method on /api/v1/:app/pastes is mounted, so a write has no route to
         // answer 410 and creates nothing, and a read has no route either.
-        const pasteCount = async () => (await db.get('SELECT COUNT(*) AS n FROM pastes')).n;
-        const rows = await pasteCount();
         let r = await post();
         assert.strictEqual(r.status, 404, 'no paste-write route remains');
         r = await fetch(`${base}/api/v1/live/pastes/text-1`, { headers: { authorization: 'Bearer live-key' } });
         assert.strictEqual(r.status, 404, 'no paste-read route remains');
-        assert.strictEqual(await pasteCount(), rows, 'nothing creates a paste');
 
         // The page and its text are Community's: a permanent 301, with no env var set.
         r = await get('/p/text-1');
@@ -57,11 +52,8 @@ const express = require('express');
         assert.strictEqual(r.status, 301);
         assert.strictEqual(r.headers.get('location'), 'https://openvibe.community/p/a%2Fb%20c', 'the slug is URL-encoded, never interpolated raw');
 
-        // The frozen rows still serve their screenshot bytes (Live/Community still link them).
         r = await get('/p/shot-1/screenshot');
-        assert.strictEqual(r.status, 200, 'screenshot bytes are still served here');
-        assert.ok(await db.getPasteBySlug('text-1'), 'no request deletes anything');
-
+        assert.deepStrictEqual([r.status, r.headers.get('location')], [301, `/o/${objectId}`]);
         server.close();
         fs.rmSync(tmp, { recursive: true, force: true });
         console.log('pastes moved: all checks passed');

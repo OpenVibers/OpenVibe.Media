@@ -2,8 +2,8 @@
 // ═══════════════════════════════════════════════════════════════
 // Avatar ingestion — every avatar on the network is a file HERE.
 //
-//   POST /internal/avatar-ingest   { url, user_id, username }        (internal key + loopback only)
-//   → { ok, slug, url: 'https://openvibe.media/p/<slug>/screenshot', width, height, bytes }
+//   POST /internal/avatar-ingest   { url, user_id, username, subject }   (internal key + loopback only)
+//   → { ok, object_id, url: 'https://openvibe.media/o/<id>', width, height, bytes }
 //
 // A person may point at a picture anywhere on the web; no OpenVibe site ever serves or stores that address.
 // We fetch it once, on the server, with the precautions a server-side fetch of a user-supplied URL needs:
@@ -14,9 +14,10 @@
 //   • 8 MB cap while streaming, 10 s overall deadline
 //   • the bytes are decoded by sharp and re-encoded (512×512 WebP): metadata, scripts hidden in image
 //     containers and non-image payloads do not survive; a pixel-count limit stops decompression bombs
-// The result is stored as an unlisted "screenshot" paste owned by the account, so avatars live in the same
-// system as every other picture (reportable, served with range/caching by the public /p/:slug/screenshot
-// route). The paste API was retired in T10 step 2, so Media has no route that deletes them.
+// The result is a native media object (kind avatar, unlisted) in Live's `<root>.avatars` namespace, owned by the
+// account's subject when Network sends it, created the way an Object API upload is: the namespace and quota are
+// checked with the object, and the ready transition, its invariant row and media.object.uploaded commit together.
+// /o/<id> serves it with range and caching. (Until 2026-10-10 an avatar was a row in the legacy pastes table.)
 // ═══════════════════════════════════════════════════════════════
 const dns = require('dns').promises;
 const https = require('https');
@@ -34,10 +35,10 @@ const MAX_BYTES = 8 * 1024 * 1024, DEADLINE_MS = 10_000, MAX_REDIRECTS = 3, SIZE
 const egress = require('openvibe-shared/egress');
 const isPublicAddress = (ip) => egress.isPublicAddress(ip);
 
-// Where avatars land and how their slug is minted: the paste storage module
-// (server/pastes/storage.js), a leaf with no router. The defaults keep the exact
-// persisted path and slug behavior; tests may inject their own.
-const pasteStorage = require('../pastes/storage');
+// The tenant every avatar has lived in (Media has no tenant of Network's own) and the namespace below its root.
+const AVATAR_APP = 'live';
+const AVATAR_NAMESPACE = 'avatars';
+const SUBJECT_RE = /^usr_[0-9A-HJKMNP-TV-Z]{26}$/;
 
 async function resolvePublic(hostname) {
     const host = egress.normalizeHost(hostname);
@@ -99,25 +100,67 @@ async function toAvatar(buf) {
     return { buffer: out, width: SIZE, height: SIZE };
 }
 
-function createIngestHandler({ db, config, screenshotsDir = pasteStorage.SCREENSHOTS_DIR, generateSlug = pasteStorage.generateSlug, log = console }) {
+/**
+ * Store one avatar's bytes as a native object; returns its id. Throws (with nothing left behind) when the tenant,
+ * the namespace or the quota refuses it.
+ */
+async function storeAvatar({ db, pic, subject = null, username = null, sourceHost = null }) {
+    const model = require('../objects/model');
+    const namespaces = require('../objects/namespaces');
+    const invariant = require('../objects/invariant');
+    const { announce } = require('../webhooks');
+    const app = await db.getApp(AVATAR_APP);
+    if (!app) throw new Error('Picture storage is not configured on this server');
+    const { namespace } = namespaces.resolveName(app, AVATAR_NAMESPACE);
+    const bytes = pic.buffer.length;
+    const sha256 = crypto.createHash('sha256').update(pic.buffer).digest('hex');
+    // The namespace row, the quota check and the object commit together, as an API upload's init does.
+    const made = await db.getDb().tx(async () => {
+        const row = await namespaces.ensure(app, namespace);
+        if (row.error) return { error: row.error };
+        const q = await namespaces.checkQuota(app, namespace, { bytes, objects: 1 });
+        if (q) return { error: q.detail || 'Picture storage is full' };
+        return {
+            id: await model.createObject({
+                app_id: AVATAR_APP, namespace, kind: 'avatar', owner_subject: SUBJECT_RE.test(String(subject || '')) ? subject : null,
+                visibility: 'unlisted', lifecycle_status: 'uploading', mime_type: 'image/webp', size_bytes: bytes, content_hash: sha256,
+                metadata: { filename: 'avatar.webp', title: `Avatar${username ? ' of ' + String(username).slice(0, 40) : ''}`, source: 'avatar.ingest', source_host: sourceHost },
+            }),
+        };
+    });
+    if (made.error) throw new Error(made.error);
+    const obj = await model.getObject(made.id);
+    const dest = model.objectFilePath(obj);
+    try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.writeFileSync(dest, pic.buffer);
+        await announce(AVATAR_APP, 'media.object.uploaded', {
+            change: async () => {
+                await model.upsertLocation(obj.id, { provider: 'local', key: dest, state: 'present', size_bytes: bytes, checksum: sha256, verified: true });
+                await model.updateObject(obj.id, { lifecycle_status: 'ready', canonical_provider: 'local', canonical_key: dest });
+                await invariant.record(await model.getObject(obj.id));
+            },
+            payload: async () => await model.objectPublic(await model.getObject(obj.id)),
+        });
+    } catch (err) {
+        try { fs.unlinkSync(dest); } catch { /* not written */ }
+        await db.run('DELETE FROM media_objects WHERE id = ?', [obj.id]).catch(() => {});
+        throw err;
+    }
+    await namespaces.reconcileChain(app, namespace).catch(() => {});
+    return obj.id;
+}
+
+function createIngestHandler({ db, config, log = console }) {
     return async function avatarIngest(req, res) {
         try {
-            const { url, user_id, username } = req.body || {};
+            const { url, user_id, username, subject } = req.body || {};
             if (!url || !user_id) return res.status(400).json({ ok: false, error: 'url and user_id required' });
             const raw = await safeFetchImage(url);
             const pic = await toAvatar(raw);
-            fs.mkdirSync(screenshotsDir, { recursive: true });
-            const file = path.join(screenshotsDir, `avatar-n${parseInt(user_id, 10) || 0}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.webp`);
-            fs.writeFileSync(file, pic.buffer);
-            const slug = await generateSlug();   // async since the PostgreSQL switch (it checks the table)
-            const insert = async () => await db.run(`INSERT INTO pastes (app_id, slug, user_id, type, title, content, language, visibility, screenshot_path, metadata, ip_address)
-                    VALUES ('network', ?, ?, 'screenshot', ?, '', 'text', 'unlisted', ?, ?, NULL) RETURNING id`,
-                [slug, parseInt(user_id, 10) || null, `Avatar${username ? ' of ' + String(username).slice(0, 40) : ''}`, file,
-                    JSON.stringify({ kind: 'avatar', source_host: (() => { try { return new URL(url).hostname; } catch { return null; } })(), size_bytes: pic.buffer.length, mime_type: 'image/webp' })]);
-            // The row and the avatar's media_object in one transaction (a database without the object model: the row alone).
-            if (typeof db.withObject === 'function') await db.withObject('paste', (r) => r.lastInsertRowid, insert);
-            else await insert();
-            res.json({ ok: true, slug, url: `${config.publicUrl}/p/${slug}/screenshot`, width: pic.width, height: pic.height, bytes: pic.buffer.length });
+            const sourceHost = (() => { try { return new URL(url).hostname; } catch { return null; } })();
+            const id = await storeAvatar({ db, pic, subject, username, sourceHost });
+            res.json({ ok: true, object_id: id, url: `${config.publicUrl}/o/${id}`, width: pic.width, height: pic.height, bytes: pic.buffer.length });
         } catch (err) {
             log.warn('[Avatar ingest]', err.message);
             res.status(422).json({ ok: false, error: /unsupported image|Input buffer|corrupt|VipsJpeg|bad seek/i.test(err.message) ? 'That file is not a picture we can read' : err.message });
@@ -125,4 +168,4 @@ function createIngestHandler({ db, config, screenshotsDir = pasteStorage.SCREENS
     };
 }
 
-module.exports = { createIngestHandler, safeFetchImage, isPublicAddress, toAvatar, resolvePublic };
+module.exports = { createIngestHandler, storeAvatar, safeFetchImage, isPublicAddress, toAvatar, resolvePublic };
