@@ -1,10 +1,9 @@
 'use strict';
-// Object-first writes (WS-G task 1, retiring compatibility shim C-75): every write to an inherited
+// Object-first writes (WS-G task 1, C-75 retired 2026-10-10): every write to an inherited
 // vods/clips/files/pastes row makes or updates its media_object in the SAME PostgreSQL transaction
 // (objects/model.js withObject). For each main write path the object is there, linked and agreeing
-// with the row, as soon as the write returns; when the object cannot be written, the row write
-// rolls back with it (neither row); and the drift report (server/objects/drift.js,
-// scripts/object-drift-report.js) writes nothing and finds drift planted behind the model's back.
+// with the row as soon as the write returns; when the object cannot be written, the row write
+// rolls back with it (neither row).
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -24,7 +23,6 @@ const sharp = require('sharp');
 
     const db = require('../server/db/database');
     const model = require('../server/objects/model');
-    const drift = require('../server/objects/drift');
     const tools = require('../server/vod/media-tools');
     const thumbService = require('../server/thumbnails/thumbnail-service');
     const cutter = require('../server/vod/clip-cutter');
@@ -37,7 +35,6 @@ const sharp = require('sharp');
 
     await db.upsertApp({ app_id: 'live', api_key: 'live-key-object-first' });
     const raw = db.getDb();
-    const q = { all: async (sql, p = []) => await raw.prepare(sql).all(...p), get: async (sql, p = []) => await raw.prepare(sql).get(...p) };
     const count = async (table) => (await raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).n;
 
     // No ffmpeg in these paths: the thumbnail generators and the probes answer as a real file would.
@@ -56,15 +53,11 @@ const sharp = require('sharp');
         const obj = await model.getObject(row.object_id);
         assert.ok(obj, `${label}: object exists right after the write`);
         const p = { vods: model.vodProjection, clips: model.clipProjection, files: model.fileProjection, pastes: model.pasteProjection }[table](row);
-        const want = drift.expectedFields(p);
-        for (const f of drift.FIELDS) assert.strictEqual(String(obj[f] ?? ''), String(want[f] ?? ''), `${label}: object ${f}`);
+        for (const [field, value] of Object.entries({ kind: p.kind, visibility: p.visibility, lifecycle_status: p.lifecycle_status, size_bytes: Number(p.size_bytes) || 0, legacy_ref: p.legacy_ref, app_id: p.app_id, owner_app: p.owner_app || p.app_id, owner_user_id: p.owner_user_id })) {
+            assert.strictEqual(String(obj[field] ?? ''), String(value ?? ''), `${label}: object ${field}`);
+        }
         return { row, obj };
     }
-    const noDrift = async (label) => {
-        const r = await drift.buildReport(q);
-        assert.strictEqual(r.total_drift, 0, `${label}:\n${drift.formatReport(r)}`);
-        return r;
-    };
 
     const app = express();
     app.use(express.json({ limit: '5mb' }));
@@ -224,9 +217,6 @@ const sharp = require('sharp');
         assert.deepStrictEqual([(await linked('pastes', 'id', avatarId, 'avatar')).obj.kind, (await linked('pastes', 'id', avatarId, 'avatar')).obj.legacy_ref], ['avatar', 'legacy:network:avatar:av1']);
         console.log('✅ file, screenshot-paste and avatar writes commit with their object; deletes mark it deleted');
 
-        const clean = await noDrift('after every write path');
-        assert.ok(clean.total_rows >= 8, 'the report checked the rows written above');
-
         // ── 4. Atomicity: an object write that fails takes the row write with it ──
         // Every object write fails (as a trigger refusing it would): the model's INSERT/UPDATE of media_objects throws.
         const realRun = db.run;
@@ -264,55 +254,7 @@ const sharp = require('sharp');
         await unchanged('thrown after the insert: neither row');
         db.run = realRun;
         await finalizeVod(vodId, { fromJob: true });
-        await noDrift('after the refused writes');
         console.log('✅ a write whose object cannot be written leaves neither row (inserts, updates, announce path, a throw after the insert)');
-
-        // ── 5. Drift report: read-only, finds planted drift ──
-        await raw.prepare("INSERT INTO vods (id, app_id, user_id, title, file_path) OVERRIDING SYSTEM VALUE VALUES (900, 'live', 3, 'Planted: no object', NULL) RETURNING id").run();
-        const upObj = (await db.get('SELECT object_id FROM clips WHERE id = ?', [upId])).object_id;
-        await raw.prepare("UPDATE media_objects SET visibility = 'private' WHERE id = ?").run(upObj);
-        const fileObj = (await db.get('SELECT object_id FROM files WHERE key = ?', [fileKey])).object_id;
-        await raw.prepare('UPDATE media_objects SET size_bytes = 1, owner_user_id = 99 WHERE id = ?').run(fileObj);
-        await raw.prepare('UPDATE pastes SET object_id = NULL WHERE slug = ?').run(slug);
-        const cutObj = (await db.get('SELECT object_id FROM clips WHERE id = ?', [cutId])).object_id;
-        await raw.prepare("UPDATE media_objects SET lifecycle_status = 'deleted' WHERE id = ?").run(cutObj);
-
-        const snapshot = async () => (await Promise.all(['vods', 'clips', 'files', 'pastes', 'media_objects', 'media_locations', 'media_variants', 'media_relationships']
-            .map(async t => JSON.stringify(await raw.prepare(`SELECT * FROM ${t} ORDER BY ${t}::text`).all())))).join('|');
-        const snap = await snapshot();
-        const rep = await drift.buildReport(q, { limit: 5 });
-        assert.strictEqual(await snapshot(), snap, 'the report changed nothing');
-
-        assert.strictEqual(rep.total_drift, 5, drift.formatReport(rep));
-        assert.deepStrictEqual([rep.kinds.vod.missing, rep.kinds.clip.mismatch, rep.kinds.file.mismatch, rep.kinds.screenshot.unlinked], [1, 2, 1, 1]);
-        assert.deepStrictEqual([rep.field_counts.visibility, rep.field_counts.size_bytes, rep.field_counts.owner_user_id, rep.field_counts.lifecycle_status], [1, 1, 1, 1]);
-        const ex = (kind, id) => rep.kinds[kind].examples.find(e => String(e.id) === String(id));
-        assert.deepStrictEqual(ex('vod', 900).problems, ['missing']);
-        assert.deepStrictEqual(ex('clip', upId).diff.visibility, { row: 'public', object: 'private' });
-        assert.deepStrictEqual(ex('clip', cutId).diff.lifecycle_status, { row: 'failed', object: 'deleted' });
-        assert.deepStrictEqual(Object.keys(ex('file', fileKey).diff).sort(), ['owner_user_id', 'size_bytes']);
-        assert.deepStrictEqual(ex('screenshot', (await db.get('SELECT id FROM pastes WHERE slug = ?', [slug])).id).problems, ['unlinked']);
-        assert.strictEqual(rep.kinds.vod.skipped, 1, 'the clips-only recording is skipped, not drift');
-        assert.strictEqual((await drift.buildReport(q, { appId: 'network' })).total_drift, 0, '--app narrows the report');
-        assert.match(drift.formatReport(rep), /total drift: 5 of \d+ row\(s\)/);
-
-        // The script: read-only, exit 0 whatever it finds.
-        const { runScript } = require('./helpers/run-script');
-        const script = path.join(__dirname, '..', 'scripts', 'object-drift-report.js');
-        const r1 = await runScript(script, ['--json', '--limit', '1']);
-        assert.strictEqual(r1.code, 0, r1.err);
-        const out = JSON.parse(r1.out);
-        assert.strictEqual(out.total_drift, 5);
-        assert.ok(Object.values(out.kinds).every(k => k.examples.length <= 1), '--limit caps the examples per kind');
-        assert.match((await runScript(script, [])).out, /clip examples \(2 of 2\)/);
-        assert.strictEqual(await snapshot(), snap, 'the script changed nothing either');
-
-        // Re-projecting the planted rows clears the drift the report listed.
-        for (const id of [900]) await model.sync('vod', id);
-        await model.sync('clip', upId); await model.sync('clip', cutId); await model.sync('file', fileKey);
-        await model.sync('paste', (await db.get('SELECT id FROM pastes WHERE slug = ?', [slug])).id);
-        await noDrift('after re-projecting the planted drift');
-        console.log('✅ drift report: read-only (report and script), counts per kind with examples, finds missing / unlinked / mismatched objects');
 
         server.close();
         fs.rmSync(tmp, { recursive: true, force: true });

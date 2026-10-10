@@ -141,7 +141,7 @@ const { spawnSync, execFileSync } = require('child_process');
         await db.run("INSERT INTO assets (id, app_id, kind, name, file_path, mime) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 'emote', 'drillWave', ?, 'image/png')", [bytes.asset]);
         await db.run("INSERT INTO pastes (id, app_id, slug, type, title, screenshot_path, visibility) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 'shot1', 'screenshot', 'Shot', ?, 'public')", [bytes.shot]);
         await db.run("INSERT INTO files (key, app_id, original_name, size, mime) VALUES ('f1.txt', 'live', 'f1.txt', 13, 'text/plain')");
-        await require('../server/objects/backfill').backfill({ onlyMissing: true });
+        await require('./helpers/project-rows').projectRows({ onlyMissing: true });
         const COUNTED = ['media_objects', 'vods', 'clips', 'apps', 'media_locations', 'media_jobs', 'event_outbox'];
         const counts = async () => Object.fromEntries(await Promise.all(COUNTED.map(async (t) => [t, Number((await db.get(`SELECT COUNT(*) AS n FROM ${t}`)).n)])));
         const countsBefore = await counts();

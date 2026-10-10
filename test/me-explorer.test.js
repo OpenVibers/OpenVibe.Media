@@ -336,7 +336,7 @@ const http = require('http');
             assert.deepStrictEqual(rep.jobs.failed.last_7_days, [{ type: 'object.sprite', error_code: 'no_video', count: 1 }]);
             assert.ok(rep.missing.no_good_copy.objects.some(o => o.id === lost), 'a ready object whose only copy is missing');
             assert.ok(rep.missing.locations.missing_or_corrupt.some(l => l.object_id === lost && l.provider === 'b2'));
-            assert.ok(rep.backfill.unprojected && rep.backfill.owner_subject.missing >= 1);
+            assert.ok(rep.projection.unprojected && rep.projection.owner_subject.missing >= 1);
             assert.ok(rep.tiering.objects.some(o => o.origin === 'native') && rep.tiering.sweep && 'pending_offload' in rep.tiering);
             assert.ok(rep.namespaces.some(n => n.namespace === 'live.avatars'));
             // Webhooks section: host only, no URL path and no secret anywhere in the payload; counts are
@@ -352,7 +352,7 @@ const http = require('http');
             assert.ok(r.status === 200 && r.text.includes('mjob_TESTFAILED') && r.text.includes('action="/me/ops/recompute"') && r.text.includes('noindex'));
             assert.ok(r.text.includes('webhooks-h') && r.text.includes('hooks.example.test'), 'the page shows the webhooks section and the configured host');
             assert.ok(!r.text.includes(HOOK_URL) && !r.text.includes('ov-private-hook-path') && !r.text.includes(HOOK_SECRET), 'the page never shows the webhook URL path or secret');
-            console.log('✅ operator views: staff.site.view only (not users, not global mods); failed jobs, missing media, backfill, tiering, namespaces');
+            console.log('✅ operator views: staff.site.view only (not users, not global mods); failed jobs, missing media, projection, tiering, namespaces');
 
             // ── Recompute: staff.site.configure, same-origin ──
             await db.run("UPDATE media_namespaces SET used_bytes = 0, used_objects = 0, reconciled_at = NULL WHERE namespace = 'live'");

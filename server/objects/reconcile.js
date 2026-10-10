@@ -16,7 +16,7 @@
  *   size_mismatch / hash_mismatch   bytes differ from the object's size / sha256
  *   orphan_location                 location rows whose object does not exist
  *   deleted_publicly_reachable      deleted object still served (legacy row, or a thumbnail of it)
- *   missing_projection              inherited rows with no object yet (run the backfill)
+ *   missing_projection              inherited rows with no object yet (investigate the write path)
  *   incomplete_multipart            multipart sessions still open past their expiry (the hourly purge
  *                                   removes their parts; one listed here means the purge is not running)
  */

@@ -75,7 +75,7 @@ function heldSql(ref) {
 }
 
 /**
- * Object-first write (WS-G task 1, retiring C-75): run write() — a change to a projected
+ * Object-first write (WS-G task 1, C-75 retired 2026-10-10): run write() — a change to a projected
  * vods/clips/files/pastes row — and re-project the row's media_object in the same transaction
  * (objects/model.js withObject). Throws, with nothing written, when either part fails.
  */

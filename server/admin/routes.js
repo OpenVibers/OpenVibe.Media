@@ -35,7 +35,7 @@
  *                           and each change is logged as an [Admin] line
  * POST   /holds/:holdId/release   { released_by } (also DELETE /holds/:holdId); 409 when already released
  * GET    /ops              this app's operator report (server/me/ops.js, as openvibe.media/me/ops shows
- *                           it to Network staff): failed jobs, missing media, backfill, tiering, namespaces
+ *                           it to Network staff): failed jobs, missing media, projection, tiering, namespaces
  * POST   /ops/recompute    refresh this app's namespaces' usage snapshot from the rows
  */
 'use strict';
@@ -665,7 +665,7 @@ function _opsStaffOnly(req, res) {
     return false;
 }
 
-// GET /ops?limit — failed jobs, missing media, backfill status, tiering diagnostics and the namespaces'
+// GET /ops?limit — failed jobs, missing media, projection status, tiering diagnostics and the namespaces'
 // usage snapshot of this app (server/me/ops.js; the sweep and the provider switches are service-wide).
 router.get('/ops', async (req, res) => {
     try {

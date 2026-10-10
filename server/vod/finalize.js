@@ -166,11 +166,6 @@ async function finalizeVod(vodId, opts = {}) {
         throw err;
     } finally {
         _finalizing.delete(vodId);
-        // Every outcome (ready, quarantined, failed) now commits with its object (withObject); a deleted
-        // row's object is marked by its trigger. This follow-up only re-reads the disk after a finalize
-        // that threw part-way (a merge or remux rewrote the file, no row write followed). C-75 leftover:
-        // it goes with the boot backfill (server/index.js) once the drift report shows zero drift.
-        await objects().safeSync('vod', vodId);
     }
 }
 

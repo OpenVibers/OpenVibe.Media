@@ -303,18 +303,8 @@ const ready = (async () => {
                 await ns.reconcileAll();
             } catch (err) { console.warn('[Namespaces] sweep:', err.message); }
         });
-        // Project rows that have no media_object yet (first boot after the upgrade: all of them).
-        // C-75 catch-up: every write now makes its object in the same transaction (objects/model.js
-        // withObject, WS-G task 1), so this should find nothing. It stays until a release has run with
-        // `node scripts/object-drift-report.js` showing zero drift; then it goes, with the finalize
-        // follow-up re-projection (vod/finalize.js), in a dated later step.
+        // Take the first namespaces usage snapshot after boot (then hourly and after each write).
         setTimeout(async () => {
-            try {
-                const bf = require('./objects/backfill');
-                const r = await bf.backfill({ onlyMissing: true });
-                if (r.totals.created || r.totals.updated || r.errors.length) console.log(`[Objects] Backfill: ${bf.summarize(r)}`);
-            } catch (err) { console.warn('[Objects] Backfill failed:', err.message); }
-            // The namespaces' usage snapshot, first taken here (then hourly, and after each write).
             try { await require('./objects/namespaces').reconcileAll(); } catch (err) { console.warn('[Namespaces] reconcile:', err.message); }
         }, 15 * 1000).unref?.();
 
