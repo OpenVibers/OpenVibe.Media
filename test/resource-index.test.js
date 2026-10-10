@@ -2,7 +2,7 @@
 // Media's authority resource index (ADR-048 §3, plan T13 step 8; capability media.resource.read):
 // GET /api/v1/resources pages common.resource-summary@1 for the resources Media owns — its media objects
 // (med_, media_objects) — and GET /api/v1/resources/:ovrn reads one by its computed ovrn. Media lists
-// objects alone; v1 vods/clips/files are projections and are never listed. ?project=&kind=&cursor=&limit=
+// objects alone; v1 vods/clips/files are projections and are never listed. ?project=&owner=&kind=&cursor=&limit=
 // are honoured; ?project= is the tenancy boundary (the tenant's apps.project_id), so a resource of another
 // project is never returned. An ovrn is present exactly when openvibe-contracts' contracts.resources.nameOf
 // composes one: only when the object's tenant is a developer project (a first-party tenant has no project).
@@ -37,7 +37,7 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
 
     // ── Fixtures: two developer projects (A production + sandbox, B) and the first-party tenant `live` ──
     const prjA = ids.newId('project'); const prjB = ids.newId('project');
-    const usrA = ids.newId('user');
+    const usrA = ids.newId('user'); const usrB = ids.newId('user');
     const at = '2026-10-01 00:00:00';                        // Media's stored shape; the index renders it RFC 3339
     const objA1 = ids.newId('media', 1700000001000);          // project A, production, ready, user-owned
     const objA2 = ids.newId('media', 1700000002000);          // project A, sandbox, uploading
@@ -51,9 +51,9 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
     const INSERT_OBJECT = "INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, visibility, lifecycle_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'private', ?, ?, ?)";
     const insertObject = (id, app, kind, owner, lifecycle) => db.run(INSERT_OBJECT, [id, app, app, kind, owner, lifecycle, at, at]);
     await insertObject(objA1, prjA, 'vod', usrA, 'ready');
-    await insertObject(objA2, `${prjA}-sandbox`, 'vod', null, 'uploading');
+    await insertObject(objA2, `${prjA}-sandbox`, 'vod', usrA, 'uploading');
     await insertObject(objA3, prjA, 'clip', null, 'deleted');
-    await insertObject(objB1, prjB, 'file', null, 'ready');
+    await insertObject(objB1, prjB, 'file', usrB, 'ready');
     await insertObject(objL1, 'live', 'file', null, 'ready');
     await insertObject(objL2, 'live', 'file', usrA, 'ready');
 
@@ -89,6 +89,7 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
             assert.strictEqual(byId.get(objA2).project_id, prjA, 'the sandbox tenant of project A is project A');
             assert.strictEqual(byId.get(objA1).ovrn, ovrnOf(prjA, objA1), 'a project object is named');
             assert.strictEqual(byId.get(objA1).owner.id, usrA, 'a user-owned object names its owner');
+            assert.strictEqual(byId.get(objB1).owner.id, usrB, 'another user-owned object names its own owner');
             assert.strictEqual(byId.get(objA1).state, 'ready');
             assert.strictEqual(byId.get(objA2).state, 'uploading');
             assert.strictEqual(byId.get(objA3).state, 'deleted', 'the state follows lifecycle_status');
@@ -113,6 +114,35 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
             assert.deepStrictEqual(await aIds('?kind=vod'), [], 'a v1 kind (a projection) is not a resource kind');
             assert.deepStrictEqual(await aIds(`?project=${ids.newId('project')}`), [], 'an unknown project has no resources');
             assert.deepStrictEqual((await aIds(`?project=${prjA}&limit=1000`)).sort(), [objA1, objA2, objA3].sort(), 'a large limit still pages one result');
+
+            // ── ?owner= scopes the summary owner across tenants and combines with the other filters ──
+            const ownedByA = [objA1, objA2, objL2].sort();
+            assert.deepStrictEqual(await aIds(`?owner=${usrA}`), ownedByA, 'only this subject, including first-party rows');
+            assert.deepStrictEqual(await aIds(`?owner=${usrB}`), [objB1], 'another subject has only its own rows');
+            assert.deepStrictEqual(await aIds(`?owner=${usrA}&kind=media.object`), ownedByA, 'owner and kind combine');
+            assert.deepStrictEqual(await aIds(`?owner=${usrA}&project=${prjA}&kind=media.object`), [objA1, objA2].sort(), 'owner, project and kind combine');
+            assert.deepStrictEqual(await aIds(`?owner=${usrA}&project=${prjB}`), [], 'owner excludes another project');
+            assert.deepStrictEqual(await aIds(`?owner=${usrA.replace(/^usr_/, 'agt_')}`), [], 'an agent has no user-owned summaries');
+            assert.deepStrictEqual(await aIds('?owner='), idOrder, 'an empty owner leaves the index unfiltered');
+
+            const ownedPages = [];
+            let ownerCursor = null;
+            for (;;) {
+                const q = `?owner=${usrA}&limit=1${ownerCursor ? `&cursor=${encodeURIComponent(ownerCursor)}` : ''}`;
+                const y = await get(`/api/v1/resources${q}`, authHeaders);
+                assert.strictEqual(y.status, 200, q);
+                assert.ok(validate('common.resource-list-result@1', y.body).valid, q);
+                y.body.resources.forEach((s) => {
+                    assert.ok(validate('common.resource-summary@1', s).valid, s.id);
+                    assert.strictEqual(s.owner.id, usrA);
+                });
+                ownedPages.push(...y.body.resources.map((s) => s.id));
+                if (y.body.next_cursor === null) break;
+                assert.ok(y.body.next_cursor && y.body.next_cursor !== ownerCursor);
+                ownerCursor = y.body.next_cursor;
+                if (ownedPages.length > ownedByA.length) assert.fail('the owner cursor chain never ended');
+            }
+            assert.deepStrictEqual(ownedPages, ownedByA, 'owner paging visits each row exactly once in order');
 
             // ── Keyset paging: the whole index in pages of two, no duplicates, none skipped, order preserved ──
             const seen = [];
@@ -156,7 +186,7 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
             assert.strictEqual((await get(`/api/v1/resources/${encodeURIComponent(ovrnOf(prjA, objA1))}`)).status, 401, 'a read without a token is 401 too');
 
             // ── A bad query is 400 resources.bad_query (an unknown kind stays an empty page) ──
-            const bad = [['?project=nope', 'project not a prj_ id'], ['?limit=0', 'limit below one'], ['?limit=abc', 'limit not a number'], ['?limit=99999', 'limit over the cap'], ['?cursor=***', 'cursor not one this index issued']];
+            const bad = [['?project=nope', 'project not a prj_ id'], ['?owner=svc:live', 'owner is not a subject id'], ['?owner=usr_short', 'owner is too short'], [`?owner=${usrA}&owner=${usrB}`, 'multiple owners are not a subject id'], ['?limit=0', 'limit below one'], ['?limit=abc', 'limit not a number'], ['?limit=99999', 'limit over the cap'], ['?cursor=***', 'cursor not one this index issued']];
             for (const [q, why] of bad) {
                 const y = await get(`/api/v1/resources${q}`, authHeaders);
                 assert.strictEqual(y.status, 400, why);
