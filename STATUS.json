@@ -6,7 +6,7 @@
   "runtime": "node 22, express, PostgreSQL 18 (openvibe-sdk/db, async) + Valkey 9, ffmpeg",
   "port": 4100,
   "domain": "openvibe.media",
-  "contracts": "openvibe-contracts v0.122.1",
+  "contracts": "openvibe-contracts v0.126.0",
   "sdk": "openvibe-sdk v0.35.1",
   "shared": "openvibe-shared v2.20.0",
   "capabilities": [
@@ -47,5 +47,5 @@
     "HLS discovery on the v1 shapes (F3.c, behind MEDIA_HLS_ENABLED): the VOD and clip answers (vodPublic/clipPublic — get, list, create, update) carry hls_url (and hls_expires_at when the object is private or sandbox), the same field and access rules as GET /o/:id/download?format=json, read through one shared discovery (server/objects/hls.js); an object without a timeline gets object.cmaf queued and the field appears once it ran, and a virtual clip plays its source's window without being cut a timeline of its own",
     "materialized clips (F3.6, behind MEDIA_HLS_ENABLED + MEDIA_MATERIALIZED_CLIPS, off by default): clip.cut over a source timeline writes the clip's own media_timeline rows — the interior copies the source's segments (packed chunk ranges included), only the two window edges are re-encoded into fMP4 with their own inits (init-head.mp4/init-tail.mp4, negative seq, EXT-X-MAP + EXT-X-DISCONTINUITY in the playlist) — inserting them in one transaction that locks the named source rows FOR SHARE and aborts with a retryable error when one is gone or any location column moved (a pack), so a racing delete either waits and keeps the bytes or aborts the insert; the projection keeps virtual: true and gains materialized: true (readiness, playableSql and the verify job treat it as a virtual clip), sprites decode each edge with its own init, deleting the clip removes its rows and edge bytes while the source's bytes stay, and download?format=mp4 answers the playlist for a timeline-only clip instead of queueing a remux that cannot read its input"
   ],
-  "updated": "2026-10-09"
+  "updated": "2026-10-10"
 }
