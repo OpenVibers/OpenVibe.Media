@@ -9,7 +9,7 @@ its v1 pastes API was retired in T10 step 2 (`/api/v1/:app/pastes` is unmounted;
 `/p/:slug` routes remain). Other existing URLs and v1 responses are
 unchanged. New code talks to objects through the [v2 API](#object-api-v2).
 
-Code: `server/objects/` (`model.js`, `routes.js`, `backfill.js`, `reconcile.js`, `invariant.js`,
+Code: `server/objects/` (`model.js`, `routes.js`, `reconcile.js`, `invariant.js`,
 `signing.js`, `verify-job.js`, `copy-report.js`, `multipart.js`, `content-type.js`, `readiness.js`, `namespaces.js`,
 `namespace-routes.js`, `popularity.js`, `tier-policy.js`, `tiering.js`) and the job system in
 `server/jobs/` (`queue.js`, `worker.js`, `routes.js`, `types.js`, `thumbnail.js`, `invariant-scan.js`,
@@ -44,7 +44,7 @@ state resets only when the key changes.
 
 ### Ids and legacy refs
 
-Ids come from `openvibe-contracts` `ids.newId('media')`. A backfilled object takes its ULID time
+Ids come from `openvibe-contracts` `ids.newId('media')`. A projected legacy object takes its ULID time
 from the original row's `created_at`, so ids sort by creation time. Projected objects also carry
 the transitional `media.media-ref@1` legacy form in `legacy_ref`, which is unique:
 
@@ -66,8 +66,7 @@ Every v2 route that takes `:id` accepts either form. Native v2 objects have `leg
 ### How a row maps to its object
 
 `model.sync(kind, id)` derives the object and its locations from the row as it is at that moment
-(the per-kind `<kind>Projection(row)` functions). The backfill, every write and the drift report use
-the same functions.
+(the per-kind `<kind>Projection(row)` functions). Every write uses the same functions.
 
 - **vod / clip.**
   - Local copy: the file under `VOD_PATH` (vods, resolved by basename as playback does) or the clip's own path.
@@ -81,29 +80,12 @@ the same functions.
 - **screenshot / avatar.** `screenshot_path`. Text pastes have no bytes and no object; paste text belongs to Community.
 - **thumbnail.** One object per vod/clip, reached through the parent's `thumbnail` variant and **updated in place** when the picture is regenerated (live recordings refresh it every couple of minutes). Visibility is `public` when the parent is public and `unlisted` otherwise, because `/t/<name>` serves anyone who has the name. An external `thumbnail_url` is skipped.
 
-## Backfill
-
-`backfill()` in `server/objects/backfill.js` is a module, not a CLI: it is called from code, and the service calls it
-itself with `{ onlyMissing: true }` 15 s after boot. Read-only questions about it are answered by the
-[drift report](#drift-report). It creates one object per vod, clip, file, screenshot/avatar paste
-and thumbnail, with relationships and thumbnail variants.
-
-- **Idempotent.** Objects are keyed by `legacy_ref`, so a second run updates them in place and creates nothing.
-- **Never moves or deletes bytes, and never calls B2/R2.** A local copy is `present` when the file exists and `missing` when it does not. Remote copies stay `pending` until `reconcile-objects.js --verify` checks them.
-- **One transaction,** with one savepoint per row: a failing row is reported and leaves nothing half-written. A dry run (`{ dryRun: true }`) rolls everything back and only reports.
-- **Report:** counts per kind (seen, created, updated, skipped), location states, skipped rows with a reason, and errors. A real run stores the report in `media_settings` under `objects.backfill.last_report`; `lastReport()` reads it back and `/me/ops` shows it.
-- **At boot:** the service runs the `onlyMissing` form itself 15 s after start, for rows with no `object_id`. The first boot after the upgrade therefore projects everything. With object-first writes it should find nothing; it stays until the [drift report](#drift-report) shows zero drift across a release.
-
-Skip reasons today: `clips-only recording (ephemeral, never published)`, `screenshot paste without a file path`, `external thumbnail url`.
-
-The backfill's own transaction holds row and table locks for its duration, typically seconds, so it runs only
-where the service controls it: the boot backfill.
+The historical projection of imported rows is preserved for tests in `test/helpers/project-rows.js`. It is not a production path.
 
 ### Keeping the model current: object-first writes
 
 Every write to a projected row writes its object in the same PostgreSQL transaction
-(`model.withObject(kind, ids, write)`; roadmap WS-G task 1, which retires compatibility shim C-75,
-"write the row, then sync the object"). The row change and the re-projection commit together or
+(`model.withObject(kind, ids, write)`; roadmap WS-G task 1; compatibility shim C-75 was retired on 2026-10-10). The row change and the re-projection commit together or
 not at all, so a crash or an error between them can no longer leave the object behind its row. A
 write whose object cannot be written fails as a whole and changes nothing. Inside
 `webhooks.announce()` the object joins the outcome's transaction, and its object events are queued
@@ -134,28 +116,13 @@ content hashes come from the content-hash job, and remote copies stay `pending` 
 reconciliation verifies them. Two writes record something that already happened outside the
 database, so they never lose the row to its object: the recorder's start (ffmpeg is running) and the
 tier moves (the bytes have moved). If their combined transaction fails, the row is written alone and
-re-projected after it (`withObjectOrRow`), with a warning. After a move that removed the local file,
-and after a finalize that threw part-way, a follow-up re-projection re-reads the disk. Columns no
+re-projected after it (`withObjectOrRow`), with a warning. After a move that removed the local file, a follow-up re-projection re-reads the disk. Columns no
 object carries (view counts, `master_file_path`, `cut_attempts`, paste likes and AI fields) are
-written without one. `db.importLegacyRows` (the cutover import) is not converted: the boot backfill
-projects what it inserts.
+written without one. `db.importLegacyRows` is the historical cutover import.
 
-### Drift report
+### C-75 retirement
 
-```
-node scripts/object-drift-report.js [--app live] [--limit 20] [--json] [--out report.json]
-```
-
-For every projected row, and each vod/clip thumbnail, the report derives what the object must say
-with the same projection functions and compares it with the object on record: `kind`, `visibility`,
-`lifecycle_status`, `size_bytes`, `legacy_ref`, `app_id`, `owner_app`, `owner_user_id`, and the link
-(the row's `object_id`, or the parent's `thumbnail` variant). A row is `missing` (no object),
-`unlinked` (the link names another object) or `mismatch` (a field differs). It prints counts per
-kind and up to `--limit` examples of each. The database is opened read-only and nothing is written;
-the exit code is always 0.
-
-The boot backfill (rows with no object) and the finalize follow-up stay until a release has run with
-zero drift. They are removed in a later, dated step.
+C-75 was retired on 2026-10-10 after production drift was 0 of 3036 rows (vod 736, clip 363, file 29, screenshot 819, avatar 3, thumbnail 1086). Every write makes its media object in the same transaction through `model.withObject`. Operators can still check objects with `scripts/reconcile-objects.js` and `scripts/object-invariant.js`.
 
 ## Owner subjects
 
@@ -447,7 +414,7 @@ cheap and renders in a drill.
 
 - `jobs`: counts by status; failed jobs of the last 7 days by type and error code; the most recent failures with their error text.
 - `missing`: ready objects with no good copy; copies recorded missing or corrupt; copies by provider and state; quarantined VODs; the last verification run.
-- `backfill`: the last object backfill that changed something; rows with no object yet; objects whose owner subject is unresolved; whether upload reservations were seeded.
+- `projection`: rows with no object yet; objects whose owner subject is unresolved; whether upload reservations were seeded.
 - `tiering`: providers and policy; VODs and clips per provider; objects per canonical copy (native or projected); VODs eligible to offload; R2 decisions of the last 24 h and recent refusals and failures; the sweep's state in this process; and `native_objects`: the [object tiering](#tiering-of-native-objects)'s activation gate and policy, native objects in R2, how many are eligible to promote now, its decisions of the last 24 h (dry runs included) and the most recent ones, and its last sweep.
 - `namespaces`: every namespace with quota and usage snapshot.
 - `webhooks`: the apps with a configured outbound webhook (app id and host only — never the URL or secret) and, per app, what this process has sent since it loaded (`sent`, `failed`, the last event and attempt/ok times, the last error). In-memory: counts reset on restart and scope to the app when the report is scoped.
@@ -553,7 +520,7 @@ The exit code is 1 when issues were found.
 | `size_mismatch` / `hash_mismatch` | the bytes differ from the object's size or sha256 |
 | `orphan_location` | a location row whose object does not exist |
 | `deleted_publicly_reachable` | a deleted object whose inherited row still serves it, or a thumbnail of a deleted object that is still served by name |
-| `missing_projection` | an inherited row with no object yet (run the backfill) |
+| `missing_projection` | an inherited row with no object yet (investigate the write path) |
 | `incomplete_multipart` | a multipart session still open past its expiry (the hourly purge should have removed it) |
 
 Bucket keys and local files that no row names are the [storage orphan report](#storage-orphan-report)'s.

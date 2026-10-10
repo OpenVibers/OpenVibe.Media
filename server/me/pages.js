@@ -332,7 +332,7 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
     const kv = (obj) => Object.entries(obj || {}).map(([k, v]) => `${esc(k.replace(/_/g, ' '))} ${num(v)}`).join(' · ') || 'none';
     const t = r.tiering;
     const no = t.native_objects || null;
-    const bf = r.backfill;
+    const projection = r.projection;
     const m = r.missing;
     const body = `
   <h1>Media operations</h1>
@@ -346,7 +346,7 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
     ${card(num(r.jobs.failed.total), 'failed jobs')}
     ${card(num(m.no_good_copy.total), 'ready objects with no good copy')}
     ${card(num(m.locations.missing_or_corrupt.length), 'missing or corrupt copies listed')}
-    ${card(num(Object.values(bf.unprojected).reduce((a, b) => a + b, 0)), 'rows without an object')}
+    ${card(num(Object.values(projection.unprojected).reduce((a, b) => a + b, 0)), 'rows without an object')}
     ${card(num(t.pending_offload), 'VODs eligible to offload')}
   </div>
 
@@ -392,14 +392,13 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
     ${table('Copies by provider and state', ['Provider', 'State', 'Copies'], m.locations.by_provider_state.map(x => [esc(x.provider), esc(x.state), num(x.count)]), { numeric: [2] }) || '<p class="empty">None.</p>'}
   </section>
 
-  <section aria-labelledby="backfill-h">
-    <h2 id="backfill-h">Backfill</h2>
-    <p class="hint">${esc(bf.note)}</p>
+  <section aria-labelledby="projection-h">
+    <h2 id="projection-h">Projection</h2>
+    <p class="hint">${esc(projection.note)}</p>
     <dl class="facts">
-      <dt>Last object backfill</dt><dd>${bf.objects ? `${esc(fmtWhen(bf.objects.finished_at))}${bf.objects.dry_run ? ' (dry run)' : ''}: ${bf.objects.totals ? kv(bf.objects.totals) : 'no totals'}; ${num(bf.objects.errors)} errors, ${num(bf.objects.skipped)} skipped` : 'none recorded'}</dd>
-      <dt>Rows without an object</dt><dd>${kv(bf.unprojected)}</dd>
-      <dt>Owner subject unresolved</dt><dd>${num(bf.owner_subject.missing)}${bf.owner_subject.by_app.length ? ` (${bf.owner_subject.by_app.map(a => `${esc(a.app_id)} ${num(a.count)}`).join(', ')})` : ''}</dd>
-      <dt>Upload reservations seeded</dt><dd>${bf.namespace_reservations_seeded ? 'yes' : 'no'}</dd>
+      <dt>Rows without an object</dt><dd>${kv(projection.unprojected)}</dd>
+      <dt>Owner subject unresolved</dt><dd>${num(projection.owner_subject.missing)}${projection.owner_subject.by_app.length ? ` (${projection.owner_subject.by_app.map(a => `${esc(a.app_id)} ${num(a.count)}`).join(', ')})` : ''}</dd>
+      <dt>Upload reservations seeded</dt><dd>${projection.namespace_reservations_seeded ? 'yes' : 'no'}</dd>
     </dl>
   </section>
 
@@ -441,7 +440,7 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
     }), { numeric: [2, 3] }) || '<p class="empty">No app is configured to receive webhooks.</p>'}
   </section>
   <p class="hint">JSON: <a href="/api/v2/me/ops${scopeQs}">/api/v2/me/ops</a>.</p>`;
-    return doc({ title: 'Media operations', description: 'Operator views of OpenVibe.Media: failed jobs, usage, missing media, backfill, tiering and webhooks.', body });
+    return doc({ title: 'Media operations', description: 'Operator views of OpenVibe.Media: failed jobs, usage, missing media, projection, tiering and webhooks.', body });
 }
 
 module.exports = {

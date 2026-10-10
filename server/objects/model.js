@@ -5,10 +5,8 @@
  * row per provider copy. The inherited vods/clips/files/pastes rows are typed
  * projections over objects: each carries object_id, and the sync*() functions
  * below derive the object + locations from the row as it is right now. The same
- * functions back the one-off backfill and every write on the old APIs, which
- * writes the row and its object in one transaction (withObject, WS-G task 1), so
- * the model cannot drift between "imported" and "written since". The drift
- * report (./drift.js) checks that it has not.
+ * functions back every write on the old APIs, which writes the row and its object
+ * in one transaction (withObject, WS-G task 1).
  *
  * Location states: present (verified: the local file exists / a HEAD answered),
  * missing (verified absent), pending (believed there, not yet verified — every
@@ -49,7 +47,7 @@ function parseJson(s, fallback) {
     try { return JSON.parse(s); } catch { return fallback; }
 }
 
-/** Epoch ms from a `YYYY-MM-DD HH:MM:SS` (UTC) text timestamp, as the migrations store them, so backfilled ids sort by original creation time. */
+/** Epoch ms from a `YYYY-MM-DD HH:MM:SS` (UTC) text timestamp, as the migrations store them, so projected legacy ids sort by original creation time. */
 function toMs(createdAt) {
     const ms = Date.parse(String(createdAt || '').replace(' ', 'T') + (/[zZ]|[+-]\d\d:?\d\d$/.test(String(createdAt || '')) ? '' : 'Z'));
     return Number.isFinite(ms) ? ms : Date.now();
@@ -302,9 +300,8 @@ async function recordInvariant(objectId) {
 
 // ── Per-kind projections ─────────────────────────────────────
 // <kind>Projection(row) derives what the object behind one inherited row must say (project()'s input).
-// Read-only (it stats local files, never writes), and shared by the sync*() writers below and the
-// drift report (./drift.js), so the report checks exactly what a write would have written. A row
-// that has no object of its own answers { skipped: reason }.
+// Read-only (it stats local files, never writes), and shared by the sync*() writers below.
+// A row that has no object of its own answers { skipped: reason }.
 
 function vodLifecycle(row) {
     const s = db.vodStatus(row);
@@ -519,7 +516,7 @@ async function safeSync(kind, id) {
 }
 
 /**
- * Object-first write (WS-G task 1; retires compatibility shim C-75, "write the row, then sync its
+ * Object-first write (WS-G task 1; C-75 retired 2026-10-10, "write the row, then sync its
  * object"): write() changes inherited rows and the objects behind them are re-projected in the SAME
  * transaction, so both commit or neither does: no crash or error between the two can leave
  * an object behind its row. kind vod|clip|file|paste; ids the row id (a file's key), a list of them,
@@ -546,7 +543,7 @@ async function withObject(kind, ids, write) {
  * withObject() for a row write that records something already done outside the database (a
  * recorder's ffmpeg is running): the row must say so whatever happens to its object. When the
  * combined transaction fails, the row is written alone and the object re-projected after it (the
- * pre-WS-G two steps; logged, and the drift report lists the row until a later write catches up).
+ * pre-WS-G two steps; logged, and the row's next write brings its object level).
  */
 async function withObjectOrRow(kind, ids, write) {
     try { return await withObject(kind, ids, write); } catch (err) {

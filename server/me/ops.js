@@ -2,7 +2,7 @@
  * OpenVibe.Media — operator views over the object platform (roadmap WS-G task 12;
  * docs/object-model.md#operator-views).
  *
- *   report({ appId, limit })   failed jobs, missing media, backfill status, tiering diagnostics, the
+ *   report({ appId, limit })   failed jobs, missing media, projection status, tiering diagnostics, the
  *                              namespaces' usage snapshot and the outbound-webhooks section; appId
  *                              narrows everything that has a tenant (the tiering sweep and the provider
  *                              switches are service-wide)
@@ -98,15 +98,14 @@ async function missing(appId, limit) {
         locations: { by_provider_state: byState, missing_or_corrupt: bad },
         vods_quarantined: quarantined,
         verification,
-        note: 'From what the database records (scheduled verification, tier moves, reconciliation). A full walk of storage is the storage.orphans.scan report; drift between rows and objects is scripts/object-drift-report.js.',
+        note: 'From what the database records (scheduled verification, tier moves, reconciliation). A full walk of storage is the storage.orphans.scan report.',
     };
 }
 
-// ── Backfill ─────────────────────────────────────────────────
+// ── Projection ───────────────────────────────────────────────
 
-async function backfill(appId) {
+async function projection(appId) {
     const s = scoped(appId);
-    const last = await require('../objects/backfill').lastReport();
     const unprojected = {
         vods: (await db.get(`SELECT COUNT(*) AS n FROM vods WHERE object_id IS NULL AND COALESCE(clips_only, 0) = 0${s.sql}`, s.params)).n,
         clips: (await db.get(`SELECT COUNT(*) AS n FROM clips WHERE object_id IS NULL${s.sql}`, s.params)).n,
@@ -116,16 +115,10 @@ async function backfill(appId) {
     const owner = await db.all(`SELECT app_id, COUNT(*) AS n FROM media_objects WHERE owner_subject IS NULL AND owner_user_id IS NOT NULL
                           AND lifecycle_status != 'deleted'${s.sql} GROUP BY app_id ORDER BY n DESC`, s.params);
     return {
-        objects: last ? {
-            finished_at: iso(last.finished_at) || null, dry_run: !!last.dry_run, only_missing: !!last.only_missing,
-            totals: last.totals || null, locations: last.locations || null,
-            errors: Array.isArray(last.errors) ? last.errors.length : 0,
-            skipped: Array.isArray(last.skipped) ? last.skipped.length : 0,
-        } : null,
         unprojected,
         owner_subject: { missing: owner.reduce((a, r) => a + r.n, 0), by_app: owner.map(r => ({ app_id: r.app_id, count: r.n })) },
         namespace_reservations_seeded: !!await db.get("SELECT 1 AS x FROM media_settings WHERE key = 'namespaces.reservations_seeded'"),
-        note: 'objects: the last boot or scripted backfill that changed something (media_settings objects.backfill.last_report). unprojected: rows with no object yet. owner_subject: objects the owner-subject job has not resolved.',
+        note: 'unprojected: rows with no object yet. owner_subject: objects the owner-subject job has not resolved.',
     };
 }
 
@@ -238,7 +231,7 @@ async function report({ appId = null, limit = 50 } = {}) {
         tenants: (await db.all('SELECT app_id FROM apps ORDER BY app_id')).map(r => r.app_id),
         jobs: await jobs(appId, n),
         missing: await missing(appId, n),
-        backfill: await backfill(appId),
+        projection: await projection(appId),
         tiering: await tiering(appId, n),
         namespaces: await namespaceSnapshot(appId),
         webhooks: await webhooks(appId),

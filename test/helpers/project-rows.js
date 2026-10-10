@@ -1,5 +1,5 @@
 /**
- * OpenVibe.Media — object backfill
+ * OpenVibe.Media — test-only legacy row projection
  *
  * One media_object (+ locations, relationships, thumbnail variant) per existing
  * vod, clip, file, screenshot/avatar paste and vod/clip thumbnail, derived by the
@@ -14,16 +14,14 @@
  */
 'use strict';
 
-const db = require('../db/database');
-const model = require('./model');
-
-const SETTING_KEY = 'objects.backfill.last_report';
+const db = require('../../server/db/database');
+const model = require('../../server/objects/model');
 
 function emptyCounts() {
     return { seen: 0, created: 0, updated: 0, skipped: 0 };
 }
 
-async function backfill({ dryRun = false, onlyMissing = false } = {}) {
+async function projectRows({ dryRun = false, onlyMissing = false } = {}) {
     const report = {
         started_at: new Date().toISOString(), dry_run: !!dryRun, only_missing: !!onlyMissing,
         counts: { vod: emptyCounts(), clip: emptyCounts(), file: emptyCounts(), screenshot: emptyCounts(), avatar: emptyCounts(), thumbnail: emptyCounts() },
@@ -87,18 +85,7 @@ async function backfill({ dryRun = false, onlyMissing = false } = {}) {
         for (const k of Object.keys(t)) t[k] += c[k];
         return t;
     }, emptyCounts());
-    if (!dryRun && (!onlyMissing || report.totals.created || report.totals.updated)) {
-        // Keep the latest report (skipped rows capped) for operators: media_settings.objects.backfill.last_report.
-        const stored = { ...report, skipped: report.skipped.slice(0, 500), skipped_truncated: report.skipped.length > 500 };
-        await db.run(`INSERT INTO media_settings (key, value, description, type) VALUES (?, ?, 'Last object backfill report', 'json')
-                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = ov_now()`, [SETTING_KEY, JSON.stringify(stored)]);
-    }
     return report;
-}
-
-async function lastReport() {
-    const row = await db.get('SELECT value FROM media_settings WHERE key = ?', [SETTING_KEY]);
-    return row ? model.parseJson(row.value, null) : null;
 }
 
 function summarize(report) {
@@ -108,4 +95,4 @@ function summarize(report) {
         + `missing ${report.locations.missing}, pending ${report.locations.pending}${report.errors.length ? `; ${report.errors.length} error(s)` : ''}`;
 }
 
-module.exports = { backfill, lastReport, summarize, SETTING_KEY };
+module.exports = { projectRows, summarize };

@@ -15,7 +15,7 @@
  * Operator views, for Network staff (contracts staff map, ADR-022): staff.site.view reads,
  * staff.site.configure recomputes (POST, same-origin only when the credential is the cookie):
  *
- *   GET  /api/v2/me/ops[?app]            failed jobs, missing media, backfill, tiering, namespaces (me/ops.js)
+ *   GET  /api/v2/me/ops[?app]            failed jobs, missing media, projection, tiering, namespaces (me/ops.js)
  *   POST /api/v2/me/ops/recompute[?app]  refresh the namespaces' usage snapshot
  *   GET  /me/ops, POST /me/ops/recompute the page and its form
  *

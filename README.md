@@ -103,7 +103,7 @@ server/
   me/                    the object explorer: /me and /api/v2/me (a signed-in person's own objects, uploads,
                          derivatives and usage) and the operator views /me/ops — see docs/object-model.md#object-explorer
   objects/               canonical object model: model (projections, holds), routes (/api/v2 + /o),
-                         backfill, reconcile, invariant, signing (presigned URLs), multipart,
+                         reconcile, invariant, signing (presigned URLs), multipart,
                          content-type, verify-job (scheduled copy verification), copy-report,
                          readiness (metadata / bytes_verified / playable), popularity (unique viewers
                          per day, no identifiers), tier-policy + tiering (native objects in the R2 cache) —
@@ -127,7 +127,7 @@ server/
   client-ip.js           trust proxy = loopback; req.ip is the only client address
 (openvibe-shared v3.0.0, openvibe-contracts v0.127.0, openvibe-sdk v0.38.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
-scripts/reconcile-objects.js / object-invariant.js / object-drift-report.js / no-good-copy-report.js   object-model operator tools
+scripts/reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
 scripts/r2-eviction-drill.js   evict one VOD's R2 copy, prove B2 serves it, re-warm R2; JSON artifact (dry run by default)
 scripts/vod-duration-reconcile.js   stored VOD durations vs the real files (dry run by default; --apply --backup; --rollback)
@@ -148,7 +148,7 @@ other OpenVibe services call the API.
 subject, in every tenant: uploads in progress, copies, derivatives, visibility, lifecycle and their own
 usage per tenant and namespace (`GET /api/v2/me/objects`, `/objects/:id`, `/usage`). Read-only: changes
 stay with the apps. Network staff with `staff.site.view` get the operator views at `/me/ops` (failed
-jobs, missing media, backfill, tiering, outbound webhooks — who is configured and what this process
+jobs, missing media, projection, tiering, outbound webhooks — who is configured and what this process
 has sent — and usage recompute with `staff.site.configure`). Details in
 [docs/object-model.md](docs/object-model.md#object-explorer).
 
@@ -356,7 +356,7 @@ directories are shared across apps) and responses carry a `note` saying so.
 | POST | `/admin/storage/holds` | `{ object_id \| vod_id \| clip_id, reason, kind?, note?, placed_by? }` → 201: the object is kept (no delete, no tier move) and so are the clips cut from a held VOD. Not for calls acting for a user (403) |
 | POST | `/admin/storage/holds/:holdId/release` | `{ released_by }` (also `DELETE /admin/storage/holds/:holdId`); 409 when already released. Holds stay on record |
 | GET | `/admin/storage/buckets` | sanitized bucket status per provider: `{ configured, endpoint, bucket, region, healthy, reachable }` via a live HeadBucket probe — **credentials are never returned** |
-| GET | `/admin/storage/ops` | this app's operator report (as `/me/ops` shows it to Network staff): failed jobs, missing media, backfill, tiering, the namespaces' usage snapshot. Not for calls acting for a user (403) |
+| GET | `/admin/storage/ops` | this app's operator report (as `/me/ops` shows it to Network staff): failed jobs, missing media, projection, tiering, the namespaces' usage snapshot. Not for calls acting for a user (403) |
 | POST | `/admin/storage/ops/recompute` | refresh this app's namespaces' usage snapshot from the rows |
 
 ### Webhooks (outbound)
@@ -427,7 +427,7 @@ mode (`server/drill.js`) Media:
   4100 (before the database is opened), and opens the copy without migrating it;
 - starts only its HTTP server: no app seeding, JWKS refresh, tiering sweep, health job, junk sweep,
   clip re-cuts, copy verification, jobs worker, disk guardian, thumbnail cleanup, object purge,
-  backfill, orphan-recording finalize or Events relay; webhooks are never sent;
+  orphan-recording finalize or Events relay; webhooks are never sent;
 - writes no file and creates no directory (the storage checks leave `/api/ready`, as do the remote
   tiers; it reports `"mode": "drill"`);
 - never opens a file path from the database: every byte route (`/v` and `/c` bytes, `/t`, `/a`, `/f`,
@@ -578,16 +578,7 @@ Every stored blob is a **media object** (`med_<ULID>`, `media_objects`) with one
 existing route and response is unchanged, and the old write paths keep the
 model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
 
-- **Backfill** — the row→object projection (`server/objects/backfill.js`), not a
-  CLI script: one object per vod, clip, file, screenshot, avatar and thumbnail;
-  idempotent; never moves bytes or calls B2/R2 (remote copies stay `pending`). The
-  service runs the only-missing form 15 s after boot, for rows with no `object_id`
-  yet, and stores its report in `media_settings.objects.backfill.last_report`
-  (also surfaced by `/me/ops`). To see whether any row still lacks an object — or
-  disagrees with the object on record — run the read-only drift report:
-  `node scripts/object-drift-report.js [--app live] [--limit 20] [--json]
-  [--out report.json]`. Zero drift across a release is the signal to drop the boot
-  backfill ([details](docs/object-model.md#backfill)).
+- **Object projection** — C-75 was retired on 2026-10-10 after production drift was 0 of 3036 rows. Every write makes its media object in the same transaction (`server/objects/model.js` `withObject`). Operators retain `scripts/reconcile-objects.js` and `scripts/object-invariant.js` as checks ([details](docs/object-model.md#keeping-the-model-current-object-first-writes)).
 - **API** — `/api/v2/:app/objects`: init → `PUT /:id/content` (sha256, size,
   quota) → `/:id/complete`; `GET /:id`, cursor `GET /`, soft `DELETE /:id`
   (bytes kept `MEDIA_DELETE_RETENTION_DAYS`), `/:id/restore`, `/:id/download`

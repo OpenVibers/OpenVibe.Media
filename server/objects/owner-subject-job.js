@@ -4,13 +4,12 @@
  *
  * Every MEDIA_OWNER_SUBJECT_INTERVAL_MIN minutes (first run a minute after boot), objects that name
  * an app-local owner (owner_app + owner_user_id) and no owner_subject get their owner's canonical
- * subject from Network (server/objects/owner-subject.js). This is how objects created since the
- * backfill get one: the upload and projection paths never wait on Network, and an object whose owner
- * Network does not know yet (a Live account not linked to Network) is filled on a later run once it is.
+ * subject from Network (server/objects/owner-subject.js). This is how new objects get one: the upload
+ * and projection paths never wait on Network, and an object whose owner Network does not know yet (a
+ * Live account not linked to Network) is filled on a later run once it is.
  * When there is nothing to fill, a run asks Network nothing.
  *
- * MEDIA_OWNER_SUBJECT_SYNC=0 turns it off (do that before rolling a backfill back, or the next run
- * fills the rows again).
+ * MEDIA_OWNER_SUBJECT_SYNC=0 turns it off.
  */
 const db = require('../db/database');
 const config = require('../config');

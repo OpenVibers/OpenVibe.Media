@@ -1,6 +1,6 @@
 'use strict';
 // Namespaces and grants (roadmap WS-G task 2; server/objects/namespaces.js, server/auth.js VERBS):
-//   - the backfill on open: developer-project objects move to app.<project_id>[.sandbox], every tenant
+//   - namespace setup on open: developer-project objects move to app.<project_id>[.sandbox], every tenant
 //     and every namespace an object names gets a row, uploads in progress get a reservation (once);
 //   - five verbs per namespace (read, list, write, delete, transform), the older ids still granting the
 //     newer verbs, strict_verbs refusing them; child namespaces and grants that name only a child;

@@ -50,7 +50,9 @@ const SEED_PG = `
         await db.run("INSERT INTO pastes (app_id, slug, type, title, content, visibility) VALUES ('live', 'n1paste', 'paste', 'N-1 paste', 'hello from N-1', 'public')");
         await db.run("INSERT INTO files (key, app_id, original_name, size, mime) VALUES ('n1file.txt', 'live', 'n1file.txt', 17, 'text/plain')");
         put('FILES_PATH', 'live/n1file.txt'); put('THUMBNAILS_PATH', 'vod-1-1.jpg');
-        await require('./server/objects/backfill').backfill({ onlyMissing: true });
+        // N-1 releases before C-75's retirement project rows with server/objects/backfill.js; later ones with the test helper.
+        const projectRows = fs.existsSync('./test/helpers/project-rows.js') ? require('./test/helpers/project-rows').projectRows : require('./server/objects/backfill').backfill;
+        await projectRows({ onlyMissing: true });
         const obj = await db.get("SELECT id FROM media_objects WHERE kind = 'vod' ORDER BY created_at, id LIMIT 1");
         fs.writeFileSync(path.join(process.env.N1_DATA, 'n1-ids.json'), JSON.stringify({ object: obj ? obj.id : null }));
         await db.close();

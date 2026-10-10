@@ -1,5 +1,5 @@
 'use strict';
-// Canonical object model (roadmap Wave 4): the backfill projects every vod, clip, file, screenshot,
+// Canonical object model (roadmap Wave 4): the test helper projects every vod, clip, file, screenshot,
 // avatar and thumbnail row onto media_objects + media_locations without touching bytes or providers;
 // it is idempotent; the write hooks keep the model current; holds block deletion and tier moves on
 // every path; the public object-size invariant is recorded as policy.
@@ -27,7 +27,7 @@ const path = require('path');
     const contracts = require('openvibe-contracts');
     const db = require('../server/db/database');
     const model = require('../server/objects/model');
-    const { backfill } = require('../server/objects/backfill');
+    const { projectRows } = require('./helpers/project-rows');
     const invariant = require('../server/objects/invariant');
     const vodStorage = require('../server/vod/vod-storage');
     // The revisioned tier policies load once the database is open (server/index.js does this at boot).
@@ -68,16 +68,15 @@ const path = require('path');
     const mtimes = [vodFile, clipFile, shot, avatar].map(p => fs.statSync(p).mtimeMs);
 
     // ── Dry run: a full report, nothing written ──
-    const dry = await backfill({ dryRun: true });
+    const dry = await projectRows({ dryRun: true });
     assert.strictEqual(dry.dry_run, true);
     assert.deepStrictEqual(dry.counts.vod, { seen: 7, created: 6, updated: 0, skipped: 1 });
     assert.strictEqual((await d.prepare('SELECT COUNT(*) c FROM media_objects').get()).c, 0, 'dry run writes no objects');
     assert.strictEqual((await d.prepare('SELECT COUNT(*) c FROM vods WHERE object_id IS NOT NULL').get()).c, 0, 'dry run links no rows');
-    assert.strictEqual(model.parseJson((await d.prepare("SELECT value FROM media_settings WHERE key = 'objects.backfill.last_report'").get())?.value, null), null, 'dry run stores no report');
     console.log('✅ dry run reports without writing');
 
     // ── Real run ──
-    const r = await backfill();
+    const r = await projectRows();
     assert.deepStrictEqual(r.counts.vod, { seen: 7, created: 6, updated: 0, skipped: 1 });
     assert.deepStrictEqual(r.counts.clip, { seen: 2, created: 2, updated: 0, skipped: 0 });
     assert.deepStrictEqual(r.counts.file, { seen: 1, created: 1, updated: 0, skipped: 0 });
@@ -86,7 +85,6 @@ const path = require('path');
     assert.deepStrictEqual(r.counts.thumbnail, { seen: 2, created: 1, updated: 0, skipped: 1 });
     assert.deepStrictEqual(r.skipped.map(s => s.reason).sort(), ['clips-only recording (ephemeral, never published)', 'external thumbnail url', 'screenshot paste without a file path']);
     assert.deepStrictEqual(r.errors, []);
-    assert.ok(await d.prepare("SELECT value FROM media_settings WHERE key = 'objects.backfill.last_report'").get(), 'report recorded');
     assert.deepStrictEqual([vodFile, clipFile, shot, avatar].map(p => fs.statSync(p).mtimeMs), mtimes, 'no bytes touched');
 
     const v1 = await objOf('vods', 1), v2 = await objOf('vods', 2), v3 = await objOf('vods', 3), v4 = await objOf('vods', 4), v6 = await objOf('vods', 6), v7 = await objOf('vods', 7);
@@ -130,18 +128,18 @@ const path = require('path');
     const th = await model.getObject(tv.derived_object_id);
     assert.deepStrictEqual([th.kind, th.legacy_ref, th.visibility, (await locs(th)).local.state], ['thumbnail', 'legacy:live:thumbnail:vod-1-111.jpg', 'public', 'present']);
     assert.ok(await d.prepare("SELECT 1 FROM media_relationships WHERE from_object_id = ? AND relation = 'thumbnail_of' AND to_object_id = ?").get(th.id, v1.id));
-    console.log('✅ backfill: one object per row, locations mirror where the bytes are, relationships + thumbnail variants');
+    console.log('✅ projection: one object per row, locations mirror where the bytes are, relationships + thumbnail variants');
 
     // ── Idempotent ──
     const countAll = async () => (await Promise.all(['media_objects', 'media_locations', 'media_relationships', 'media_variants'].map(async t => (await d.prepare(`SELECT COUNT(*) c FROM ${t}`).get()).c)));
     const before = await countAll();
-    const again = await backfill();
+    const again = await projectRows();
     assert.strictEqual(again.totals.created, 0, 'a re-run creates nothing');
     assert.strictEqual(again.counts.vod.updated, 6);
     assert.deepStrictEqual(await countAll(), before);
     assert.strictEqual((await objOf('vods', 1)).id, v1.id, 'ids are stable');
-    assert.strictEqual((await backfill({ onlyMissing: true })).totals.created, 0, 'only-missing finds nothing new');
-    console.log('✅ backfill is idempotent');
+    assert.strictEqual((await projectRows({ onlyMissing: true })).totals.created, 0, 'only-missing finds nothing new');
+    console.log('✅ projection is idempotent');
 
     // ── Remote knowledge survives a re-projection ──
     await model.setLocationState((await locs(v2)).b2.id, { state: 'present', size_bytes: 5 * MB });
@@ -243,6 +241,6 @@ const path = require('path');
         console.log('✅ native soft delete keeps bytes for the retention period; purge skips held objects');
 
         fs.rmSync(tmp, { recursive: true, force: true });
-        console.log('objects model + backfill: all checks passed');
+        console.log('objects model + projection: all checks passed');
     })().catch((err) => { console.error(err); process.exit(1); });
 })().catch((err) => { console.error(err); process.exit(1); });

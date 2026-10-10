@@ -2,7 +2,7 @@
 // Reconciliation of the object model against the bytes, with a fake B2/R2 provider: read-only by
 // default, --verify records what the HEADs found; it detects missing canonical copies, lost local
 // files, size/hash mismatches, orphan locations, deleted-but-still-served objects and unprojected
-// rows. Plus the three scripts end to end (backfill --dry-run, reconcile, invariant).
+// rows. Plus test-only projection and the reconcile and invariant scripts end to end.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -40,19 +40,19 @@ const crypto = require('crypto');
     write(path.join(env.FILES_PATH, 'live', 'k1-f.bin'), fileBytes);
     await d.prepare("INSERT INTO files (key, app_id, size, mime, sha256) VALUES ('k1-f.bin', 'live', ?, 'application/octet-stream', ?)").run(fileBytes.length, crypto.createHash('sha256').update(fileBytes).digest('hex'));
 
-    // The backfill (server/objects/backfill.js; the service runs it at boot): a dry run reports and writes nothing.
+    // Test-only legacy row projection: a dry run reports and writes nothing.
     const { runScript } = require('./helpers/run-script');
     const run = async (script, args = []) => await runScript(path.join(__dirname, '..', 'scripts', script), args, { env });
-    const bf = require('../server/objects/backfill');
-    const dry = await bf.backfill({ dryRun: true });
+    const bf = require('./helpers/project-rows');
+    const dry = await bf.projectRows({ dryRun: true });
     assert.deepStrictEqual([dry.dry_run, dry.counts.vod.created, dry.counts.file.created], [true, 5, 1]);
     assert.strictEqual((await d.prepare('SELECT COUNT(*) c FROM media_objects').get()).c, 0, 'a dry run wrote nothing');
-    const real = await bf.backfill();
+    const real = await bf.projectRows();
     assert.match(bf.summarize(real), /vod 5\+\/0~\/0 skipped/);
     assert.strictEqual((await d.prepare('SELECT COUNT(*) c FROM media_objects').get()).c, 6);
-    console.log('✅ backfill: a dry run reports only; a real run projects');
+    console.log('✅ projection: a dry run reports only; a real run projects');
 
-    fs.unlinkSync(path.join(env.VOD_PATH, 'e.webm'));                               // vod 5 loses its file after backfill
+    fs.unlinkSync(path.join(env.VOD_PATH, 'e.webm'));                               // vod 5 loses its file after projection
     const objId = async (vodId) => (await d.prepare('SELECT object_id FROM vods WHERE id = ?').get(vodId)).object_id;
     // Anomalies the reconciler must notice:
     await d.prepare("INSERT INTO media_locations (object_id, provider, key, state) VALUES ('med_01JAB2C3D4E5F6G7H8J9K0MNPQ', 'local', '/nowhere', 'present') RETURNING id").run();   // orphan location
