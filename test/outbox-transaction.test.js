@@ -132,6 +132,8 @@ const crypto = require('crypto');
         const { finalizeVod } = require('../server/vod/finalize');
         await raw.prepare(`INSERT INTO vods (id, app_id, user_id, title, file_path, is_public, is_recording) OVERRIDING SYSTEM VALUE
                      VALUES (20, 'live', 5, 'Ghost', ?, 1, 1) RETURNING id`).run(path.join(process.env.VOD_PATH, 'never-written.webm'));
+        // A recording row has its object from the start (createVod writes both); this fixture row is projected the same way.
+        await require('../server/objects/model').sync('vod', 20);
         failOutboxInserts(true);
         await finalizeVod(20);
         failOutboxInserts(false);
