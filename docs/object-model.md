@@ -123,7 +123,7 @@ after the outcome event.
 | thumbnail generate / upload | `thumbnail-service`, `POST /thumbnails` |
 | screenshot upload / update / censor | none since pastes moved to OpenVibe.Community (2026-09-22): the paste API was retired in T10 step 2 (`/api/v1/:app/pastes` is unmounted) |
 | avatar ingest | `avatars/ingest` |
-| tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep, `migrateLegacy`: the copy the move verified is marked `present` in the same transaction |
+| tier moves | `moveToCold`, `moveToHot`, `promoteToR2`, `demoteFromR2`, sweep: the copy the move verified is marked `present` in the same transaction |
 
 **Deletes need nothing more.** A PostgreSQL trigger (defined in `migrations/`, PL/pgSQL) on `vods`, `clips`, `files` and `pastes` marks the
 object `deleted` in the same statement whenever its row is deleted, which covers all of the

@@ -1239,38 +1239,6 @@ async function checkProviders() {
     return { ...providerHealthy };
 }
 
-/**
- * One-time migration from the legacy hot/cold columns: rows imported with
- * storage_tier='cold' were uploaded to B2 at vods/<basename> by the old rclone
- * mount — verify and flip them to provider 'b2'.
- */
-async function migrateLegacy() {
-    if (!providerConfigured('b2')) return;
-    const legacy = await db.all(`
-        SELECT id, file_path FROM vods
-        WHERE storage_tier = 'cold' AND COALESCE(storage_provider, 'local') = 'local'
-    `);
-    if (!legacy.length) return;
-    let flipped = 0, restoredLocal = 0;
-    for (const vod of legacy) {
-        const key = KEY_PREFIX + path.basename(vod.file_path || '');
-        try {
-            const head = await headObject('b2', key);
-            if (head) {
-                await _moved(vod.id, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vod.id]));
-                flipped++;
-            } else if (fs.existsSync(localPathForVod(vod))) {
-                restoredLocal++; // still local, sweep will re-offload
-            } else {
-                console.warn(`[VodStorage] Legacy cold VOD ${vod.id} missing from B2 and local disk`);
-            }
-        } catch (err) {
-            console.warn(`[VodStorage] Legacy migration check failed for VOD ${vod.id}:`, err.message);
-        }
-    }
-    console.log(`[VodStorage] Legacy migration: ${flipped} cold VOD(s) mapped to B2${restoredLocal ? `, ${restoredLocal} still local` : ''}`);
-}
-
 // The sweep is a self-rescheduling chain, not a fixed interval: after a pass that
 // left the disk still needing a drain it comes back in pressureRetryMs, otherwise in
 // sweepIntervalMs. A sweep that overran its deadline is reported by the watchdog
@@ -1572,7 +1540,6 @@ module.exports = {
     reconcileGhosts,
     quarantineMissing,
     checkProviders,
-    migrateLegacy,
     start,
     stop,
     getStatus,
@@ -1588,18 +1555,13 @@ module.exports = {
     dirStats,
 };
 
-// ── CLI: node server/vod/vod-storage.js <check|migrate-legacy|drain [pct]> ──
+// ── CLI: node server/vod/vod-storage.js <check|drain [pct]> ──
 if (require.main === module) {
     (async () => {
         const cmd = process.argv[2];
         if (cmd === 'check') {
             await checkProviders();
             console.log(JSON.stringify((await getStatus()).tiers, null, 2));
-            process.exit(0);
-        }
-        if (cmd === 'migrate-legacy') {
-            await checkProviders();
-            await migrateLegacy();
             process.exit(0);
         }
         if (cmd === 'drain') {
@@ -1626,7 +1588,7 @@ if (require.main === module) {
             }
             process.exit(0);
         }
-        console.log('Usage: node server/vod/vod-storage.js <check|migrate-legacy|drain [targetPct]>');
+        console.log('Usage: node server/vod/vod-storage.js <check|drain [targetPct]>');
         process.exit(1);
     })().catch(err => { console.error(err); process.exit(1); });
 }

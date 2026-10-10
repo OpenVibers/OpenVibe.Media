@@ -262,7 +262,6 @@ const ready = (async () => {
     // talks to B2/R2 or announces outcomes to Live.
     if (!drill.enabled) {
         vodStorage.checkProviders()
-            .then(() => vodStorage.migrateLegacy().catch(() => {}))
             .catch(err => console.warn('[Boot] Provider check failed:', err.message));
         vodStorage.start();                                        // tiering sweep
         healthJob.start().catch((err) => console.warn('[VOD] health job did not start:', err.message));   // health scan + quarantine cleanup
