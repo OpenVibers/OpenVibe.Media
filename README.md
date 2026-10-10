@@ -45,7 +45,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.127.0, `openvibe-sdk` v0.38.0 (tokens, events outbox, usage readings, per-actor limits),
+- `openvibe-contracts` v0.129.0, `openvibe-sdk` v0.38.0 (tokens, events outbox, usage readings, per-actor limits),
   `openvibe-shared` v3.0.0, pinned by release tarball
 
 ## Capabilities
@@ -125,7 +125,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v3.0.0, openvibe-contracts v0.127.0, openvibe-sdk v0.38.0: pinned release tarballs, installed by npm)
+(openvibe-shared v3.0.0, openvibe-contracts v0.129.0, openvibe-sdk v0.38.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -725,7 +725,7 @@ Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not
 restart; afterwards `sudo ovhost rollback media --to <sha>`.
 
 <!-- versions:start -->
-- openvibe-contracts: v0.127.0
+- openvibe-contracts: v0.129.0
 - openvibe-sdk: v0.38.0
 - openvibe-shared: v3.0.0
 <!-- versions:end -->
