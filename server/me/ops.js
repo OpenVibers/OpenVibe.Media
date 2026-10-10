@@ -110,7 +110,6 @@ async function projection(appId) {
         vods: (await db.get(`SELECT COUNT(*) AS n FROM vods WHERE object_id IS NULL AND COALESCE(clips_only, 0) = 0${s.sql}`, s.params)).n,
         clips: (await db.get(`SELECT COUNT(*) AS n FROM clips WHERE object_id IS NULL${s.sql}`, s.params)).n,
         files: (await db.get(`SELECT COUNT(*) AS n FROM files WHERE object_id IS NULL${s.sql}`, s.params)).n,
-        screenshots: (await db.get(`SELECT COUNT(*) AS n FROM pastes WHERE object_id IS NULL AND type = 'screenshot' AND COALESCE(screenshot_path, '') != ''${s.sql}`, s.params)).n,
     };
     const owner = await db.all(`SELECT app_id, COUNT(*) AS n FROM media_objects WHERE owner_subject IS NULL AND owner_user_id IS NOT NULL
                           AND lifecycle_status != 'deleted'${s.sql} GROUP BY app_id ORDER BY n DESC`, s.params);

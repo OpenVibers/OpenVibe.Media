@@ -2,7 +2,7 @@
  * OpenVibe.Media — canonical object model (roadmap Wave 4; docs/object-model.md)
  *
  * Every stored blob is a media_object (id med_<ULID>) with one media_locations
- * row per provider copy. The inherited vods/clips/files/pastes rows are typed
+ * row per provider copy. The inherited vods/clips/files rows are typed
  * projections over objects: each carries object_id, and the sync*() functions
  * below derive the object + locations from the row as it is right now. The same
  * functions back every write on the old APIs, which writes the row and its object
@@ -114,7 +114,7 @@ async function isHeld(objectId) {
 }
 
 /**
- * Hold check for an inherited row (vods/clips/files/pastes). A clip row also follows its source VOD's
+ * Hold check for an inherited row (vods/clips/files). A clip row also follows its source VOD's
  * hold before it has an object of its own; any other row with no object yet is not held.
  */
 async function isHeldRow(row) {
@@ -366,24 +366,6 @@ function fileProjection(row) {
     };
 }
 
-/** Screenshot pastes (and avatars, which are stored as screenshot pastes) — the bytes only; text is Community's. */
-function pasteProjection(row) {
-    if (row.type !== 'screenshot') return { skipped: 'text paste (no bytes)' };
-    if (!row.screenshot_path) return { skipped: 'screenshot paste without a file path' };
-    const meta = parseJson(row.metadata, {}) || {};
-    const kind = meta.kind === 'avatar' ? 'avatar' : 'screenshot';
-    const local = localLocation([row.screenshot_path]);
-    return {
-        legacy_ref: legacyRef(row.app_id, kind === 'avatar' ? 'avatar' : 'paste', row.slug), existingId: row.object_id,
-        app_id: row.app_id, kind, owner_user_id: row.user_id,
-        visibility: VISIBILITIES.includes(row.visibility) ? row.visibility : 'public', lifecycle_status: 'ready',
-        mime_type: meta.mime_type || mimeFor(row.screenshot_path, 'image/png'),
-        size_bytes: local.state === 'present' ? local.size_bytes : (Number(meta.size_bytes) || 0),
-        metadata: { title: row.title || null, slug: row.slug },
-        created_at: row.created_at, locations: [local], canonical: 'local',
-    };
-}
-
 async function syncVod(idOrRow) {
     const row = typeof idOrRow === 'object' ? idOrRow : await db.get('SELECT * FROM vods WHERE id = ?', [idOrRow]);
     if (!row) return null;
@@ -418,16 +400,6 @@ async function syncFile(keyOrRow) {
     const r = await project(p);
     await linkRow('files', 'key', row.key, r.id);
     return { ...r, locations: [p.locations[0].state] };
-}
-
-async function syncPaste(idOrRow) {
-    const row = typeof idOrRow === 'object' ? idOrRow : await db.get('SELECT * FROM pastes WHERE id = ?', [idOrRow]);
-    if (!row) return null;
-    const p = pasteProjection(row);
-    if (p.skipped) return p;
-    const r = await project(p);
-    await linkRow('pastes', 'id', row.id, r.id);
-    return { ...r, kind: p.kind, locations: [p.locations[0].state] };
 }
 
 /** Thumbnail file name behind a stored thumbnail_url, or null when it is not one of ours. */
@@ -493,14 +465,14 @@ async function _syncTx(fn) {
     return out;
 }
 
-const SYNC_BY_KIND = { vod: syncVod, clip: syncClip, file: syncFile, paste: syncPaste };
+const SYNC_BY_KIND = { vod: syncVod, clip: syncClip, file: syncFile };
 
 /** Row ids named by withObject()'s `ids` (a value, a list, or a function of write()'s result). */
 function _rowIds(ids, out) {
     return [].concat((typeof ids === 'function' ? ids(out) : ids) ?? []).filter(id => id != null);
 }
 
-/** Re-project one inherited row: kind vod|clip|file|paste, id = row id (file key for files). */
+/** Re-project one inherited row: kind vod|clip|file, id = row id (file key for files). */
 async function sync(kind, id) {
     const fn = SYNC_BY_KIND[kind];
     if (!fn || id == null) return null;
@@ -519,7 +491,7 @@ async function safeSync(kind, id) {
  * Object-first write (WS-G task 1; C-75 retired 2026-10-10, "write the row, then sync its
  * object"): write() changes inherited rows and the objects behind them are re-projected in the SAME
  * transaction, so both commit or neither does: no crash or error between the two can leave
- * an object behind its row. kind vod|clip|file|paste; ids the row id (a file's key), a list of them,
+ * an object behind its row. kind vod|clip|file; ids the row id (a file's key), a list of them,
  * or a function of write()'s result that gives them (an INSERT's lastInsertRowid). write() must be
  * database work (awaited). Returns write()'s result; throws, with nothing written, when either
  * part fails. Inside an outer transaction (webhooks.announce) it is a savepoint of that one.
@@ -753,11 +725,11 @@ async function objectPublic(obj, { locations = true } = {}) {
 
 module.exports = {
     KINDS, VISIBILITIES, LIFECYCLES, HOLD_KINDS, HeldError,
-    mimeFor, parseJson, parseLegacyRef, thumbFileFromUrl,
+    mimeFor, parseJson, legacyRef, parseLegacyRef, thumbFileFromUrl,
     getObject, getObjectByLegacyRef, resolveObject, listLocations, listHolds, inheritedHolds, isHeld, isHeldRow,
     createObject, updateObject, upsertLocation, setLocationState, setRelationship, setVariant, getVariant,
-    vodProjection, clipProjection, fileProjection, pasteProjection, thumbnailProjection,
-    syncVod, syncClip, syncFile, syncPaste, sync, safeSync, withObject, withObjectOrRow, afterTierMove,
+    vodProjection, clipProjection, fileProjection, thumbnailProjection,
+    syncVod, syncClip, syncFile, sync, safeSync, withObject, withObjectOrRow, afterTierMove,
     placeHold, releaseHold, holdPublic,
     objectFilePath, softDelete, restore, purgeExpired, usedBytes,
     legacyPublicUrl, objectPublic,

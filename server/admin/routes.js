@@ -107,7 +107,7 @@ router.get('/', async (req, res) => {
         const directories = [
             { name: 'vods',       path: config.vod.path },
             { name: 'clips',      path: config.vod.clipsPath },
-            { name: 'pastes',     path: config.pastes.path },
+            { name: 'pastes',     path: config.pastes.path }, // Legacy files still live in this directory.
             { name: 'thumbnails', path: config.thumbnails.path },
             { name: 'files',      path: config.files.path },
         ];
@@ -124,14 +124,6 @@ router.get('/', async (req, res) => {
             FROM vods WHERE app_id = ?
         `, [req.appId]) || {};
         const clipStats = await db.get('SELECT COUNT(*) AS count FROM clips WHERE app_id = ?', [req.appId]) || {};
-        // Paste rows are frozen (pastes moved to OpenVibe.Community, 2026-09-22) and
-        // the read-only paste API was retired (T10 step 2); the count stays
-        // while the table exists (it feeds /api/v2/me and operator stats).
-        const pasteStats = await db.get(`
-            SELECT COUNT(*) AS count,
-                   SUM(CASE WHEN type = 'screenshot' THEN 1 ELSE 0 END) AS screenshots
-            FROM pastes WHERE app_id = ?
-        `, [req.appId]) || {};
         const fileStats = await db.get('SELECT COUNT(*) AS count, COALESCE(SUM(size), 0)::bigint AS bytes FROM files WHERE app_id = ?', [req.appId]) || {};
 
         res.json({
@@ -142,7 +134,6 @@ router.get('/', async (req, res) => {
             breakdown,
             vodStats,
             clipStats,
-            pasteStats,
             fileStats,
             byProvider: {
                 vods: await _providerCounts('vods', req.appId, true),

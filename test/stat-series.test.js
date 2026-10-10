@@ -27,6 +27,7 @@ const path = require('path');
     const h = await db.getAppStatSeries('live', 'hours', 7);
     assert.strictEqual(h.total, 3);
     assert.strictEqual(await db.getAppStatSeries('live', 'nope', 7), null);
+    assert.strictEqual(await db.getAppStatSeries('live', 'pastes', 7), null);
     assert.strictEqual((await db.getAppStatSeries('live', 'vods', 9999)).points.length, 365);
 
     for (const ext of ['', '-wal', '-shm']) { try { fs.unlinkSync(tmp + ext); } catch { /* */ } }

@@ -81,7 +81,6 @@ const crypto = require('crypto');
     }
     const HIDDEN_TITLES = ['Secret VOD title', 'Unlisted VOD title', 'Secret clip title', 'Unlisted clip title'];
     const HIDDEN_THUMBS = [`vod-${privVod}-222.jpg`, `vod-${unlVod}-666.jpg`, `clip-${privClip}-2.jpg`, `clip-${unlClip}-3.jpg`];
-    await raw.prepare("INSERT INTO pastes (slug, app_id, user_id, title, type, content, language, visibility) VALUES ('priv-page', 'live', 5, 'Secret paste title', 'paste', 'secret text', 'text', 'private') RETURNING id").run();
 
     const app = express();
     app.put('/api/v2/:app/objects/:id/content', ...require('../server/objects/routes').contentHandlers);
@@ -140,7 +139,7 @@ const crypto = require('crypto');
         for (const p of ['/', '/browse', '/browse?tab=videos', '/browse?tab=clips', '/browse?tab=thumbnails', '/?tab=thumbnails&page=1', '/sitemap.xml', '/llms.txt', '/updates']) {
             const r = await get(p);
             assert.ok(r.status < 500, `${p} answers`);
-            for (const t of [...HIDDEN_TITLES, ...HIDDEN_THUMBS, 'Secret paste title']) assert.ok(!r.text.includes(t), `${p} lists ${t}`);
+            for (const t of [...HIDDEN_TITLES, ...HIDDEN_THUMBS]) assert.ok(!r.text.includes(t), `${p} lists ${t}`);
             if (/thumbnails/.test(p)) {
                 assert.ok(r.text.includes(`vod-${pubVod}-111.jpg`) && r.text.includes(`clip-${pubClip}-1.jpg`), `${p}: public recordings' thumbnails are listed`);
             }

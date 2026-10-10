@@ -139,7 +139,6 @@ const { spawnSync, execFileSync } = require('child_process');
         await db.run("INSERT INTO vods (id, app_id, title, file_path, is_public, visibility, is_recording) OVERRIDING SYSTEM VALUE VALUES (2, 'live', 'Still recording', ?, 1, 'public', 1)", [bytes.rec]);
         await db.run("INSERT INTO clips (id, app_id, vod_id, title, file_path, duration_seconds, status) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 1, 'Restored clip', ?, 10, 'ready')", [bytes.clip]);
         await db.run("INSERT INTO assets (id, app_id, kind, name, file_path, mime) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 'emote', 'drillWave', ?, 'image/png')", [bytes.asset]);
-        await db.run("INSERT INTO pastes (id, app_id, slug, type, title, screenshot_path, visibility) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 'shot1', 'screenshot', 'Shot', ?, 'public')", [bytes.shot]);
         await db.run("INSERT INTO files (key, app_id, original_name, size, mime) VALUES ('f1.txt', 'live', 'f1.txt', 13, 'text/plain')");
         await require('./helpers/project-rows').projectRows({ onlyMissing: true });
         const COUNTED = ['media_objects', 'vods', 'clips', 'apps', 'media_locations', 'media_jobs', 'event_outbox'];

@@ -1,8 +1,8 @@
 /**
  * OpenVibe.Media — app-facing view API (mounted at /api/v1/:app/views, app key).
  *
- *   POST /            { type: 'vod'|'clip'|'paste'|'file', id, ip?, user_id?, user_agent? }
- *                     Apps that render their own watch/paste pages call this when the page
+ *   POST /            { type: 'vod'|'clip'|'file', id, ip?, user_id?, user_agent? }
+ *                     Apps that render their own watch pages call this when the page
  *                     opens. The real client IP travels in X-Forwarded-For (Live's proxy sets
  *                     it) or `ip`; the viewer's user id in X-OV-User-Id or `user_id`.
  *                     → { counted, unique, reason?, view_count, unique_views }
@@ -25,7 +25,7 @@ router.post('/', tenantAuth(), async (req, res) => {
     const body = req.body || {};
     const type = String(body.type || '');
     const id = parseInt(body.id, 10);
-    if (!views.TABLES[type] || !id) return res.status(400).json({ error: 'type (vod|clip|paste|file) and id required' });
+    if (!views.TABLES[type] || !id) return res.status(400).json({ error: 'type (vod|clip|file) and id required' });
     // Deletion/tenancy guard: only the owning app may count views on its content.
     const t = views.TABLES[type];
     const row = await db.get(`SELECT app_id, user_id FROM ${t.table} WHERE id = ?`, [id]);

@@ -45,12 +45,6 @@ const http = require('http');
                                  VALUES (?, 'live', 1, ?, ?, ?, ?, ?, 'ready') RETURNING id`);
     await insClip.run(10, 5, 'Public clip', clipFile('clip-10.webm'), 1, 'public');
     await insClip.run(11, 5, 'Private clip', clipFile('clip-11-secret.webm'), 0, 'private');
-    const insPaste = raw.prepare(`INSERT INTO pastes (slug, app_id, user_id, title, type, content, language, visibility, screenshot_path)
-                                  VALUES (?, 'live', 5, 'P', ?, ?, 'text', ?, ?) RETURNING id`);
-    await insPaste.run('pub-text', 'paste', 'hello', 'public', null);
-    await insPaste.run('priv-text', 'paste', 'secret', 'private', null);
-    await insPaste.run('priv-shot', 'screenshot', 'caption', 'private', '/nonexistent.png');
-
     const mkObj = async (visibility, lifecycle_status) => await model.createObject({
         app_id: 'live', namespace: 'live', kind: 'file', owner_subject: null, owner_app: 'live', owner_user_id: 5,
         visibility, lifecycle_status, mime_type: 'text/plain', size_bytes: 5, metadata: {},
@@ -174,13 +168,7 @@ const http = require('http');
         assert.strictEqual((await get('/api/v1/live/clips/11', asUser(5))).status, 200);
         assert.strictEqual((await get('/api/v1/live/vods/6', asUser(77))).status, 200, 'unlisted stays reachable by id');
 
-        const views = async () => (await raw.prepare("SELECT views FROM pastes WHERE slug = 'priv-text'").get()).views;
-        const before = await views();
-        // The read-only paste API is retired (T10 step 2): the v1 path is unmounted for everyone,
-        // so it cannot confirm a private paste exists either.
         assert.strictEqual((await get('/api/v1/live/pastes/priv-text', asUser(5))).status, 404, 'the paste API is gone');
-        assert.strictEqual((await get('/api/v1/live/pastes/priv-text', asUser(77))).status, 404);
-        assert.strictEqual(await views(), before, 'a refused read counts no view');
         console.log('✅ v1 detail: acting non-owners get the missing answer');
 
         server.close();

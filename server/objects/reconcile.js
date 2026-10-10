@@ -53,7 +53,6 @@ const PROJECTIONS = [
     { table: 'vods', open: (r) => (r.visibility || (r.is_public ? 'public' : 'private')) !== 'private' && !r.clips_only },
     { table: 'clips', open: (r) => (r.visibility || (r.is_public ? 'public' : 'private')) !== 'private' },
     { table: 'files', open: () => true },
-    { table: 'pastes', open: (r) => r.visibility !== 'private' && !!r.screenshot_path },
 ];
 
 async function reconcile({ verify = false, hash = false, head = defaultHead, hashMaxBytes = 512 * MB, appId = null, listLimit = 200 } = {}) {
@@ -175,7 +174,6 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
         ['vods', 'id', 'object_id IS NULL AND COALESCE(clips_only, 0) = 0'],
         ['clips', 'id', 'object_id IS NULL'],
         ['files', 'key', 'object_id IS NULL'],
-        ['pastes', 'id', "object_id IS NULL AND type = 'screenshot' AND screenshot_path IS NOT NULL"],
     ];
     for (const [table, keyCol, cond] of gaps) {
         for (const r of await db.all(`SELECT ${keyCol} AS k FROM ${table} WHERE ${cond}${appId ? ' AND app_id = ?' : ''}`, appId ? [appId] : [])) {

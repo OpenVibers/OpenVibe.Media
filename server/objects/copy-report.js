@@ -38,7 +38,6 @@ async function references(q, obj) {
         clips: await q.all(`SELECT id, app_id, vod_id, stream_id, user_id, channel_user_id, title, visibility, is_public, file_path, status, created_at
                       FROM clips WHERE object_id = ?`, [obj.id]),
         files: await q.all('SELECT key, app_id, user_id, original_name, size, mime, created_at FROM files WHERE object_id = ?', [obj.id]),
-        pastes: await q.all('SELECT id, slug, app_id, user_id, title, type, visibility, screenshot_path, created_at FROM pastes WHERE object_id = ?', [obj.id]),
         relationships: await q.all(`SELECT from_object_id, relation, to_object_id FROM media_relationships
                               WHERE from_object_id = ? OR to_object_id = ? ORDER BY id`, [obj.id, obj.id]),
         variants: await q.all(`SELECT object_id, variant_name, derived_object_id FROM media_variants
@@ -92,7 +91,6 @@ function formatReport(report) {
         for (const v of r.vods) out.push(`  vods#${v.id}: user ${v.user_id ?? '-'} "${v.title || ''}" ${v.visibility || ''} provider=${v.storage_provider || 'local'} file=${v.file_path || '-'}`);
         for (const c of r.clips) out.push(`  clips#${c.id}: vod ${c.vod_id ?? '-'} user ${c.user_id ?? '-'} "${c.title || ''}" ${c.visibility || ''} file=${c.file_path || '-'}`);
         for (const f of r.files) out.push(`  files/${f.key}: user ${f.user_id ?? '-'} ${f.original_name || ''}`);
-        for (const p of r.pastes) out.push(`  pastes/${p.slug}: user ${p.user_id ?? '-'} ${p.type || ''} ${p.visibility || ''}`);
         for (const x of r.relationships) out.push(`  relationship: ${x.from_object_id} ${x.relation} ${x.to_object_id}`);
         for (const x of r.variants) out.push(`  variant: ${x.object_id} ${x.variant_name} → ${x.derived_object_id}`);
         for (const h of r.holds) out.push(`  HOLD ${h.kind}: ${h.reason || ''} (by ${h.created_by || '-'})`);
