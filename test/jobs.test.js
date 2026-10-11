@@ -26,14 +26,12 @@ const http = require('http');
     process.env.MEDIA_INVARIANT_SCAN_HOURS = '0';
 
 
-    const hooks = [];
     const stub = http.createServer((req, res) => {
         let body = '';
         req.on('data', (c) => { body += c; });
         req.on('end', () => {
             res.setHeader('Content-Type', 'application/json');
             if (req.url === '/oauth/token') return res.end(JSON.stringify({ access_token: 'tok', token_type: 'Bearer', expires_in: 300 }));
-            if (req.url === '/hook') { hooks.push(JSON.parse(body)); return res.end('{}'); }
             res.statusCode = 404; res.end('{}');
         });
     });
@@ -52,7 +50,7 @@ const http = require('http');
         const raw = db.getDb();
 
 
-        await db.upsertApp({ app_id: 'live', api_key: 'live-key', webhook_url: `${base}/hook`, webhook_secret: 's' });
+        await db.upsertApp({ app_id: 'live', api_key: 'live-key' });
         await db.upsertApp({ app_id: 'games', api_key: 'games-key' });
         const events = require('../server/events');
         const relay = events.init({ eventsUrl: base, clientSecret: 's', networkUrl: base, intervalMs: 60000 });
@@ -123,7 +121,6 @@ const http = require('http');
         await assert.rejects(async () => await queue.cancel(q2.job.id, { by: 'x' }), /outbox insert failed/);
         failOutbox(false);
         assert.strictEqual((await queue.get(q2.job.id)).status, 'queued', 'a cancel whose event cannot be written changes nothing');
-        assert.ok(hooks.length === 0, 'job events go to Events only, not the app webhook');
         console.log('✅ job state changes commit with their media.job.* outbox row, or not at all');
 
         // ── 3. Idempotency keys ──

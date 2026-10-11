@@ -87,7 +87,7 @@ Every write to a projected row writes its object in the same PostgreSQL transact
 (`model.withObject(kind, ids, write)`; roadmap WS-G task 1; compatibility shim C-75 was retired on 2026-10-10). The row change and the re-projection commit together or
 not at all, so a crash or an error between them can no longer leave the object behind its row. A
 write whose object cannot be written fails as a whole and changes nothing. Inside
-`webhooks.announce()` the object joins the outcome's transaction, and its object events are queued
+`announce()` the object joins the outcome's transaction, and its object events are queued
 after the outcome event.
 
 | path | where |
@@ -180,7 +180,7 @@ All routes live under `/api/v2/:app/objects`.
 | POST | `/` | init. `{ namespace (default the tenant's root; a name below it, full or relative), kind, visibility (default private), mime_type, size_bytes, filename, content_hash (expected sha256), metadata (≤ 16 KB; `metadata.class` declares the object's storage class, see [Tiering of native objects](#tiering-of-native-objects)), user_id, upload_ttl (60-86400 s), multipart, part_size }` returns 201 `{ id, object, upload: { method: 'PUT', url, token, expires_at, max_bytes, content_type, complete_url, multipart_url } }`. `url` is a [presigned PUT URL](#presigned-uploads). With `multipart: true` (required above `MEDIA_OBJECT_MAX_MB`): `method: 'multipart'`, `url: null`, and `upload.multipart` is the new [session](#multipart-uploads). Checks at init: `size_bytes` against `MEDIA_OBJECT_MAX_MB` (single part) or `MEDIA_MULTIPART_MAX_MB` (413), the namespace's policy (422 `media.namespace.policy_denied`, 413 `media.object.too_large`), every quota from the namespace up to the tenant including reservations (413 `media.quota.exceeded` / `media.quota.objects_exceeded`; the declared size is then reserved), the public-size invariant (422) and the [content type](#content-types) for the kind (415 `media.object.unsupported_type`) |
 | POST | `/:id/upload-url` | a fresh presigned single-PUT URL for an uploading object (`{ ttl }` 60-86400 s) |
 | PUT | `/:id/content` | the bytes, single part. Auth is the upload token (`?token=` from init, or `X-Upload-Token`) or the usual credential. Streams to disk computing sha256. Refuses more than the declared size or the limit (413; an object declared above `MEDIA_OBJECT_MAX_MB` goes multipart), a size mismatch (400), quota overrun (413), a type that does not suit the kind (415) and a PUT while a multipart session is open (409). Stored at `OBJECTS_PATH/<app>/<id>` with a verified local location. Mounted ahead of the JSON body parser, so any Content-Type is taken as raw bytes; the Content-Type becomes `mime_type` when init set none. Can be repeated while the object is `uploading` |
-| POST | `/:id/complete` | checks the expected hash (422 `media.object.hash_mismatch`), the invariant, the quota and the bytes against the type (415 `media.object.content_mismatch`). Sets `ready` and sends the `media.object.uploaded` webhook. Also accepts the upload token |
+| POST | `/:id/complete` | checks the expected hash (422 `media.object.hash_mismatch`), the invariant, the quota and the bytes against the type (415 `media.object.content_mismatch`). Sets `ready` and queues the `media.object.uploaded` event. Also accepts the upload token |
 | POST | `/:id/multipart` | start a [multipart session](#multipart-uploads) `{ part_size, size_bytes (when init declared none) }` → 201 |
 | GET | `/:id/multipart/:uploadId` | the session: `parts` received (number, size, sha256), `missing`, `received_bytes`, `expires_at` |
 | PUT | `/:id/multipart/:uploadId/parts/:n` | one part, raw bytes of exactly its size; optional `X-Content-SHA256` |
@@ -416,15 +416,13 @@ cheap and renders in a drill.
 - `projection`: rows with no object yet; objects whose owner subject is unresolved; whether upload reservations were seeded.
 - `tiering`: providers and policy; VODs and clips per provider; objects per canonical copy (native or projected); VODs eligible to offload; R2 decisions of the last 24 h and recent refusals and failures; the sweep's state in this process; and `native_objects`: the [object tiering](#tiering-of-native-objects)'s activation gate and policy, native objects in R2, how many are eligible to promote now, its decisions of the last 24 h (dry runs included) and the most recent ones, and its last sweep.
 - `namespaces`: every namespace with quota and usage snapshot.
-- `webhooks`: the apps with a configured outbound webhook (app id and host only — never the URL or secret) and, per app, what this process has sent since it loaded (`sent`, `failed`, the last event and attempt/ok times, the last error). In-memory: counts reset on restart and scope to the app when the report is scoped.
 
 ## Readiness
 
 Code: `server/objects/readiness.js`. Test: `test/readiness.test.js`.
 
 Every object answer (v2 `GET /:id`, the v2 list, the `media.object.uploaded` payload) and the v1 VOD
-and clip answers (`GET`, list, update, finalize, upload; not the `vod.*`/`clip.*` webhook payloads,
-which are sent before the object is re-projected) carry `readiness`:
+and clip answers (`GET`, list, update, finalize, upload) carry `readiness`:
 
 ```json
 { "metadata": true, "bytes_verified": true, "playable": true, "hash_verified": false, "verified_copies": ["local"], "reason": null }
@@ -647,10 +645,9 @@ Code: `server/jobs/`. Tests: `test/jobs.test.js`, `test/jobs-invariant.test.js`,
 
 **Events.** Every state change and its `media.job.<transition>` event (`proposed`, `queued`,
 `started`, `retrying`, `succeeded`, `failed`, `cancelled`; subject `job <id>`) commit in one PostgreSQL
-transaction through Media's outbox, the same rule as the outcome events (`webhooks.announce()`): no
+transaction through Media's outbox, the same rule as the outcome events (`announce()`): no
 change without its event, no event for a change that rolled back. Progress events are `low`
-priority; outcomes and proposals are `important`. Job events go to OpenVibe.Events only, not to app
-webhooks.
+priority; outcomes and proposals are `important`. Job events go to OpenVibe.Events.
 
 The payload is the event projection (`queue.jobEvent`, contracts `media.job.<transition>@1`), not
 the job as the API answers it:
@@ -704,7 +701,7 @@ job over only with the token it read and, past boot, only while the lease is sti
 | `invariant.scan` | light | The [size-invariant validator](#public-object-size-invariant): records violations, proposes `object.split` / `object.remux`, withdraws moot proposals. Tenant-wide (no object) |
 | `object.split` | heavy | Stream-copies a vod/clip (or a video/audio object) into parts (`params.parts` 2-1000 or `segment_seconds`), each a new **private** object with a `derived_from` relationship (`job_id`, `part`, `start_seconds`, `duration_seconds`). Cuts land on keyframes, so neighbouring parts can overlap slightly. The source is never changed. Checkpointed per part |
 | `object.remux` | heavy | Stream-copy remux of the whole source (seek index, duration, MP4 faststart) into one new private object; also the source's `remux` variant |
-| `clip.cut` | clips | Cut (or re-cut) a clip row from its VOD: `POST /api/v1/:app/clips` and `/:id/recut` answer 202 with `job_id`, which a UI polls and reattaches to (`GET /api/v2/:app/jobs/:id`). `clip.ready`/`clip.failed` and the webhook come from the cut as before. It retries after 2, 10 and 30 min (from attempt 2 a cloud VOD is fetched home first); a window with no footage fails at once. The `clips` lane (`MEDIA_JOBS_CLIPS_CONCURRENCY`, 2) runs while recording |
+| `clip.cut` | clips | Cut (or re-cut) a clip row from its VOD: `POST /api/v1/:app/clips` and `/:id/recut` answer 202 with `job_id`, which a UI polls and reattaches to (`GET /api/v2/:app/jobs/:id`). `clip.ready`/`clip.failed` events come from the cut. It retries after 2, 10 and 30 min (from attempt 2 a cloud VOD is fetched home first); a window with no footage fails at once. The `clips` lane (`MEDIA_JOBS_CLIPS_CONCURRENCY`, 2) runs while recording |
 | `object.waveform` | heavy | The audio waveform as a PNG (`showwavespic`, 1800×140 by default; `width`, `height`). It is a private `asset` object and the source's `waveform` variant. A remote-only source over `MEDIA_PREVIEW_REMOTE_MAX_MB` (2048) is refused, because it decodes the whole audio track. `no_audio` is permanent |
 | `object.sprite` | heavy | A seek-preview sprite sheet as a JPEG: 100 frames by default, at most one per 2 s, 10 columns and 160 px tiles (`frames`, `columns`, `tile_width`). With `MEDIA_HLS_ENABLED` and a source timeline it is cut from the timeline's rows — each sample time's row decoded from this node's segment or the packed chunk's byte range, checked against the row's sha256 — so a packed long VOD is never decoded end to end; a source without a timeline keeps one fast seek per frame over the source. It is a private `asset` object and the source's `sprite` variant. The layout goes in its metadata as `sprite: { count, interval_seconds, columns, rows, tile_width, tile_height }`: frame *i* covers [*i*·interval, (*i*+1)·interval) at column *i* mod columns, row ⌊*i*/columns⌋. `no_video` is permanent |
 | `object.hash` | light | sha256 of ready objects' present local copies that have no hash yet, onto the object (`content_hash`, `metadata.hash_basis`) and the local location (`checksum`). Tenant-wide batch (`params { limit (1-500, 50), budget_mb }`) or one object. Scheduled per tenant every `MEDIA_HASH_INTERVAL_MIN`. Result `{ hashed, bytes, skipped, remaining }`. See [Scheduled verification](#scheduled-verification) |

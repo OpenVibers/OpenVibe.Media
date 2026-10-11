@@ -1,27 +1,25 @@
 'use strict';
 /**
- * Media → OpenVibe.Events (roadmap Wave 3, ADR-004): the outcomes Media already announces by
- * per-app webhook are also written as durable events to Media's own `event_outbox` table and
- * relayed to OpenVibe.Events with Media's service token (audience openvibe.events, capability
- * events.event.publish). The webhooks stay as they are until every consumer reads events.
+ * Media → OpenVibe.Events (roadmap Wave 3, ADR-004): Media announces outcomes as durable events
+ * written to its own `event_outbox` table and relayed to OpenVibe.Events with Media's service
+ * token (audience openvibe.events, capability
+ * events.event.publish). Events are the only announcement path.
  *
  *   vod.ready | vod.failed           → media.vod.ready | media.vod.failed      (subject vod <id>)
  *   clip.ready | clip.failed         → media.clip.ready | media.clip.failed    (subject clip <id>)
  *   media.object.uploaded            → media.object.uploaded                   (subject object <id>)
  *   storage.alert | storage.recovered → media.storage.alert | media.storage.recovered
  *   job state changes (server/jobs/queue.js) → media.job.proposed | queued | started | retrying |
- *                                             succeeded | failed | cancelled   (subject job <id>; Events only, no webhook;
+ *                                             succeeded | failed | cancelled   (subject job <id>;
  *                                             payload queue.jobEvent, not the tenant's params/result/error)
  *   an object deleted / its visibility changed → media.object.deleted | media.object.visibility_changed
- *                                             (subject object <id>; Events only; payload object id, tenant,
+ *                                             (subject object <id>; payload object id, tenant,
  *                                             kind, legacy_ref and the times/visibilities, nothing else)
  *
  * The outbox row is written INSIDE the PostgreSQL transaction that makes the state change it describes
- * (record(), called from webhooks.announce()): the event exists if and only if the change committed,
- * so a crash can neither lose an outcome nor announce one that rolled back. The webhook for the same
- * outcome is sent after the commit and carries the envelope's event_id, so a consumer receiving it by
- * both paths (Live during its webhook → Events transition) handles it once. Delivery from the outbox
- * on is at least once. Every event is `internal` visibility: a VOD's own visibility decides who may
+ * (record(), called from announce()): the event exists if and only if the change committed,
+ * so a crash can neither lose an outcome nor announce one that rolled back. Delivery from the outbox
+ * is at least once. Every event is `internal` visibility: a VOD's own visibility decides who may
  * see it, and consumers (Live, Search) apply it. Lifecycle outcomes are `important` (roadmap §6.3);
  * only storage.recovered is `low`.
  *
@@ -42,7 +40,7 @@ const TYPES = {
     'storage.recovered': ['media.storage.recovered', 'storage'],
 };
 
-// Placement decisions have no webhook twin; callers record them in the outbox transaction.
+// Placement decisions are recorded in the outbox transaction.
 const PLACEMENT_TYPES = new Set([
     'media.replica.requested', 'media.replica.ready', 'media.replica.draining', 'media.replica.evicted',
     'media.object.hot', 'media.region.hot', 'media.delivery.surge', 'media.delivery.degraded',
@@ -111,10 +109,10 @@ function slim(appId, data) {
  * Queue the durable event for an outcome. MUST run inside the transaction that makes the change
  * (the SDK outbox refuses otherwise), and throws if the insert fails, so the change rolls back with
  * it. Returns the envelope (with event_id), or null when the outbox is off, the tenant is a sandbox
- * or the webhook event has no durable twin.
+ * or the outcome has no mapped event type.
  */
-async function record(webhookEvent, appId, data) {
-    const map = TYPES[webhookEvent];
+async function record(outcome, appId, data) {
+    const map = TYPES[outcome];
     if (!map) return null;
     const [eventType, subjectType] = map;
     const id = data && (data.object_id || data.id);

@@ -3,7 +3,7 @@
  *
  *   recutClip(clipId, { reason })   the ONE code path that (re)cuts an existing clip row:
  *                                   resolves the source, cuts, updates the row, thumbnails,
- *                                   commits the outcome with its event, fires the webhook. Records cut_error / cut_attempts and
+ *                                   commits the outcome with its event. Records cut_error / cut_attempts and
  *                                   schedules an automatic retry on failure.
  *   spec                            the media job clip.cut (lane clips; roadmap WS-G task 3): a new clip's
  *                                   cut and every re-cut run as a job, so they carry media.job.* events and a
@@ -31,7 +31,7 @@ const db = require('../db/database');
 const config = require('../config');
 const cutter = require('./clip-cutter');
 const vodStorage = require('./vod-storage');
-const { announce } = require('../webhooks');
+const { announce } = require('../announce');
 const objects = () => require('../objects/model');
 
 const MAX_ATTEMPTS = 4;
@@ -113,7 +113,7 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null
     const cut = await cutter.cutClipFile({ source: source.value, startTime, duration });
     if (!cut.ok) return await fail(clipId, clip, attempt, cut.error, { viaJob });
     // Thumbnail first (the clip.ready payload carries it), then the ready transition, the clip's
-    // object and its event in one transaction (webhooks.announce), then the webhook.
+    // object and its event in one transaction (announce).
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
     await announce(clip.app_id, 'clip.ready', {
         change: async () => {
@@ -205,7 +205,7 @@ async function timelineWindow(vod, startTime, endTime) {
     return { objectId: obj.id, endTime: startTime + Number(last.end_ms) / 1000 };
 }
 
-/** Make a clip row virtual and ready (no ffmpeg): row, object and clip.ready event in one transaction, then the webhook. */
+/** Make a clip row virtual and ready (no ffmpeg): row, object and clip.ready event in one transaction. */
 async function makeVirtual(clipId, win) {
     const clip = await db.getClipById(clipId);
     if (!clip) return { ok: false, error: 'Clip not found' };

@@ -7,10 +7,10 @@
  *     DATABASE_DIRECT_URL is set, when HOST is not loopback or PORT is production's 4100, before the
  *     database is opened (a real
  *     `node server/index.js`, in a child process).
- *   - Booted for real (server/index.js, in this process) on a copy whose `live` app has a webhook
- *     URL, with production-like settings (EVENTS_URL + client secret, B2/R2, app seeding, VOD_PATH …):
+ *   - Booted for real (server/index.js, in this process) on a copy with production-like settings
+ *     (EVENTS_URL + client secret, B2/R2, app seeding, VOD_PATH …):
  *     one listener, its HTTP port on 127.0.0.1; no setInterval and no long timer from Media's code;
- *     no program but git (no ffmpeg/ffprobe); no outbound connection; no webhook reaches the app;
+ *     no program but git (no ffmpeg/ffprobe); no outbound connection;
  *     nothing written or created outside the copy's directory.
  *   - The endpoints the Host inventory compares (/release.json, the /browse index) and the watch pages
  *     render from the copy; every route that would stream a stored file answers 503 without opening
@@ -105,11 +105,10 @@ const { spawnSync, execFileSync } = require('child_process');
         });
 
         // ── Production's database and files (a normal-mode process writes them) ──
-        // The `live` app's webhook goes to a sink here: a drill must never call it.
+        // A local sink helps verify the drill's connection guard.
         const sinkHits = [];
         const sink = http.createServer((req, res) => { sinkHits.push(`${req.method} ${req.url}`); res.end('ok'); });
         await new Promise((r) => sink.listen(0, '127.0.0.1', r));
-        const SINK = `http://127.0.0.1:${sink.address().port}/media-webhook`;
         for (const d of Object.values(P)) fs.mkdirSync(d, { recursive: true });
         const bytes = { vod: path.join(P.vods, 'vod-1.mp4'), rec: path.join(P.vods, 'vod-2.mp4'), clip: path.join(P.clips, 'clip-1.mp4'), asset: path.join(P.assets, 'wave.png'), shot: path.join(P.pastes, 'shot-1.png'), file: path.join(P.files, 'live', 'f1.txt') };
         fs.mkdirSync(path.dirname(bytes.file), { recursive: true });
@@ -133,7 +132,7 @@ const { spawnSync, execFileSync } = require('child_process');
         // The restored copy's rows (written before the drill boots, as production wrote them).
         const db = require('../server/db/database');
         await db.initDb();
-        await db.run("INSERT INTO apps (app_id, name, api_key_hash, webhook_url, webhook_secret) VALUES ('live', 'OpenVibe.Live', ?, ?, 'whsec')", [require('crypto').createHash('sha256').update('k'.repeat(40)).digest('hex'), SINK]);
+        await db.run("INSERT INTO apps (app_id, name, api_key_hash) VALUES ('live', 'OpenVibe.Live', ?)", [require('crypto').createHash('sha256').update('k'.repeat(40)).digest('hex')]);
         await db.run("INSERT INTO vods (id, app_id, title, file_path, thumbnail_url, duration_seconds, is_public, visibility) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 'Restored VOD', ?, '/t/vod-1-1.jpg', 60, 1, 'public')", [bytes.vod]);
         await db.run("INSERT INTO vods (id, app_id, title, file_path, is_public, visibility, is_recording) OVERRIDING SYSTEM VALUE VALUES (2, 'live', 'Still recording', ?, 1, 'public', 1)", [bytes.rec]);
         await db.run("INSERT INTO clips (id, app_id, vod_id, title, file_path, duration_seconds, status) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 1, 'Restored clip', ?, 10, 'ready')", [bytes.clip]);
@@ -206,7 +205,7 @@ const { spawnSync, execFileSync } = require('child_process');
             assert.deepStrictEqual(spied.intervals, [], JSON.stringify(spied.intervals, null, 1));
             assert.deepStrictEqual(spied.longTimeouts, [], JSON.stringify(spied.longTimeouts, null, 1));
         });
-        await check('no program but git ran, nothing tried to leave, no webhook reached the app', () => {
+        await check('no program but git ran, nothing tried to leave', () => {
             assert.ok(spied.programs.every((p) => path.basename(p) === 'git'), spied.programs.join(', '));
             assert.deepStrictEqual(drill.blocked, []);
             assert.deepStrictEqual(sinkHits, []);
@@ -272,13 +271,12 @@ const { spawnSync, execFileSync } = require('child_process');
             assert.deepStrictEqual(drill.blocked, [], 'nothing tried to leave');
             assert.deepStrictEqual(await counts(), countsBefore);
         });
-        await check('webhooks and the Events relay stay off even when called', async () => {
-            assert.strictEqual(await require('../server/webhooks').sendWebhook('live', 'vod.ready', { id: 1 }), false);
+        await check('the Events relay stays off even when called', async () => {
             assert.strictEqual(require('../server/events').init(), null);
             assert.deepStrictEqual(sinkHits, []);
         });
         await check('the guards refuse a connection, ffmpeg, a listener and a UDP socket', async () => {
-            await assert.rejects(fetch('https://openvibe.live/internal/media-webhook'), /fetch failed/);
+            await assert.rejects(fetch('https://openvibe.live/internal/probe'), /fetch failed/);
             const sock = net.connect({ host: '127.0.0.1', port: sink.address().port });
             const err = await new Promise((resolve) => sock.on('error', resolve));
             assert.strictEqual(err.code, 'ECONNREFUSED');

@@ -448,7 +448,7 @@ async function syncThumbnail(parentRow, parentObjectId, parentKind) {
 
 /**
  * Projection work in one transaction, with the object-change events it caused (server/events.js).
- * Nested in an outer transaction (webhooks.announce, another withObject) it is a savepoint, and the
+ * Nested in an outer transaction (announce, another withObject) it is a savepoint, and the
  * outer one records the changes at its end, in the same transaction and after its own outcome event,
  * the order they had when the object was synced after the commit.
  */
@@ -494,7 +494,7 @@ async function safeSync(kind, id) {
  * an object behind its row. kind vod|clip|file; ids the row id (a file's key), a list of them,
  * or a function of write()'s result that gives them (an INSERT's lastInsertRowid). write() must be
  * database work (awaited). Returns write()'s result; throws, with nothing written, when either
- * part fails. Inside an outer transaction (webhooks.announce) it is a savepoint of that one.
+ * part fails. Inside an outer transaction (announce) it is a savepoint of that one.
  *
  * The projection stats local files (sizes, present/missing copies) but never reads them: content
  * hashes stay with the content-hash job and remote copies stay 'pending' until reconciliation or a

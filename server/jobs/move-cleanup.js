@@ -5,7 +5,7 @@
  * in media_object_tier_decisions. This job reads those rows: an object whose move failed FAIL_THRESHOLD times
  * within the lookback (a later `done` of the same move starts the count over) raises one storage.alert of kind
  * move_cleanup_failed, which vod-storage's emitStorageEvent counts in media_storage_alerts_total{kind} and
- * delivers as the Events outbox row and per-app webhook. Report only: it never moves, deletes or changes a row.
+ * delivers as an Events outbox row. Report only: it never moves, deletes or changes a row.
  *
  *   params {}   service-wide; runs only under queue.SYSTEM_APP (no tenant can enqueue it)
  *   result { scanned, alerted, objects }   objects = the first 50 (object_id, action, fails, first_at, last_at, last_error)

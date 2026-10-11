@@ -974,9 +974,7 @@ const sweepState = {
 const alertLastSentAt = new Map(); // kind → epoch ms
 
 /**
- * Tell every app with a webhook that storage needs a human (or that it recovered).
- * Delivered as the regular Media→app webhook (`storage.alert` / `storage.recovered`),
- * so Live can log it loudly and page whatever ops channel it has configured.
+ * Announce that storage needs a human (or that it recovered) through OpenVibe.Events.
  */
 async function emitStorageEvent(event, kind, data, settings = getSettings()) {
     const cooldownKey = `${event}:${kind}`;
@@ -989,19 +987,13 @@ async function emitStorageEvent(event, kind, data, settings = getSettings()) {
     const payload = { kind, ...data, at: new Date().toISOString() };
     (event === 'storage.alert' ? console.error : console.warn)(`[VodStorage] ${event} (${kind}): ${JSON.stringify(data)}`);
     // No database state changes here (the cooldown is in memory): the outbox row is the whole
-    // commit, queued once for every app; each app's webhook carries its event_id.
-    let eventId = null;
+    // commit, queued once for all consumers.
+    // The alert fired once it passed the cooldown (counted, logged); the event is best effort, as before.
     try {
         const events = require('../events');
-        const env = await db.getDb().tx(async () => await events.record(event, null, payload));
-        eventId = env ? env.event_id : null;
+        await db.getDb().tx(async () => await events.record(event, null, payload));
         events.kick();
     } catch (err) { console.warn(`[VodStorage] ${event} not queued for Events:`, err.message); }
-    let apps = [];
-    try { apps = (await db.listApps()).filter(a => a.webhook_url); } catch { apps = []; }
-    let webhooks;
-    try { webhooks = require('../webhooks'); } catch { return false; }
-    await Promise.all(apps.map(app => webhooks.sendWebhook(app.app_id, event, payload, { eventId }).catch(() => false)));
     return true;
 }
 
@@ -1095,7 +1087,7 @@ async function runSweep() {
 
         // Stall detection: a pressure pass that freed nothing is the failure mode that
         // went unnoticed for weeks. Count them, and after a couple in a row raise an
-        // alert through the app webhooks; announce recovery once the drain works again.
+        // alert; announce recovery once the drain works again.
         const diskAfter = diskUsage(config.vod.path);
         const stillNeedsDrain = underPressure && !drainSatisfied(diskAfter, settings);
         if (underPressure && !migrated) {

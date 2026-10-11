@@ -33,7 +33,7 @@
     "multi-tenant apps and developer-project tenants (sandbox separated)",
     "public serving with presigned URLs; signed access for private and sandbox items",
     "the object explorer (/me) and operator views",
-    "media.* events through the SDK outbox, webhooks during the transition",
+    "media.* events through the SDK outbox as the only outcome announcement",
     "restore-drill mode and N-1 compatibility tests",
     "per-actor limits (openvibe-sdk/limits)",
     "placement demand rollups on Valkey (F2.4): reads per object × region × 5-minute bucket and, for a timeline segment, per segment too (object total is the sum over its segments; hotness over the hour, media.object.hot once per object per hour)",

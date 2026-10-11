@@ -3,7 +3,7 @@
  *
  * Multi-tenant media service: VOD ingest/recording (RTMP pull, RTP, browser
  * chunks), local/B2/R2 storage tiering with presigned-302 playback, clips,
- * files, thumbnails, legacy screenshot redirects, and HMAC-signed webhooks. See CONTRACTS.md
+ * files, thumbnails, legacy screenshot redirects, and OpenVibe.Events announcements. See CONTRACTS.md
  * (Media API v1) and README.md.
  */
 'use strict';
@@ -338,7 +338,7 @@ const ready = (async () => {
         console.log(`[Media] OpenVibe.Media listening on ${config.host}:${config.port} (${config.nodeEnv})`);
         console.log(`[Media] Data: db=${config.db.url ? 'postgresql' : 'pglite'} vods=${config.vod.path} clips=${config.vod.clipsPath}`);
         console.log(`[Media] RTP ingest pool: udp ${config.rtp.portMin}-${config.rtp.portMax} (127.0.0.1)`);
-        // Durable events (roadmap Wave 3): webhook outcomes also go to OpenVibe.Events. Off without EVENTS_URL.
+        // Durable outcome events (roadmap Wave 3) go to OpenVibe.Events. Off without EVENTS_URL.
         try { require('./events').init(); } catch (err) { console.warn('[Events] not started:', err.message); }
         // Media's own watch pages in OpenVibe.Search (WS-O task 10): media.index_document.* through the same outbox.
         require('./public/search-documents').start().catch((err) => console.warn('[Search] documents not started:', err.message));

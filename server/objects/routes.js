@@ -58,7 +58,7 @@ const multipart = require('./multipart');
 const namespaces = require('./namespaces');
 const { contentDisposition } = require('./disposition');
 const { tenantAuth, tenantCors, tenantPath, namespaceGrant } = require('../auth');
-const { announce } = require('../webhooks');
+const { announce } = require('../announce');
 const { limits } = require('../actor-limits');
 
 const MB = 1024 * 1024;
@@ -401,7 +401,7 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res)
 /**
  * The checks every upload ends with (single PUT and multipart): expected sha256, the public-size
  * invariant, the quota, and whether the bytes are what their type says; then the ready transition,
- * its invariant row and the media.object.uploaded event commit together (the webhook follows).
+ * its invariant row and the media.object.uploaded event commit together.
  */
 async function completeUpload(req, res, obj, { expectedHash = null } = {}) {
     const loc = (await model.listLocations(obj.id)).find(l => l.provider === 'local' && l.state === 'present');

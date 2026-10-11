@@ -41,7 +41,7 @@ const http = require('http');
         const db = require('../server/db/database');
         db.getDb();
         const events = require('../server/events');
-        const { sendWebhook, announce } = require('../server/webhooks');
+        const { announce } = require('../server/announce');
         const inTx = async (fn) => await db.getDb().tx(fn);
 
         assert.strictEqual(events.init({ eventsUrl: '', clientSecret: '' }), null, 'off without EVENTS_URL');
@@ -50,12 +50,10 @@ const http = require('http');
         const outbox = events.init({ eventsUrl: base, clientSecret: 's', networkUrl: base, intervalMs: 50 });
         assert.ok(outbox);
 
-        // An app with no webhook URL still gets the durable event.
+        // An outcome gets the durable event.
         await announce('no-such-app', 'vod.ready', { payload: { id: 42, title: 'Stream', meta: { big: 'x'.repeat(100000) }, ai_overview: 'long text' } });
         await announce('no-such-app', 'clip.failed', { payload: { id: 7, status: 'failed' } });
         assert.strictEqual((await announce('no-such-app', 'unknown.event', { payload: { id: 1 } })).eventId, null, 'no durable twin');
-        // A bare webhook queues nothing (the event is written inside the state change's transaction).
-        await sendWebhook('no-such-app', 'vod.ready', { id: 43 });
         await outbox.flush();
         assert.strictEqual(published.length, 2);
         assert.strictEqual(published[0].event_type, 'media.vod.ready');
@@ -68,10 +66,7 @@ const http = require('http');
         assert.strictEqual(published[1].event_type, 'media.clip.failed');
         assert.strictEqual(published[1].priority, 'important');
 
-        // Storage alerts: queued once by the storage module, never per app by sendWebhook.
-        await sendWebhook('no-such-app', 'storage.alert', { kind: 'disk' });
-        await outbox.flush();
-        assert.strictEqual(published.length, 2);
+        // Storage alerts are queued once for all consumers.
         await inTx(async () => await events.record('storage.alert', null, { kind: 'disk', free_gb: 3 }));
         await outbox.flush();
         assert.strictEqual(published.length, 3);

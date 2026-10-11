@@ -108,7 +108,7 @@ async function storeAvatar({ db, pic, subject = null, username = null, sourceHos
     const model = require('../objects/model');
     const namespaces = require('../objects/namespaces');
     const invariant = require('../objects/invariant');
-    const { announce } = require('../webhooks');
+    const { announce } = require('../announce');
     const app = await db.getApp(AVATAR_APP);
     if (!app) throw new Error('Picture storage is not configured on this server');
     const { namespace } = namespaces.resolveName(app, AVATAR_NAMESPACE);

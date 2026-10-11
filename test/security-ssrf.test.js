@@ -6,9 +6,9 @@
 //   - POST /api/v1/:app/vods/:id/ingest/rtmp makes ffmpeg pull an app-supplied rtmp_url, which must name an
 //     allow-listed host:port (MEDIA_RTMP_PULL_ALLOW; test/rtmp-allowlist.test.js has the URL grammar).
 // Every other outbound request goes to an operator-configured address (Network, Events, Live's internal
-// URL, B2/R2, an app's operator-set webhook_url row, IndexNow's fixed api.indexnow.org from
+// URL, B2/R2, IndexNow's fixed api.indexnow.org from
 // INDEXNOW_KEY). The inventory below fails when a new outbound call appears in server/ until it is
-// classified here, and no route lets a tenant set a webhook URL.
+// classified here. No server path sends to a webhook URL.
 // No test here needs the network: literals and internal names are refused before DNS, and DNS answers
 // and the socket are stubbed.
 const assert = require('assert');
@@ -31,7 +31,6 @@ const https = require('https');
         'server/avatars/ingest.js': 'a person\'s picture URL: safeFetchImage, tested below',
         'server/account-data.js': 'Network internal API (OV_NETWORK_INTERNAL_URL), fixed paths: export parts and deletion confirmations',
         'server/user-auth.js': 'Network OAuth (OV_NETWORK_URL / OV_NETWORK_INTERNAL_URL); the signing keys come from openvibe-sdk/auth',
-        'server/webhooks.js': 'an app\'s webhook_url, an operator-set row (no seeding since C-71)',
         'server/thumbnails/live-frame-service.js': 'the app\'s internal URL (APP_INTERNAL_URLS), fixed path',
         'server/public/dev-data.js': 'the app\'s internal URL (APP_INTERNAL_URLS), ids and encoded names in the path',
         'server/jobs/pack.js': 'a presigned GET on B2/R2 (operator-configured buckets) for a segment\'s durable copy',
@@ -52,8 +51,8 @@ const https = require('https');
         walk(path.join(ROOT, 'server'));
         for (const f of found) assert.ok(OUTBOUND[f], `${f} makes an outbound request: classify it in test/security-ssrf.test.js (a user-chosen address must go through a guard)`);
         for (const f of Object.keys(OUTBOUND)) assert.ok(found.has(f), `${f} no longer makes an outbound request: drop it from the inventory`);
-        // Webhook targets are operator configuration: the only SQL that writes an app's webhook_url is
-        // db.upsertApp, which no server code calls since app seeding went (C-71): tests and the smoke script only.
+        // The schema and db.upsertApp retain the legacy columns, but no server code uses them
+        // as an outbound destination.
         const sqlWriters = [], upserters = [];
         const scan = (d) => {
             for (const e of fs.readdirSync(d, { withFileTypes: true })) {
@@ -67,14 +66,24 @@ const https = require('https');
         };
         scan(path.join(ROOT, 'server'));
         assert.deepStrictEqual(sqlWriters, ['server/db/database.js'], 'only db.upsertApp writes an app\'s webhook_url');
-        assert.deepStrictEqual(upserters, [], 'and no server code calls it: app seeding is gone (C-71), so a webhook URL is an operator-set row');
+        assert.deepStrictEqual(upserters, [], 'no server code calls db.upsertApp');
+        const webhookReaders = [];
+        const scanReaders = (d) => {
+            for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+                const p = path.join(d, e.name);
+                if (e.isDirectory()) { scanReaders(p); continue; }
+                if (p.endsWith('.js') && !p.endsWith(path.join('db', 'database.js')) && /\bwebhook_(url|secret)\b/.test(fs.readFileSync(p, 'utf8'))) webhookReaders.push(path.relative(ROOT, p));
+            }
+        };
+        scanReaders(path.join(ROOT, 'server'));
+        assert.deepStrictEqual(webhookReaders, [], 'no server code sends to or reads a webhook URL or secret');
         // IndexNow (openvibe-shared/indexnow, wired in server/index.js): the only outbound request made
         // from a dependency. Its endpoint is the fixed api.indexnow.org and host/key are operator config
         // (MEDIA_PUBLIC_URL / INDEXNOW_KEY) — never a tenant or a user-supplied URL, and no route reaches it.
         const idxSrc = fs.readFileSync(path.join(ROOT, 'server', 'index.js'), 'utf8');
         assert.ok(idxSrc.includes('createIndexNow(') && idxSrc.includes('host: config.publicUrl') && idxSrc.includes('key: config.indexnow.key'),
             'IndexNow is wired from operator config (host/key), the one outbound dependency');
-        console.log(`✅ outbound inventory: ${found.size} files, one user-chosen address (avatar ingest); webhook URLs are operator-set; IndexNow posts to the fixed api.indexnow.org`);
+        console.log(`✅ outbound inventory: ${found.size} files, one user-chosen address (avatar ingest); no webhook sends; IndexNow posts to the fixed api.indexnow.org`);
     }
 
     const ingest = require('../server/avatars/ingest');

@@ -67,7 +67,7 @@ function bind(registry) {
     });
     alerts = registry.counter({
         name: 'media_storage_alerts_total',
-        help: 'Storage alerts emitted to /metrics, mirroring the storage.alert webhook kinds',
+        help: 'Storage alerts emitted to /metrics, mirroring the storage.alert event kinds',
         labelNames: ['kind'],
     });
 

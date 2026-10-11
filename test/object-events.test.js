@@ -88,7 +88,7 @@ const http = require('http');
         console.log('✅ a rolled-back change leaves neither an event nor a staged row');
 
         // ── 3. A row deleted inside announce(): media.object.deleted in the same transaction ──
-        const { announce } = require('../server/webhooks');
+        const { announce } = require('../server/announce');
         await announce('live', 'vod.failed', { change: async () => await db.run('DELETE FROM vods WHERE id = ?', [vodId]), payload: { id: vodId } });
         evs = await objectEvents();
         assert.strictEqual(evs.length, 2);

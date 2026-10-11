@@ -10,7 +10,7 @@
  *   - assertSafe(): Media refuses to start unless DATABASE_URL is set and does not name production's database
  *     (ov_media on the host's 5432 or PgBouncer's 6432), DATABASE_DIRECT_URL is unset (a drill never migrates),
  *     PORT is set and is not production's 4100, and HOST is loopback. It runs before the database is opened.
- *   - installGuards(): no outbound connection (net.Socket#connect, fetch), so no webhook, event, B2/R2
+ *   - installGuards(): no outbound connection (net.Socket#connect, fetch), so no event, B2/R2
  *     or Network call leaves the process; no program other than git (child_process: no ffmpeg or
  *     ffprobe ever; git only reads the checkout for /release.json); no UDP socket (RTP ingest); nothing
  *     listens but the drill's own HTTP port.
@@ -21,7 +21,7 @@
  *   - server/index.js opens the database and serves HTTP, and starts nothing else: no app seeding, no
  *     JWKS refresh, no health job, junk sweep, tiering sweep, clip re-cuts, copy verification, jobs
  *     worker (thumbnails, split/remux, invariant scans, storage orphan scans), disk guardian, thumbnail cleanup, object purge,
- *     orphan-recording finalize or Events relay; webhooks are never sent. Timers that modules
+ *     orphan-recording finalize or Events relay. Timers that modules
  *     start when they are loaded check `enabled` as well. Readiness does not probe storage (a drill
  *     writes none) or the remote tiers.
  *
