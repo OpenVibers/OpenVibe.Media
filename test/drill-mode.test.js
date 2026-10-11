@@ -236,8 +236,8 @@ const { spawnSync, execFileSync } = require('child_process');
             assert.deepStrictEqual(spied.dbPathTouches, []);
         });
         await check('every route that would stream a stored file answers 503 without opening the database\'s path', async () => {
-            const byteRoutes = ['/v/1', '/v/1?raw=1', '/v/vod-1.mp4', '/c/1', '/c/1?raw=1', `/o/${objectId}`, '/t/vod-1-1.jpg', '/api/thumbnails/vod-1-1.jpg',
-                '/a/1', '/f/f1.txt', '/f/screenshots/shot-1.png', '/p/shot1/screenshot', '/live/1/frame.jpg'];
+            const byteRoutes = ['/v/1', '/v/1?raw=1', '/c/1', '/c/1?raw=1', `/o/${objectId}`, '/t/vod-1-1.jpg',
+                '/a/1', '/f/f1.txt', '/p/shot1/screenshot', '/live/1/frame.jpg'];
             for (const p of byteRoutes) {
                 const r = await request('GET', p, { headers: { Range: 'bytes=0-' } });
                 assert.strictEqual(r.status, 503, `${p}: ${r.status} ${r.text.slice(0, 120)}`);

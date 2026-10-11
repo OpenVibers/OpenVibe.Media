@@ -419,7 +419,7 @@ mode (`server/drill.js`) Media:
 - writes no file and creates no directory (the storage checks leave `/api/ready`, as do the remote
   tiers; it reports `"mode": "drill"`);
 - never opens a file path from the database: every byte route (`/v` and `/c` bytes, `/t`, `/a`, `/f`,
-  `/o`, `/p/:slug/screenshot`, `/live/:sel/frame.jpg`, `/api/thumbnails/:name`) answers 503;
+  `/o`, `/p/:slug/screenshot`, `/live/:sel/frame.jpg`) answers 503;
   watch pages and the `/browse` index still render from the copy;
 - connects to nothing and runs no program but `git` (no ffmpeg or ffprobe), opens no UDP socket and
   listens on nothing but its port;
@@ -515,14 +515,13 @@ aggregated and stay queued. The runbook is `docs/cutover-media-billing-readings.
 
 | path | behavior |
 |---|---|
-| `GET /v/:id` | VOD playback — local stream with Range support, live-DVR `.seekable` sidecar while recording, or **302** to a presigned B2/R2 URL. `X-Robots-Tag: noindex`. Also accepts a legacy **file basename** (old `/api/vods/file/<name>` URLs; clip basenames resolve too) |
+| `GET /v/:id` | VOD playback — local stream with Range support, live-DVR `.seekable` sidecar while recording, or **302** to a presigned B2/R2 URL. `X-Robots-Tag: noindex`. By numeric id only: the file-name form was retired with C-75 (2026-10-11) |
 | `GET /c/:id` | clip playback, same logic, `noindex` |
 | `GET /p/:slug` | **301** to OpenVibe.Community, the canonical home for pastes since 2026-09-22 (every slug, found or not) |
 | `GET /p/:slug/raw` | **301** to Community's raw text |
 | `GET /p/:slug/screenshot` | 301 to a ready, nonprivate legacy screenshot or avatar object; otherwise 301 to Community |
 | `GET /t/:id` | thumbnail (id = filename), `noindex` |
 | `GET /f/:key` | file with stored Content-Type + Range, `noindex` |
-| `GET /f/screenshots/:name` | paste screenshot by filename — serves straight from `PASTES_PATH/screenshots` (migrated legacy files have no files-table rows), `noindex` |
 | `GET /live/:sel/transcript.json` | **transcript + AI timeline API** — full audio-transcription log and AI overview timeline. `:sel` = slot id / slot slug → slot-scoped sessions; **`@username`** → user-scoped (all their slots, works while offline). Returns `{ live, current, sessions[] (each: ai_overview, transcript, duration…), streamer (overview + stream memories), user }`. `?limit=1..50` sessions (default 10), `?app=`. Cached **30s** (that's the rate limit), CORS-open. |
 | `GET /live/:sel/chat-insight.json` | **chat insight API** — a user's chat-related AI insight/timeline (`:sel` = `@username` or numeric user id): today-vs-alltime chat overviews, condensed memory, event timeline, plus their streamer overview + stream memories when they stream. Proxied from the app's public chat-AI API over loopback; cached **30s**, CORS-open. |
 | `GET /v/:id/transcript.json` | **VOD transcript API** — transcript + AI overview for one existing VOD id (`{ vod_id, title, duration_seconds, ai_overview, transcript, ai_analyzed_at }`). Private VODs → 404. Cached 30s, CORS-open. |
@@ -543,8 +542,7 @@ wherever they belong, labelled "AI clip", attributed to no person (`creator` Ope
 Private items (and legacy rows with no visibility and `is_public = 0`) answer
 exactly like a missing id — the same 404 and body — unless the request bears the
 owning app's API key, optionally acting for the owner via `X-OV-User-Id`. That holds
-for the watch page, the bytes, `transcript.json`, the legacy `/api/thumbnails` redirect
-and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`)
+for the watch page, the bytes, `transcript.json` and `/p/:slug/raw`; the v1 detail routes (`GET /vods/:id`, `/clips/:id`)
 apply it to an app acting for someone other than the owner. A call acting for a user writes
 only that user's VODs and clips (update, delete, ingest, chunks, finalize, re-cut, thumbnail):
 someone else's private one is the missing answer, anything else 403. The media index lists a
