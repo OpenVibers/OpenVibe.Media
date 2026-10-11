@@ -64,8 +64,7 @@ const ready = (async () => {
         try { require('./placement/providers').startHealthLoop(); } catch (err) { console.warn('[Placement] health loop did not start:', err.message); }
     }
     if (!drill.enabled) {
-        await auth.seedApps();     // upsert MEDIA_APPS_SEED / MEDIA_APP_KEYS
-        await auth.ensureTokenOnlyApps();  // tenants reached only with Network service tokens (community)
+        await auth.ensureTokenOnlyApps();  // the first-party tenants, reached only with Network service tokens (C-71)
         auth.startJwksRefresh();     // a drill asks Network for nothing (app keys still verify against the copy)
     }
 

@@ -123,7 +123,6 @@ const { spawnSync, execFileSync } = require('child_process');
             MEDIA_DRILL: '1', DATABASE_URL: DRILL_URL, DATABASE_DIRECT_URL: '', HOST: '127.0.0.1', PORT: String(port), NODE_ENV: 'production',
             // What the production env file sets; a normal boot would act on all of it.
             EVENTS_URL: 'http://127.0.0.1:9', OV_OAUTH_CLIENT_SECRET: 's'.repeat(40),
-            MEDIA_APP_KEYS: `live:${'n'.repeat(40)},games:${'g'.repeat(40)}`,
             MEDIA_B2_ENDPOINT: 'https://s3.example.invalid', MEDIA_B2_BUCKET: 'b', MEDIA_B2_KEY_ID: 'id', MEDIA_B2_APP_KEY: 'key',
             MEDIA_R2_ENDPOINT: 'https://r2.example.invalid', MEDIA_R2_BUCKET: 'r', MEDIA_R2_ACCESS_KEY_ID: 'id', MEDIA_R2_SECRET_ACCESS_KEY: 'key',
             // The Host inventory's storage: nothing but the thumbnail listing points at production.
@@ -212,7 +211,7 @@ const { spawnSync, execFileSync } = require('child_process');
             assert.deepStrictEqual(drill.blocked, []);
             assert.deepStrictEqual(sinkHits, []);
         });
-        await check('no app seeding: the copy\'s apps are production\'s, untouched by MEDIA_APP_KEYS', async () => {
+        await check('the copy\'s apps are production\'s: a drill boot creates and changes no tenant', async () => {
             assert.deepStrictEqual(await counts(), countsBefore);
         });
 

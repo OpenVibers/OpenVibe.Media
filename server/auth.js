@@ -12,9 +12,9 @@
  *      Browser endpoints additionally check the Origin header against the
  *      app's allowed_origins list.
  *
- * App seeding: MEDIA_APPS_SEED (JSON array) and/or the deprecated MEDIA_APP_KEYS
- * ("id:key,…") short form are upserted on boot; keys are stored as sha256 hashes.
- * MEDIA_APP_KEYS is deprecated — move each app to MEDIA_APPS_SEED.
+ * Tenants: the first-party ones are created at boot by ensureTokenOnlyApps and reached only with Network service
+ * tokens; developer-project tenants are created on first use (ADR-014). No app key is seeded or issued (C-71): an
+ * app key (stored as a sha256 hash) exists only where a test or the smoke script writes one with db.upsertApp.
  *
  * Network principal tokens (service and developer app tokens) are checked per namespace for one of
  * five verbs: read, list, write, delete, transform (VERBS below; objects/namespaces.js has the rows).
@@ -196,19 +196,25 @@ function tenantPath(app) {
 }
 
 /**
- * Tenants that exist only to be reached with service tokens (no API key is ever issued):
- * OpenVibe.Community stores screenshot bytes here under its own namespace.
+ * The first-party tenants. Every one is reached only with its service's Network service token: no app key is ever
+ * issued, and none is seeded (MEDIA_APPS_SEED / MEDIA_APP_KEYS are gone, compatibility register C-71). A missing
+ * tenant is created with its quota (0 = no tenant quota) and browser origins; an existing row is left as it is, so an
+ * operator's quota or origins stand. Developer-project tenants are created on first use instead (ADR-014).
  */
 async function ensureTokenOnlyApps() {
-    // Services that reach Media only with Network service tokens (no app key). Quotas are per tenant.
-    for (const [appId, name, quotaGb] of [
-        ['community', 'OpenVibe.Community', 10],
-        ['tools', 'OpenVibe.Tools', 20],       // Wave 11 job results (TOOLS_JOB_RESULTS=media)
-        ['games', 'OpenVibe.Games', 10],       // Wave 12 map-editor assets
-        ['wiki', 'OpenVibe.Wiki', 10],         // Wave 16 page attachments
-        ['blog', 'OpenVibe.Blog', 10],         // Wave 16 post attachments
+    for (const [appId, name, quotaGb, origins] of [
+        ['live', 'OpenVibe.Live', 0, ['https://openvibe.live']],   // VODs, clips, thumbnails, avatars (C-70)
+        ['community', 'OpenVibe.Community', 10, []],
+        ['tools', 'OpenVibe.Tools', 20, ['https://openvibe.tools']],       // Wave 11 job results (TOOLS_JOB_RESULTS=media)
+        ['games', 'OpenVibe.Games', 10, ['https://openvibe.games', 'https://play.openvibe.games']],   // Wave 12 map-editor assets
+        ['wiki', 'OpenVibe.Wiki', 10, []],         // Wave 16 page attachments
+        ['blog', 'OpenVibe.Blog', 10, []],         // Wave 16 post attachments
+        ['inventory', 'OpenVibe.Inventory', 1, []],     // Workshop badge images
+        ['media-hub', 'OpenVibe.MediaHub', 100, []],    // the OpenVibe.Download drive
     ]) {
-        if (!await db.getApp(appId)) await db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes) VALUES (?, ?, '', ?)", [appId, name, quotaGb * 1024 ** 3]);
+        if (!await db.getApp(appId)) {
+            await db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes, allowed_origins) VALUES (?, ?, '', ?, ?)", [appId, name, quotaGb * 1024 ** 3, JSON.stringify(origins)]);
+        }
         await db.ensureRootNamespace(await db.getApp(appId));
     }
 }
@@ -412,54 +418,6 @@ function tenantCors(req, res, next) {
     next();
 }
 
-// ── App seeding ──────────────────────────────────────────────
-
-async function seedApps() {
-    let seeded = 0;
-
-    if (config.apps.seedJson) {
-        try {
-            const list = JSON.parse(config.apps.seedJson);
-            for (const entry of Array.isArray(list) ? list : []) {
-                if (!entry || !entry.app_id || !entry.api_key) continue;
-                if (/^prj_/.test(String(entry.app_id))) { console.warn(`[Auth] MEDIA_APPS_SEED: ${entry.app_id} skipped (developer-project tenants never get an API key)`); continue; }
-                await db.upsertApp(entry);
-                seeded++;
-            }
-        } catch (err) {
-            console.error('[Auth] MEDIA_APPS_SEED is not valid JSON:', err.message);
-        }
-    }
-
-    if (config.apps.seedKeys) {
-        console.warn('[Auth] MEDIA_APP_KEYS is deprecated: move each app to MEDIA_APPS_SEED (JSON with app_id, api_key, webhook_url, allowed_origins)');
-        for (const pair of config.apps.seedKeys.split(',')) {
-            const idx = pair.indexOf(':');
-            if (idx < 1) continue;
-            const app_id = pair.slice(0, idx).trim();
-            const api_key = pair.slice(idx + 1).trim();
-            if (!app_id || !api_key) continue;
-            if (/^prj_/.test(app_id)) { console.warn(`[Auth] MEDIA_APP_KEYS: ${app_id} skipped (developer-project tenants never get an API key)`); continue; }
-            // Don't clobber a richer MEDIA_APPS_SEED entry for the same app.
-            const existing = await db.getApp(app_id);
-            if (existing && config.apps.seedJson && config.apps.seedJson.includes(`"${app_id}"`)) continue;
-            await db.upsertApp({
-                app_id,
-                name: existing?.name || app_id,
-                api_key,
-                webhook_url: existing?.webhook_url || null,
-                webhook_secret: existing?.webhook_secret || null,
-                allowed_origins: existing ? db.appAllowedOrigins(existing) : [],
-                quota_bytes: existing?.quota_bytes || 0,
-            });
-            seeded++;
-        }
-    }
-
-    if (seeded) console.log(`[Auth] Seeded/updated ${seeded} app(s): ${(await db.listApps()).map(a => a.app_id).join(', ')}`);
-    else if (!(await db.listApps()).length) console.warn('[Auth] No apps configured — set MEDIA_APPS_SEED (all API calls will 404)');
-}
-
 module.exports = {
     tenantAuth,
     tenantPath,
@@ -481,7 +439,6 @@ module.exports = {
     optionalIdentity,
     // verifyUserJwt stays internal: it proves a token is a genuine Network credential,
     // but its subject is a Network id and must never be used as an app-local user id.
-    seedApps,
     startJwksRefresh,
     stopJwksRefresh,
     jwksLoaded,
