@@ -34,14 +34,24 @@ ffmpeg -y -f lavfi -i "testsrc=duration=5:size=640x360:rate=30" \
        "$WORK/test.mp4" >/dev/null 2>&1
 [ -s "$WORK/test.mp4" ] && ok "test.mp4 generated" || { bad "test.mp4 generation"; exit 1; }
 
+echo "-- test tenants with app keys (only tests and this script write keys; production tenants are token-only, C-71)"
+MEDIA_PGLITE_DIR="$WORK/data/pglite" LIVE_KEY="$LIVE_KEY" GAMES_KEY="$GAMES_KEY" node -e '
+const db = require(process.argv[1] + "/server/db/database");
+(async () => {
+    await db.initDb();
+    await db.upsertApp({ app_id: "live", name: "Live", api_key: process.env.LIVE_KEY, allowed_origins: ["http://localhost:3000"] });
+    await db.upsertApp({ app_id: "games", name: "Games", api_key: process.env.GAMES_KEY, quota_bytes: 10485760 });
+    await db.close();
+})().catch((e) => { console.error(e.message); process.exit(1); });
+' "$ROOT" || { bad "test tenants"; exit 1; }
+
 echo "-- booting server on :$PORT (temp data dir)"
-SEED="[{\"app_id\":\"live\",\"name\":\"Live\",\"api_key\":\"$LIVE_KEY\",\"allowed_origins\":[\"http://localhost:3000\"]},{\"app_id\":\"games\",\"name\":\"Games\",\"api_key\":\"$GAMES_KEY\",\"quota_bytes\":10485760}]"
 env PORT="$PORT" HOST=127.0.0.1 \
+    MEDIA_PGLITE_DIR="$WORK/data/pglite" \
     MEDIA_DATA_DIR="$WORK/data" \
     VOD_PATH="$WORK/data/vods" CLIPS_PATH="$WORK/data/clips" \
     PASTES_PATH="$WORK/data/pastes" THUMBNAILS_PATH="$WORK/data/thumbnails" \
     FILES_PATH="$WORK/data/files" \
-    MEDIA_APPS_SEED="$SEED" \
     OV_NETWORK_URL="http://127.0.0.1:1" \
     node "$ROOT/server/index.js" > "$WORK/server.log" 2>&1 &
 SRV=$!

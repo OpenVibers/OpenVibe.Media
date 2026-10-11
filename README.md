@@ -14,7 +14,7 @@ Implements **Media API v1** from `../CONTRACTS.md`.
 
 ```
 npm install
-cp .env.example .env     # set MEDIA_APPS_SEED at minimum
+cp .env.example .env     # the first-party tenants are created at boot (token-only)
 npm start                # node server/index.js
 ```
 
@@ -219,15 +219,14 @@ namespaces are `app.<project_id>` (production) and `app.<project_id>.sandbox`, w
 - Not yet: reading quotas set in Network (`network.project.read`), and removing a project's
   tenants when the project is archived.
 
-### App seeding
+### First-party tenants
 
-On every boot the service upserts apps from env (keys are hashed):
-
-```bash
-MEDIA_APPS_SEED='[{"app_id":"live","name":"OpenVibe.Live","api_key":"…","webhook_url":"http://127.0.0.1:3000/internal/media-webhook","webhook_secret":"…","allowed_origins":["https://openvibe.live"],"quota_bytes":0}]'
-# deprecated: use MEDIA_APPS_SEED (fallback short form, no webhooks/origins)
-MEDIA_APP_KEYS="live:key1,games:key2"
-```
+Boot creates any missing first-party tenant: `live`, `community`, `tools`, `games`, `wiki`, `blog`, `inventory` and
+`media-hub` (`server/auth.js` `ensureTokenOnlyApps`), with its quota and browser origins, and leaves an existing row as
+it is. Each is reached only with its service's Network service token, with grants per namespace in Network. No app
+key is issued or seeded: `MEDIA_APPS_SEED` and `MEDIA_APP_KEYS` are gone (compatibility register C-71), and migration
+`0006` emptied the key hashes the tenants still carried. App keys now exist only as test fixtures (`db.upsertApp`)
+and in `scripts/smoke-test.sh`.
 
 ## API (all under `/api/v1/:app`)
 
@@ -698,8 +697,7 @@ Reporting a vulnerability: [SECURITY.md](SECURITY.md). The rules the code keeps:
   `test/rtmp-allowlist.test.js`); avatar
   ingestion fetches through the SSRF guard; other calls go to the configured Network, Live, Events, B2
   and R2 endpoints.
-- **Secrets.** `OV_OAUTH_CLIENT_SECRET`, `MEDIA_SIGNING_SECRET`, `MEDIA_SECRET`, `MEDIA_APPS_SEED`
-  (and the deprecated `MEDIA_APP_KEYS`), `MEDIA_B2_*`, `MEDIA_R2_*`, `MEDIA_INBOUND_EVENTS_SECRET` and
+- **Secrets.** `OV_OAUTH_CLIENT_SECRET`, `MEDIA_SIGNING_SECRET`, `MEDIA_SECRET`, `MEDIA_B2_*`, `MEDIA_R2_*`, `MEDIA_INBOUND_EVENTS_SECRET` and
   `VIEW_HASH_SECRET` (the
   secret visitor hashes are derived from; it falls back to `MEDIA_SECRET`) live in
   `/etc/openvibe/media.env` (0600), by name only.

@@ -37,11 +37,9 @@ const crypto = require('crypto');
         MEDIA_B2_APP_KEY: S('b2-app-key'),
         MEDIA_R2_ACCESS_KEY_ID: S('r2-access-key-id'),
         MEDIA_R2_SECRET_ACCESS_KEY: S('r2-secret-access-key'),
-        MEDIA_APP_KEYS: `live:${LIVE_KEY}`,
-        MEDIA_APPS_SEED: JSON.stringify([{ app_id: 'games', name: 'Games', api_key: GAMES_KEY, webhook_url: `${CLOSED}/hook`, webhook_secret: S('games-webhook-secret'), allowed_origins: ['https://games.test'] }]),
     };
     const sentinels = new Map([
-        ...Object.entries(SECRET_ENV).filter(([k]) => !['MEDIA_APP_KEYS', 'MEDIA_APPS_SEED'].includes(k)),
+        ...Object.entries(SECRET_ENV),
         ['live app key', LIVE_KEY], ['games app key', GAMES_KEY], ['games webhook secret', S('games-webhook-secret')],
         ['stream key', S('stream-key')], ['rtmp path key', S('rtmp-path-key')],
     ]);
@@ -55,7 +53,7 @@ const crypto = require('crypto');
         // Public by protocol, not secrets: an IndexNow key is served at /<key>.txt for search engines to verify.
         const PUBLIC_BY_DESIGN = new Set(['INDEXNOW_KEY']);
         const secretish = [...names].filter(n => /SECRET|_KEY$|_KEYS$|KEY_ID$|TOKEN|PASSWORD|PASSWD|CREDENTIAL|_SEED$|PRIVATE/.test(n) && !/_(S|MS|MB|GB|MIN|HOURS|DAYS)$/.test(n) && !PUBLIC_BY_DESIGN.has(n));   // not the numeric settings (MEDIA_UPLOAD_TOKEN_TTL_S)
-        assert.ok(secretish.length >= 10, `found the secret variables (${secretish})`);
+        assert.ok(secretish.length >= 9, `found the secret variables (${secretish})`);   // 9 since the seeding variables went (C-71)
         for (const n of secretish) assert.ok(Object.prototype.hasOwnProperty.call(SECRET_ENV, n), `${n} is read by the service: give it a sentinel in test/security-secrets.test.js`);
     }
 
@@ -97,20 +95,16 @@ const crypto = require('crypto');
         });
         for (const k of ['MEDIA_DRILL', 'PASTES_MOVED_TO', 'EVENTS_PUBLISH']) delete process.env[k];
 
-        // MEDIA_APP_KEYS is deprecated (T4): it still seeds, but must warn once per boot and never name the key.
-        const warnLines = [];
-        const realWarn = console.warn;
-        console.warn = (...args) => { warnLines.push(args.join(' ')); return realWarn.apply(console, args); };
         const { app, server } = await require('../server/index.js').ready;
         if (!server.listening) await new Promise((r) => server.once('listening', r));
-        console.warn = realWarn;
-        const depr = warnLines.filter((l) => l.includes('MEDIA_APP_KEYS is deprecated'));
-        assert.strictEqual(depr.length, 1, `MEDIA_APP_KEYS warns once per boot (saw ${depr.length})`);
-        assert.ok(depr[0].includes('MEDIA_APPS_SEED') && !depr[0].includes(LIVE_KEY), 'the warning points at MEDIA_APPS_SEED and never names a key');
         const auth = require('../server/auth');
         auth._setNetworkPublicKeyForTests(keys.publicKey);
         const db = require('../server/db/database');
-        assert.strictEqual((await db.getApp('live')).app_id, 'live', 'MEDIA_APP_KEYS still seeds its app (deprecated, not removed)');
+        // Boot made the first-party tenants token-only (C-71: nothing seeds a key). The app keys these checks use are
+        // fixtures written here, so the redaction checks still cover a key and a webhook secret.
+        assert.strictEqual((await db.getApp('live')).api_key_hash, '', 'boot creates live with no app key');
+        await db.upsertApp({ app_id: 'live', name: 'OpenVibe.Live', api_key: LIVE_KEY, allowed_origins: ['https://openvibe.live'] });
+        await db.upsertApp({ app_id: 'games', name: 'Games', api_key: GAMES_KEY, webhook_url: `${CLOSED}/hook`, webhook_secret: S('games-webhook-secret'), allowed_origins: ['https://games.test'] });
         const base = `http://127.0.0.1:${server.address().port}`;
 
         // ── Credentials ──
