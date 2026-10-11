@@ -9,7 +9,7 @@
  * local storage directory accepts a write. Optional (one capability degrades, the rest keeps
  * working): the Network public key (user-JWT and service-token routes; app-key tenants are
  * unaffected), each CONFIGURED remote tier (B2 cold storage, R2 cache; a HeadBucket at most once a
- * minute), the Events outbox (webhooks still deliver when it backs up), and object_copies: every
+ * minute), the Events outbox, and object_copies: every
  * ready object has a good copy somewhere (server/objects/verify-job.js records it; objects with no
  * good copy are listed by scripts/no-good-copy-report.js). object_copies never fails readiness —
  * Media keeps serving everything else.
@@ -145,7 +145,7 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
         checks.push({ name: `remote_${name}`, required: false, cacheMs: 60 * 1000, timeoutMs: 5000, check: () => remote.probe(name) });
     }
     checks.push({
-        name: 'events_outbox', required: false, description: 'durable events to OpenVibe.Events (webhooks are separate)',
+        name: 'events_outbox', required: false, description: 'durable outcome events to OpenVibe.Events',
         check: async () => {
             const s = await events.status();
             if (!s.enabled) return skip('relay off (EVENTS_URL or the service credentials unset)', { enabled: false });   // verified nothing: never ok (WS-Q task 7)

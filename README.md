@@ -68,8 +68,7 @@ Called elsewhere, as the service principal `media` (the OAuth client `media`):
 | OpenVibe.Live | `live.lineage.resolve` | which channel and person a recording belongs to |
 | OpenVibe.Events | `events.event.publish`, `events.subscription.manage` | the outbox relay; its subscriptions |
 
-Outbound webhooks to tenants (`webhook_url`, HMAC with `webhook_secret`) stay until every consumer
-reads events.
+Media announces outcomes as OpenVibe.Events events (`media.vod.ready`, …) and sends no webhooks since 2026-10-11 (C-75).
 
 ## Layout
 
@@ -79,7 +78,7 @@ server/
   config.js              env config (PORT, MEDIA_DATA_DIR, *_PATH, DATABASE_URL/DATABASE_DIRECT_URL, MEDIA_B2_*/R2_*,
                          RTP pool, OV_NETWORK_URL)
   auth.js                tenancy + auth middleware, JWKS fetch, app seeding
-  webhooks.js            HMAC-signed outbound webhooks
+  announce.js            transactional OpenVibe.Events outcome announcements
   drill.js               MEDIA_DRILL: restore-drill mode (reads only, no bytes, no jobs, nothing leaves)
   db/database.js         PostgreSQL helpers (openvibe-sdk/db, async), all app_id-scoped
   db/init.js             applies migrations/ (DATABASE_URL/DATABASE_DIRECT_URL, or embedded PGlite)
@@ -87,7 +86,7 @@ server/
                          media_objects/locations/relationships/variants/jobs/holds/invariant_violations
   vod/recorder.js        ffmpeg recording: RTMP pull + RTP (SDP) ingest, codec passthrough
   vod/media-tools.js     probes, seekable remux, DVR sidecar, chunk-segment concat
-  vod/finalize.js        finalize pipeline (remux → probe → master recovery → thumbnail → webhook)
+  vod/finalize.js        finalize pipeline (remux → probe → master recovery → thumbnail → event)
   vod/routes.js          /api/v1/:app/vods (+ ingest + chunks)
   vod/clip-cutter.js     re-encoding clip cutter (local file or presigned URL source)
   vod/clips-routes.js    /api/v1/:app/clips
@@ -147,8 +146,7 @@ other OpenVibe services call the API.
 subject, in every tenant: uploads in progress, copies, derivatives, visibility, lifecycle and their own
 usage per tenant and namespace (`GET /api/v2/me/objects`, `/objects/:id`, `/usage`). Read-only: changes
 stay with the apps. Network staff with `staff.site.view` get the operator views at `/me/ops` (failed
-jobs, missing media, projection, tiering, outbound webhooks — who is configured and what this process
-has sent — and usage recompute with `staff.site.configure`). Details in
+jobs, missing media, projection, tiering and usage recompute with `staff.site.configure`). Details in
 [docs/object-model.md](docs/object-model.md#object-explorer).
 
 ## Tenancy & auth
@@ -159,7 +157,7 @@ Tenant = the `:app` path segment. Rows in the `apps` table define tenants:
 |---|---|
 | `app_id` | tenant id (`live`, `games`, …) |
 | `api_key_hash` | sha256 of the app API key (never stored in plaintext) |
-| `webhook_url` / `webhook_secret` | outbound event delivery (HMAC) |
+| `webhook_url` / `webhook_secret` | retained for a separate schema migration; unused for delivery |
 | `allowed_origins` | JSON array; guards browser (user-JWT) calls |
 | `quota_bytes` | storage quota: v1 files + native v2 objects (0 = unlimited) |
 | `project_id` / `env` | set only on developer-project tenants (below) |
@@ -240,7 +238,7 @@ and in `scripts/smoke-test.sh`.
 | POST | `/vods/:id/ingest/rtp/stop` | finalizes the recording |
 | POST | `/vods/:id/chunks` | multipart `chunk` (+`segmentId`), user JWT ok — browser MediaRecorder append flow |
 | POST | `/vods/:id/complete` | finalize chunked upload (user JWT ok) |
-| POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, webhook |
+| POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, event |
 | GET | `/vods/:id` | `{ id, title, status, duration, playback_url, hls_url, thumbnail_url, storage_provider, readiness, … }` (`readiness`: [below](#readiness); `hls_url`, with `hls_expires_at` when signed: the object's master playlist with `MEDIA_HLS_ENABLED`, docs/media-fabric.md §3) |
 | GET | `/vods?limit&offset&user_id&stream_id&managed_stream_id&include_private&order&since` | list; `include_private` app-key only; `order` = newest\|oldest\|views; `since` = created at or after (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC) |
 | PUT | `/vods/:id` | `{ title?, description?, visibility? }` |
@@ -354,22 +352,17 @@ directories are shared across apps) and responses carry a `note` saying so.
 | GET | `/admin/storage/ops` | this app's operator report (as `/me/ops` shows it to Network staff): failed jobs, missing media, projection, tiering, the namespaces' usage snapshot. Not for calls acting for a user (403) |
 | POST | `/admin/storage/ops/recompute` | refresh this app's namespaces' usage snapshot from the rows |
 
-### Webhooks (outbound)
+### Outcome events
 
-`POST` to the app's `webhook_url` with body
-`{ "event": "vod.ready"|"vod.failed"|"clip.ready"|"clip.failed"|"media.object.uploaded"|"storage.alert"|"storage.recovered", "app_id", "data", "event_id"? }`
-and header `X-OVMedia-Signature: sha256=<hex hmac-sha256 of the raw body with
-the app's webhook_secret>`. 3 attempts with backoff, 10 s timeout.
+Media announces outcomes as OpenVibe.Events events (`media.vod.ready`, …) and sends no webhooks since 2026-10-11 (C-75).
 
-Each outcome is also a durable OpenVibe.Events event (`media.vod.ready|failed`,
+Each outcome is a durable OpenVibe.Events event (`media.vod.ready|failed`,
 `media.clip.ready|failed`, `media.object.uploaded`, `media.storage.alert|recovered`;
 `server/events.js`). The outbox row is written in the **same transaction** as the state
-change it describes (`webhooks.announce()`), so an outcome is never lost or announced for a
-rolled-back change; the webhook follows the commit and carries `event_id` = that event's id
-(absent when the outbox is off), so an app that reads both paths (Live during its webhook →
-Events transition) handles each outcome once. Webhooks stay until every consumer reads Events.
+change it describes (`announce()`), so an outcome is never lost or announced for a
+rolled-back change.
 
-Two object events go to OpenVibe.Events only (no webhook): **`media.object.deleted`**
+Two additional object events go to OpenVibe.Events: **`media.object.deleted`**
 `{ object_id, app_id, kind, legacy_ref, deleted_at }` and **`media.object.visibility_changed`**
 `{ object_id, app_id, kind, legacy_ref, visibility, previous_visibility, changed_at }` (subject
 `object <id>`, `important`, times ISO 8601 UTC, `legacy_ref` null for native objects). Nothing
@@ -422,7 +415,7 @@ mode (`server/drill.js`) Media:
   4100 (before the database is opened), and opens the copy without migrating it;
 - starts only its HTTP server: no app seeding, JWKS refresh, tiering sweep, health job, junk sweep,
   clip re-cuts, copy verification, jobs worker, disk guardian, thumbnail cleanup, object purge,
-  orphan-recording finalize or Events relay; webhooks are never sent;
+  orphan-recording finalize or Events relay;
 - writes no file and creates no directory (the storage checks leave `/api/ready`, as do the remote
   tiers; it reports `"mode": "drill"`);
 - never opens a file path from the database: every byte route (`/v` and `/c` bytes, `/t`, `/a`, `/f`,
@@ -432,7 +425,7 @@ mode (`server/drill.js`) Media:
   listens on nothing but its port;
 - answers 403 to every method but GET, HEAD and OPTIONS, and 503 to `/auth/*`.
 
-`test/drill-mode.test.js` boots the real server that way against a copy whose app has a webhook URL
+`test/drill-mode.test.js` boots the real server that way against a restored copy
 and checks each point.
 
 ## N-1: the previous release against this one
@@ -660,7 +653,7 @@ shutdown.
 - **Only real files are candidates.** Rows without a file (a recording that was refused or never produced output, legacy paths) are quarantined as `health_status='missing_file'` and excluded — they used to fill the candidate list and starve the drain.
 - **Cadence** — while a drain is still needed the sweep re-runs every `pressureRetryMs` (2 min), otherwise every `sweepIntervalMs` (15 min). A VOD whose upload failed is skipped for 30 min so one bad file cannot pin the drain.
 - **Bounded uploads** — each upload is aborted past `uploadTimeoutFloorMs + size / uploadMinThroughputMBps`; a watchdog logs a sweep that has run for hours.
-- **Stall alerts** — after `alertAfterStalledPasses` (2) consecutive pressure passes that freed nothing, and whenever the disk is critical, Media sends `storage.alert` to every app webhook (Live logs it and forwards to `OPS_ALERT_WEBHOOK_URL` / the `ops_alert_webhook_url` setting); `storage.recovered` follows once the drain works again. Each pass under pressure logs candidates / uploaded / failed / backed-off / quarantined.
+- **Stall alerts** — after `alertAfterStalledPasses` (2) consecutive pressure passes that freed nothing, and whenever the disk is critical, Media queues a `media.storage.alert` event; `media.storage.recovered` follows once the drain works again. Each pass under pressure logs candidates / uploaded / failed / backed-off / quarantined.
 - **Status** — `GET /api/v1/:app/admin/storage` includes `sweep` (last result, next run, stalled flag, needsDrain/critical).
 
 Run `npm test` for the policy regression tests.

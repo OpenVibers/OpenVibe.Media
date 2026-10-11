@@ -5,7 +5,7 @@
  * vodId (there is no stream registry here — apps own stream state):
  *   merge pending chunk segments → seekable remux → probe → master recovery
  *   (truncated-webm rebuild) → thumbnail → DB update + vod.ready event (one
- *   transaction) → webhook vod.ready.
+ *   transaction).
  *
  * Guarded against double-invocation; refuses to finalize while the recorder
  * still holds the file open (stops it gracefully instead — its ffmpeg exit
@@ -19,7 +19,7 @@ const { spawn } = require('child_process');
 const db = require('../db/database');
 const config = require('../config');
 const tools = require('./media-tools');
-const { announce } = require('../webhooks');
+const { announce } = require('../announce');
 const objects = () => require('../objects/model');
 
 /** Absolute-ize a stored Media-relative URL (/t/…, /api/thumbnails/…). */
@@ -35,9 +35,9 @@ function isFinalizing(vodId) {
     return _finalizing.has(Number(vodId));
 }
 
-// Public shape of a vod row for API responses + webhooks. { readiness: true } (API responses) adds the
-// object's readiness levels (server/objects/readiness.js); webhook payloads leave them out (their shape
-// predates the object model and stays as it is). `hls` selects the playlist fields: undefined = discover
+// Public shape of a vod row for API responses + events. { readiness: true } (API responses) adds the
+// object's readiness levels (server/objects/readiness.js); event payloads leave them out.
+// `hls` selects the playlist fields: undefined = discover
 // them for this row (a single-item read), false = omit them (an event payload must never carry a signed
 // URL into the outbox), an object = the answer the list route already batched (objects/hls.discoveryMany).
 async function vodPublic(vod, { readiness = false, hls } = {}) {
@@ -119,8 +119,8 @@ function rebuildWebmFromMaster(masterPath, webmPath) {
 }
 
 /**
- * The state change for a VOD outcome, the VOD's object and the event/webhook, committed together
- * (webhooks.announce around objects.withObject). `row()` gives the row the payload describes (read
+ * The state change for a VOD outcome, the VOD's object and the event commit together
+ * (announce around objects.withObject). `row()` gives the row the payload describes (read
  * inside the transaction). Returns the payload, or null when the transaction failed (then nothing
  * changed and nothing was announced). A deleted row's object is marked deleted by its trigger.
  */
@@ -381,8 +381,8 @@ async function _doFinalize(vodId, opts) {
     // recording is back to the visibility its owner chose.
     const lift = _finalizeQuarantined(await db.getVodById(vodId) || vod);
 
-    // The ready transition, the VOD's object and the vod.ready event commit together (then the
-    // webhook goes out). A failed commit throws, as the plain UPDATE did before.
+    // The ready transition, the VOD's object and the vod.ready event commit together.
+    // A failed commit throws, as the plain UPDATE did before.
     await announce(vod.app_id, 'vod.ready', {
         change: async () => await objects().withObject('vod', vodId, async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
             [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId])),

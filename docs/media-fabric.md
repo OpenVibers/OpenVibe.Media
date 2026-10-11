@@ -277,7 +277,7 @@ formats (AVIF/WebP), preview clips and AI thumbnails are `rebuildable = true`:
   only, report only) reads those rows every `MEDIA_MOVE_CLEANUP_MINUTES` (60; `0` = never; not in a restore drill): an
   object whose move failed three times in the last 7 days (a later `done` of that move resets the count) raises one
   `storage.alert` of kind `move_cleanup_failed`, listing the objects (`media_storage_alerts_total{kind}`, the Events
-  outbox and the per-app webhook, once per 6 h cooldown like every storage alert).
+  outbox, once per 6 h cooldown like every storage alert).
 - **Dry-run and simulator:** every policy can run in dry-run mode (logs what it would do and what it would cost), and a
   simulator replays recorded telemetry against a candidate policy before it is enabled.
 - **Demand rollups (F2.4, shipped):** every served viewer read (`router.route()` for playback or download, not a derive

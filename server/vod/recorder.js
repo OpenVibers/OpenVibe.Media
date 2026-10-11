@@ -269,7 +269,7 @@ class StreamRecorder {
                 ffmpegCorrupted: rec?._ffmpegCorrupted || false,
             };
             this._teardown(vodId);
-            // Let finalizeVod handle remux, probe, thumbnail, webhook.
+            // Let finalizeVod handle remux, probe, thumbnail and outcome event.
             // Short delay to ensure the file is fully flushed to disk.
             setTimeout(() => {
                 require('./finalize').finalizeVod(vodId, finalizeOpts).catch(err => {

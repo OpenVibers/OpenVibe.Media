@@ -9,8 +9,8 @@
  *   succeeded | failed | cancelled   finished
  *
  * Every state change and its media.job.<transition> event commit in ONE PostgreSQL transaction (the same
- * rule as webhooks.announce(), see events.js): an event exists if and only if its change committed.
- * The relay is woken after the commit. Job events go to OpenVibe.Events only (no app webhook).
+ * rule as announce(), see events.js): an event exists if and only if its change committed.
+ * The relay is woken after the commit. Job events go to OpenVibe.Events.
  *
  * Fencing: a claim writes a fresh random lease_token on the row and hands it to its holder. Renewing
  * the lease, saving a checkpoint and every way out of 'running' (succeed, fail, markCancelled) match

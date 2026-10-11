@@ -131,7 +131,7 @@ async function getApp(appId) {
 }
 
 async function listApps() {
-    return await all('SELECT app_id, name, webhook_url, allowed_origins, quota_bytes, created_at FROM apps ORDER BY app_id');
+    return await all('SELECT app_id, name, allowed_origins, quota_bytes, created_at FROM apps ORDER BY app_id');
 }
 
 async function upsertApp({ app_id, name, api_key, webhook_url, webhook_secret, allowed_origins, quota_bytes }) {

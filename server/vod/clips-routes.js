@@ -3,7 +3,7 @@
  *
  * POST   /        { vod_id, start_s, end_s, title?, user_id? } → { id, status }
  *                 The cut runs in the background (works on the local file or a
- *                 presigned B2/R2 URL); webhook clip.ready|clip.failed fires on
+ *                 presigned B2/R2 URL); clip.ready|clip.failed events are queued on
  *                 completion. Also accepts a live cut against a still-recording
  *                 VOD (clamped to flushed footage, like the predecessor).
  * GET    /:id     clip meta (status: processing | ready | failed)
@@ -143,8 +143,8 @@ const flag = (v) => (['1', 'true'].includes(String(v)) ? 1 : ['0', 'false'].incl
 
 // ── Create clip ──────────────────────────────────────────────
 // JSON body: a window of a VOD. Over a source with a CMAF timeline (MEDIA_HLS_ENABLED) the clip is virtual: ready at
-// once (201, clip.ready webhook), no ffmpeg, played as HLS over the source's segments (docs/media-fabric.md §4, F3.5).
-// With `materialize: true`, or a source without a timeline, it is cut into its own file (202, background clip.cut + webhook).
+// once (201, clip.ready event), no ffmpeg, played as HLS over the source's segments (docs/media-fabric.md §4, F3.5).
+// With `materialize: true`, or a source without a timeline, it is cut into its own file (202, background clip.cut event).
 // Multipart `video`: direct upload of an already-cut blob (201, ready) —
 // inherited browser-MediaRecorder clip path.
 router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.single('video'), async (req, res) => {
@@ -241,7 +241,7 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
 
         // The cut is a media job (clip.cut, WS-G task 3): media.job.* events, retries with backoff, and a
         // job id the caller's UI follows (GET /api/v2/:app/jobs/:id) and reattaches to after a reload.
-        // clip.ready / clip.failed and the webhook come from the cut itself, as before.
+        // clip.ready / clip.failed events come from the cut itself.
         const { job } = await clipJobs.enqueueCut(appId, clipId, {
             reason: 'cut', createdBy: req.authType === 'user' ? `app:${appId}:user:${req.userId}` : `app:${appId}`, ownerUserId: userId ?? null,
         });
@@ -257,7 +257,7 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
 /**
  * Direct clip upload: the blob is already cut client-side — remux it for
  * seeking (rebases cluster timestamps hours from zero on long streams),
- * probe the real duration, store as ready. No webhook (nothing async).
+ * probe the real duration, store as ready. There is no asynchronous outcome.
  */
 async function _createUploadedClip(req, res) {
     const body = req.body || {};
