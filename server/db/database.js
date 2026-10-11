@@ -332,10 +332,6 @@ async function getAppStats(appId) {
     return {
         vods: await c(`SELECT COUNT(*) n ${vodBase}`, [appId]),
         clips: await c(`SELECT COUNT(*) n ${clipBase}`, [appId]),
-        // Pastes belong to Community, and Live reads them there; null keys remain for one release for N-1 clients.
-        pastes: null,
-        pasteImages: null,
-        pasteText: null,
         durationSeconds: await c(`SELECT COALESCE(SUM(duration_seconds),0) n ${vodBase}`, [appId]),
         recent: {
             vods: await win(`SELECT COUNT(*) n ${vodBase} AND created_at >= datetime('now', ?)`, [appId]),
