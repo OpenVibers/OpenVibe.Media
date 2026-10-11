@@ -2,8 +2,9 @@
 // Privacy: anyone who may not see a private item gets exactly the answer a missing id gets.
 // A 403 ("This media is private"), a 410, or a redirect that happens only for real items all
 // confirm that the item exists. Covers the public serving routes (/v /c /o /p/:slug,
-// /v/:id/transcript.json, legacy /api/thumbnails) and the v1 detail routes when an app acts
-// for one of its users (X-OV-User-Id).
+// /v/:id/transcript.json) and the v1 detail routes when an app acts for one of its users (X-OV-User-Id).
+// The predecessor-shaped routes (/v/<file name>, /api/thumbnails/<name>, /f/screenshots/<name>) are
+// retired (C-75): they answer the missing-id 404 even for public rows.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -88,8 +89,8 @@ const http = require('http');
         await same(['/v/2', nav], ['/v/999', nav], 'private VOD watch page looks missing');
         await same(['/v/3', video], ['/v/999', video], 'legacy row (no visibility, is_public 0) is private');
         await same(['/v/4', video], ['/v/999', video], 'clips-only source recordings are not served');
-        await same(['/v/vod-2-secret.webm', video], ['/v/no-such-file.webm', video], 'basename form: private file names are not confirmed');
-        await same(['/v/clip-11-secret.webm', video], ['/v/no-such-file.webm', video], 'basename form reaching a private clip');
+        await same(['/v/vod-2-secret.webm', video], ['/v/no-such-file.webm', video], 'a file name is not a route: private file names are not confirmed');
+        await same(['/v/vod-1.webm', video], ['/v/no-such-file.webm', video], 'nor a public row\'s file name (C-75)');
         await same(['/c/11', video], ['/c/999', video], 'private clip looks missing');
         await same(['/c/11', nav], ['/c/999', nav], 'private clip watch page looks missing');
         await same(['/v/2', { ...video, ...asUser(77) }], ['/v/999', { ...video, ...asUser(77) }], 'another user of the app is nobody special');
@@ -126,13 +127,12 @@ const http = require('http');
         await same(['/v/4/transcript.json'], ['/v/999/transcript.json'], 'clips-only transcript looks missing');
         console.log('✅ /v/:id/transcript.json: private looks missing');
 
-        // ── Legacy thumbnail names never hand out a private row's current thumbnail URL ──
+        // ── Retired predecessor routes (C-75): gone for every row, public ones included ──
         r = await get('/api/thumbnails/vod-1-0.jpg');
-        assert.deepStrictEqual([r.status, r.location], [302, '/t/vod-1-111.jpg'], 'public rows still redirect to the current thumbnail');
-        await same(['/api/thumbnails/vod-2-0.jpg'], ['/api/thumbnails/vod-999-0.jpg'], 'private row: same answer as a missing one');
-        r = await get('/api/thumbnails/vod-2-0.jpg');
-        assert.strictEqual(r.location, null, 'no redirect for a private row');
-        console.log('✅ /api/thumbnails: no redirect for private rows');
+        assert.deepStrictEqual([r.status, r.location], [404, null], 'legacy thumbnail names neither redirect nor serve');
+        assert.strictEqual((await get('/api/thumbnails/vod-1-111.jpg')).status, 404, 'not even the exact current file name');
+        assert.strictEqual((await get('/f/screenshots/shot-1.png')).status, 404, 'screenshots by file name are gone (object URLs serve them)');
+        console.log('✅ /v/<file name>, /api/thumbnails/<name>, /f/screenshots/<name>: retired');
 
         // ── /o: a private object is missing without a signature, whatever its lifecycle ──
         await same([`/o/${privDeleted}`], ['/o/med_01JAB2C3D4E5F6G7H8J9K0MNPQ'], 'deleted private object: 404, not 410');

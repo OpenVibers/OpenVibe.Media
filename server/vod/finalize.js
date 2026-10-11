@@ -22,7 +22,7 @@ const tools = require('./media-tools');
 const { announce } = require('../announce');
 const objects = () => require('../objects/model');
 
-/** Absolute-ize a stored Media-relative URL (/t/…, /api/thumbnails/…). */
+/** Absolute-ize a stored Media-relative URL (/t/…). */
 function _absUrl(u) {
     if (!u) return null;
     if (/^https?:\/\//i.test(u)) return u;

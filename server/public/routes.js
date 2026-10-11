@@ -232,22 +232,14 @@ async function serveMediaRecord(kind, record, req, res) {
 }
 
 // ── VOD playback ─────────────────────────────────────────────
-// Accepts a numeric id OR a legacy file basename (old /api/vods/file/<name>
-// URLs in the wild redirect here with the basename; migrated rows keep their
-// original file_path basenames). The old route served CLIP files too, so a
-// basename that matches a clip serves that clip.
+// By numeric id only: a file name is not a route (the basename fallback for old /api/vods/file/<name> URLs
+// was retired with compatibility register C-75 once Live asked by id).
 router.get('/v/:id', optionalIdentity, async (req, res) => {
     try {
-        if (/^\d+$/.test(req.params.id)) {
-            const vod = await db.getVodById(parseInt(req.params.id, 10));
-            if (!vod || vod.clips_only) return notFound(res);
-            return await serveMediaRecord('vod', vod, req, res);
-        }
-        const vod = await db.getVodByFileBasename(req.params.id);
-        if (vod && !vod.clips_only) return await serveMediaRecord('vod', vod, req, res);
-        const clip = await db.getClipByFileBasename(req.params.id);
-        if (clip) return await serveMediaRecord('clip', clip, req, res);
-        notFound(res);
+        if (!/^\d+$/.test(req.params.id)) return notFound(res);
+        const vod = await db.getVodById(parseInt(req.params.id, 10));
+        if (!vod || vod.clips_only) return notFound(res);
+        return await serveMediaRecord('vod', vod, req, res);
     } catch (err) {
         console.error('[Public] /v error:', err.message);
         if (!res.headersSent) res.status(500).json({ error: 'Failed to serve media' });
@@ -425,53 +417,6 @@ router.get('/v/:id/transcript.json', _devDataRoute((req) => {
     if (!Number.isFinite(id)) return { status: 400, body: { error: 'Bad VOD id' } };
     return require('./dev-data').getVodTranscript(id);
 }));
-
-// ── Legacy thumbnail URLs ────────────────────────────────────
-// Old-stack thumbnails lived at /api/thumbnails/<basename>, and migrated Live
-// rows still carry those absolute URLs. Basenames change when a thumbnail is
-// regenerated, so resolve the vod/clip id from the name and redirect to the
-// current canonical URL; serve the exact file when it still exists.
-router.get('/api/thumbnails/:name', async (req, res) => {
-    if (drill.refuseBytes(res)) return;
-    const name = path.basename(String(req.params.name || ''));
-    const m = /^(vod|clip)-(\d+)-\d+\.(?:jpg|jpeg|png)$/i.exec(name);
-    if (m) {
-        const row = m[1].toLowerCase() === 'vod'
-            ? await db.getVodById(parseInt(m[2], 10), 'live')
-            : await db.getClipById(parseInt(m[2], 10), 'live');
-        // Never for a private row: the redirect would hand out the current thumbnail URL of any
-        // private recording to whoever guesses vod-<id>-0.jpg. The exact file name still serves.
-        if (row && row.thumbnail_url && recordVisibility(row) !== 'private' && !row.thumbnail_url.endsWith(`/${name}`)) {
-            // A regenerated thumbnail keeps its old URL until the row is updated: no stale serving, or the
-            // redirect could point at the stale thumbnail for another hour.
-            res.set('Cache-Control', cache.htmlHeaders({ maxAge: 3600, swr: 0 }));
-            return res.redirect(302, row.thumbnail_url);
-        }
-    }
-    req.params.id = name;
-    require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
-});
-
-// ── Paste screenshots by filename ────────────────────────────
-// Legacy /data/pastes/screenshots/<name> URLs (old avatars, hero moments,
-// pre-cutover pastes) map here. Migrated screenshot files have arbitrary
-// basenames on disk and NO files-table rows, so this serves straight from
-// PASTES_PATH/screenshots for exactly that namespace.
-router.get('/f/screenshots/:name', (req, res) => {
-    if (drill.refuseBytes(res)) return;
-    try {
-        const name = path.basename(String(req.params.name || ''));
-        const dir = path.join(require('../config').pastes.path, 'screenshots');
-        const filePath = path.join(dir, name);
-        if (!name || !filePath.startsWith(dir) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-            return res.status(404).json({ error: 'Not found' });
-        }
-        streamFileWithRange(req, res, filePath, { 'Cache-Control': 'public, max-age=604800, immutable', 'X-Robots-Tag': 'noindex' });
-    } catch (err) {
-        console.error('[Public] /f/screenshots error:', err.message);
-        if (!res.headersSent) res.status(500).json({ error: 'Failed to serve file' });
-    }
-});
 
 // ── Files ────────────────────────────────────────────────────
 router.get('/f/:key', async (req, res) => {

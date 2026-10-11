@@ -1,7 +1,7 @@
 'use strict';
 // Private and unlisted media stay where they belong (roadmap WS-R task 5). Extends
-// test/private-not-found.test.js (which covers /v /c /o /p/:slug/raw, transcript.json, the legacy
-// /api/thumbnails redirect and the v1 detail routes for an acting non-owner) to the paths it does not:
+// test/private-not-found.test.js (which covers /v /c /o /p/:slug/raw, transcript.json and the v1
+// detail routes for an acting non-owner) to the paths it does not:
 //   - public lists: the media index (/ and /browse, every tab, thumbnails included), /sitemap.xml,
 //     /llms.txt, the v1 VOD/clip lists and latest-thumbs for a caller acting for another user, the v2
 //     object and job lists: never a private or unlisted item (sitemap and Search documents in depth:
