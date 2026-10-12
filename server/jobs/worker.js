@@ -81,7 +81,7 @@ async function execute(row, laneName) {
         } catch { /* next beat */ }
     }, Math.max(1000, Math.floor(leaseS * 1000 / 3)));
     if (beat.unref) beat.unref();
-    const timeoutMs = spec ? spec.timeoutMs : 1000;
+    const timeoutMs = spec ? (typeof spec.timeoutMs === 'function' ? spec.timeoutMs(row) : spec.timeoutMs) : 1000;
     const limit = setTimeout(() => ac.abort(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s`)), timeoutMs);
     if (limit.unref) limit.unref();
     if (cancelRequested) ac.abort(new Error('cancelled by its owner'));

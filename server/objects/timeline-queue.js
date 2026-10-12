@@ -5,7 +5,8 @@
  * finalize of a recording (server/vod/finalize.js), and lazily from GET …/download?format=json so a VOD older than F3.1
  * gets one on its first request. Nothing happens (null) with MEDIA_HLS_ENABLED off, for a missing, unready or non-media
  * object, or once the timeline exists. One job per object: dedupeActive joins a queued or running cut, and the
- * idempotency key `object.cmaf:<id>` answers a later call with the same job. → the job id, or null.
+ * idempotency key `object.cmaf:<id>` (or `:transcode` when first queued with transcoding on) answers a later call with
+ * the same job. → the job id, or null.
  *
  * queuePack(appId, objectId, { rendition }) enqueues `object.pack` once a cut's rows are committed (server/jobs/cmaf.js,
  * server/jobs/rendition.js), so packing follows the cut by itself instead of an operator's hand. Nothing happens (null)
@@ -54,6 +55,16 @@ async function queueCmaf(appId, objectId, { segment_seconds = null, lazy = false
     }
     const queue = require('../jobs/queue');
     const params = require('../jobs/cmaf').spec.validate({ appId, obj, params: segment_seconds != null ? { segment_seconds } : {} });
+    // Mark jobs first queued with transcoding on. An older copy-only codec failure gets this one new key on a lazy
+    // request. A failed transcode job already has the key and is replayed, so lazy reads cannot start a retry loop.
+    let idempotencyKey = `object.cmaf:${obj.id}`;
+    if (config.hls.transcode) {
+        const last = await require('../db/database').get(`SELECT status, error_code, idempotency_key FROM media_jobs
+            WHERE app_id = ? AND object_id = ? AND job_type = 'object.cmaf'
+            ORDER BY created_at DESC, id DESC LIMIT 1`, [appId, obj.id]);
+        if (!last || last.idempotency_key === `${idempotencyKey}:transcode` ||
+            (lazy && last.status === 'failed' && last.error_code === 'codec_unsupported')) idempotencyKey += ':transcode';
+    }
     if (lazy) {
         if (Math.max(recent, lazyQueuedAt.length) + pendingLazy >= config.hls.backfillPerHour) return null;
         pendingLazy++;
@@ -61,7 +72,7 @@ async function queueCmaf(appId, objectId, { segment_seconds = null, lazy = false
     try {
         const r = await queue.enqueue({
             appId, type: 'object.cmaf', objectId: obj.id, params,
-            dedupeActive: true, idempotencyKey: `object.cmaf:${obj.id}`, createdBy: lazy ? 'system:timeline-backfill' : 'system:timeline',
+            dedupeActive: true, idempotencyKey, createdBy: lazy ? 'system:timeline-backfill' : 'system:timeline',
         });
         if (r.created && lazy) lazyQueuedAt.push(now);
         if (r.created) require('../jobs/worker').kick();

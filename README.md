@@ -451,6 +451,9 @@ never the headers (`test/trust-proxy.test.js`).
 | Environment variable | Default | Purpose |
 |---|---:|---|
 | `MEDIA_HLS_ENABLED` | `0` | Enable timeline generation and HLS routes. |
+| `MEDIA_CMAF_TRANSCODE` | `0` | Encode incompatible source streams to H.264/AAC for the source timeline; uses CPU. |
+| `MEDIA_CMAF_TRANSCODE_MAX_SECONDS` | `14400` | Maximum duration of a source needing CMAF transcoding (four hours). |
+| `MEDIA_CMAF_TRANSCODE_THREADS` | `2` | libx264 threads for one CMAF transcode, which also runs at nice 15 so live streams keep the CPU. |
 | `MEDIA_TIMELINE_LOCAL_MAX_BYTES` | `10737418240` | Maximum local timeline cache (10 GiB; `0` keeps no durable copies locally). |
 | `MEDIA_TIMELINE_LOCAL_MIN_FREE_BYTES` | `8589934592` | Below this free disk level, new verified timeline bytes remain durable only. |
 | `MEDIA_HLS_BACKFILL_PER_HOUR` | `20` | Maximum lazy `object.cmaf` queues for older VODs per rolling hour on a single Media host; finalize is exempt. |
