@@ -546,6 +546,8 @@ aggregated and stay queued. The runbook is `docs/cutover-media-billing-readings.
 | `GET /llms-full.txt` | the same map plus the full text of the index and the newest watch pages Media is the canonical home of (`openvibe-shared/seo.llmsFull`; rendering stops at 512 KB, and any further pages become its "truncated" line) |
 | `GET /live/:sel/frame.jpg` | **live frame API** — near-realtime JPEG frame of an actively-live stream slot, extracted from its in-progress recording. `:sel` = slot id (`1`), slot **slug** (`whip`), or **`@username`** (that streamer's top-viewed live slot; slug/username resolve via the app's `/api/streams` listing, cached 5s). Optional `?w=64..1920` scales the width, `?app=` selects the tenant (default `live`; internal base URLs from `APP_INTERNAL_URLS` JSON env or `LIVE_APP_INTERNAL_URL`). Cached **5s per slot** (that cache is the rate limit), CORS-open for external APIs/bots/dashboards. Not live → **404 with a styled OFFLINE card** (real JPEG bytes — dev pipelines decode the body as image/jpeg) so `<img>` embeds degrade nicely (`?format=json` for JSON errors); `503` + card when live but a frame can't be cut. |
 
+Sitemap entries carry lastmod from the release commit for the index and each watch item's recorded time.
+
 Watch pages (`/v/:id`, `/c/:id` on a browser navigation) offer a player only when the item's
 [readiness](#readiness) is `playable`; otherwise they say why (still being recorded, still processing,
 not available) and are `noindex`. They carry a schema.org `VideoObject` when the item is public and

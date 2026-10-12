@@ -14,6 +14,7 @@ const express = require('express');
 const config = require('../config');
 const db = require('../db/database');
 const seo = require('openvibe-shared/seo');
+const releaseLastmod = require('../sitemap-lastmod');
 const cache = require('openvibe-shared/cache-policy');
 const pages = require('./pages');
 const readiness = require('../objects/readiness');
@@ -192,7 +193,7 @@ router.get('/llms-full.txt', async (req, res) => {
 });
 router.get('/sitemap.xml', async (req, res) => {
     try {
-        send(res, 'application/xml', seo.sitemapXml([{ loc: `${config.publicUrl}/`, changefreq: 'hourly' }, ...await sitemapEntries()]));
+        send(res, 'application/xml', seo.sitemapXml([{ loc: `${config.publicUrl}/`, lastmod: releaseLastmod, changefreq: 'hourly' }, ...await sitemapEntries()]));
     } catch (err) {
         console.error('[Public] sitemap error:', err.message);
         res.status(500).type('text/plain').send('sitemap unavailable');
