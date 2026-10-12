@@ -189,6 +189,17 @@ async function tabCounts() {
 // ── Rendering ────────────────────────────────────────────────
 const KIND_ICON = { video: '🎬', clip: '✂️', thumbnail: '🏞️', file: '📦' };
 
+/** JSON-LD for the index's first page: the site, and the cards it lists (ItemList). Later pages are noindex. */
+function browseJsonLd(config, tab, cards) {
+    const seo = require('openvibe-shared/seo');
+    const abs = (u) => { try { return new URL(u, `${config.publicUrl}/`).toString(); } catch { return null; } };
+    const items = cards.map((c) => ({ name: c.title || 'Untitled', url: abs(c.view) })).filter((it) => it.url);
+    return [
+        tab === 'all' ? seo.jsonLdTag(seo.jsonLd.website({ name: 'OpenVibe.Media', url: `${config.publicUrl}/`, description: 'Every public file on the OpenVibe network: videos, clips, files and thumbnails.' })) : '',
+        items.length ? seo.jsonLdTag(seo.jsonLd.itemList(tab === 'all' ? 'Latest public media' : `Latest public ${tab}`, items, { url: `${config.publicUrl}/${tab === 'all' ? '' : `?tab=${tab}`}` })) : '',
+    ].filter(Boolean).join('\n');
+}
+
 function renderCard(c) {
     const preview = c.thumb
         ? `<img src="${esc(c.thumb)}" alt="" loading="lazy">`
@@ -229,6 +240,7 @@ function renderPage(tab, page, data, counts) {
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="OpenVibe.Media — Media Index">
 <meta name="twitter:image" content="${config.publicUrl}/og-image.png">
+${page === 1 ? browseJsonLd(config, tab, data.cards) : ''}
 <!-- The shared theme-loader applies the user's theme to <html> before anything paints. -->
 <script src="${require('openvibe-shared/serve').url('theme-loader.js')}" defer></script>
 <style>
