@@ -5,6 +5,17 @@
 // private/unlisted/sandbox), and every listed page renders `index, follow`; /llms.txt maps the site;
 // public watch pages carry a VideoObject; AI clips are noindex with no Person author, like on Live.
 const assert = require('assert');
+
+function assertSitemapLastmods(xml, tag = 'url') {
+    const entries = [...xml.matchAll(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'g'))];
+    for (const [, body] of entries) {
+        const match = /<lastmod>(\d{4}-\d{2}-\d{2})<\/lastmod>/.exec(body);
+        assert.ok(match, body);
+        assert.strictEqual(new Date(match[1]).toISOString().slice(0, 10), match[1]);
+    }
+    return entries;
+}
+
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -78,6 +89,9 @@ const express = require('express');
         const locs = [...r.body.matchAll(/<loc>([^<]+)<\/loc>/g)].map(m => m[1]);
         assert.deepStrictEqual(locs.filter(l => !l.includes('/t/')).sort(), ['https://media.test/', 'https://media.test/c/11', 'https://media.test/v/1'].sort());
         assert.ok(r.body.includes('<image:loc>https://media.test/t/g1.jpg</image:loc>'), 'thumbnails as image entries');
+        assert.strictEqual(assertSitemapLastmods(r.body).length, 3);
+        assert.match(r.body, /<loc>https:\/\/media\.test\/v\/1<\/loc><lastmod>2026-09-20<\/lastmod>/);
+        assert.match(r.body, /<loc>https:\/\/media\.test\/c\/11<\/loc><lastmod>2026-09-22<\/lastmod>/);
         for (const never of ['/v/2', '/v/3', '/v/4', '/v/5', '/v/6', '/v/7', '/v/8', '/c/12', '/c/13', '/c/14', '/c/15']) {
             assert.ok(!locs.includes(`https://media.test${never}`), `${never} is not listed`);
         }
