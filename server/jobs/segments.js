@@ -29,6 +29,7 @@
 const fs = require('fs');
 const path = require('path');
 const timeline = require('../objects/timeline');
+const config = require('../config');
 const derive = require('./derive');
 const { JobError } = require('./queue');
 
@@ -96,6 +97,10 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
     const target = await timeline.durableProvider(src);
     // B2/R2 configured but none healthy (breakers open) is "not durable yet", retried later, never a quiet success.
     const remoteConfigured = vodStorage.REMOTE_PROVIDERS.some((p) => vodStorage.providerConfigured(p));
+    const cache = require('../objects/timeline-cache');
+    // One tree scan per cut. Only this heavy job adds timeline files; charge every retained file against this
+    // snapshot and recheck free space for each file, instead of walking the growing tree for every segment.
+    let localRemaining = Math.max(0, config.hls.localMaxBytes - cache.status().bytes);
     const rows = [];
     let uploaded = 0;
     const failed = [];
@@ -103,6 +108,7 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
     // again, so a cancelled run leaves neither untracked keys nor files.
     const stagedRemote = [];
     const stagedLocal = [];
+    const dropLocal = [];
     let committed = false;
     try {
         for (const f of files) {
@@ -138,6 +144,8 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
                     if (!vodStorage.providerAvailable(target)) throw new Error(`${target} is unavailable`);
                     await vodStorage.uploadFile(target, key, localPath, f.seq === 0 ? 'video/mp4' : 'video/iso.segment', { signal: ctx.signal });
                     stagedRemote.push({ provider: target, key });
+                    const back = await vodStorage.sha256Object(target, key);
+                    if (!back || back.sha256 !== sha || Number(back.size) !== size) throw new Error(`${target}:${key} failed size/sha256 readback`);
                     durable = target;
                     uploaded++;
                 } catch (err) {
@@ -145,6 +153,10 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
                     failed.push(`${f.name}: ${err.message}`);
                 }
             }
+            if (durable && (localRemaining < size || cache.freeBytes() < config.hls.localMinFreeBytes)) {
+                dropLocal.push(localPath);
+                localPath = null;
+            } else if (localPath) localRemaining = Math.max(0, localRemaining - size);
             rows.push({
                 seq: f.seq, name: f.name, start_ms: f.start_ms, end_ms: f.end_ms, keyframe_ms: f.keyframe_ms, key, local_path: localPath,
                 durable_provider: durable, packed_object_id: null, byte_offset: null, byte_length: size, sha256: sha,
@@ -163,6 +175,11 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
             throw err;
         }
         committed = true;
+        // A published durable row now resolves through the router. Remove the staged local copy only after commit;
+        // another row may share this content-addressed path, in which case it remains its cache until a sweep.
+        for (const p of dropLocal) {
+            if (!await timeline.isNamed({ localPath: p })) { try { fs.unlinkSync(p); } catch { /* sweep reports orphan */ } }
+        }
         // The master playlist reads these without touching bytes; a failure here leaves the timeline correct and only
         // the variant's RESOLUTION/CODECS absent, so it never fails the cut.
         if (meta) {

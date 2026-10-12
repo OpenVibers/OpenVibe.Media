@@ -131,6 +131,8 @@ async function run(job, ctx) {
     if (!provider) throw new JobError('media.provider.unavailable', 'No durable provider is configured and healthy for the chunks', { retryAfterS: 1800 });
     out.provider = provider;
     const vodStorage = require('../vod/vod-storage');
+    const cache = require('../objects/timeline-cache');
+    let localRemaining = Math.max(0, config.hls.localMaxBytes - cache.status().bytes);
     const dir = derive.workDir(job.id);
     try {
         for (const chunk of chunks) {
@@ -156,7 +158,9 @@ async function run(job, ctx) {
             const name = `p${timeline.segmentName(Number(chunk[0].seq))}`;
             const key = timeline.keyFor(src.id, rendition, name, sha.slice(0, 12));
             // This node keeps a copy of the chunk where it kept copies of the segments.
-            const keepLocal = chunk.some((r) => r.local_path && derive.existing(r.local_path));
+            const keepLocal = chunk.some((r) => r.local_path && derive.existing(r.local_path))
+                && localRemaining >= offset && cache.freeBytes() >= config.hls.localMinFreeBytes;
+            if (keepLocal) localRemaining -= offset;
             const localPath = keepLocal ? timeline.localPathFor(src, rendition, name, sha.slice(0, 12)) : null;
             let uploaded = false;
             let committed = false;
@@ -167,7 +171,7 @@ async function run(job, ctx) {
                 aborted(ctx);
                 // Durable means verified: the provider gives back exactly these bytes.
                 const back = await vodStorage.sha256Object(provider, key);
-                if (!back || back.sha256 !== sha) throw new JobError('pack_unverified', `${provider}:${key} does not read back as ${sha.slice(0, 12)}`, { retryAfterS: 600 });
+                if (!back || back.sha256 !== sha || Number(back.size) !== offset) throw new JobError('pack_unverified', `${provider}:${key} does not read back as ${sha.slice(0, 12)}`, { retryAfterS: 600 });
                 if (localPath) { fs.mkdirSync(path.dirname(localPath), { recursive: true }); fs.renameSync(tmp, localPath); }
                 aborted(ctx);
                 committed = await timeline.markPacked(src.id, placed.map((p) => ({

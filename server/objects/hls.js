@@ -80,7 +80,7 @@ async function throttleOnce(map, objectId, queue) {
 
 /** Queue object.cmaf for an object at most once per QUEUE_TTL_MS in this process. Never throws. */
 async function queueCmafOnce(appId, objectId) {
-    await throttleOnce(_queuedCmaf, objectId, () => require('./timeline-queue').queueCmaf(appId, objectId));
+    await throttleOnce(_queuedCmaf, objectId, () => require('./timeline-queue').queueCmaf(appId, objectId, { lazy: true }));
 }
 
 /**

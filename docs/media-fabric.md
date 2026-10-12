@@ -98,7 +98,7 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   (`server/jobs/cmaf.js`) stream-copies a ready vod/clip/video object (`ffmpeg -c copy -f hls -hls_segment_type fmp4`,
   `params.segment_seconds` 1–10, 4 by default, cut at the first source keyframe after it) into `init.mp4` +
   `000001.m4s`…, stores each under `OBJECTS_PATH/.timeline/<app>/<object>/source/<version>/` and, with B2 configured,
-  under the key `<object>/source/<version>/<name>` on B2 (`durable` once B2 confirms the size), then writes all rows of
+  under the key `<object>/source/<version>/<name>` on B2 (`durable` after a size and sha256 readback), then writes all rows of
   the rendition in one transaction and only then deletes the previous cut's bytes. It never touches the source object; a
   rerun reuses rows whose sha256 matches and their location as they are and uploads only what is not durable yet; it
   honours the abort signal (which stops an upload in flight) and, before the rows commit, removes the files and keys it
@@ -121,7 +121,7 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   before; runs of one segment and the init segment stay as they are; a segment not durable yet ends a run). Each
   segment's bytes are checked against its row's sha256 (this node's copy, else the durable one through the router); the
   chunk goes to the router's durable provider under `<object>/<rendition>/<chunk sha prefix>/p<first seq>.m4s` and is
-  verified there (sha256 read back), this node keeps a copy where it kept the segments, and the rows move to it in one
+  verified there (size and sha256 read back), this node may keep a cache copy where it kept the segments, and the rows move to it in one
   transaction: `key`/`local_path`/`durable_provider` name the chunk, `packed_object_id` is its sha256 (content address),
   `byte_offset`/`byte_length` the segment inside it; name, times and sha256 stay the segment's. Only after the commit are
   the per-segment files and keys **deleted**: the chunk holds the same verified bytes, keeping both would double the
@@ -168,6 +168,26 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   `-movflags +faststart` for an MP4 source; the container stays the source's) as a signed URL, or queues the remux
   (`dedupeActive`) and answers `202 { job_id }` while it is missing.
 - **F3.5, shipped: virtual clips over the timeline (§4).**
+- **Local timeline cache, shipped:** `OBJECTS_PATH/.timeline` is bounded by
+  `MEDIA_TIMELINE_LOCAL_MAX_BYTES` (10 GiB by default; 0 keeps no new local copies once durable) and
+  `MEDIA_TIMELINE_LOCAL_MIN_FREE_BYTES` (8 GiB by default). CMAF and packing stage their work as before; once the
+  durable upload passes size and sha256 readback, they keep no new local copy if the cache is full or free disk is
+  below the floor. The hourly object sweep evicts least recently served local files until both limits are satisfied.
+  Serving a local segment updates its file mtime, a portable recency signal that survives restarts without a database
+  write per request. The sweep verifies the durable bytes again, including older size-only timeline uploads, and clears
+  every row sharing that local path in its delete transaction. A file with an unverified or missing durable copy remains;
+  no timeline row is deleted. The route then uses its existing durable fallback, including packed byte ranges. The
+  storage orphan report still counts only row-named timeline files; an unlinked cache file and its cleared path are
+  absent from both sides. `timeline_cache` is optional on `/api/ready` and degrades above budget or below the free
+  floor; `/metrics` exposes `media_timeline_local_bytes` and `media_timeline_local_evictions`.
+
+  Lazy discovery of an older VOD without a timeline is capped at `MEDIA_HLS_BACKFILL_PER_HOUR` (20 per rolling hour,
+  with job history surviving a restart on a single Media host); a capped read simply has no `hls_url` and its MP4/file playback remains available. A recording's
+  own finalize bypasses the cap. List reads discover timelines in batches and do not queue missing ones.
+
+  **Turning HLS on in production:** set the cache budget and free-space floor for the host, set
+  `MEDIA_HLS_ENABLED=1`, keep `MEDIA_JOBS_HEAVY_CONCURRENCY=1`, and watch `timeline_cache`, local timeline bytes,
+  evictions, and `object.cmaf`/`object.pack` job durations during backfill.
 - **F3.6, shipped (behind `MEDIA_HLS_ENABLED` + `MEDIA_MATERIALIZED_CLIPS`, off by default): materialized clips over
   the source's bytes (§4, docs/materialized-clips.md).** A clip whose source has a timeline gets its own persisted
   `media_timeline` rows: the interior segments are the source's rows (same location, packed chunk range and sha256,

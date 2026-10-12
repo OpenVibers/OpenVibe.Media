@@ -266,6 +266,7 @@ const ready = (async () => {
         require('./vod/clip-jobs').start().catch((err) => console.warn('[Clips] re-cut job did not start:', err.message));   // failed clip re-cuts (auto-retry, hot-fetch)
         require('./objects/verify-job').start();                   // scheduled copy verification (bounded batches; never deletes)
         require('./jobs/worker').start().catch((err) => console.warn('[Jobs] worker did not start:', err.message));   // media_jobs worker (light + heavy lanes; proposals wait for their owner)
+        require('./objects/timeline-cache').sweep().catch((err) => console.warn('[Objects] timeline cache boot sweep:', err.message));
         require('./objects/owner-subject-job').start();            // owner_subject for objects that name only an app-local owner (asks Network)
         // Usage readings → Billing (plan T5 step 14): off by default (MEDIA_BILLING_INTERVAL_MS=0 starts nothing).
         // With an interval it aggregates each closed UTC day into one platform.usage-sample@1 gb-month reading and
@@ -288,6 +289,7 @@ const ready = (async () => {
             try { const n = await require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
             // A projected object (a deleted clip's/VOD's) whose durable timeline delete failed keeps its rows; retry them.
             try { const r = await require('./objects/timeline').sweepPendingRemovals(); if (r.objects) console.log(`[Objects] Timeline retry: ${r.removed} row(s) of ${r.objects} gone object(s) removed, ${r.pending} still pending`); } catch (err) { console.warn('[Objects] timeline retry:', err.message); }
+            try { const r = await require('./objects/timeline-cache').sweep(); if (r.removed) console.log(`[Objects] Timeline cache: evicted ${r.removed} local file(s)`); } catch (err) { console.warn('[Objects] timeline cache:', err.message); }
             // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
             try { const r = await require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
             // Native objects' popularity (ADR-021): a finished UTC day's viewer hashes and salt are deleted, only its counts stay (30 days).
