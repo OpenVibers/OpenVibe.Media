@@ -198,7 +198,9 @@ function abort(id) {
 async function start() {
     if (started || !cfg().enabled) return false;
     started = true;
-    const n = await queue.recoverInterrupted({ all: true });
+    // Every running row is from a dead process — except one this process is running right now (runNow on a request,
+    // or a job claimed before start()): failing it here would refuse its own result as stale (jobs.test.js flaked on it).
+    const n = await queue.recoverInterrupted({ all: true, except: new Set(running.keys()) });
     if (n) console.log(`[Jobs] ${n} job(s) interrupted by the restart were requeued or failed`);
     lastScheduleAt = Date.now();           // the first scheduled scan waits a few minutes after boot
     timer = setInterval(() => { tick().catch(() => {}); }, cfg().pollMs);
