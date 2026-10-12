@@ -54,12 +54,25 @@ const express = require('express');
             assert.deepStrictEqual([job.status, job.error_code, job.attempts], ['failed', 'media_unavailable', 1], `vod ${id}`);
             assert.ok(Date.now() - t0 < 5000, 'refused before any ffmpeg run');
         }
+        // An audio-only recording (a browser broadcast with no camera; VODs 5718 and 5721 on 2026-10-12): no_video, 404.
+        if (require('child_process').spawnSync('ffmpeg', ['-version']).status === 0) {
+            const audio = path.join(V, 'audio-only.webm');
+            const mk = require('child_process').spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:a', 'libopus', audio]);
+            assert.strictEqual(mk.status, 0, String(mk.stderr));
+            const id = Number((await db.run(`INSERT INTO vods (app_id, title, file_path, file_size, is_public, visibility, health_status)
+                VALUES ('live', 't', ?, ?, 1, 'public', 'ok') RETURNING id`, [audio, fs.statSync(audio).size])).lastInsertRowid);
+            const r = await post(`/api/v1/live/thumbnails/vod/${id}`);
+            assert.strictEqual(r.status, 404, JSON.stringify(r.body));
+            assert.strictEqual(r.body.code, 'media.no_video');
+            const job = await queue.get(r.body.job_id);
+            assert.deepStrictEqual([job.status, job.error_code, job.attempts], ['failed', 'no_video', 1]);
+        } else console.log('audio-only case skipped (ffmpeg not found)');
         assert.ok(/empty \(0 bytes\)/.test((await queue.list('live', { type: 'thumbnail.regenerate' })).jobs.find(j => JSON.parse(j.params).id === marked).error));
         assert.strictEqual((await db.all("SELECT COUNT(*) AS n FROM media_jobs WHERE error_code = 'generate_failed'"))[0].n, 0, 'none of them is a generate failure any more');
         server.close();
         await db.close();
         fs.rmSync(tmp, { recursive: true, force: true });
-        console.log('✅ thumbnail.regenerate on an empty or missing recording: media_unavailable at once, 404 from the v1 route');
+        console.log('✅ thumbnail.regenerate on an empty or missing recording: media_unavailable at once; on an audio-only one: no_video; 404 from the v1 route');
         process.exit(0);
     })().catch((err) => { console.error(err); server.close(); process.exit(1); });
 })().catch((err) => { console.error(err); process.exit(1); });

@@ -8,8 +8,9 @@
  *   params { kind: 'vod' | 'clip', id: <row id> }   (derived from the object's legacy ref when omitted)
  *   result { url, kind, id }
  * Failures: media_unavailable (no local file and no cloud copy, an empty file, or a recording the
- * health scan found zero-byte / missing; permanent, answered 404 by the v1 route), not_found
- * (permanent), generate_failed (ffmpeg produced no frame from real media; retried).
+ * health scan found zero-byte / missing; permanent, answered 404 by the v1 route), no_video (an
+ * audio-only recording: no frame exists; permanent, 404), not_found (permanent), generate_failed
+ * (ffmpeg produced no frame from real media; retried).
  */
 'use strict';
 
@@ -59,6 +60,9 @@ async function run(job) {
         let size = 0;
         try { size = require('fs').statSync(source.value).size; } catch { size = 0; }
         if (!size) throw new JobError('media_unavailable', 'The media file is empty (0 bytes)', { permanent: true, status: 404 });
+    }
+    if (await thumbService.hasVideoStream(source.value) === false) {
+        throw new JobError('no_video', 'The recording has no video (audio only), so there is no frame to take', { permanent: true, status: 404 });
     }
     const url = kind === 'vod'
         ? await thumbService.generateVodThumbnail(id, source.value)
