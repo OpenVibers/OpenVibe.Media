@@ -16,6 +16,7 @@
  *   media_presign_cache_total{result}                    counter
  *   media_storage_alerts_total{kind}                     counter
  *   media_sweep_demand_source_total{source}              counter (valkey | pg: the object sweep's demand signal)
+ *   media_cmaf_transcodes_total{stream}                  counter (video or audio streams encoded by object.cmaf)
  */
 'use strict';
 
@@ -30,6 +31,7 @@ let decisions = null;   // counter
 let presign = null;     // counter
 let alerts = null;      // counter
 let demandSource = null; // counter
+let cmafTranscodes = null; // counter
 
 function bind(registry) {
     if (latency) return;   // idempotent
@@ -77,6 +79,12 @@ function bind(registry) {
         labelNames: ['source'],
     });
     for (const source of ['valkey', 'pg']) demandSource.inc({ source }, 0);
+    cmafTranscodes = registry.counter({
+        name: 'media_cmaf_transcodes_total',
+        help: 'Streams transcoded by successful object.cmaf jobs',
+        labelNames: ['stream'],
+    });
+    for (const stream of ['video', 'audio']) cmafTranscodes.inc({ stream }, 0);
 
     // Bind every hook the placement modules use.
     router.bindMetric((name, labels) => inc(name, labels));
@@ -90,6 +98,7 @@ function inc(name, labels) {
     else if (name === 'media_storage_alerts_total') alerts && alerts.inc(labels || {}, 1);
     else if (name === 'media_provider_errors_total') errors && errors.inc(labels || {}, 1);
     else if (name === 'media_sweep_demand_source_total') demandSource && demandSource.inc(labels || {}, 1);
+    else if (name === 'media_cmaf_transcodes_total') cmafTranscodes && cmafTranscodes.inc(labels || {}, 1);
 }
 
 /** Hook the signals module's recordSuccess/recordFailure to fill the histogram/counter. */
@@ -97,4 +106,4 @@ function observeLatency(provider, op, ms) { if (latency && ms > 0) latency.obser
 function observeError(provider, op) { errors && errors.inc({ provider, op }, 1); }
 function alert(kind) { alerts && alerts.inc({ kind }, 1); }
 
-module.exports = { bind, inc, observeLatency, observeError, alert, _reset: () => { latency = errors = breakerGauge = decisions = presign = alerts = demandSource = null; } };
+module.exports = { bind, inc, observeLatency, observeError, alert, _reset: () => { latency = errors = breakerGauge = decisions = presign = alerts = demandSource = cmafTranscodes = null; } };

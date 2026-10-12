@@ -95,14 +95,21 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   `sha256`, `durability` `local|durable`), keyed by (object, rendition, seq) for "segments in order" with an index on
   (object, rendition, start_ms) for "the segment at t". `server/objects/timeline.js` is the store (`segmentAt(objectId,
   rendition, tMs)`, `segments`, `replace`, `removeObject`, the playlist writers). The heavy-lane job **`object.cmaf`**
-  (`server/jobs/cmaf.js`) stream-copies a ready vod/clip/video object (`ffmpeg -c copy -f hls -hls_segment_type fmp4`,
-  `params.segment_seconds` 1–10, 4 by default, cut at the first source keyframe after it) into `init.mp4` +
+  (`server/jobs/cmaf.js`) stream-copies a ready vod/clip/video object by default (`ffmpeg -c copy -f hls -hls_segment_type fmp4`,
+  `params.segment_seconds` 1–10, 4 by default, cut at the first source keyframe after it). With
+  `MEDIA_CMAF_TRANSCODE=1`, it probes the source and copies H.264 video and AAC/MP3 audio, encoding other video as
+  H.264 and other audio as AAC. Encoded video keeps its dimensions and frame timing and forces keyframes on the segment
+  grid; sources needing an encode above `MEDIA_CMAF_TRANSCODE_MAX_SECONDS` (14400 by default) fail permanently. An
+  encode uses `MEDIA_CMAF_TRANSCODE_THREADS` libx264 threads (2) at nice 15, because the heavy lane waits for recordings
+  only before it starts a job and an encode can outlast that. The
+  output is `init.mp4` +
   `000001.m4s`…, stores each under `OBJECTS_PATH/.timeline/<app>/<object>/source/<version>/` and, with B2 configured,
   under the key `<object>/source/<version>/<name>` on B2 (`durable` after a size and sha256 readback), then writes all rows of
   the rendition in one transaction and only then deletes the previous cut's bytes. It never touches the source object; a
   rerun reuses rows whose sha256 matches and their location as they are and uploads only what is not durable yet; it
   honours the abort signal (which stops an upload in flight) and, before the rows commit, removes the files and keys it
-  staged; the stream-copy budget is honoured and its work directory removed.
+  staged; the stream-copy or duration-based transcode budget is honoured and its work directory removed. The master
+  playlist reads CODECS from the written init segment, so an encoded source advertises its output codecs.
   Behind **`MEDIA_HLS_ENABLED`** (off by default: the job is refused with `409 media.hls.disabled` and the routes 404),
   `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8` and `/o/:id/source/{init.mp4,NNNNNN.m4s}` serve the timeline
   under the same check as `GET /o/:id` (private and sandbox objects only with the object's `?exp&sig`, carried onto
@@ -167,6 +174,9 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   answers the object's `remux` variant (`object.remux`,
   `-movflags +faststart` for an MP4 source; the container stays the source's) as a signed URL, or queues the remux
   (`dedupeActive`) and answers `202 { job_id }` while it is missing.
+  With transcoding enabled, new jobs use a `:transcode` idempotency suffix. Lazy discovery retries an earlier
+  copy-only `codec_unsupported` failure once under that key. A failed transcode job is not queued again; the hourly
+  lazy backfill cap still applies.
 - **F3.5, shipped: virtual clips over the timeline (§4).**
 - **Local timeline cache, shipped:** `OBJECTS_PATH/.timeline` is bounded by
   `MEDIA_TIMELINE_LOCAL_MAX_BYTES` (10 GiB by default; 0 keeps no new local copies once durable) and
@@ -186,8 +196,10 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   own finalize bypasses the cap. List reads discover timelines in batches and do not queue missing ones.
 
   **Turning HLS on in production:** set the cache budget and free-space floor for the host, set
-  `MEDIA_HLS_ENABLED=1`, keep `MEDIA_JOBS_HEAVY_CONCURRENCY=1`, and watch `timeline_cache`, local timeline bytes,
-  evictions, and `object.cmaf`/`object.pack` job durations during backfill.
+  `MEDIA_HLS_ENABLED=1`, and set `MEDIA_CMAF_TRANSCODE=1` to make WebM/other incompatible sources playable as H.264/AAC.
+  Encoding costs substantially more CPU than copying; keep `MEDIA_JOBS_HEAVY_CONCURRENCY=1`, choose a suitable
+  `MEDIA_CMAF_TRANSCODE_MAX_SECONDS` (default 14400, four hours), and watch `timeline_cache`, local timeline bytes,
+  evictions, `media_cmaf_transcodes_total`, and `object.cmaf`/`object.pack` job durations during backfill.
 - **F3.6, shipped (behind `MEDIA_HLS_ENABLED` + `MEDIA_MATERIALIZED_CLIPS`, off by default): materialized clips over
   the source's bytes (§4, docs/materialized-clips.md).** A clip whose source has a timeline gets its own persisted
   `media_timeline` rows: the interior segments are the source's rows (same location, packed chunk range and sha256,

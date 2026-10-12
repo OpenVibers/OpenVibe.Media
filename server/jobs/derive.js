@@ -109,10 +109,13 @@ function sha256File(p) {
 }
 
 /** ffmpeg with a deadline and the job's abort signal. Resolves { ok, code, stderr }. */
-function ffmpeg(args, { signal, timeoutMs }) {
+/** `niceness` (0-19) lowers the process's CPU priority, for a re-encode that may still be running when a stream starts:
+ *  the heavy lane only waits for recordings before it starts a job. */
+function ffmpeg(args, { signal, timeoutMs, niceness = 0 }) {
     return new Promise((resolve) => {
         let proc;
         try { proc = spawn('ffmpeg', args, { stdio: ['ignore', 'ignore', 'pipe'] }); } catch (err) { return resolve({ ok: false, code: -1, stderr: err.message }); }
+        if (niceness > 0 && proc.pid) { try { require('os').setPriority(proc.pid, niceness); } catch { /* best effort */ } }
         let stderr = '';
         let done = false;
         const finish = (r) => { if (done) return; done = true; clearTimeout(t); if (signal) signal.removeEventListener('abort', onAbort); resolve(r); };
@@ -128,6 +131,41 @@ function ffmpeg(args, { signal, timeoutMs }) {
 
 function inputArgs(src) {
     return src.remote ? ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '10'] : [];
+}
+
+/** The first streams and measured duration of the exact input ffmpeg will read. */
+function probeStreams(source, { signal, timeoutMs = 60000 } = {}) {
+    return new Promise((resolve, reject) => {
+        const args = ['-v', 'error', ...inputArgs(source), '-show_entries', 'format=duration:stream=codec_type,codec_name,duration', '-of', 'json', source.input];
+        let proc;
+        try { proc = spawn('ffprobe', args, { stdio: ['ignore', 'pipe', 'pipe'] }); } catch (err) { return reject(err); }
+        let stdout = '';
+        let stderr = '';
+        let done = false;
+        const kill = () => { try { proc.kill('SIGKILL'); } catch { /* gone */ } };
+        const timer = setTimeout(kill, timeoutMs);
+        const finish = (err, value) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            if (signal) signal.removeEventListener('abort', kill);
+            if (err) reject(err); else resolve(value);
+        };
+        if (signal) { if (signal.aborted) kill(); else signal.addEventListener('abort', kill, { once: true }); }
+        proc.stdout.on('data', (d) => { stdout = (stdout + d).slice(-200000); });
+        proc.stderr.on('data', (d) => { stderr = (stderr + d).slice(-4000); });
+        proc.on('error', (err) => finish(err));
+        proc.on('close', (code) => {
+            if (code !== 0) return finish(new Error(`ffprobe exited ${code}: ${stderr.trim()}`));
+            try {
+                const info = JSON.parse(stdout);
+                const streams = info.streams || [];
+                const duration = Number(info.format && info.format.duration) || Math.max(0, ...streams.map((s) => Number(s.duration) || 0));
+                finish(null, { video: streams.find((s) => s.codec_type === 'video') || null,
+                    audio: streams.find((s) => s.codec_type === 'audio') || null, duration });
+            } catch (err) { finish(err); }
+        });
+    });
 }
 
 /** Budget for one stream copy of `bytes`: ~45 s per GB, at least 3 min, at most 2 h. */
@@ -317,5 +355,5 @@ module.exports = {
     // for the preview jobs (previews.js)
     loadSource, adopt, ffmpeg, inputArgs, probeDuration, workDir, cleanupWork, existing, checkRoom,
     // and object.cmaf (cmaf.js)
-    budgetMs, sha256File,
+    budgetMs, probeStreams, sha256File,
 };
