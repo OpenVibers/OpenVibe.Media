@@ -914,6 +914,7 @@ async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
     for (const loc of decision.candidates || []) {
         if (loc.provider === 'local') {
             if (!fs.existsSync(loc.key)) continue;
+            require('./timeline-cache').served(loc.key);
             if (packed) return sendSlice(req, res, { file: loc.key, ...slice });
             return require('../public/routes').streamFileWithRange(req, res, loc.key, headers);
         }
@@ -1066,4 +1067,5 @@ module.exports.contentHandlers = [contentAuth, tenantCors, limits('media.object.
 // minute is 50 MB/s) and its session already bounds them; this stops only a runaway loop.
 module.exports.partHandlers = [mpWrite, tenantCors, limits('media.object.part', { minute: 600, hour: 20000 }), putPart];
 module.exports.publicRouter = publicRouter;
+module.exports.sendSegmentRow = sendSegmentRow; // socket-free verification of durable ranged fallback
 module.exports.INLINE = INLINE;

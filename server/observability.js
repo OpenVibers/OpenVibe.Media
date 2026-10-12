@@ -56,6 +56,9 @@ function storageDirs(config) {
 
 function domainMetrics(registry, { db, recorder, events }) {
     registry.gauge({ name: 'media_recordings_in_progress', help: 'Recordings ffmpeg is writing right now', collect: () => recorder.activeCount() });
+    const timelineCache = require('./objects/timeline-cache');
+    registry.gauge({ name: 'media_timeline_local_bytes', help: 'Bytes used by local timeline files, including orphan files', collect: () => timelineCache.status().bytes });
+    registry.gauge({ name: 'media_timeline_local_evictions', help: 'Local timeline files evicted since process start', collect: () => timelineCache.evictions() });
     // target vod: media_tier_decisions (VODs); object: media_object_tier_decisions (native v2 objects), whose
     // outcome dry_run is what the object sweep would have done while its activation gate is off.
     registry.gauge({
@@ -136,6 +139,12 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
         for (const [name, dir] of Object.entries(storageDirs(config))) {
             checks.push({ name: `storage_${name}`, required: true, check: () => writable(dir) });
         }
+        checks.push({ name: 'timeline_cache', required: false, check: () => {
+            if (!config.hls.enabled) return { skipped: 'MEDIA_HLS_ENABLED off: no timeline is cut, nothing is cached' };
+            const s = require('./objects/timeline-cache').status();
+            const ok = s.bytes <= s.max_bytes && s.free_bytes >= s.min_free_bytes;
+            return { ok, ...(ok ? {} : { error: 'Timeline cache over budget or disk below free-space floor' }), detail: s };
+        } });
     }
     checks.push({ name: 'network_jwks', required: false, description: 'user sign-in and service tokens (app keys work without it)', check: () => auth.jwksLoaded() || 'Network public key not loaded yet' });
     for (const name of require('./vod/vod-storage').REMOTE_PROVIDERS) {

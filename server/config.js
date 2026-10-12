@@ -93,6 +93,9 @@ const config = {
     // media_timeline (/o/:id/master.m3u8, /o/:id/source/…). Off by default: off, the job is refused and the routes 404.
     hls: {
         enabled: ['1', 'true', 'on'].includes(String(process.env.MEDIA_HLS_ENABLED || '').toLowerCase()),
+        localMaxBytes: Math.max(0, intEnv('MEDIA_TIMELINE_LOCAL_MAX_BYTES', 10 * 1024 ** 3)),
+        localMinFreeBytes: Math.max(0, intEnv('MEDIA_TIMELINE_LOCAL_MIN_FREE_BYTES', 8 * 1024 ** 3)),
+        backfillPerHour: Math.max(0, intEnv('MEDIA_HLS_BACKFILL_PER_HOUR', 20)),
         // Lifetime of a signed playlist (purpose 'hls', accepted only by the HLS routes): 60 s to 12 h, 6 h by default.
         playlistTtlS: Math.min(43200, Math.max(60, intEnv('MEDIA_HLS_PLAYLIST_TTL_S', 21600))),
         // On-demand renditions (docs/media-fabric.md §5/F4): the rendition.create job and the extra master-playlist

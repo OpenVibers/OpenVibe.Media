@@ -446,6 +446,20 @@ that reaches port 4100 directly cannot choose its IP by sending `X-Forwarded-For
 `CF-Connecting-IP` itself. View counting and the live-frame rate limit read `req.ip`,
 never the headers (`test/trust-proxy.test.js`).
 
+## Segment-native video settings
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `MEDIA_HLS_ENABLED` | `0` | Enable timeline generation and HLS routes. |
+| `MEDIA_TIMELINE_LOCAL_MAX_BYTES` | `10737418240` | Maximum local timeline cache (10 GiB; `0` keeps no durable copies locally). |
+| `MEDIA_TIMELINE_LOCAL_MIN_FREE_BYTES` | `8589934592` | Below this free disk level, new verified timeline bytes remain durable only. |
+| `MEDIA_HLS_BACKFILL_PER_HOUR` | `20` | Maximum lazy `object.cmaf` queues for older VODs per rolling hour on a single Media host; finalize is exempt. |
+| `MEDIA_JOBS_HEAVY_CONCURRENCY` | `1` | Keep at 1 while enabling HLS in production. |
+
+The hourly sweep evicts the least recently served verified local timeline files. A segment whose local copy was
+evicted is served from its durable provider. Watch `timeline_cache` on `/api/ready` and job durations during backfill
+(docs/media-fabric.md §3).
+
 ## Per-actor limits
 
 nginx limits by address; the capability routes also limit by who calls (`server/actor-limits.js`,
@@ -506,8 +520,8 @@ aggregated and stay queued. The runbook is `docs/cutover-media-billing-readings.
 | path | behavior |
 |---|---|
 | `GET /healthz` | liveness: the process answers (unchanged; it checks nothing else) |
-| `GET /api/ready` | readiness from real checks, each with `status`, `required`, `latency_ms`, `checked_at`. **Required** (503 when one fails): `db` (a real round trip that names the store, postgresql or pglite, and counts the tenants), `valkey` optional (skipped without `VALKEY_URL`), `storage_vods`, `storage_clips`, `storage_pastes`, `storage_thumbnails`, `storage_files`, `storage_objects` (a probe file is written and removed). **Optional** (listed in `degraded`, still 200): `network_jwks` (user JWTs and service tokens; app keys work without it), `remote_b2` / `remote_r2` (HeadBucket, at most once a minute; present only when the provider is configured), `events_outbox` (backlog over 1000 events). Also `recordings_in_progress`. |
-| `GET /metrics` | Prometheus text (openvibe-shared/metrics) for **direct loopback callers only**; 404 through nginx. HTTP golden signals by route template, process metrics, `release_info`, `release_client_updates_total{outcome,reason}`, plus `media_recordings_in_progress`, `media_object_locations{provider,state}`, `media_objects{lifecycle_status}`, `media_events_outbox{status}` (only while the outbox runs), `media_job_stale_completions_total{action}` (job writes refused by the lease-token fence). |
+| `GET /api/ready` | readiness from real checks, each with `status`, `required`, `latency_ms`, `checked_at`. **Required** (503 when one fails): `db` (a real round trip that names the store, postgresql or pglite, and counts the tenants), `valkey` optional (skipped without `VALKEY_URL`), `storage_vods`, `storage_clips`, `storage_pastes`, `storage_thumbnails`, `storage_files`, `storage_objects` (a probe file is written and removed). **Optional** (listed in `degraded`, still 200): `network_jwks`, `remote_b2` / `remote_r2`, `events_outbox`, and `timeline_cache` (bytes vs budget; free disk vs floor). Also `recordings_in_progress`. |
+| `GET /metrics` | Prometheus text (openvibe-shared/metrics) for **direct loopback callers only**; 404 through nginx. HTTP golden signals by route template, process metrics, `release_info`, `release_client_updates_total{outcome,reason}`, plus `media_recordings_in_progress`, `media_timeline_local_bytes`, `media_timeline_local_evictions`, `media_object_locations{provider,state}`, `media_objects{lifecycle_status}`, `media_events_outbox{status}` (only while the outbox runs), `media_job_stale_completions_total{action}` (job writes refused by the lease-token fence). |
 | `GET /release.json` | release manifest (`registry.release-manifest@1` 1.1.0, openvibe-shared/release, ADR-016): deployed commit, package versions, components, contract ranges, `metrics_url`. The shared navbar's release-watch polls it. No components are declared, so every release still prompts open tabs to reload. |
 | `POST /release-metrics` | open tabs' update reports (release-watch beacons, at most 4 KB; 30 a minute per connecting address, which behind nginx is the proxy, so one budget for all tabs; Sec-GPC/DNT dropped) into `release_client_updates_total` on `/metrics`. 403 in a restore drill, like every write. |
 

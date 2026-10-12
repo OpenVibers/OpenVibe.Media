@@ -267,7 +267,8 @@ const http = require('http');
         assert.strictEqual(r.status, 202);
         assert.ok(await waitFor(() => false, 50) || true);
         await worker.start();
-        assert.ok(await waitFor(async () => (await queue.get(r.body.job.id)).status === 'succeeded'), '?async=1 queues it for the worker');
+        // ffprobe then ffmpeg (the audio-only check, Media#93) under a parallel suite: give the real job 15 s.
+        assert.ok(await waitFor(async () => (await queue.get(r.body.job.id)).status === 'succeeded', 15000), '?async=1 queues it for the worker');
         r = await call('POST', '/api/v2/live/jobs', { body: { type: 'thumbnail.regenerate', object_id: `legacy:live:vod:1` } });
         assert.deepStrictEqual([r.status, r.body.job.params], [202, { kind: 'vod', id: 1 }], 'the v2 API takes the object and finds the row');
         assert.ok(await waitFor(async () => (await queue.get(r.body.job.id)).status === 'succeeded'));

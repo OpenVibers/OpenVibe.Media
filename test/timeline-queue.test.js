@@ -185,7 +185,7 @@ const express = require('express');
         await call('GET', `/api/v2/live/objects/${old}/download?format=json`);
         cmaf = await jobs('object.cmaf', old);
         assert.strictEqual(cmaf.length, 1, 'queued once on demand');
-        assert.strictEqual(cmaf[0].created_by, 'system:timeline');
+        assert.strictEqual(cmaf[0].created_by, 'system:timeline-backfill');
         assert.strictEqual((await jobs('object.cmaf', pdf)).length, 0);
         await call('GET', `/api/v2/live/objects/${pdf}/download?format=json`);
         assert.strictEqual((await jobs('object.cmaf', pdf)).length, 0, 'a non-media download queues nothing');

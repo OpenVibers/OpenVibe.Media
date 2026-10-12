@@ -63,13 +63,13 @@ const { spawn } = require('child_process');
         assert.strictEqual(body.service, 'media');
         assert.strictEqual(body.recordings_in_progress, 1);
         const names = Object.keys(body.checks).sort();
-        assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'object_copies', 'remote_b2', 'remote_r2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods', 'valkey']);
+        assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'object_copies', 'remote_b2', 'remote_r2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods', 'timeline_cache', 'valkey']);
         // r2 is not configured: listed as skipped with the reason, never a pretend pass (WS-Q task 7), and an optional
         // skip leaves the verified service ready.
         assert.deepStrictEqual([body.checks.remote_r2.status, body.checks.remote_r2.reason], ['skipped', 'not configured']);
-        assert.deepStrictEqual(body.skipped.sort(), ['remote_r2', 'valkey'], 'Valkey too: no VALKEY_URL in this test');
+        assert.deepStrictEqual(body.skipped.sort(), ['remote_r2', 'timeline_cache', 'valkey'], 'Valkey too (no VALKEY_URL in this test), and the timeline cache while HLS is off');
         for (const [n, c] of Object.entries(body.checks)) {
-            if (n === 'remote_r2' || n === 'valkey') continue;
+            if (n === 'remote_r2' || n === 'valkey' || n === 'timeline_cache') continue;
             assert.strictEqual(c.status, 'ok', n);
             assert.strictEqual(typeof c.latency_ms, 'number');
             assert.ok(Date.parse(c.checked_at));

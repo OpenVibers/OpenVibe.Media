@@ -26,6 +26,8 @@
 
 const crypto = require('crypto');
 const config = require('../config');
+const lazyQueuedAt = [];
+let pendingLazy = 0;
 
 /**
  * The identity of the source cut a rendition is made against: the first 16 hex of sha256 over the source rows' (seq,
@@ -37,19 +39,34 @@ function sourceVersion(rows) {
     return h.digest('hex').slice(0, 16);
 }
 
-async function queueCmaf(appId, objectId, { segment_seconds = null } = {}) {
+async function queueCmaf(appId, objectId, { segment_seconds = null, lazy = false, now = Date.now() } = {}) {
     if (!config.hls.enabled || !appId || !objectId) return null;
     const obj = await require('./model').getObject(objectId);
     if (!obj || obj.lifecycle_status !== 'ready' || !require('../jobs/derive').isMediaObject(obj)) return null;
     if (await require('./timeline').has(obj.id)) return null;
+    // Count persisted jobs (including those from before a restart) and successful queues in this process. Reserve
+    // synchronously after the count so concurrent reads cannot overshoot it while their enqueues are in flight.
+    let recent = 0;
+    if (lazy) {
+        while (lazyQueuedAt.length && lazyQueuedAt[0] <= now - 3600000) lazyQueuedAt.shift();
+        const row = await require('../db/database').get("SELECT COUNT(*) AS n FROM media_jobs WHERE created_by = 'system:timeline-backfill' AND created_at >= ov_now_iso('-1 hour')");
+        recent = Number(row.n);
+    }
     const queue = require('../jobs/queue');
     const params = require('../jobs/cmaf').spec.validate({ appId, obj, params: segment_seconds != null ? { segment_seconds } : {} });
-    const r = await queue.enqueue({
-        appId, type: 'object.cmaf', objectId: obj.id, params,
-        dedupeActive: true, idempotencyKey: `object.cmaf:${obj.id}`, createdBy: 'system:timeline',
-    });
-    if (r.created) require('../jobs/worker').kick();
-    return r.job ? r.job.id : null;
+    if (lazy) {
+        if (Math.max(recent, lazyQueuedAt.length) + pendingLazy >= config.hls.backfillPerHour) return null;
+        pendingLazy++;
+    }
+    try {
+        const r = await queue.enqueue({
+            appId, type: 'object.cmaf', objectId: obj.id, params,
+            dedupeActive: true, idempotencyKey: `object.cmaf:${obj.id}`, createdBy: lazy ? 'system:timeline-backfill' : 'system:timeline',
+        });
+        if (r.created && lazy) lazyQueuedAt.push(now);
+        if (r.created) require('../jobs/worker').kick();
+        return r.job ? r.job.id : null;
+    } finally { if (lazy) pendingLazy--; }
 }
 
 async function queuePack(appId, objectId, { rendition = null } = {}) {
