@@ -6,6 +6,11 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 (async () => {
+    // Like media-timeline.test.js: the encode needs ffmpeg/ffprobe (with libx264, libvpx, libopus), which CI may not have.
+    if (spawnSync('ffmpeg', ['-version']).status !== 0 || spawnSync('ffprobe', ['-version']).status !== 0) {
+        console.log('cmaf transcode: skipped (ffmpeg not found)');
+        return;
+    }
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-cmaf-transcode-'));
     const dir = (name) => { const p = path.join(tmp, name); fs.mkdirSync(p, { recursive: true }); return p; };
     Object.assign(process.env, {
