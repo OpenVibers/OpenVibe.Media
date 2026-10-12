@@ -85,6 +85,25 @@ function _probeLastPts(videoPath) {
 }
 
 /**
+ * Whether a file (or presigned URL) has a video stream: true, false, or null when ffprobe could not tell.
+ * An audio-only recording (a browser broadcast with no camera) has no frame to take; asking ffmpeg for one
+ * fails every time, so the job refuses it as permanent instead (two such VODs answered 500 on 2026-10-12).
+ */
+function hasVideoStream(videoPath) {
+    return new Promise((resolve) => {
+        let out = '';
+        let p;
+        try {
+            p = spawn('ffprobe', ['-v', 'error', '-select_streams', 'v', '-show_entries', 'stream=index', '-of', 'csv=p=0', videoPath]);
+        } catch { return resolve(null); }
+        const to = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* */ } resolve(null); }, 15000);
+        p.stdout.on('data', (d) => { out += d; });
+        p.on('close', (code) => { clearTimeout(to); resolve(code === 0 ? String(out).trim() !== '' : null); });
+        p.on('error', () => { clearTimeout(to); resolve(null); });
+    });
+}
+
+/**
  * Extract a thumbnail frame from a video file using ffmpeg.
  * @param {string} videoPath  – Absolute path (or presigned URL) of the video
  * @param {string} prefix     – Filename prefix ('vod' or 'clip')
@@ -371,6 +390,7 @@ function extractFrameToFile(source, seekSeconds, outAbsPath) {
 
 module.exports = {
     generateFromVideo,
+    hasVideoStream,
     generateVodThumbnail,
     generateClipThumbnail,
     saveLiveThumbnail,

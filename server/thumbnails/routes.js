@@ -100,6 +100,7 @@ router.post('/:kind/:id', tenantAuth({ verb: 'write', allowUser: true }), upload
         if (!done || done.status === 'queued' || done.status === 'running') return res.status(202).json({ job: queue.jobPublic(done || r.job) });
         if (done.status === 'succeeded') return res.json({ url: queue.parseJson(done.result, {}).url, job_id: done.id });
         if (done.error_code === 'media_unavailable') return res.status(404).json({ error: 'Media file unavailable', job_id: done.id });
+        if (done.error_code === 'no_video') return res.status(404).json({ error: 'The recording has no video', code: 'media.no_video', job_id: done.id });
         res.status(500).json({ error: 'Failed to generate thumbnail', job_id: done.id });
     } catch (err) {
         if (err && err.code === 'media.job.too_many') {
