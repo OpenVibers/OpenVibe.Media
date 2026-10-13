@@ -35,7 +35,10 @@ const events = require('../events');
 const STATUSES = ['proposed', 'queued', 'running', 'succeeded', 'failed', 'cancelled'];
 const FINISHED = ['succeeded', 'failed', 'cancelled'];
 const ACTIVE = ['queued', 'running'];
-const MAX_ACTIVE_PER_TENANT = 50;   // queued + running jobs one tenant may have (proposals excluded)
+// Queued + running jobs one tenant may have IN ONE LANE (proposals excluded). Per lane: the heavy lane waits while a
+// recording runs (worker.js), and on 2026-10-13 a day of back-to-back streams left 50 paused transcodes holding a single
+// tenant-wide cap, so every thumbnail and content hash of the new recordings was refused (429) for hours.
+const MAX_ACTIVE_PER_TENANT = 50;
 // Service-wide maintenance jobs (storage.orphans.scan) belong to no tenant: they run under this app id,
 // which has no apps row, so no API credential reaches them, and they announce no events.
 const SYSTEM_APP = '_media';
@@ -74,6 +77,11 @@ function register(type, spec) {
 function typeSpec(type) {
     loadBuiltins();
     return TYPES.get(type) || null;
+}
+/** The job types that run in `lane` (the per-tenant cap counts one lane). */
+function typesInLane(lane) {
+    loadBuiltins();
+    return [...TYPES.values()].filter((s) => s.lane === lane).map((s) => s.type);
 }
 function typeNames() {
     loadBuiltins();
@@ -266,9 +274,11 @@ async function enqueue({ appId, type, objectId = null, params = {}, status = 'qu
             if (same) { out = { job: same, created: false, replayed: false, deduped: true }; return; }
         }
         if (status === 'queued') {
-            const active = (await db.get("SELECT COUNT(*) AS n FROM media_jobs WHERE app_id = ? AND status IN ('queued', 'running')", [appId])).n;
+            const lane = typesInLane(spec.lane);
+            const active = (await db.get(`SELECT COUNT(*) AS n FROM media_jobs WHERE app_id = ? AND status IN ('queued', 'running')
+                                          AND job_type IN (${lane.map(() => '?').join(', ')})`, [appId, ...lane])).n;
             if (active >= MAX_ACTIVE_PER_TENANT) {
-                throw new JobError('media.job.too_many', `At most ${MAX_ACTIVE_PER_TENANT} jobs may be queued or running per tenant`, { status: 429, retryAfterS: 60 });
+                throw new JobError('media.job.too_many', `At most ${MAX_ACTIVE_PER_TENANT} ${spec.lane} jobs may be queued or running per tenant`, { status: 429, retryAfterS: 60 });
             }
         }
         await db.run(`INSERT INTO media_jobs (id, app_id, object_id, job_type, status, idempotency_key, request_hash, params, max_attempts,
@@ -488,7 +498,7 @@ async function prune({ days = 30, types = ['thumbnail.regenerate', 'object.hash'
 
 module.exports = {
     STATUSES, FINISHED, ACTIVE, MAX_ACTIVE_PER_TENANT, SYSTEM_APP, JobError, bus,
-    register, typeSpec, typeNames, requestHash, parseJson,
+    register, typeSpec, typeNames, typesInLane, requestHash, parseJson,
     get, getForApp, jobPublic, jobEvent, list, counts,
     enqueue, approve, cancel,
     claim, renew, saveCheckpoint, succeed, fail, markCancelled, recoverInterrupted, waitFor, prune, staleStats,
