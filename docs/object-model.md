@@ -671,7 +671,8 @@ that needs them GETs the job with its own tenant-scoped token (`GET /api/v2/:app
 **Idempotency.** `Idempotency-Key` (or `idempotency_key`) is unique per tenant: the same key with the
 same request (type, object, params) answers with the job it made (`Idempotent-Replayed: true`); a
 different request under a used key is 409 `media.job.idempotency_conflict`. At most 50 jobs per tenant
-may be queued or running (429 `media.job.too_many`).
+may be queued or running **in each lane** (429 `media.job.too_many`): the heavy lane waits while a recording runs,
+so a backlog of transcodes never stops a thumbnail, a content hash or a clip.
 
 **Cancellation, by the owner.** A proposed or queued job is cancelled at once. A running job gets
 `cancel_requested`; the worker aborts it (its ffmpeg is killed) and it ends `cancelled`. Finished
