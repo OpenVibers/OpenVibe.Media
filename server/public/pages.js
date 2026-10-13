@@ -173,16 +173,25 @@ function renderWatchPage(kind, record, readiness = null) {
   .player .state-detail { margin: 0; color: var(--muted); }
   .h2 { font-size: 1rem; margin: 1.2rem 0 .3rem; color: var(--text); }`;
 
+    // Structured data and the AI summary describe public items only; unlisted and private pages carry none.
+    const described = playable && (record.visibility || (record.is_public ? 'public' : 'private')) === 'public';
     return pageFrame.page({
         seo: {
             title: `${title} — ${SITE_NAME}`, description, canonical, robots,
             image: thumb || undefined, ogType: playable ? 'video.other' : 'website',
             // No playable bytes: no video URL for previews and no VideoObject that names them.
             video: playable ? { url: rawUrl, type: mime } : undefined,
-            // Structured data describes public items only; unlisted and private pages carry none.
-            jsonLd: playable && (record.visibility || (record.is_public ? 'public' : 'private')) === 'public' ? [videoObject] : [],
+            jsonLd: described ? [videoObject] : [],
         },
         css, body,
+        summary: described ? {
+            summary: description, url: canonical,
+            facts: [
+                ['Duration', record.duration_seconds ? fmtDuration(record.duration_seconds) : null],
+                ['Views', record.view_count != null ? Number(record.view_count).toLocaleString('en-US') : null],
+            ].filter(([, v]) => v != null),
+            updated: uploadDate || undefined,
+        } : undefined,
         history: { type: isVod ? 'vod' : 'clip', title },
         footer: { variant: 'compact' },
     });

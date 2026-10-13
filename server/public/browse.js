@@ -4,7 +4,8 @@
  * Server-rendered browse UI at GET / — a mass index of every public piece of
  * media this service owns, tabbed by kind (Videos / Clips / Thumbnails / Files).
  * Each card carries its description / AI overview and a link to its source page
- * in the owning app. Dependency-free: inline CSS, no client JS required.
+ * in the owning app. Composed by page-frame (the shared shell) with the showcase hero on
+ * the first page; no client JS required.
  */
 'use strict';
 
@@ -17,9 +18,11 @@ const PAGE_SIZE = 48;
 const THUMB_DIR = path.resolve(config.thumbnails.path);
 
 // Public base URL per app for "source" links — shared with the watch pages.
-const { appUrl, DEFAULT_THEME_CSS } = require('./page-frame');
+const pageFrame = require('./page-frame');
+const { appUrl, isoDate } = pageFrame;
 const cache = require('openvibe-shared/cache-policy');
 const frame = require('openvibe-shared/frame');
+const showcase = require('openvibe-shared/showcase');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`));
@@ -190,14 +193,14 @@ async function tabCounts() {
 const KIND_ICON = { video: '🎬', clip: '✂️', thumbnail: '🏞️', file: '📦' };
 
 /** JSON-LD for the index's first page: the site, and the cards it lists (ItemList). Later pages are noindex. */
-function browseJsonLd(config, tab, cards) {
+function browseJsonLd(tab, cards) {
     const seo = require('openvibe-shared/seo');
     const abs = (u) => { try { return new URL(u, `${config.publicUrl}/`).toString(); } catch { return null; } };
     const items = cards.map((c) => ({ name: c.title || 'Untitled', url: abs(c.view) })).filter((it) => it.url);
     return [
-        tab === 'all' ? seo.jsonLdTag(seo.jsonLd.website({ name: 'OpenVibe.Media', url: `${config.publicUrl}/`, description: 'Every public file on the OpenVibe network: videos, clips, files and thumbnails.' })) : '',
-        items.length ? seo.jsonLdTag(seo.jsonLd.itemList(tab === 'all' ? 'Latest public media' : `Latest public ${tab}`, items, { url: `${config.publicUrl}/${tab === 'all' ? '' : `?tab=${tab}`}` })) : '',
-    ].filter(Boolean).join('\n');
+        tab === 'all' ? seo.jsonLd.website({ name: 'OpenVibe.Media', url: `${config.publicUrl}/`, description: 'Every public file on the OpenVibe network: videos, clips, files and thumbnails.' }) : null,
+        items.length ? seo.jsonLd.itemList(tab === 'all' ? 'Latest public media' : `Latest public ${tab}`, items, { url: `${config.publicUrl}/${tab === 'all' ? '' : `?tab=${tab}`}` }) : null,
+    ].filter(Boolean);
 }
 
 function renderCard(c) {
@@ -221,68 +224,75 @@ function renderCard(c) {
 
 const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['emotes', 'Emotes'], ['sounds', 'Sounds'], ['thumbnails', 'Thumbnails'], ['files', 'Files']];
 
-function renderPage(tab, page, data, counts) {
-    const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
-    const nav = (p, label, dis) => dis ? `<span class="pg dis" aria-disabled="true">${label}</span>` : `<a class="pg" href="/?tab=${tab}&page=${p}">${label}</a>`;
-    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenVibe.Media — Media Index</title>
-<meta name="description" content="Index of all public media on the OpenVibe network — videos, clips, files and thumbnails.">
-<link rel="canonical" href="${config.publicUrl}/${tab === 'all' && page === 1 ? '' : `?tab=${tab}${page > 1 ? `&page=${page}` : ''}`}">
-<meta name="robots" content="${page > 1 ? 'noindex, follow' : 'index, follow'}">
-<meta property="og:site_name" content="OpenVibe.Media">
-<meta property="og:type" content="website">
-<meta property="og:title" content="OpenVibe.Media — Media Index">
-<meta property="og:description" content="Every public file on the OpenVibe network — videos, clips, files and thumbnails.">
-<meta property="og:url" content="${config.publicUrl}/">
-<meta property="og:image" content="${config.publicUrl}/og-image.png">
-<meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="OpenVibe.Media — Media Index">
-<meta name="twitter:image" content="${config.publicUrl}/og-image.png">
-${page === 1 ? browseJsonLd(config, tab, data.cards) : ''}
-<!-- The shared theme-loader applies the user's theme to <html> before anything paints. -->
-<script src="${require('openvibe-shared/serve').url('theme-loader.js')}" defer></script>
-<style>
-${DEFAULT_THEME_CSS ? `:root{${DEFAULT_THEME_CSS}}` : ''}
-:root{--bg:var(--bg-primary,#0a0f1c);--panel:var(--bg-card,#131c2e);--border:#1f2d47;--text:var(--text-primary,#e6edf7);--muted:var(--text-secondary,#96a7c2);--accent-page:var(--accent,#3b82f6)}
-*{box-sizing:border-box;margin:0}body{background:var(--bg);color:var(--text);font:15px/1.5 system-ui,'Segoe UI',Arial,sans-serif;padding-bottom:3rem}
-header.intro{display:flex;align-items:baseline;gap:.2rem .8rem;flex-wrap:wrap;padding:1rem 1.4rem .4rem}
+// The index's own rules; page-frame's baseCss supplies the palette (--panel, --line, --muted, --acc …) and the reset.
+// Card rules are scoped to .card: baseCss styles .meta and .desc for the watch pages.
+const BROWSE_CSS = `
+header.intro{display:flex;align-items:baseline;gap:.2rem .8rem;flex-wrap:wrap;padding:0 0 .4rem}
 header.intro h1{font-size:1.15rem;margin:0}
 header.intro .sub{color:var(--muted);font-size:.85rem}
-nav.tabs{display:flex;gap:.25rem;padding:.2rem 1.4rem .7rem;flex-wrap:wrap}
+nav.tabs{display:flex;gap:.25rem;padding:.2rem 0 .7rem;flex-wrap:wrap}
 nav.tabs a{color:var(--muted);text-decoration:none;padding:.45rem .9rem;border-radius:999px;font-size:.88rem;border:1px solid transparent}
 nav.tabs a:hover{color:var(--text)}nav.tabs a.on{color:var(--on-accent-strong,#fff);background:var(--accent-strong,#1d4ed8)}
 nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{opacity:1}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem;padding:0 1.4rem}
-.card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
-.thumb{position:relative;display:block;aspect-ratio:16/9;background:#0b0f18}
-.thumb img{width:100%;height:100%;object-fit:cover;display:block}
-.thumb .ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.2rem;opacity:.5}
-.thumb .dur{position:absolute;right:.5rem;bottom:.5rem;background:rgba(0,0,0,.75);padding:.1rem .45rem;border-radius:6px;font-size:.75rem}
-.thumb .kind{position:absolute;left:.5rem;top:.5rem;background:rgba(var(--accent-rgb,59,130,246),.85);color:var(--on-accent,#fff);padding:.1rem .5rem;border-radius:6px;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}
-.meta{padding:.7rem .8rem;display:flex;flex-direction:column;gap:.35rem;flex:1}
-.title{font-weight:600;font-size:.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.desc{color:var(--muted);font-size:.8rem;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.foot{margin-top:auto;display:flex;justify-content:space-between;gap:.6rem;color:var(--muted);font-size:.74rem;flex-wrap:wrap}
-.foot a{color:var(--accent-page);text-decoration:none}.foot a:hover{text-decoration:underline}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.card .thumb{position:relative;display:block;aspect-ratio:16/9;background:#0b0f18}
+.card .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.card .thumb .ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.2rem;opacity:.5}
+.card .thumb .dur{position:absolute;right:.5rem;bottom:.5rem;background:rgba(0,0,0,.75);color:#fff;padding:.1rem .45rem;border-radius:6px;font-size:.75rem}
+.card .thumb .kind{position:absolute;left:.5rem;top:.5rem;background:rgba(var(--accent-rgb,59,130,246),.85);color:var(--on-accent,#fff);padding:.1rem .5rem;border-radius:6px;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}
+.card .meta{margin:0;padding:.7rem .8rem;display:flex;flex-direction:column;flex-wrap:nowrap;align-items:stretch;gap:.35rem;flex:1;color:var(--text);font-size:inherit;line-height:1.5}
+.card .title{font-weight:600;font-size:.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card .desc{color:var(--muted);font-size:.8rem;white-space:normal;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.card .foot{margin-top:auto;display:flex;justify-content:space-between;gap:.6rem;color:var(--muted);font-size:.74rem;flex-wrap:wrap}
+.card .foot a{color:var(--acc);text-decoration:none}.card .foot a:hover{text-decoration:underline}
 .pager{display:flex;gap:.5rem;justify-content:center;align-items:center;padding:1.4rem;color:var(--muted);font-size:.88rem}
-.pg{color:var(--accent-page);text-decoration:none;padding:.35rem .8rem;border:1px solid var(--border);border-radius:8px}
+.pg{color:var(--acc);text-decoration:none;padding:.35rem .8rem;border:1px solid var(--line);border-radius:8px}
 .pg.dis{color:var(--muted);opacity:.4}
 .empty{padding:3rem;text-align:center;color:var(--muted)}
-</style>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-${require('openvibe-shared/app-icon').headTags({ site: 'media', iconBase: '/assets' })}
-</head><body>
-<div id="navbar-mount"></div>${frame.noscriptNav({ name: 'OpenVibe.Media' })}
-<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>
+`;
+
+const DESCRIPTION = 'Index of all public media on the OpenVibe network — videos, clips, files and thumbnails.';
+
+function renderPage(tab, page, data, counts) {
+    const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    const nav = (p, label, dis) => dis ? `<span class="pg dis" aria-disabled="true">${label}</span>` : `<a class="pg" href="/?tab=${tab}&page=${p}">${label}</a>`;
+    const first = tab === 'all' && page === 1;
+    const canonical = `${config.publicUrl}/${first ? '' : `?tab=${tab}${page > 1 ? `&page=${page}` : ''}`}`;
+    // The one <h1> on the page: the showcase hero on the index's front page, the plain intro elsewhere.
+    const heading = first ? showcase.hero({
+        eyebrow: 'OpenVibe.Media',
+        title: 'Every public file on the',
+        accent: 'OpenVibe network',
+        lede: 'Videos, clips, emotes, sounds, files and thumbnails from every OpenVibe site, in one index. Watch and download public media without an account.',
+        actions: [
+            { label: 'Browse videos', href: '/?tab=videos', primary: true },
+            { label: 'Watch on OpenVibe.Live', href: appUrl('live') + '/' },
+        ],
+    }) : '<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>';
+    const body = `${heading}
 <nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>
-${tab === 'all' && page === 1 ? `<div style="max-width:1200px;margin:0 auto;padding:0 1rem">${frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' })}</div>` : ''}
-${frame.footer({ service: 'media', variant: 'full', updates: '/updates' })}
-${require('./page-frame').frameScripts({ footer: { variant: 'full' } })}
-</body></html>`;
+${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' }) : ''}`;
+    return pageFrame.page({
+        seo: {
+            title: 'OpenVibe.Media — Media Index', description: DESCRIPTION, canonical,
+            robots: page > 1 ? 'noindex, follow' : 'index, follow', ogType: 'website',
+            jsonLd: page === 1 ? browseJsonLd(tab, data.cards) : [],
+        },
+        css: BROWSE_CSS,
+        body,
+        // Later pages are noindex and carry no structured data, the summary's WebPage included.
+        summary: page === 1 ? {
+            summary: 'Index of all public media on the OpenVibe network: videos, clips, emotes, sounds, files and thumbnails, browsable and playable without an account.',
+            url: canonical,
+            facts: [['Items', data.total.toLocaleString('en-US')]],
+            updated: isoDate(data.cards[0] && data.cards[0].date) || undefined,
+        } : undefined,
+        history: { type: 'page', title: 'OpenVibe.Media' },
+        footer: { variant: 'full' },
+    });
 }
 
 async function handle(req, res) {
