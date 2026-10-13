@@ -103,18 +103,18 @@ function rebuildWebmFromMaster(masterPath, webmPath) {
         let ff;
         try { ff = spawn('ffmpeg', args, { stdio: 'ignore' }); } catch { return resolve(false); }
         const to = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* */ } }, 45 * 60 * 1000);
-        ff.on('close', (code) => {
+        ff.on('close', async (code) => {
             clearTimeout(to);
             try {
                 if (code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 1024) {
-                    fs.renameSync(tmp, webmPath);
+                    await fs.promises.rename(tmp, webmPath);
                     return resolve(true);
                 }
             } catch { /* fall through */ }
-            try { fs.existsSync(tmp) && fs.unlinkSync(tmp); } catch { /* */ }
+            await tools.removeFile(tmp);
             resolve(false);
         });
-        ff.on('error', () => { clearTimeout(to); try { fs.existsSync(tmp) && fs.unlinkSync(tmp); } catch { /* */ } resolve(false); });
+        ff.on('error', () => { clearTimeout(to); tools.removeFile(tmp).then(() => resolve(false)); });
     });
 }
 
@@ -203,9 +203,9 @@ async function _doFinalize(vodId, opts) {
     // Ephemeral clips-only recording: it existed only to serve live clips. Never
     // published — delete the file (+ any offloaded object) and its row.
     if (vod.clips_only) {
-        try { if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch { /* */ }
-        try { tools.cleanupSeekableFile(filePath); } catch { /* */ }
-        try { if (vod.master_file_path && fs.existsSync(vod.master_file_path)) fs.unlinkSync(vod.master_file_path); } catch { /* */ }
+        await tools.removeFile(filePath);
+        await tools.cleanupSeekableFile(filePath);
+        await tools.removeFile(vod.master_file_path);
         try { if (vod.storage_provider && vod.storage_provider !== 'local') require('./vod-storage').deleteVodObjects(vod).catch(() => {}); } catch { /* */ }
         try { await db.run('DELETE FROM vods WHERE id = ?', [vodId]); } catch { /* */ }
         console.log(`[VOD] Discarded ephemeral clips-only recording (vod ${vodId})`);
@@ -247,21 +247,22 @@ async function _doFinalize(vodId, opts) {
     if (tools.getFileSizeSafe(filePath) === 0) {
         if (held) return await keepHeld('zero_byte');
         console.warn(`[VOD] vod ${vodId}: zero-byte recording — deleting empty recording`);
-        try { fs.unlinkSync(filePath); } catch { /* */ }
-        try { tools.cleanupSeekableFile(filePath); } catch { /* */ }
-        try { if (vod.master_file_path && fs.existsSync(vod.master_file_path)) fs.unlinkSync(vod.master_file_path); } catch { /* */ }
+        await tools.removeFile(filePath);
+        await tools.cleanupSeekableFile(filePath);
+        await tools.removeFile(vod.master_file_path);
         await _commitVodOutcome(vod, 'vod.failed', async () => await db.run('DELETE FROM vods WHERE id = ?', [vodId]),
             () => ({ ...vod, health_status: 'zero_byte', is_public: 0 }));
         return null;
     }
 
+    // The live seekable copy is no longer needed: drop it (and stop a live pass still writing one)
+    // before the final remux, whose own copy of the recording needs that room on the disk.
+    await tools.cleanupSeekableFile(filePath);
+
     // Remux for proper seeking support (fast copy-mode, no re-encode). Its last packet time is a
     // measurement of the file (source 'remux'); a failed remux measures nothing.
     const remux = await tools.remuxForSeekingDetailed(filePath);
     if (!remux.ok && remux.error !== 'unsupported container') issues.push('remux_failed');
-
-    // Clean up the live seekable copy (no longer needed after final remux)
-    tools.cleanupSeekableFile(filePath);
 
     // The duration is what the file says: ffprobe's, else the packets' (a stream-copy pass when the
     // remux gave none), never the wall clock. Nothing measurable: 0 and needs_review.
@@ -290,7 +291,7 @@ async function _doFinalize(vodId, opts) {
             const ok = await rebuildWebmFromMaster(masterPath, filePath);
             if (ok) {
                 let again = { ok: false, seconds: 0 };
-                try { again = await tools.remuxForSeekingDetailed(filePath); tools.cleanupSeekableFile(filePath); } catch { /* */ }
+                try { again = await tools.remuxForSeekingDetailed(filePath); await tools.cleanupSeekableFile(filePath); } catch { /* */ }
                 const rebuilt = await measure(filePath, again.ok ? again.seconds : 0);
                 if (rebuilt.choice.seconds > durationSeconds) {
                     ({ probe, choice } = rebuilt);
@@ -354,7 +355,7 @@ async function _doFinalize(vodId, opts) {
             const webmComplete = !masterDur || durationSeconds >= masterDur - 8;
             if (fs.existsSync(masterPath)) {
                 if (webmComplete) {
-                    fs.unlinkSync(masterPath);
+                    await fs.promises.unlink(masterPath);
                     console.log(`[VOD] Removed master archive for vod ${vodId} (${path.basename(masterPath)})`);
                     await db.run('UPDATE vods SET master_file_path = NULL WHERE id = ?', [vodId]);   // not projected: no object change
                 } else {

@@ -8,6 +8,7 @@
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const tools = require('./media-tools');
 const db = require('../db/database');
 
 function probeMediaInfo(filePath) {
@@ -48,37 +49,11 @@ function decodeVodFile(filePath) {
     });
 }
 
+// The shared remux (media-tools): a kill budget that scales with the file (this copy's flat 30 s cut
+// every multi-GB recording short), a free-disk check, and its temp file removed off the event loop.
+// → { ok, error }
 function remuxForSeeking(filePath) {
-    return new Promise((resolve) => {
-        // Match the tmp container to the source so an H.264 .mp4 VOD isn't
-        // force-written into a VP8-only WebM (which just fails). For .mp4,
-        // faststart makes it instantly seekable.
-        const isMp4 = filePath.toLowerCase().endsWith('.mp4');
-        const tmpPath = isMp4 ? `${filePath}.remux.tmp.mp4` : `${filePath}.remux.tmp.webm`;
-        const args = isMp4
-            ? ['-y', '-i', filePath, '-c', 'copy', '-fflags', '+genpts', '-movflags', '+faststart', tmpPath]
-            : ['-y', '-i', filePath, '-c', 'copy', '-fflags', '+genpts', tmpPath];
-        const proc = spawn('ffmpeg', args);
-        proc.on('close', (code) => {
-            if (code === 0 && fs.existsSync(tmpPath)) {
-                try {
-                    fs.renameSync(tmpPath, filePath);
-                    resolve({ ok: true });
-                } catch (err) {
-                    if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-                    resolve({ ok: false, error: err.message });
-                }
-            } else {
-                if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-                resolve({ ok: false, error: `ffmpeg remux failed code ${code}` });
-            }
-        });
-        proc.on('error', (err) => {
-            if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-            resolve({ ok: false, error: err.message });
-        });
-        setTimeout(() => { try { proc.kill(); } catch {} }, 30000);
-    });
+    return tools.remuxForSeekingDetailed(filePath).then(({ ok, error }) => ({ ok, error }));
 }
 
 // Re-encode a served .webm from the lossless .master.mkv archive. Used by the
@@ -93,18 +68,18 @@ function _rebuildWebmFromMaster(masterPath, webmPath) {
         let ff;
         try { ff = spawn('ffmpeg', args, { stdio: 'ignore' }); } catch { return resolve(false); }
         const to = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* */ } }, 45 * 60 * 1000);
-        ff.on('close', (code) => {
+        ff.on('close', async (code) => {
             clearTimeout(to);
             try {
                 if (code === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size > 1024) {
-                    fs.renameSync(tmp, webmPath);
+                    await fs.promises.rename(tmp, webmPath);
                     return resolve(true);
                 }
             } catch { /* fall through */ }
-            try { fs.existsSync(tmp) && fs.unlinkSync(tmp); } catch { /* */ }
+            await tools.removeFile(tmp);
             resolve(false);
         });
-        ff.on('error', () => { clearTimeout(to); try { fs.existsSync(tmp) && fs.unlinkSync(tmp); } catch { /* */ } resolve(false); });
+        ff.on('error', () => { clearTimeout(to); tools.removeFile(tmp).then(() => resolve(false)); });
     });
 }
 

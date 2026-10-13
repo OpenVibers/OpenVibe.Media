@@ -31,7 +31,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
 const config = require('../config');
 const db = require('../db/database');
 
@@ -247,6 +246,7 @@ function endpointFor(name) {
 // placement (`write`) and re-projects the VOD's media_locations in one transaction (WS-G task 1;
 // afterTierMove). Lazy — the model requires this module.
 const objects = () => require('../objects/model');
+const tools = () => require('./media-tools');
 async function _held(vod) { return await objects().isHeldRow(vod); }
 async function _moved(vodId, verified, write = null) { return await objects().afterTierMove(vodId, verified, write); }
 // After a move removed the local copy (the row already names the remote one): the object's locations
@@ -563,11 +563,10 @@ async function resolveMediaSource(vod) {
 
 // ── Tier moves ───────────────────────────────────────────────
 
-function cleanupSidecar(localPath) {
+/** Remove a VOD's .seekable.* sidecars, off the event loop (media-tools.removeFile). */
+async function cleanupSidecar(localPath) {
     for (const seekable of [localPath.replace(/\.webm$/, '.seekable.webm'), localPath.replace(/\.mp4$/, '.seekable.mp4')]) {
-        if (seekable !== localPath && fs.existsSync(seekable)) {
-            try { fs.unlinkSync(seekable); } catch { /* ignore */ }
-        }
+        if (seekable !== localPath) await tools().removeFile(seekable);
     }
 }
 
@@ -602,10 +601,10 @@ async function moveToCold(vodId) {
         }
 
         await _moved(vodId, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));
-        try { fs.unlinkSync(local); } catch (err) {
+        try { await fs.promises.unlink(local); } catch (err) {
             console.error(`[VodStorage] Uploaded but failed to remove local file for VOD ${vodId}:`, err.message);
         }
-        cleanupSidecar(local);
+        await cleanupSidecar(local);
         await _localRemoved(vodId);
 
         console.log(`[VodStorage] VOD ${vodId} offloaded to B2: ${key} (${(localSize / 1048576).toFixed(1)} MB)`);
@@ -624,7 +623,7 @@ function cleanupStaleDownloads() {
         for (const f of fs.readdirSync(dir)) {
             if (!f.endsWith('.download')) continue;
             const fp = path.join(dir, f);
-            try { if (Date.now() - fs.statSync(fp).mtimeMs > 3600000) { fs.unlinkSync(fp); console.log(`[VodStorage] Removed stale partial download ${f}`); } } catch { /* */ }
+            try { if (Date.now() - fs.statSync(fp).mtimeMs > 3600000) tools().removeFile(fp).then((ok) => { if (ok) console.log(`[VodStorage] Removed stale partial download ${f}`); }); } catch { /* */ }
         }
     } catch { /* */ }
 }
@@ -696,12 +695,12 @@ async function _moveToHot(vodId) {
             obj.Body.on('error', finish);
             out.on('error', finish);
             out.on('finish', () => finish(null));
-        }).catch((err) => { try { fs.unlinkSync(tmp); } catch { /* ignore */ } throw err; });
+        }).catch(async (err) => { await tools().removeFile(tmp); throw err; });
         if (fs.statSync(tmp).size !== head.size) {
-            try { fs.unlinkSync(tmp); } catch { /* ignore */ }
+            await tools().removeFile(tmp);
             return { ok: false, error: 'Download verification failed' };
         }
-        fs.renameSync(tmp, local);
+        await fs.promises.rename(tmp, local);
 
         // Restoring to local keeps the B2 canonical copy; drop any R2 copy.
         if (providerOf(vod) === 'r2' && providerConfigured('r2')) await deleteObject('r2', key);
@@ -758,7 +757,7 @@ async function _promoteToR2(vodId) {
         let freed = 0;
         if (fs.existsSync(local)) {
             freed = fs.statSync(local).size;
-            try { fs.unlinkSync(local); cleanupSidecar(local); } catch { freed = 0; }
+            try { await fs.promises.unlink(local); await cleanupSidecar(local); } catch { freed = 0; }
             if (freed) await _localRemoved(vodId);
         }
 
@@ -809,14 +808,10 @@ async function deleteVodObjects(vod) {
     // Its CMAF segments and timeline rows (F3.1, objects/timeline.js) go with it.
     if (vod.object_id) await require('../objects/timeline').removeObject(vod.object_id).catch((err) => console.warn(`[VodStorage] timeline of ${vod.object_id}: ${err.message}`));
     const local = localPathForVod(vod);
-    if (fs.existsSync(local)) {
-        try { fs.unlinkSync(local); } catch { /* ignore */ }
-    }
+    await tools().removeFile(local);
     // Clips live in the clips dir — also try the record's own absolute path.
-    if (vod.file_path !== local && fs.existsSync(vod.file_path)) {
-        try { fs.unlinkSync(vod.file_path); } catch { /* ignore */ }
-    }
-    cleanupSidecar(local);
+    if (vod.file_path !== local) await tools().removeFile(vod.file_path);
+    await cleanupSidecar(local);
     const key = keyForVod(vod);
     for (const p of REMOTE_PROVIDERS) {
         if (providerConfigured(p)) await deleteObject(p, key);
@@ -825,20 +820,17 @@ async function deleteVodObjects(vod) {
 
 // ── Disk usage ───────────────────────────────────────────────
 
+/**
+ * The disk holding targetPath, as df reports it (usePct = used / (used + available), rounded up).
+ * One statfs call: this used to run df through a shell with execSync, a process spawn on the event
+ * loop for every sweep step and recorder check. `mount` is no longer known and stays '/'.
+ */
 function diskUsage(targetPath) {
     try {
-        const resolved = path.resolve(targetPath);
-        const output = execSync(`df -B1 "${resolved}" 2>/dev/null | tail -1`, { encoding: 'utf8' });
-        const parts = output.trim().split(/\s+/);
-        if (parts.length >= 6) {
-            return {
-                total: parseInt(parts[1], 10) || 0,
-                used: parseInt(parts[2], 10) || 0,
-                available: parseInt(parts[3], 10) || 0,
-                usePct: parseFloat(parts[4]) || 0,
-                mount: parts[5] || '/',
-            };
-        }
+        const s = fs.statfsSync(path.resolve(targetPath));
+        const total = s.blocks * s.bsize, used = (s.blocks - s.bfree) * s.bsize, available = s.bavail * s.bsize;
+        const usePct = used + available > 0 ? Math.ceil(used * 100 / (used + available)) : 0;
+        return { total, used, available, usePct, mount: '/' };
     } catch { /* ignore */ }
     return { total: 0, used: 0, available: 0, usePct: 0, mount: '/' };
 }
