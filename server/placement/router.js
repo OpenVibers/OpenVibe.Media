@@ -11,8 +11,10 @@
  *   1. Resolve locations for the object (`locationsFor(opts)` accepts an `object`,
  *      a `vod` / `clip` row, or an explicit list).
  *   2. Filter to `state === 'present'` rows only. Non-present rows are NEVER routed to.
- *   3. Filter to providers that are configured, have passed their capability probe and are
- *      not breaker-open.
+ *   3. Filter to providers that are configured and have passed their capability probe. Of those, a provider
+ *      that is breaker-open, whose last live health check failed, or that this read was told to avoid (`exclude`:
+ *      the origin shield could not fetch from it) is only a last resort: served when no other copy is left, so
+ *      losing a provider moves reads to the next copy and never makes a one-copy object vanish.
  *   4. Rank by preference tier, with the measured 5-minute EWMA latency breaking ties:
  *        playback : R2 with a verified present copy (popularity promotion put it there to move
  *                   reads off the host; promoting a VOD also frees its local copy) > local > R2 > B2
@@ -113,15 +115,23 @@ function withOwnCopy(rows, provider, key, extra = {}) {
     return [...rows.filter((r) => r.provider !== provider), { provider, state: 'present', key, ...extra }];
 }
 
-/** A copy is healthy when: configured, breaker closed, and eligible for at least one provider class
- *  (a failed capability probe removes every class it needed). `passed === null` = probe not run yet. */
-function isHealthy(provider, { purpose = 'playback' } = {}) {
+/** A copy can be served at all when: configured and eligible for at least one provider class (a failed capability
+ *  probe removes every class it needed). `passed === null` = probe not run yet. */
+function isEligible(provider) {
     if (provider === 'local') return true;
     if (!providers.isConfigured(provider)) return false;
-    if (signals.breakerOpen(provider)) return false;
     const caps = providers.capabilities(provider);
     if (caps.passed === null) return providers.providerClasses(provider).length > 0;
     return providers.eligibleClasses(provider).length > 0;
+}
+
+/** A copy is healthy when eligible, its breaker is closed and its last live health check did not fail. */
+function isHealthy(provider, { purpose = 'playback' } = {}) {   // eslint-disable-line no-unused-vars
+    if (!isEligible(provider)) return false;
+    if (provider === 'local') return true;
+    if (signals.breakerOpen(provider)) return false;
+    try { if (providers.liveUnhealthy(provider)) return false; } catch { /* a providers stub without health */ }
+    return true;
 }
 
 /** Measured 5-minute EWMA (ms) of a network round-trip op (head, then get), or null when the
@@ -197,7 +207,8 @@ const DEMAND_PURPOSES = new Set(['playback', 'download']);
 /**
  * The only function every read path uses.
  * opts: { object | vod | clip | locations, objectId?, purpose, session?, segment?, range?, presign?, expiresIn?,
- *         contentType?, contentDisposition? }
+ *         contentType?, contentDisposition?, exclude? }
+ * `exclude` names providers this read should avoid (the shield just failed to fetch from one): last resort only.
  * `objectId` names the object a demand hit belongs to when the caller passes no object/vod/clip row (a segment
  * read: the route already resolved its row and passes explicit locations); `segment` is the timeline segment served.
  * returns: { provider, key, url, reason, fallbacks, candidates } — `fallbacks` are provider names, ranked;
@@ -208,15 +219,21 @@ async function route(opts = {}) {
     const session = opts.session || null;
     const locs = (await locationsFor(opts)).filter((l) => l && l.state === 'present' && l.key);
 
-    // One candidate per provider: the first present location it has.
+    // One candidate per provider: the first present location it has. A copy on an unhealthy (or avoided) provider
+    // waits as a last resort: served only when no healthy copy is left.
+    const avoid = new Set(Array.isArray(opts.exclude) ? opts.exclude : []);
     const seen = new Set();
-    const candidates = [];
+    let candidates = [];
+    const degraded = [];
     for (const l of locs) {
         if (seen.has(l.provider)) continue;
-        if (!isHealthy(l.provider, { purpose })) continue;
+        if (!isEligible(l.provider)) continue;
         seen.add(l.provider);
-        candidates.push(l);
+        if (isHealthy(l.provider, { purpose }) && !avoid.has(l.provider)) candidates.push(l);
+        else degraded.push(l);
     }
+    const lastResort = candidates.length === 0 && degraded.length > 0;
+    if (lastResort) candidates = degraded;
     const ranked = rankCandidates(candidates, { purpose });
 
     // Sticky: same session -> same provider for STICKY_TTL_MS unless its copy/breaker is gone, or a better tier
@@ -244,7 +261,7 @@ async function route(opts = {}) {
 
     const fallbacks = ordered.filter((c) => c !== primary).map((c) => c.provider);
     const reason = primary
-        ? (stickyHit && primary === ordered[0] && primary.provider === sticky.provider ? 'sticky' : REASONS[tierOf(primary, purpose)] || 'fastest-healthy')
+        ? lastResort ? 'last-resort' : (stickyHit && primary === ordered[0] && primary.provider === sticky.provider ? 'sticky' : REASONS[tierOf(primary, purpose)] || 'fastest-healthy')
         : 'no-healthy-copy';
 
     if (primary) stickyPut(session, primary.provider);
@@ -284,6 +301,7 @@ function incMetric(name, labels) { try { _inc(name, labels); } catch { /* */ } }
 module.exports = {
     route,
     isHealthy,
+    isEligible,
     rankCandidates,
     tierOf,
     locationsFor,

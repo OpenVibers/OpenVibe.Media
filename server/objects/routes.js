@@ -994,9 +994,12 @@ publicRouter.get('/:id', async (req, res) => {
         // providers, and ranks by preference tier with the measured 5-minute EWMA latency and the
         // design's ±15 % tie band: a verified R2 copy (the hot cache) for playback, then local, R2, B2.
         const router = require('../placement/router');
+        // The shield could not fetch this read (nginx handed it back): another copy, and no shield for this one.
+        const shieldFailed = require('../placement/shield').failedOf(req);
         const decision = await router.route({
             object: obj, purpose: 'playback', session: router.sessionFor(req, obj.id),
             contentType: mime, contentDisposition: headers['Content-Disposition'], expiresIn: 300,
+            exclude: shieldFailed ? [shieldFailed] : [],
         });
         // Walk the router's ranked copies: stream a local one, redirect to a presigned remote one.
         // A stale `present` local row whose file is gone falls through to the next copy.
@@ -1011,11 +1014,12 @@ publicRouter.get('/:id', async (req, res) => {
             // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through its
             // slice cache, with a long internal presign that never reaches the viewer (only on the DNS-only edge host).
             const shield = require('../placement/shield');
-            if (shield.enabled(provider) && !sandbox && obj.visibility !== 'private' && !shield.onEdge(req)) {
+            const shielded = shield.enabled(provider) && provider !== shieldFailed;
+            if (shielded && !sandbox && obj.visibility !== 'private' && !shield.onEdge(req)) {
                 const edge = shield.toEdge(req, provider);
                 if (edge) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, edge); }
             }
-            if (shield.enabled(provider) && shield.onEdge(req) && !sandbox && obj.visibility !== 'private') {
+            if (shielded && shield.onEdge(req) && !sandbox && obj.visibility !== 'private') {
                 const inner = await require('../vod/vod-storage').presignGet(provider, loc.key, shield.SHIELD_TTL_SECONDS, { contentType: mime, contentDisposition: headers['Content-Disposition'] }).catch(() => null);
                 const t = inner && shield.target({ provider, url: inner, visibility: obj.visibility, sandbox, edge: shield.edgeOf(req) });
                 if (t) return shield.send(res, t, headers);

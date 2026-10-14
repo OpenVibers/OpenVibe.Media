@@ -290,6 +290,14 @@ function observe(provider, op, ok, ms) {
     } catch { /* */ }
 }
 
+/** True while the provider's last live health check (or capability probe) failed and is recent: the router routes
+ *  reads to another copy until a check passes again. A check older than LIVE_HEALTH_FRESH_MS says nothing. */
+const LIVE_HEALTH_FRESH_MS = 5 * 60_000;
+function liveUnhealthy(name) {
+    const at = state.lastHealthCheck[name];
+    return state.lastHealthError[name] != null && at != null && Date.now() - at < LIVE_HEALTH_FRESH_MS;
+}
+
 function healthStatus() {
     const out = {};
     for (const name of vodStorage().REMOTE_PROVIDERS) {
@@ -340,8 +348,9 @@ function reset() { stop(); state.capabilities = {}; state.lastHealthCheck = {}; 
 module.exports = {
     CLASSES, CLASS_REQUIREMENTS, PROBE_PREFIX, PROBE_KEY,
     isConfigured, providerClasses, eligibleClasses, measuredClasses, placementGate, gateMode, capabilities,
-    probe, probeAll, liveHealth, healthStatus,
+    probe, probeAll, liveHealth, liveUnhealthy, healthStatus,
     startHealthLoop, stop, reset,
     // Test-only setter (used by tests to inject a known capability snapshot without touching the SDK).
     _setCapabilities: setCapabilities,
+    _setHealth: (name, error) => { state.lastHealthCheck[name] = Date.now(); state.lastHealthError[name] = error || null; },
 };

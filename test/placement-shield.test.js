@@ -47,6 +47,26 @@ const assert = require('assert');
     for (const c of [edgeConf, mainConf]) assert.match(c, /proxy_set_header X-Forwarded-Host "";/);
     for (const d of ['client_max_body_size 4096m;', 'proxy_read_timeout 3600s;', 'location ~* ^/metrics(/|$) { return 404; }']) assert.ok(edgeConf.includes(d), `the edge block has ${d}`);
     assert.match(conf('media-shield.http.conf'), /allow 127\.0\.0\.1;\s*deny all;/, 'only loopback may refresh the cache');
+    // Losing B2 fails over: a first slice B2 cannot serve (nothing stale cached) goes back to Node, marked by a header
+    // only that named location sets; every location a client reaches clears it.
+    const shieldBlock = edgeConf.slice(edgeConf.indexOf('location /_media_shield/b2/'), edgeConf.indexOf('location @shield_failed_b2'));
+    assert.match(shieldBlock, /proxy_intercept_errors on;/);
+    assert.match(shieldBlock, /error_page 502 503 504 = @shield_failed_b2;/);
+    const failedBlock = edgeConf.slice(edgeConf.indexOf('location @shield_failed_b2'));
+    assert.match(failedBlock, /proxy_pass http:\/\/127\.0\.0\.1:4100\$request_uri;/, 'the original request goes back to Node');
+    assert.match(failedBlock, /proxy_set_header X-Media-Shield-Failed b2;/);
+    assert.match(failedBlock, /proxy_set_header X-Media-Shield-Host \$server_name;/);
+    assert.match(failedBlock, /proxy_set_header X-Real-IP \$remote_addr;/, 'client-IP headers from $remote_addr only');
+    for (const c of [edgeConf, mainConf]) assert.match(c.slice(c.indexOf('    location / {')), /proxy_set_header X-Media-Shield-Failed "";/, 'a client cannot claim a shield failure');
+    // failedOf(): only on the edge, only a shielded provider, and the failure feeds the provider's signals.
+    const signals = require('../server/placement/signals');
+    signals.reset();
+    const hdr = (h) => ({ get: (k) => h[k.toLowerCase()] });
+    assert.strictEqual(shield.failedOf(hdr({ 'x-media-shield-host': 'edge.openvibe.media', 'x-media-shield-failed': 'b2' })), 'b2');
+    assert.strictEqual(shield.failedOf(hdr({ 'x-media-shield-failed': 'b2' })), null, 'not on the edge: ignored');
+    assert.strictEqual(shield.failedOf(hdr({ 'x-media-shield-host': 'edge.openvibe.media', 'x-media-shield-failed': 'r2' })), null, 'r2 is not shielded');
+    assert.strictEqual(signals.snapshot().providers.b2.windows['1m'].errors, 1, 'one failed get recorded');
+    signals.reset();
 
     // send(): the route's headers plus the internal redirect, an empty 200.
     const res = { h: {}, set(k, v) { this.h[k] = v; }, status(c) { this.code = c; return this; }, end() { this.ended = true; return this; } };

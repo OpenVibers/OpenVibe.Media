@@ -525,9 +525,9 @@ async function presignGet(provider, key, expiresInSeconds = 900, overrides = {})
  * preferred when the file is on disk, R2 over B2 for playback when both are present, and B2
  * as the canonical fallback. The router returns the chosen provider; we presign it and answer.
  */
-async function resolvePlayback(vod, { session = null, range = null } = {}) {
+async function resolvePlayback(vod, { session = null, range = null, exclude = [] } = {}) {
     const router = require('../placement/router');
-    const decision = await router.route({ vod, purpose: 'playback', session, range });
+    const decision = await router.route({ vod, purpose: 'playback', session, range, exclude });
     if (decision.provider && decision.provider !== 'local') {
         if (decision.url) return { kind: 'redirect', url: decision.url, provider: decision.provider, fallbacks: decision.fallbacks };
         // The router met a provider it could not rank-presign (the client is unavailable). Try the

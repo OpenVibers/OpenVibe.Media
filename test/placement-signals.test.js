@@ -30,7 +30,7 @@ const assert = require('assert');
 
     // p95 latency on a different provider drives the second open rule.
     signals.reset();
-    for (let i = 0; i < 20; i++) signals.recordSuccess('r2', 'presign', 6000);   // 6 s, over the 5 s threshold
+    for (let i = 0; i < 20; i++) signals.recordSuccess('r2', 'head', 6000);   // 6 s, over the 5 s threshold
     assert.strictEqual(signals.breakerOpen('r2'), true, 'breaker opens when 5m p95 > 5 s');
 
     // Half-open: after 60 s exactly one trial is allowed; a success closes the breaker, a failure
@@ -42,7 +42,7 @@ const assert = require('assert');
     assert.strictEqual(signals.breakerState('b2'), 'half-open', 'half-open 60 s after opening');
     assert.strictEqual(signals.halfOpenClaim('b2'), true, 'the one trial is claimed');
     assert.strictEqual(signals.halfOpenClaim('b2'), false, 'a concurrent second trial is refused');
-    signals.recordSuccess('b2', 'presign', 80);
+    signals.recordSuccess('b2', 'head', 80);
     assert.strictEqual(signals.breakerState('b2'), 'closed', 'a successful trial closes the breaker');
 
     for (let i = 0; i < 10; i++) signals.recordFailure('r2', 'presign', 50);
@@ -54,9 +54,9 @@ const assert = require('assert');
 
     // Snapshot exposes both providers' state, with p50 and p95 per window (the admin view and /metrics).
     signals.reset();
-    signals.recordSuccess('b2', 'presign', 100);
-    signals.recordSuccess('r2', 'presign', 100);
-    signals.recordSuccess('r2', 'presign', 400);
+    signals.recordSuccess('b2', 'head', 100);
+    signals.recordSuccess('r2', 'head', 100);
+    signals.recordSuccess('r2', 'get', 400);
     const snap = signals.snapshot();
     assert.ok(snap.providers.b2 && snap.providers.r2);
     assert.ok(snap.breakers.b2 && snap.breakers.r2);
@@ -66,6 +66,23 @@ const assert = require('assert');
         assert.strictEqual(typeof snap.providers.r2.windows[win].p95Ms, 'number', `p95 in ${win}`);
     }
     assert.strictEqual(snap.providers.r2.windows['5m'].total, 2, 'both r2 samples in the 5-minute window');
+
+    // A presign is local signing, not a provider round-trip: during an outage every viewer's presign succeeds while
+    // the HEADs fail. Those successes must not dilute the error rate, feed the p95, or close an open breaker.
+    signals.reset();
+    for (let i = 0; i < 50; i++) signals.recordSuccess('b2', 'presign', 2);
+    for (let i = 0; i < 5; i++) signals.recordFailure('b2', 'head', 10_000);
+    assert.strictEqual(signals.breakerState('b2'), 'open', 'five failed HEADs open it, whatever the presigns say');
+    signals._advance(61_000);
+    signals.recordSuccess('b2', 'presign', 2);
+    assert.notStrictEqual(signals.breakerState('b2'), 'closed', 'a presign is no proof the provider is back');
+    signals.recordSuccess('b2', 'head', 90);
+    assert.strictEqual(signals.breakerState('b2'), 'closed', 'a HEAD that answers is');
+    for (let i = 0; i < 20; i++) signals.recordSuccess('r2', 'presign', 6000);
+    assert.strictEqual(signals.breakerOpen('r2'), false, 'slow signing (host CPU) is not a slow provider');
+    assert.ok(signals.latencyEWMA('r2', 'presign') > 0, 'presign latency is still measured');
+    for (let i = 0; i < 6; i++) signals.recordFailure('r2', 'presign', 1);
+    assert.strictEqual(signals.breakerOpen('r2'), true, 'a copy that cannot be signed cannot be served: failed presigns still count');
 
     signals.reset();
     console.log('placement-signals: all checks passed');
