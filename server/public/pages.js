@@ -159,7 +159,7 @@ function renderWatchPage(kind, record, readiness = null) {
     const nextSteps = showcase.nextSteps({ id: 'after-watch', title: 'What next?', items: [
         ownedByLive ? { what: 'Watch on OpenVibe.Live', text: 'Chat, the transcript and the people who were there.', href: canonical, to: 'live', from: 'media' } : null,
         sourceVod ? { what: 'See the VOD this clip came from', text: 'The full stream, auto-recorded.', href: sourceVod, from: 'media' } : null,
-        playable && !isVod ? { what: 'Cut a clip of your own', text: 'Go live on OpenVibe.Live and clip from the DVR.', href: 'https://openvibe.live/', to: 'live', from: 'media' } : null,
+        playable && !isVod ? { what: 'Go live from your browser', text: 'No OBS and no follower minimum: stream on OpenVibe.Live and clip the best moments.', href: 'https://openvibe.live/', to: 'live', from: 'media' } : null,
         { what: 'Browse everything on OpenVibe.Media', text: 'Every public video, clip and file on the network.', href: `${config.publicUrl}/`, from: 'media' },
     ].filter(Boolean) });
 

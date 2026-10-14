@@ -103,7 +103,7 @@ const http = require('http');
     assert.strictEqual((aiClip.match(/class="sc-next-item"/g) || []).length, 4, 'at most four cards');
     // A clip without a player offers no clip-cutting card.
     const pending = pages.renderWatchPage('clip', { ...vod, id: 11 }, { playable: false, reason: 'processing' });
-    assert.ok(!cards(pending).includes('https://openvibe.live/?ov_from=media'), 'no "cut a clip" card without a player');
+    assert.ok(!cards(pending).includes('https://openvibe.live/?ov_from=media'), 'no "go live" card without a player');
 
     // Paste pages are Community's: there is no viewer here (public/routes.js only redirects).
     assert.ok(!/\bfree\b/i.test(html + pageFrame.baseCss()), 'no cost claims in served HTML');
