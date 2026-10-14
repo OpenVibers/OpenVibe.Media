@@ -220,6 +220,7 @@ const ready = (async () => {
     // Media owns — its media objects — as common.resource-summary@1, for OpenVibe.Services to fan out and merge.
     // Loopback and a Network service token, like the other first-party routes (server/service-guard.js); mounted
     // ahead of /api/v1/:app/… so /api/v1/resources is never read as a tenant named "resources".
+    app.use('/api/v1/resources', require('./registry/resource-control').router({ guard: require('./service-guard').guard('media.resource.control') }));
     app.use('/api/v1/resources', require('./registry/resource-index').router({ guard: require('./service-guard').guard('media.resource.read') }));
     app.use('/api/v1/:app/views', require('./views/routes'));
     app.use('/api/v1/:app/vods', require('./vod/routes'));
