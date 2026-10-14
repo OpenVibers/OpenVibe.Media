@@ -37,6 +37,7 @@ const crypto = require('crypto');
         MEDIA_B2_APP_KEY: S('b2-app-key'),
         MEDIA_R2_ACCESS_KEY_ID: S('r2-access-key-id'),
         MEDIA_R2_SECRET_ACCESS_KEY: S('r2-secret-access-key'),
+        MEDIA_S3_KEY_SECRET: S('s3-key-secret'),      // encrypts the S3 access keys' secrets (server/s3/keys.js)
     };
     const sentinels = new Map([
         ...Object.entries(SECRET_ENV),

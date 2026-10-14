@@ -319,6 +319,10 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res)
         const namespace = named.namespace;
         const g = await namespaceGrant(req, 'write', namespace);
         if (!g.allowed) return problem(res, 403, g.code, g.reason);
+        // A named zone (ADR-031 amendment): it must exist and be active, and it holds private objects only.
+        const zone = named.zone ? await require('../s3/zones').byId(named.zone) : null;
+        if (named.zone && (!zone || zone.state !== 'active' || zone.namespace !== namespace)) return problem(res, 404, 'media.zone.unknown', `no active zone ${named.zone} in this environment`);
+        if (zone && visibility !== 'private') return problem(res, 422, 'media.zone.private', 'a named zone holds private objects only');
         const policy = await namespaces.effectivePolicy(req.appId, namespace);
         if (Array.isArray(policy.kinds) && !policy.kinds.includes(kind)) return problem(res, 422, 'media.namespace.policy_denied', `${namespace} takes kinds ${policy.kinds.join(', ') || '(none)'}`);
         if (Array.isArray(policy.visibilities) && !policy.visibilities.includes(visibility)) return problem(res, 422, 'media.namespace.policy_denied', `${namespace} takes visibilities ${policy.visibilities.join(', ') || '(none)'}`);
@@ -366,6 +370,8 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res)
                 app_id: req.appId, namespace, kind, owner_subject: subject, owner_app: req.appId, owner_user_id: userId,
                 visibility, lifecycle_status: 'uploading', mime_type: mime, size_bytes: size, metadata,
             });
+            // In a named zone the object lists over S3 under its id until a key is given (only S3 writes give one).
+            if (zone) await db.run('UPDATE media_objects SET zone_id = ?, object_key = ? WHERE id = ?', [zone.id, newId, newId]);
             await namespaces.reserve(await model.getObject(newId), size);
             return { id: newId };
         });

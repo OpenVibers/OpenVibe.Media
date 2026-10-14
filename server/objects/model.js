@@ -624,7 +624,7 @@ async function softDelete(obj, { by = null } = {}) {
 
 async function restore(obj) {
     const md = parseJson(obj.metadata, {});
-    if (md.purged_at) return null;
+    if (md.purged_at || md.no_restore) return null;     // a zone deletion's tombstones are never restored
     const back = md.pre_delete_status && md.pre_delete_status !== 'deleted' ? md.pre_delete_status : 'ready';
     delete md.pre_delete_status; delete md.retention_until; delete md.deleted_by;
     await db.run(`UPDATE media_objects SET lifecycle_status = ?, deleted_at = NULL, metadata = ?, updated_at = ov_now() WHERE id = ?`,
@@ -642,25 +642,32 @@ async function restore(obj) {
 async function purgeExpired({ retentionDays = config.objects.retentionDays } = {}) {
     const rows = await db.all(`SELECT * FROM media_objects WHERE lifecycle_status = 'deleted' AND legacy_ref IS NULL
                          AND deleted_at <= datetime('now', ?)`, [`-${Math.max(0, retentionDays)} days`]);
-    const root = path.resolve(config.objects.path) + path.sep;
     let purged = 0;
-    for (const obj of rows) {
-        const md = parseJson(obj.metadata, {});
-        if (md.purged_at || await isHeld(obj.id)) continue;
-        if ((await listLocations(obj.id)).some(l => l.provider === 'r2')) continue;
-        for (const l of await listLocations(obj.id)) {
-            if (l.provider === 'local' && path.resolve(l.key).startsWith(root)) { try { fs.unlinkSync(l.key); } catch { /* already gone */ } }
-            if (l.provider === 'local') await db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
-        }
-        // Its CMAF segments (F3.1) go with the bytes. A durable copy whose delete failed keeps its row, so this purge
-        // is not marked done and the next pass retries it rather than losing the key.
-        const tl = await require('./timeline').removeObject(obj.id);
-        if (tl.pending) continue;
-        md.purged_at = new Date().toISOString();
-        await db.run('UPDATE media_objects SET metadata = ?, updated_at = ov_now() WHERE id = ?', [JSON.stringify(md), obj.id]);
-        purged++;
-    }
+    for (const obj of rows) if (await purgeOne(obj)) purged++;
     return purged;
+}
+
+/**
+ * Erase one tombstoned native object's bytes now (purgeExpired's step, and a zone deletion's, which has no retention
+ * period): its local copies, then its CMAF segments; marked purged only when every copy is gone. A held object, one
+ * still in the R2 cache (tiering demotes it first) and a purged one are left alone. true when it is purged now.
+ */
+async function purgeOne(obj) {
+    const md = parseJson(obj.metadata, {});
+    if (obj.lifecycle_status !== 'deleted' || obj.legacy_ref || md.purged_at || await isHeld(obj.id)) return false;
+    if ((await listLocations(obj.id)).some(l => l.provider === 'r2')) return false;
+    const root = path.resolve(config.objects.path) + path.sep;
+    for (const l of await listLocations(obj.id)) {
+        if (l.provider === 'local' && path.resolve(l.key).startsWith(root)) { try { fs.unlinkSync(l.key); } catch { /* already gone */ } }
+        if (l.provider === 'local') await db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
+    }
+    // Its CMAF segments (F3.1) go with the bytes. A durable copy whose delete failed keeps its row, so this purge
+    // is not marked done and the next pass retries it rather than losing the key.
+    const tl = await require('./timeline').removeObject(obj.id);
+    if (tl.pending) return false;
+    md.purged_at = new Date().toISOString();
+    await db.run('UPDATE media_objects SET metadata = ?, updated_at = ov_now() WHERE id = ?', [JSON.stringify(md), obj.id]);
+    return true;
 }
 
 /**
@@ -731,6 +738,6 @@ module.exports = {
     vodProjection, clipProjection, fileProjection, thumbnailProjection,
     syncVod, syncClip, syncFile, sync, safeSync, withObject, withObjectOrRow, afterTierMove,
     placeHold, releaseHold, holdPublic,
-    objectFilePath, softDelete, restore, purgeExpired, usedBytes,
+    objectFilePath, softDelete, restore, purgeExpired, purgeOne, usedBytes,
     legacyPublicUrl, objectPublic,
 };
