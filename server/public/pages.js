@@ -15,6 +15,7 @@
 const path = require('path');
 const config = require('../config');
 const pageFrame = require('./page-frame');
+const showcase = require('openvibe-shared/showcase');
 
 const { esc, abs, snip, appUrl, isoDate, isoDuration, fmtDuration, fmtDate, SITE_NAME, NETWORK_URL } = pageFrame;
 
@@ -153,6 +154,15 @@ function renderWatchPage(kind, record, readiness = null) {
     <p class="state-detail">${esc(stateText)}</p>
   </div>`;
 
+    // Next steps on other OpenVibe products (Shared ADR 0002, D94): real pages that work signed out, no
+    // identity in the URL; the kit keeps at most four and appends ?ov_from=media.
+    const nextSteps = showcase.nextSteps({ id: 'after-watch', title: 'What next?', items: [
+        ownedByLive ? { what: 'Watch on OpenVibe.Live', text: 'Chat, the transcript and the people who were there.', href: canonical, to: 'live', from: 'media' } : null,
+        sourceVod ? { what: 'See the VOD this clip came from', text: 'The full stream, auto-recorded.', href: sourceVod, from: 'media' } : null,
+        playable && !isVod ? { what: 'Cut a clip of your own', text: 'Go live on OpenVibe.Live and clip from the DVR.', href: 'https://openvibe.live/', to: 'live', from: 'media' } : null,
+        { what: 'Browse everything on OpenVibe.Media', text: 'Every public video, clip and file on the network.', href: `${config.publicUrl}/`, from: 'media' },
+    ].filter(Boolean) });
+
     const body = `
   <h1>${esc(title)}</h1>
   <p class="meta">${metaBits.map(b => `<span>${b}</span>`).join('<span aria-hidden="true">·</span>')}</p>
@@ -163,7 +173,8 @@ function renderWatchPage(kind, record, readiness = null) {
     ${isVod ? `<a class="btn ghost" href="${esc(`${self}/transcript.json`)}">Transcript (JSON)</a>` : ''}
   </div>
   ${record.description ? `<p class="desc">${esc(snip(record.description, 2000))}</p>` : ''}
-  ${record.ai_overview && record.ai_overview !== record.description ? `<section><h2 class="h2">Overview</h2><p class="desc">${esc(snip(record.ai_overview, 3000))}</p></section>` : ''}`;
+  ${record.ai_overview && record.ai_overview !== record.description ? `<section><h2 class="h2">Overview</h2><p class="desc">${esc(snip(record.ai_overview, 3000))}</p></section>` : ''}
+  ${nextSteps}`;
 
     const css = `
   .player { background: #000; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); margin: 0 0 1rem; }
