@@ -67,6 +67,11 @@ const http = require('http');
     assert.ok(other.includes('<meta name="robots" content="index, follow">'));
     const unlisted = pages.renderWatchPage('clip', { ...vod, id: 8, app_id: 'games', visibility: 'unlisted' });
     assert.ok(unlisted.includes('content="noindex, follow"'), 'unlisted never indexes');
+    // The AI summary (openvibe-shared/seo pageSummary) on public watch pages: description, canonical, facts.
+    assert.ok(html.includes('<meta name="ai-summary" content="We built a thing &amp; it worked.">'), 'the watch page carries the AI summary');
+    assert.ok(html.includes('<li>Duration: 1:02:05</li>') && html.includes('<li>Views: 1,234</li>'), 'with its facts');
+    assert.ok(html.includes('"@type":"WebPage"') && html.includes('"url":"https://openvibe.live/vod/42"'), 'its WebPage names the canonical');
+    assert.ok(!unlisted.includes('name="ai-summary"'), 'unlisted pages carry none');
 
     // Paste pages are Community's: there is no viewer here (public/routes.js only redirects).
     assert.ok(!/\bfree\b/i.test(html + pageFrame.baseCss()), 'no cost claims in served HTML');
@@ -90,6 +95,7 @@ const http = require('http');
         assert.strictEqual(r.status, 200);
         assert.ok(r.headers['content-type'].startsWith('text/html'));
         assert.ok(r.body.includes('Router VOD') && r.body.includes('id="navbar-mount"'));
+        assert.ok(r.body.includes('<main id="main">'));
         // No Content-Security-Policy on a page response today: the shell composes inline scripts
         // (theme boot, navbar/runtime boot, footer init), so adding a policy later must allow them.
         assert.ok(!('content-security-policy' in r.headers), 'watch pages carry no CSP header');
@@ -107,8 +113,24 @@ const http = require('http');
         assert.ok(ld.some((x) => x['@type'] === 'WebSite'), 'the index names the site');
         const list = ld.find((x) => x['@type'] === 'ItemList');
         assert.ok(list && list.itemListElement.length >= 1 && list.itemListElement.every((it) => /^https?:\/\//.test(it.url)), 'the listed cards, with absolute URLs');
+        const h1s = (html) => (html.match(/<h1[\s>]/g) || []).length;
+        assert.ok(r.body.includes('class="sc-hero'), 'the index opens with the showcase hero');
+        assert.ok(/\/shared\/showcase\.css\?v=[0-9a-f]{12}/.test(r.body), 'the kit stylesheet, through ovServe');
+        assert.ok(r.body.includes('id="navbar-mount"') && r.body.includes('<main id="main">'));
+        assert.ok(r.body.includes('<meta name="ai-summary"'), 'the index carries the AI summary');
+        assert.ok(ld.some((x) => x['@type'] === 'WebPage'), 'the summary\'s WebPage');
+        assert.strictEqual(h1s(r.body), 1, 'exactly one <h1>');
+        assert.strictEqual((r.body.match(/<!doctype/gi) || []).length, 1, 'one document');
+        for (const k of ['all', 'videos', 'clips', 'emotes', 'sounds', 'thumbnails', 'files']) assert.ok(r.body.includes(`href="/?tab=${k}"`), `tab ${k}`);
+        assert.ok(r.body.includes('class="pager"') && r.body.includes('Page 1 /'), 'the pager');
+        assert.ok(r.body.includes('<meta name="robots" content="index, follow">'));
+        r = await get('/?tab=videos', nav);
+        assert.ok(!r.body.includes('sc-hero') && h1s(r.body) === 1, 'the hero is the front page\'s only');
         r = await get('/?page=2', nav);
         assert.ok(!r.body.includes('application/ld+json'), 'a later (noindex) page carries none');
+        assert.ok(!r.body.includes('sc-hero') && h1s(r.body) === 1, 'no hero after page 1');
+        assert.ok(r.body.includes('<meta name="robots" content="noindex, follow">'));
+        assert.ok(r.body.includes('Page 2 /') && r.body.includes('href="/?tab=all&page=1"'), 'the pager links back');
         r = await get('/og-image.png', {});
         assert.strictEqual(r.status, 200);
         assert.strictEqual(r.headers['content-type'], 'image/png');

@@ -13,8 +13,8 @@ const assert = require('assert');
         assert.ok(css.includes(`${k}:${DEFAULT_VARS[k]}`), `the page defines ${k} as the default theme does`);
     }
     assert.ok(!/url\(|;\s*}/.test(css.split('\n').find((l) => l.includes('--accent:')) || ''), 'only plain token values');
-    // The index page (browse.js) writes its own <style>: it carries the same tokens.
+    // The index page (browse.js) is composed by page-frame too, so it carries the same tokens.
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server', 'public', 'browse.js'), 'utf8');
-    assert.ok(/<style>\n\$\{DEFAULT_THEME_CSS \?/.test(src), 'browse.js puts the default tokens first in its style');
+    assert.ok(/pageFrame\.page\(/.test(src) && !/<!DOCTYPE/i.test(src), 'browse.js renders through page-frame, not its own document');
     console.log('theme default: all checks passed');
 })().catch((err) => { console.error(err); process.exit(1); });

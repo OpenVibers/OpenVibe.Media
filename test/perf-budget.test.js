@@ -18,10 +18,12 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
         jsFiles: 4,   // 3
         // 2026-09-27: theme-loader (44.3 KB, 8.3 brotli) now comes from Media's own /shared (D42) instead of
         // openvibe.network, so it is counted here; the page itself did not grow.
-        jsRawKB: 215,   // 197.7
-        jsBrotliKB: 50,   // 45.6
-        cssFiles: 2,   // 1 (Font Awesome, cross-origin)
-        cssRawKB: 10,   // 0 same-origin
+        // 2026-10-13 (T11): the index is composed by openvibe-shared/shell like the watch pages, which adds the
+        // shared web-runtime.js; the showcase stylesheet (same-origin) replaces Font Awesome (cross-origin).
+        jsRawKB: 240,   // 230.9 (was 197.7)
+        jsBrotliKB: 56,   // 53.7 (was 45.6)
+        cssFiles: 2,   // 1 (showcase.css)
+        cssRawKB: 13,   // 11.6 same-origin (showcase.css; was 0)
         externalFiles: 3,   // 2
     };
 

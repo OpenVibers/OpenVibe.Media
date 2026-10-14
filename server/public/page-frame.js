@@ -82,6 +82,8 @@ function extraHead(seo, css) {
     ].filter(Boolean).join('\n') : '';
     return [
         appIcon.headTags({ site: 'media', iconBase: '/assets' }),
+        // openvibe-shared/showcase's stylesheet (the index's hero; the kit's sections on any page).
+        `<link rel="stylesheet" href="${ovServe.url('showcase.css')}">`,
         `<style>${baseCss()}${css}</style>`,
         videoTags,
         // The default share card is 1200×630; a media thumbnail carries its own dimensions.
@@ -158,31 +160,6 @@ function footerBootScript(footer) {
     return `<script>window.addEventListener('DOMContentLoaded', function () { try { OpenVibeFooter.init(${jsonForScript(footerOptions(footer))}); } catch (e) { /* footer optional */ } });</script>`;
 }
 
-/**
- * The scripts that mount the navbar + footer, after the page content so a
- * slow Network never blocks the body. Used by the hand-written browse index
- * (server/public/browse.js); the shell pages get the same navbar options through
- * shell.page() plus footerBootScript() (the shell does not initialise the footer),
- * and the footer is rendered by frame.footer.
- */
-function frameScripts({ history, footer } = {}) {
-    const navOpts = navOptions({ history });
-    const footOpts = footerOptions(footer);
-    return `<script src="${ovServe.url('navbar.js')}" defer></script>
-<script src="${ovServe.url('footer.js')}" defer></script>
-<script>
-(function () {
-  var tries = 0;
-  function boot() {
-    if (!window.OpenVibeNavbar || !window.OpenVibeFooter) { if (++tries < 60) setTimeout(boot, 100); return; }
-    try { OpenVibeNavbar.init(${jsonForScript(navOpts)}); } catch (e) { /* navbar optional */ }
-    try { OpenVibeFooter.init(${jsonForScript(footOpts)}); } catch (e) { /* footer optional */ }
-  }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
-})();
-</script>`;
-}
-
 function defaultFooterLinks() {
     return [
         {
@@ -204,9 +181,11 @@ function defaultFooterLinks() {
  * `body` is the <main> contents. The shell emits the theme-loader/web-runtime/navbar/footer scripts,
  * the no-JavaScript nav and the shared footer; `history` and `footer` become the navbar init options
  * and the server-rendered footer. The site's app icon, palette and Open Graph video tags ride in
- * through the shell's `head`.
+ * through the shell's `head`. `summary` is the page's AI summary (openvibe-shared/seo pageSummary): a
+ * string, or { summary, url, facts: [[label, value]], updated }; the url defaults to the canonical.
  */
-function page({ seo, css = '', body, history, footer }) {
+function page({ seo, css = '', body, history, footer, summary }) {
+    const sum = summary == null ? null : typeof summary === 'object' ? summary : { summary };
     const html = shell.page({
         name: SITE_NAME,
         lang: 'en',
@@ -218,8 +197,9 @@ function page({ seo, css = '', body, history, footer }) {
         type: seo.ogType,
         robots: seo.robots || 'index, follow',
         jsonLd: seo.jsonLd,
+        ...(sum ? { summary: sum.summary, facts: sum.facts, url: sum.url, updated: sum.updated } : {}),
         head: extraHead(seo, css) + footerBootScript(footer),
-        body: `<div id="navbar-mount"></div>\n<main>\n${body}\n</main>`,
+        body: `<div id="navbar-mount"></div>\n<main id="main">\n${body}\n</main>`,
         navLinks: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }],
         navbar: navOptions({ history }),
         footer: footerOptions(footer),
@@ -236,5 +216,5 @@ function page({ seo, css = '', body, history, footer }) {
 module.exports = {
     NETWORK_URL, SITE_NAME, DEFAULT_OG_IMAGE, APP_PUBLIC_URLS, appUrl,
     esc, abs, snip, isoDate, isoDuration, fmtDuration, fmtDate, jsonForScript,
-    extraHead, baseCss, frameScripts, navOptions, footerOptions, defaultFooterLinks, page, DEFAULT_THEME_CSS,
+    extraHead, baseCss, navOptions, footerOptions, defaultFooterLinks, page, DEFAULT_THEME_CSS,
 };
