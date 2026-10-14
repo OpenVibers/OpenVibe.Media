@@ -59,6 +59,7 @@ key ([Tenancy & auth](#tenancy--auth)).
 | Capability | Audience | Route | Notes |
 |---|---|---|---|
 | `media.resource.read` | first-party | `GET /api/v1/resources`, `GET /api/v1/resources/:ovrn` | the authority resource index ([Resource index](#resource-index-apiv1resources-first-party)). Active in openvibe-contracts since 0.108.0; the route enforces it (a Network service token holding it, loopback, audience `openvibe.media`) |
+| `media.resource.control` | first-party | `POST /api/v1/resources/control` | `delete` a person's (or their project's) object: the soft delete, restorable until its retention ends ([Resource index](#resource-index-apiv1resources-first-party)). Active in openvibe-contracts since 0.169.0 |
 
 Called elsewhere, as the service principal `media` (the OAuth client `media`):
 
@@ -96,6 +97,8 @@ server/
   files/routes.js        /api/v1/:app/files
   admin/routes.js        /api/v1/:app/admin/storage (disk, tiers, buckets, bulk ops)
   registry/resource-index.js  the authority resource index (/api/v1/resources; common.resource-summary@1, ADR-048)
+  registry/resource-control.js  the control API (POST /api/v1/resources/control; delete an object, ADR-048)
+  registry/projects.js        whether a person administers a project (Network's internal membership read)
   thumbnails/            thumbnail service + /api/v1/:app/thumbnails
   public/routes.js       public /v /c /p /t /f
   me/                    the object explorer: /me and /api/v2/me (a signed-in person's own objects, uploads,
@@ -123,7 +126,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v4.1.3, openvibe-contracts v0.143.0, openvibe-sdk v0.44.0: pinned release tarballs, installed by npm)
+(openvibe-shared v4.1.3, openvibe-contracts v0.169.0, openvibe-sdk v0.44.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -403,6 +406,15 @@ its objects carry no `project_id` and no `ovrn`. The summary's `ovrn` is compose
 (`ovrn:media:<project_id>:object/<med_…>`); `GET /api/v1/resources/:ovrn` reads one by that name, and only a
 resource whose computed name equals the one asked for answers. `owner` is a `subject-ref` when the object
 stores a `usr_` owner. `test/resource-index.test.js`.
+
+**Control** (`media.resource.control`, plan T13 step 10): `POST /api/v1/resources/control` takes a
+`common.resource-control-request@1` from OpenVibe.Services (same loopback service-token check, and the caller must
+be a `svc:` service) and answers a `common.resource-control-result@1`. The one action is `delete`: the API's soft
+delete (`restorable_until` in the result; restore through `POST /api/v1/objects/:id/restore`). A held object and a
+legacy-managed one (a VOD, clip or file) are refused. The object's owner may act, and so may an admin or owner of its
+project (asked of Network with `network.project.member.read`, `server/registry/projects.js`); anyone else gets
+`resources.unknown_resource`. Dry runs; the first answer per (caller, project, key) is kept in `media_control_log` and
+returned for a repeat. `test/resource-control.test.js`.
 
 ## Restore drills (`MEDIA_DRILL=1`)
 

@@ -26,12 +26,12 @@ const quiet = { log() {}, warn() {}, error() {} };
 
     // Within the window after 0001 the drop waits, and nothing after it runs.
     const held = await db.migrate({ dir: MIGRATIONS, log: quiet });
-    assert.deepStrictEqual(held.held.map((h) => h.id), ['0007'], 'the contract waits for its N-1 window');
+    assert.strictEqual(held.held.map((h) => h.id)[0], '0007', 'the contract waits for its N-1 window (and every later migration behind it)');
     assert.ok(await db.value("SELECT to_regclass('pastes')::text"), 'the tables are still there while it waits');
 
     // A week later it runs.
     const later = await db.migrate({ dir: MIGRATIONS, now: () => Date.now() + 8 * 86400000, log: quiet });
-    assert.deepStrictEqual(later.applied.map((a) => a.id), ['0007']);
+    assert.strictEqual(later.applied.map((a) => a.id)[0], '0007');
     for (const t of ['pastes', 'paste_likes', 'paste_comments']) {
         assert.strictEqual(await db.value(`SELECT to_regclass('${t}')::text`), null, `${t} is dropped`);
     }
