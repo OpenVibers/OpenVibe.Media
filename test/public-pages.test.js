@@ -73,6 +73,38 @@ const http = require('http');
     assert.ok(html.includes('"@type":"WebPage"') && html.includes('"url":"https://openvibe.live/vod/42"'), 'its WebPage names the canonical');
     assert.ok(!unlisted.includes('name="ai-summary"'), 'unlisted pages carry none');
 
+    // ── Next-step cards (Shared ADR 0002, D94): real, signed-out targets, ov_from=media, at most four ──
+    const config = require('../server/config');
+    const cards = (page) => [...page.matchAll(/<a class="sc-next-main" href="([^"]+)"/g)].map((m) => m[1].replace(/&amp;/g, '&'));
+    const checkCards = (page, label) => {
+        const hrefs = cards(page);
+        assert.ok(hrefs.length >= 1 && hrefs.length <= 4, `${label}: one to four cards (${hrefs.length})`);
+        hrefs.forEach((href) => {
+            assert.ok(/^https:\/\/openvibe\.[a-z]+(\/|$)/.test(href) || href.startsWith('/') || href.startsWith(`${config.publicUrl}/`),
+                `${label}: ${href} is an OpenVibe zone, site-relative or this site`);
+            assert.strictEqual(new URL(href, config.publicUrl).search, '?ov_from=media', `${label}: ${href} carries ov_from=media and no other query`);
+        });
+        return hrefs;
+    };
+    // A playable public Live-owned VOD: the Live card (the canonical) and the index; no clip-cutting card on a VOD.
+    assert.ok(html.includes('class="sc-sec sc-next"') && html.includes('<ol class="sc-next-list">'), 'a playable public VOD page carries the next-step cards');
+    assert.deepStrictEqual(checkCards(html, 'Live VOD'), ['https://openvibe.live/vod/42?ov_from=media', 'https://media.test/?ov_from=media'],
+        'a Live-owned item\'s card is its canonical; the index card is always there');
+    // A VOD another app owns: only the index.
+    assert.deepStrictEqual(checkCards(pages.renderWatchPage('vod', { ...vod, id: 43, app_id: 'games' }), 'games VOD'), ['https://media.test/?ov_from=media']);
+    // A playable person-cut clip on Live: Live, cut your own, the index.
+    assert.deepStrictEqual(checkCards(pages.renderWatchPage('clip', { ...vod, id: 9 }), 'Live clip'),
+        ['https://openvibe.live/clip/9?ov_from=media', 'https://openvibe.live/?ov_from=media', 'https://media.test/?ov_from=media']);
+    // An AI clip with a source VOD: every card applies, and four is the most that render.
+    const aiClip = pages.renderWatchPage('clip', { ...vod, id: 10, auto_generated: 1, vod_id: 42 });
+    assert.deepStrictEqual(checkCards(aiClip, 'AI clip'), ['https://openvibe.live/clip/10?ov_from=media', 'https://media.test/v/42?ov_from=media',
+        'https://openvibe.live/?ov_from=media', 'https://media.test/?ov_from=media'], 'a clip with a source VOD shows the VOD card');
+    assert.ok(aiClip.includes('See the VOD this clip came from'));
+    assert.strictEqual((aiClip.match(/class="sc-next-item"/g) || []).length, 4, 'at most four cards');
+    // A clip without a player offers no clip-cutting card.
+    const pending = pages.renderWatchPage('clip', { ...vod, id: 11 }, { playable: false, reason: 'processing' });
+    assert.ok(!cards(pending).includes('https://openvibe.live/?ov_from=media'), 'no "go live" card without a player');
+
     // Paste pages are Community's: there is no viewer here (public/routes.js only redirects).
     assert.ok(!/\bfree\b/i.test(html + pageFrame.baseCss()), 'no cost claims in served HTML');
 
