@@ -152,6 +152,33 @@ const assert = require('assert');
     assert.notStrictEqual(router.sessionFor(reqA, 'vod:1'), router.sessionFor(reqA, 'vod:2'));
     assert.ok(!router.sessionFor(reqA, 'vod:1').includes('198.51'), 'the key is a hash, not the address');
 
+    // Losing a provider fails over (plan §9 gate). Its failed live health check (a HEAD each minute) moves reads to
+    // the next copy at once; a read the origin shield could not fetch avoids that provider; and a copy whose only
+    // provider is unhealthy is still served as the last resort: an outage never makes a one-copy object vanish.
+    router.reset(); signals.reset();
+    const both = () => [{ provider: 'b2', state: 'present', key: 'k' }, { provider: 'r2', state: 'present', key: 'k' }];
+    providers._setHealth('r2', 'r2 HeadBucket failed: TimeoutError');
+    decision = await router.route({ locations: both(), presign: false });
+    assert.deepStrictEqual([decision.provider, decision.reason], ['b2', 'canonical-fallback'], `r2 failed its health check → b2: ${JSON.stringify(decision)}`);
+    decision = await router.route({ locations: [{ provider: 'r2', state: 'present', key: 'k' }], presign: false });
+    assert.deepStrictEqual([decision.provider, decision.reason], ['r2', 'last-resort'], `the only copy is still served: ${JSON.stringify(decision)}`);
+    providers._setHealth('r2', null);
+    decision = await router.route({ locations: both(), presign: false });
+    assert.strictEqual(decision.provider, 'r2', 'a passing check puts it back');
+    decision = await router.route({ locations: both(), presign: false, exclude: ['r2'] });
+    assert.deepStrictEqual([decision.provider, decision.fallbacks], ['b2', []], `a provider the shield could not fetch from is avoided: ${JSON.stringify(decision)}`);
+    decision = await router.route({ locations: [{ provider: 'b2', state: 'present', key: 'k' }], presign: false, exclude: ['b2'] });
+    assert.deepStrictEqual([decision.provider, decision.reason], ['b2', 'last-resort'], 'avoided, but the last copy');
+    for (let i = 0; i < 10; i++) signals.recordFailure('b2', 'head', 50);
+    decision = await router.route({ locations: [{ provider: 'b2', state: 'present', key: 'k' }], presign: false });
+    assert.deepStrictEqual([decision.provider, decision.reason], ['b2', 'last-resort'], 'an open breaker on the only copy: last resort, not a 404');
+    decision = await router.route({ locations: [{ provider: 'b2', state: 'corrupt', key: 'k' }, { provider: 'r2', state: 'pending', key: 'k' }], presign: false });
+    assert.strictEqual(decision.provider, null, 'never a corrupt or unverified copy, even as a last resort');
+    providers.isConfigured = (name) => name === 'local' || name === 'b2';
+    decision = await router.route({ locations: [{ provider: 'r2', state: 'present', key: 'k' }], presign: false });
+    assert.strictEqual(decision.provider, null, 'never an unconfigured provider, even as a last resort');
+    signals.reset(); router.reset();
+
     providers.isConfigured = realIsConfigured;
     console.log('placement-router: all checks passed');
     process.exit(0);

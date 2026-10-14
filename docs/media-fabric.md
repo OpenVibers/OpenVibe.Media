@@ -483,6 +483,14 @@ Cache-Control, nosniff and noindex, and no B2 header. VOD bytes carry no CORS he
   through the shared cache (anyone with the link may read them; `/o` answers `public, max-age=3600` for them), unlisted
   VODs answer `private, max-age=0`.
 - **Private and sandbox bytes never enter the shield.**
+- **Losing a provider fails over (2026-10-14).** A failed live health check (the HEAD each minute) moves reads to the
+  next copy at once; a presign is local signing, so its successes no longer dilute the breaker's error rate or close it
+  (during an outage every viewer's presign succeeded and the breaker never opened). A first slice the shield cannot
+  fetch from B2, with nothing stale cached, goes back to Node through the edge's `@shield_failed_b2` location
+  (`X-Media-Shield-Failed: b2`, cleared on every location a client reaches); Node records the failure and serves another
+  copy. A copy whose only provider is unhealthy is still served as the last resort (`reason: last-resort`): an outage
+  never makes a one-copy object vanish, and a corrupt, missing or unverified copy is never served at all. A second CDN
+  path is F5's (Bunny needs an account).
 - **Sizing:** one disk with recordings: `max_size=5g`, `min_free=20g` (the recording guardian warns at 15 GB), `inactive=24h`.
 - **Purge:** deleting a shielded object refreshes each of its slices (four at a time) through a loopback-only listener
   (`127.0.0.1:8479`, `allow 127.0.0.1; deny all`, `proxy_cache_bypass`), so the provider's 404 replaces the cached bytes

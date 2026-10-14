@@ -12,7 +12,10 @@
  *
  * The breaker opens when the 1-minute error rate exceeds 50% over at least 5 samples,
  * or the 5-minute p95 exceeds 5 s. Half-open after 60 s: one trial; on success it
- * closes, on failure it re-opens. `providerHealthy` in vod-storage.js reads this so a
+ * closes, on failure it re-opens. A presign is local SigV4 signing: its successes say nothing about the
+ * provider, so they never count toward the error rate or p95 and never close a breaker (otherwise every
+ * viewer's presign during an outage diluted the failing HEADs, and the breaker never opened).
+ * A failed presign still counts: a copy that cannot be signed cannot be served. `providerHealthy` in vod-storage.js reads this so a
  * dead provider is skipped without waiting for the next boot probe.
  *
  * In-memory only: signals are observed on the actual read path and the next boot
@@ -42,6 +45,9 @@ const breakers = new Map();     // provider -> { openAt, halfOpenAt?, halfOpenIn
 const listeners = new Set();    // (provider) => void  — fired when a breaker flips
 
 function key(provider, op) { return `${provider}:${op || 'op'}`; }
+
+// Ops that never touch the provider: their successes are not evidence of its health.
+const LOCAL_OPS = new Set(['presign']);
 
 function getSignal(provider, op) {
     const k = key(provider, op);
@@ -74,8 +80,10 @@ function ewmaFor(provider) {
 function push(provider, op, ok, ms) {
     const s = getSignal(provider, op);
     if (ok && ms > 0) s.ewmaMs = s.ewmaMs ? (EWMA_ALPHA * ms + (1 - EWMA_ALPHA) * s.ewmaMs) : ms;
-    s.samples.push({ t: nowMs(), ok: !!ok, ms: Number(ms) || 0 });
+    const local = !!ok && LOCAL_OPS.has(op);
+    s.samples.push({ t: nowMs(), ok: !!ok, ms: Number(ms) || 0, local });
     if (s.samples.length > SAMPLE_LIMIT) s.samples.splice(0, s.samples.length - SAMPLE_LIMIT);
+    if (local) return;
     if (ok) onSuccess(provider); else onFailure(provider);
     // Slow success (high p95) is itself a degradation signal: check every push.
     const stats5m = statsFor(provider, null, '5m');
@@ -92,7 +100,7 @@ function statsFor(provider, _opUnused, windowKey) {
     const cutoff = nowMs() - windowMs;
     let total = 0, errors = 0, latencies = [];
     for (const sample of allSamplesFor(provider)) {
-        if (sample.t < cutoff) continue;
+        if (sample.t < cutoff || sample.local) continue;
         total++;
         if (!sample.ok) errors++; else latencies.push(sample.ms);
     }

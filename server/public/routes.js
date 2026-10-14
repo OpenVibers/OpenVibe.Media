@@ -192,13 +192,15 @@ async function serveMediaRecord(kind, record, req, res) {
     // requests are handled natively by the object store.
     if (!filePath && vodStorage.isRemote(record)) {
         const router = require('../placement/router');
-        const plan = await vodStorage.resolvePlayback(record, { session: router.sessionFor(req, `${kind}:${record.id}`) });
+        // The shield could not fetch this read (nginx handed it back): another copy, and no shield for this one.
+        const shieldFailed = require('../placement/shield').failedOf(req);
+        const plan = await vodStorage.resolvePlayback(record, { session: router.sessionFor(req, `${kind}:${record.id}`), exclude: shieldFailed ? [shieldFailed] : [] });
         if (plan?.kind === 'redirect') {
             // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through
             // its slice cache with a long internal presign (only on the DNS-only edge host); everything else keeps the
             // short-lived 302.
             const shield = require('../placement/shield');
-            const shieldable = shield.enabled(plan.provider) && visibility !== 'private' && !record.is_recording;
+            const shieldable = shield.enabled(plan.provider) && plan.provider !== shieldFailed && visibility !== 'private' && !record.is_recording;
             const edge = shieldable && shield.toEdge(req, plan.provider);
             if (edge) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, edge); }
             if (shieldable && shield.onEdge(req)) {

@@ -32,6 +32,13 @@
  *                                                     edge, where the bytes come from the shield
  *   target({ provider, url, visibility, sandbox, edge })  → '/_media_shield/b2/<bucket>/<key>?<signed query>' | null
  *   send(res, target, headers)                      → the 200 + X-Accel-Redirect answer
+ *   failedOf(req)                                   → the provider the shield could not fetch this read from, or null:
+ *                                                     nginx hands a failed first slice (502/503/504 with nothing stale
+ *                                                     cached) back to Node with `X-Media-Shield-Failed`, set only by the
+ *                                                     edge's @shield_failed location (every other location clears it).
+ *                                                     The route records the failure, skips the shield and asks the
+ *                                                     router for another copy (`exclude`), so losing the provider moves
+ *                                                     the read to the next copy instead of answering 502.
  *   await purge({ provider, key, size, presign })   → refreshes every cached slice of a deleted or replaced object
  */
 'use strict';
@@ -60,6 +67,16 @@ function toEdge(req, provider) {
     if (!edge || !enabled(provider) || onEdge(req)) return null;
     const p = String((req && (req.originalUrl || req.url)) || '');
     return p.startsWith('/') && !p.startsWith('//') ? `https://${edge}${p}` : null;
+}
+
+const FAILED_HEADER = 'x-media-shield-failed';   // set by the edge's @shield_failed location only (nginx)
+/** The shielded provider whose fetch failed for this read, on the edge only (a client cannot reach it with the header). */
+function failedOf(req) {
+    if (!onEdge(req)) return null;
+    const v = String((typeof req.get === 'function' && req.get(FAILED_HEADER)) || '').trim().toLowerCase();
+    if (!v || !enabled(v)) return null;
+    try { require('./signals').recordFailure(v, 'get', 0); } catch { /* */ }
+    return v;
 }
 
 /** The internal location for one presigned URL, or null when this read must not go through the shield. `edge` is
@@ -113,4 +130,4 @@ async function purge({ provider, key, size, presign, fetchImpl = globalThis.fetc
     return { purged, failed, slices };
 }
 
-module.exports = { target, send, purge, enabled, providers, onEdge, edgeOf, toEdge, SLICE_BYTES, SHIELD_TTL_SECONDS, B2_UPSTREAM_HOST, EDGE_HEADER };
+module.exports = { target, send, purge, enabled, providers, onEdge, edgeOf, toEdge, failedOf, SLICE_BYTES, SHIELD_TTL_SECONDS, B2_UPSTREAM_HOST, EDGE_HEADER, FAILED_HEADER };
