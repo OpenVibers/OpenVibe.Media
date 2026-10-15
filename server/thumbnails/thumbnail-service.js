@@ -290,11 +290,30 @@ function saveLiveThumbnail(appId, streamId, imageData) {
 }
 
 // ── Serve Thumbnail File (public /t/:id) ─────────────────────
-function serveThumbnail(req, res) {
+let _variants = null;
+const variants = () => _variants || (_variants = require('./variants').createVariants({
+    dir: config.thumbnails.variants.path, maxBytes: config.thumbnails.variants.maxBytes, concurrency: config.thumbnails.variants.concurrency,
+}));
+
+/** Stream one file with the thumbnail headers. */
+function sendFile(res, filePath, size, contentType, cacheControl) {
+    res.writeHead(200, { 'Content-Type': contentType, 'Content-Length': size, 'Cache-Control': cacheControl, 'X-Robots-Tag': 'noindex' });
+    const stream = fs.createReadStream(filePath);
+    const done = () => { try { stream.destroy(); } catch { /* */ } };
+    res.on('close', done); res.on('finish', done); res.on('error', done);
+    stream.on('error', () => { try { res.destroy(); } catch { /* */ } });
+    stream.pipe(res);
+}
+
+async function serveThumbnail(req, res) {
     if (require('../drill').refuseBytes(res)) return;   // a restore drill serves no stored file
     try {
         const filename = path.basename(req.params.id || req.params.filename || ''); // prevent traversal
         const filePath = path.join(THUMB_DIR, filename);
+        // ?w=&fmt= asks for a variant (Media Fabric F4): a bad value is a 400; the original answers when no variant is
+        // asked, the cache is busy, or the variant cannot be made.
+        const spec = require('./variants').parse(req.query);
+        if (spec && spec.error) return res.status(400).json({ error: spec.error });
 
         if (!filename || !fs.existsSync(filePath)) {
             // Return a 1x1 transparent pixel JPEG as fallback
@@ -321,19 +340,16 @@ function serveThumbnail(req, res) {
         const isLive = filename.startsWith('stream-');
         const cacheControl = isLive ? 'public, max-age=30' : 'public, max-age=604800, immutable';
 
-        res.writeHead(200, {
-            'Content-Type': contentType,
-            'Content-Length': stat.size,
-            'Cache-Control': cacheControl,
-            'X-Robots-Tag': 'noindex',
-        });
-        const stream = fs.createReadStream(filePath);
-        const done = () => { try { stream.destroy(); } catch { /* */ } };
-        res.on('close', done); res.on('finish', done); res.on('error', done);
-        stream.on('error', () => { try { res.destroy(); } catch { /* */ } });
-        stream.pipe(res);
+        if (spec) {
+            let v = null;
+            try { v = await variants().get(filePath, spec); } catch { v = null; }
+            if (v) return sendFile(res, v.file, v.size, v.type, cacheControl);
+            // Busy or unmakeable: the original, cached briefly so the variant is made on a later request.
+            return sendFile(res, filePath, stat.size, contentType, 'public, max-age=60');
+        }
+        sendFile(res, filePath, stat.size, contentType, cacheControl);
     } catch (err) {
-        res.status(500).json({ error: 'Failed to serve thumbnail' });
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to serve thumbnail' });
     }
 }
 
