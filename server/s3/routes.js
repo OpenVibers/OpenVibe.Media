@@ -17,7 +17,8 @@
  *   GET    /<zone>/<key>             GetObject (Range)
  *   HEAD   /<zone>/<key>             HeadObject
  *   DELETE /<zone>/<key>             DeleteObject (Media's soft delete; refused under a retention hold)
- *   everything else                  NotImplemented (copy, part copy, ACLs, policies, versioning, bucket deletion)
+ *   PUT    /<zone>/<key> + x-amz-copy-source   CopyObject; with ?partNumber&uploadId UploadPartCopy (server-side copies)
+ *   everything else                  NotImplemented (ACLs, policies, versioning, bucket deletion)
  *
  * Every request is signed (SigV4, header or presigned) with an access key (server/s3/keys.js). The key fixes the
  * project and environment, so a bucket name resolves to one zone id of that environment (server/s3/zones.js); a key
