@@ -167,6 +167,34 @@ async function enqueue(eventType, appId, subject, data, priority) {
 }
 
 /**
+ * Queue one closed hour of a zone's usage (media.usage.recorded, common.usage-recorded@1; server/s3/usage.js) inside the
+ * transaction that marks it sent. Unlike outcomes, sandbox zones count too: the rollup says its env, and only the
+ * project's usage views (Network, Zone) read it. Subject: the project.
+ */
+async function recordUsage(payload) {
+    if (!outbox) return null;
+    const env = await outbox.enqueue(inTx(), {
+        event_type: 'media.usage.recorded',
+        actor: { type: 'service', id: 'media' },
+        subject: { type: 'project', id: payload.project_id },
+        visibility: 'internal',
+        priority: 'low',
+        payload,
+    });
+    stats.queued++;
+    return env;
+}
+
+/** Does a rollup match media.usage.recorded@1 and name a resource of its own project? { valid, errors } */
+function checkUsage(payload) {
+    const contracts = require('openvibe-contracts');
+    const v = contracts.validate('media.usage.recorded@1', payload);
+    if (!v.valid) return { valid: false, errors: v.errors.map((e) => `${e.path || '/'} ${e.message}`).join('; ') };
+    const c = contracts.usage && contracts.usage.checkUsageRecorded ? contracts.usage.checkUsageRecorded(payload) : { valid: true, errors: [] };
+    return c.valid ? { valid: true, errors: '' } : { valid: false, errors: c.errors.map((e) => `${e.path || '/'} ${e.message}`).join('; ') };
+}
+
+/**
  * Queue a Search document or tombstone (media.index_document.*, ./public/search-documents.js) as is:
  * no tenant field, low priority. Same rule as record(): inside the transaction that records the push.
  */
@@ -285,4 +313,4 @@ function _reset() {
     stats.queued = 0; stats.lastError = null;
 }
 
-module.exports = { init, initWriter, record, recordPlacement, recordIndexDocument, recordModeration, recordJob, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, PLACEMENT_TYPES, JOB_TRANSITIONS, _reset };
+module.exports = { init, initWriter, record, recordPlacement, recordIndexDocument, recordModeration, recordJob, recordUsage, checkUsage, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, PLACEMENT_TYPES, JOB_TRANSITIONS, _reset };

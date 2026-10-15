@@ -296,6 +296,15 @@ const ready = (async () => {
         every(60 * 1000, async () => {
             try { const r = await require('./s3/zones').sweepDeleting(); if (r.tombstoned || r.purged) console.log(`[Zones] ${r.zones} deleting zone(s): ${r.tombstoned} tombstoned, ${r.purged} purged`); } catch (err) { console.warn('[Zones] deletion sweep:', err.message); }
         });
+        // Per-zone usage on the S3 surface (ADR-031 section 8): counts flushed every 30 s, stored bytes sampled every
+        // minute, and every closed hour sent as media.usage.recorded (server/s3/usage.js).
+        const s3usage = require('./s3/usage');
+        every(30 * 1000, async () => { try { await s3usage.flush(); } catch (err) { console.warn('[S3] usage flush:', err.message); } });
+        every(60 * 1000, async () => { try { await s3usage.sample(); } catch (err) { console.warn('[S3] usage sample:', err.message); } });
+        every(5 * 60 * 1000, async () => {
+            try { const n = await s3usage.emit(); if (n) console.log(`[S3] ${n} usage rollup(s) sent`); } catch (err) { console.warn('[S3] usage rollups:', err.message); }
+            try { await s3usage.prune(); } catch (err) { console.warn('[S3] usage prune:', err.message); }
+        });
         every(60 * 60 * 1000, () => thumbService.cleanupOldThumbnails());  // stale live thumbs
         // Object model: purge native objects whose soft-delete retention has passed (held ones are kept).
         every(60 * 60 * 1000, async () => {
@@ -389,6 +398,7 @@ const ready = (async () => {
             () => require('./events')._reset(),
             () => { const v = require('./actor-limits').valkey(); if (v) v.close().catch(() => {}); },
             () => { for (const t of timers) clearInterval(t); },
+            () => require('./s3/usage').flush().catch((err) => console.warn('[S3] usage flush at stop:', err.message)),
         ],
         close: [() => db.close()],
         deadlineMs: 70000,
