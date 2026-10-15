@@ -60,6 +60,9 @@ key ([Tenancy & auth](#tenancy--auth)).
 |---|---|---|---|
 | `media.resource.read` | first-party | `GET /api/v1/resources`, `GET /api/v1/resources/:ovrn` | the authority resource index ([Resource index](#resource-index-apiv1resources-first-party)). Active in openvibe-contracts since 0.108.0; the route enforces it (a Network service token holding it, loopback, audience `openvibe.media`) |
 | `media.resource.control` | first-party | `POST /api/v1/resources/control` | `delete` a person's (or their project's) object: the soft delete, restorable until its retention ends ([Resource index](#resource-index-apiv1resources-first-party)). Active in openvibe-contracts since 0.169.0 |
+| `media.object.s3` | public (an access key) | the S3 surface at `s3.openvibe.media` ([docs/s3.md](docs/s3.md)) | PutObject, GetObject, HeadObject, DeleteObject(s), ListObjects(V2), ListBuckets, HeadBucket, presigned GET/PUT; a bucket is a zone |
+| `media.access_key.manage` | first-party | `POST/GET/DELETE /api/v1/projects/:project/access-keys` | S3 access keys for a project admin, the secret shown once (Zone's console, Services) |
+| `media.zone.provision` | first-party (Zone) | `PUT/GET /internal/zones/:id` | OpenVibe.Zone's zone records, applied by revision; usage and deletion progress |
 
 Called elsewhere, as the service principal `media` (the OAuth client `media`):
 
@@ -126,7 +129,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v4.1.3, openvibe-contracts v0.169.0, openvibe-sdk v0.44.0: pinned release tarballs, installed by npm)
+(openvibe-shared v4.1.3, openvibe-contracts v0.173.0, openvibe-sdk v0.44.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -585,6 +588,12 @@ objects openly, private ones only with a valid signature from
 without a signature is a 404 like any other private one). A native object in the
 R2 popularity cache redirects to its verified R2 copy; a GET of a native object
 counts its viewer for the day, identifying no one (see Storage tiering).
+
+## S3 surface and zones
+
+Media answers a subset of S3 at `https://s3.openvibe.media` (ADR-031). Each bucket is a zone of a project environment, and zones are managed by OpenVibe.Zone. Media issues and verifies the `ovk_` access keys, and every object stays an ordinary Media object.
+
+See [docs/s3.md](docs/s3.md) for the operations, the rules and the tests.
 
 ## Object model and API v2
 

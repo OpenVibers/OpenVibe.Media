@@ -31,6 +31,7 @@ const db = require('../db/database');
 const config = require('../config');
 
 const SEGMENT_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
+const ZONE_SEGMENT_RE = /^zon_[0-9A-HJKMNP-TV-Z]{26}$/;
 const MAX_DEPTH = 3;
 const POLICY_KEYS = ['kinds', 'visibilities', 'max_object_bytes', 'strict_verbs'];
 
@@ -100,6 +101,9 @@ function resolveName(app, requested) {
     if (s === root) return { namespace: root };
     const rel = s.startsWith(`${root}.`) ? s.slice(root.length + 1) : s;
     const segs = rel.split('.');
+    // A named zone (OpenVibe.Zone) is the one child whose name is upper-case: <root>.zon_<ULID>, made only when Zone
+    // provisions it (server/s3/zones.js); objects routes refuse one that does not exist.
+    if (segs.length === 1 && ZONE_SEGMENT_RE.test(segs[0])) return { namespace: `${root}.${rel}`, zone: segs[0] };
     if (segs.length > MAX_DEPTH || !segs.every(x => SEGMENT_RE.test(x)) || `${root}.${rel}`.length > 200) {
         return { error: `namespace must be ${root} or a name below it: up to ${MAX_DEPTH} segments of a-z, 0-9, _ and - (e.g. ${root}.avatars)` };
     }

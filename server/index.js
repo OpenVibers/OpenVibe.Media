@@ -88,6 +88,14 @@ const ready = (async () => {
     // Network's sign-out-everywhere cutoffs (server/revocations.js): signed, loopback-only. Before the JSON
     // parser, which would consume the raw body the signature is over.
     app.post('/internal/events', ...require('./revocations').handler());
+    // The S3 surface (ADR-031, server/s3/routes.js) answers every request whose Host is an S3 host (MEDIA_S3_HOSTS,
+    // s3.openvibe.media): nginx's vhost passes the request line untouched, because the client signed that exact path.
+    // It reads raw bodies (PutObject, aws-chunked), so it sits ahead of the JSON parser. The zone and access-key doors
+    // carry their own parsers and service-token guards.
+    const s3 = require('./s3/routes');
+    app.use((req, res, next) => (s3.isS3Host(req) ? s3(req, res, next) : next()));
+    app.use('/internal/zones', require('./s3/admin-routes').internalRouter());
+    app.use('/api/v1/projects/:project/access-keys', require('./s3/admin-routes').keysRouter());
     app.use(express.json({ limit: '2mb' }));
 
     // IndexNow (openvibe-shared/indexnow): created once at boot from INDEXNOW_KEY. Unset → off, the
@@ -284,6 +292,10 @@ const ready = (async () => {
             } catch { /* not linux */ }
         });
         every(60 * 1000, () => recorder.checkDisk());              // disk guardian
+        // Zones being deleted (ADR-031 amendment): their objects are tombstoned and purged in batches, every minute.
+        every(60 * 1000, async () => {
+            try { const r = await require('./s3/zones').sweepDeleting(); if (r.tombstoned || r.purged) console.log(`[Zones] ${r.zones} deleting zone(s): ${r.tombstoned} tombstoned, ${r.purged} purged`); } catch (err) { console.warn('[Zones] deletion sweep:', err.message); }
+        });
         every(60 * 60 * 1000, () => thumbService.cleanupOldThumbnails());  // stale live thumbs
         // Object model: purge native objects whose soft-delete retention has passed (held ones are kept).
         every(60 * 60 * 1000, async () => {
