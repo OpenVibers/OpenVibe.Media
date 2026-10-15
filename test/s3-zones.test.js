@@ -227,10 +227,10 @@ const { Readable } = require('stream');
         await model.placeHold({ object_id: current.id, kind: 'evidence', reason: 'test' });
         await assert.rejects(s3.send(new S3.PutObjectCommand({ Bucket: 'assets', Key: 'readme.txt', Body: 'v3' })), /AccessDenied/, 'an overwrite of a held object is refused');
         await assert.rejects(s3.send(new S3.DeleteObjectCommand({ Bucket: 'assets', Key: 'readme.txt' })), /AccessDenied/, 'so is its deletion');
-        await assert.rejects(s3.send(new S3.CreateMultipartUploadCommand({ Bucket: 'assets', Key: 'mp' })), /NotImplemented/);
+        await assert.rejects(s3.send(new S3.UploadPartCopyCommand({ Bucket: 'assets', Key: 'mp', UploadId: (await s3.send(new S3.CreateMultipartUploadCommand({ Bucket: 'assets', Key: 'mp' }))).UploadId, PartNumber: 1, CopySource: 'assets/readme.txt' })), /NotImplemented/);
         await assert.rejects(s3.send(new S3.CopyObjectCommand({ Bucket: 'assets', Key: 'copy', CopySource: 'assets/readme.txt' })), /NotImplemented/);
         await assert.rejects(s3.send(new S3.DeleteBucketCommand({ Bucket: 'assets' })), /NotImplemented|MethodNotAllowed/);
-        console.log('✅ quotas, overwrite through the deletion path, holds refuse overwrite and delete, NotImplemented answers');
+        console.log('✅ quotas, overwrite through the deletion path, holds refuse overwrite and delete, NotImplemented answers (copy, part copy, bucket deletion)');
 
         // ── Deleting objects ──
         await s3.send(new S3.DeleteObjectCommand({ Bucket: 'assets', Key: 'site/index.html' }));

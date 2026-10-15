@@ -305,6 +305,8 @@ const ready = (async () => {
             try { const r = await require('./objects/timeline-cache').sweep(); if (r.removed) console.log(`[Objects] Timeline cache: evicted ${r.removed} local file(s)`); } catch (err) { console.warn('[Objects] timeline cache:', err.message); }
             // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
             try { const r = await require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
+            // S3 multipart uploads past their expiry (MEDIA_MULTIPART_TTL_HOURS): their parts are removed (server/s3/multipart.js).
+            try { const n = await require('./s3/multipart').sweep(); if (n) console.log(`[S3] ${n} expired multipart upload(s) removed`); } catch (err) { console.warn('[S3] multipart sweep:', err.message); }
             // Native objects' popularity (ADR-021): a finished UTC day's viewer hashes and salt are deleted, only its counts stay (30 days).
             try { const r = await require('./objects/popularity').rotate(); if (r.hashes || r.salts || r.counts) console.log(`[Popularity] ${r.hashes} viewer hash(es) and ${r.salts} salt(s) of finished days deleted, ${r.counts} old daily count(s) pruned`); } catch (err) { console.warn('[Popularity] rotate:', err.message); }
             // Namespaces: uploads whose quota reservation expired are failed and their bytes freed; then every
