@@ -69,6 +69,9 @@ function baseHeaders(res) {
     res.set('X-Content-Type-Options', 'nosniff');
     res.set('x-amz-request-id', res.locals.rid || (res.locals.rid = requestId()));
     res.set('Cache-Control', 'private, no-store');
+    // Cloudflare reads these over Cache-Control: it never keeps an S3 answer, even one a client asked to be cacheable.
+    res.set('CDN-Cache-Control', 'no-store');
+    res.set('Cloudflare-CDN-Cache-Control', 'no-store');
 }
 
 /** Headers as given (Express's res.set would add a charset to a text Content-Type; S3 answers the stored type). */
@@ -187,7 +190,8 @@ function objectHeaders(obj) {
     for (const [k, v] of Object.entries(md.s3_meta || {})) h[`x-amz-meta-${k}`] = v;
     if (md.content_disposition) h['Content-Disposition'] = md.content_disposition;
     if (md.content_encoding) h['Content-Encoding'] = md.content_encoding;
-    if (md.cache_control) h['Cache-Control'] = md.cache_control;
+    // The stored Cache-Control is kept but never sent: zones are private, and a shared cache (Cloudflare in front of
+    // the S3 host) would serve a signed answer to anyone asking for the same URL (baseHeaders: private, no-store).
     return h;
 }
 
@@ -195,7 +199,7 @@ function objectHeaders(obj) {
 function responseOverrides(req) {
     const o = {};
     const map = { 'response-content-type': 'Content-Type', 'response-content-disposition': 'Content-Disposition',
-        'response-cache-control': 'Cache-Control', 'response-content-encoding': 'Content-Encoding', 'response-content-language': 'Content-Language',
+        'response-content-encoding': 'Content-Encoding', 'response-content-language': 'Content-Language',
         'response-expires': 'Expires' };
     for (const [q, h] of Object.entries(map)) if (typeof req.query[q] === 'string' && req.query[q].length <= 512) o[h] = req.query[q];
     return o;

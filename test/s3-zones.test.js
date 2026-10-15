@@ -129,7 +129,15 @@ const { Readable } = require('stream');
         assert.ok(Buffer.from(await out.Body.transformToByteArray()).equals(body), 'a streamed upload with a space and + in its key round-trips');
         const raw = await fetch(`http://127.0.0.1:${port}/assets/site/index.html`);
         assert.deepStrictEqual([raw.status, raw.headers.get('content-security-policy')], [403, "sandbox; default-src 'none'"], 'unsigned requests are refused, and nothing here runs in a browser');
-        console.log('✅ PutObject (plain and aws-chunked), GetObject with a range, HeadObject, metadata, unsigned refused');
+        // A stored Cache-Control is kept but never sent: a shared cache in front of the S3 host (Cloudflare) would hand a
+        // signed answer to an unsigned request for the same URL. So is a presigned URL's response-cache-control.
+        await s3.send(new S3.PutObjectCommand({ Bucket: 'assets', Key: 'cdn/logo.png', Body: 'png', ContentType: 'image/png', CacheControl: 'public, max-age=31536000' }));
+        const cached = await fetch(await getSignedUrl(s3, new S3.GetObjectCommand({ Bucket: 'assets', Key: 'cdn/logo.png', ResponseCacheControl: 'public, max-age=600' }), { expiresIn: 60 }));
+        assert.deepStrictEqual([cached.status, cached.headers.get('cache-control'), cached.headers.get('cdn-cache-control'), cached.headers.get('cloudflare-cdn-cache-control')],
+            [200, 'private, no-store', 'no-store', 'no-store'], 'every S3 answer is private, no-store, at the edge too');
+        assert.strictEqual((await s3.send(new S3.HeadObjectCommand({ Bucket: 'assets', Key: 'cdn/logo.png' }))).CacheControl, 'private, no-store');
+        await s3.send(new S3.DeleteObjectCommand({ Bucket: 'assets', Key: 'cdn/logo.png' }));
+        console.log('✅ PutObject (plain and aws-chunked), GetObject with a range, HeadObject, metadata, unsigned refused; nothing an edge may cache');
 
         // ── Two doors: the object is an ordinary Media object ──
         const row = await db.get("SELECT * FROM media_objects WHERE zone_id = ? AND object_key = 'site/index.html' AND lifecycle_status = 'ready'", [assets.id]);
