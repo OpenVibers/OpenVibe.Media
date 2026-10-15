@@ -228,14 +228,24 @@ async function sendObject(req, res, obj, { head = false } = {}) {
     if (require('../drill').refuseBytes(res)) return;
     const from = range || (size ? { start: 0, end: size - 1 } : null);
     if (!from) return res.end();
-    // The placement router ranks the copies; a local one streams from disk, a remote one is fetched and passed on
-    // (S3 clients do not follow redirects).
+    const src = await openBytes(req, obj, from);
+    if (src) return await pipeline(src, res).catch(() => res.destroy());
+    if (!res.headersSent) return s3error(req, res, 'InternalError', 'The object bytes are unavailable right now');
+    res.destroy();
+}
+
+/**
+ * A readable stream of the object's bytes from..to (inclusive), or null when no copy answers. The placement router
+ * ranks the copies; a local one streams from disk, a remote one is fetched and passed on (S3 clients do not follow
+ * redirects). GetObject and the copies (CopyObject, UploadPartCopy) read through here.
+ */
+async function openBytes(req, obj, from) {
     const router = require('../placement/router');
-    const decision = await router.route({ object: obj, purpose: 'download', session: router.sessionFor(req, obj.id), contentType: headers['Content-Type'], expiresIn: 300 });
+    const decision = await router.route({ object: obj, purpose: 'download', session: router.sessionFor(req, obj.id), contentType: obj.mime_type || 'application/octet-stream', expiresIn: 300 });
     for (const loc of decision.candidates || []) {
         if (loc.provider === 'local') {
             if (!fs.existsSync(loc.key)) continue;
-            return await pipeline(fs.createReadStream(loc.key, { start: from.start, end: from.end }), res).catch(() => res.destroy());
+            return fs.createReadStream(loc.key, { start: from.start, end: from.end });
         }
         const url = (loc.provider === decision.provider && decision.url)
             || await require('../vod/vod-storage').presignGet(loc.provider, loc.key, 300, {}).catch(() => null);
@@ -243,10 +253,9 @@ async function sendObject(req, res, obj, { head = false } = {}) {
         const up = await fetch(url, { headers: { Range: `bytes=${from.start}-${from.end}` }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
         if (!up || !(up.status === 206 || up.status === 200) || !up.body) continue;
         const { Readable } = require('stream');
-        return await pipeline(Readable.fromWeb(up.body), res).catch(() => res.destroy());
+        return Readable.fromWeb(up.body);
     }
-    if (!res.headersSent) return s3error(req, res, 'InternalError', 'The object bytes are unavailable right now');
-    res.destroy();
+    return null;
 }
 
 // ── Writing ──────────────────────────────────────────────────
@@ -383,7 +392,7 @@ async function commitObject(req, zone, key, { tmp, bytes, sha256, mime, md }) {
 async function putObject(req, res, zone, key) {
     const { key: akey, parsed } = req.s3;
     if (!mayWrite(akey)) { req.resume(); return s3error(req, res, 'AccessDenied', 'This access key is read-only'); }
-    if (req.headers['x-amz-copy-source']) { req.resume(); return s3error(req, res, 'NotImplemented', 'CopyObject is not supported yet: read the object and write it again'); }
+    if (req.headers['x-amz-copy-source']) { req.resume(); return await copyObject(req, res, zone, key); }
     const acl = String(req.headers['x-amz-acl'] || 'private');
     if (acl !== 'private' && acl !== 'bucket-owner-full-control') { req.resume(); return s3error(req, res, 'AccessDenied', 'Zones are private: objects cannot be made public over S3'); }
     if (DERIVED_KEY.test(key)) {
@@ -417,6 +426,123 @@ async function putObject(req, res, zone, key) {
     res.set('ETag', etagOf(outcome.obj));
     for (const k of ['x-amz-checksum-crc32', 'x-amz-checksum-sha256']) if (req.headers[k] || got.trailers[k]) res.set(k, req.headers[k] || got.trailers[k]);
     res.status(200).end();
+}
+
+// ── Copies (CopyObject, UploadPartCopy) ──────────────────────
+
+/**
+ * The source x-amz-copy-source names ("bucket/key" or "/bucket/key", URL-encoded), read with the same key: a zone of
+ * the key's environment it may read, and an object there. → { zone, key, obj } or null (the S3 error answered).
+ * The destination stays the zone the request counts against (req.s3.zone).
+ */
+async function copySource(req, res) {
+    const raw = String(req.headers['x-amz-copy-source'] || '');
+    const [pathPart, query] = raw.split('?');
+    if (query && /(^|&)versionId=/.test(query)) { s3error(req, res, 'NotImplemented', 'Zones keep no versions: copy the current object'); return null; }
+    let src;
+    try { src = decodeURIComponent(pathPart).replace(/^\//, ''); } catch { src = ''; }
+    const slash = src.indexOf('/');
+    if (slash < 1 || slash === src.length - 1) { s3error(req, res, 'InvalidArgument', 'Copy Source must mention the source bucket and key: sourcebucket/sourcekey'); return null; }
+    const key = keyOf(src.slice(slash + 1));
+    if (key == null) { s3error(req, res, 'KeyTooLongError', `Keys are 1 to ${MAX_KEY_BYTES} bytes`); return null; }
+    if (!mayRead(req.s3.key)) { s3error(req, res, 'AccessDenied', 'This access key cannot read the copy source'); return null; }
+    const dest = req.s3.zone;
+    const zone = await zoneFor(req, res, src.slice(0, slash));
+    req.s3.zone = dest;
+    if (!zone) return null;
+    const obj = await findObject(zone, req.appId, key);
+    if (!obj) { s3error(req, res, 'NoSuchKey', 'The specified key does not exist.', `<Key>${esc(key)}</Key>`); return null; }
+    const etag = etagOf(obj);
+    const at = lastModified(obj).getTime();
+    const list = (h) => String(req.headers[h] || '').split(',').map((x) => x.trim()).filter(Boolean);
+    const when = (h) => { const d = req.headers[h] ? new Date(req.headers[h]) : null; return d && Number.isFinite(d.getTime()) ? d.getTime() : null; };
+    const im = list('x-amz-copy-source-if-match'), inm = list('x-amz-copy-source-if-none-match');
+    const ims = when('x-amz-copy-source-if-modified-since'), ius = when('x-amz-copy-source-if-unmodified-since');
+    // S3's order: if-match wins over if-unmodified-since, if-none-match over if-modified-since.
+    const ok = (im.length ? im.includes(etag) || im.includes('*') : (ius == null || at <= ius + 999))
+        && (inm.length ? !inm.includes(etag) : (ims == null || at > ims + 999));
+    if (!ok) { s3error(req, res, 'PreconditionFailed', 'At least one of the pre-conditions you specified did not hold'); return null; }
+    return { zone, key, obj };
+}
+
+/** Copy the source's bytes from..to into a temporary file, hashing them. → { tmp, bytes, sha256, md5 } | { error } */
+async function copyBytes(req, obj, from) {
+    const tmpDir = path.join(config.objects.path, '.tmp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const tmp = path.join(tmpDir, `s3c-${crypto.randomBytes(8).toString('hex')}`);
+    const sha = crypto.createHash('sha256'), md5 = crypto.createHash('md5');
+    let bytes = 0;
+    if (!from) { fs.writeFileSync(tmp, ''); return { tmp, bytes: 0, sha256: sha.digest('hex'), md5: md5.digest('hex') }; }
+    if (require('../drill').enabled) return { error: ['ServiceUnavailable', 'This Media is a restore drill: no bytes are served'] };
+    const src = await openBytes(req, obj, from);
+    if (!src) return { error: ['InternalError', 'The copy source bytes are unavailable right now'] };
+    const { Transform } = require('stream');
+    const tap = new Transform({ transform(chunk, _enc, cb) { sha.update(chunk); md5.update(chunk); bytes += chunk.length; cb(null, chunk); } });
+    try {
+        await pipeline(src, tap, fs.createWriteStream(tmp));
+    } catch (err) {
+        try { fs.unlinkSync(tmp); } catch { /* not written */ }
+        return { error: ['InternalError', `The copy did not complete: ${err.message}`] };
+    }
+    if (bytes !== from.end - from.start + 1) { try { fs.unlinkSync(tmp); } catch { /* */ } return { error: ['InternalError', 'The copy source ended early'] }; }
+    return { tmp, bytes, sha256: sha.digest('hex'), md5: md5.digest('hex') };
+}
+
+async function copyObject(req, res, zone, key) {
+    const src = await copySource(req, res);
+    if (!src) return;
+    const directive = String(req.headers['x-amz-metadata-directive'] || 'COPY').toUpperCase();
+    if (directive !== 'COPY' && directive !== 'REPLACE') return s3error(req, res, 'InvalidArgument', 'Unknown metadata directive: COPY or REPLACE');
+    if (src.zone.id === zone.id && src.key === key && directive === 'COPY') {
+        return s3error(req, res, 'InvalidRequest', "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.");
+    }
+    const size = Number(src.obj.size_bytes) || 0;
+    const cap = (config.objects.multipartMaxMb || 20480) * 1024 * 1024;
+    if (size > cap) return s3error(req, res, 'EntityTooLarge', `A copy in one request is at most ${cap} bytes; use UploadPartCopy`);
+    const pre = await namespaces.checkQuota(req.appRow, zone.namespace, { bytes: size, objects: 0 });
+    if (pre) return s3error(req, res, 'QuotaExceeded', pre.detail);
+    let md, mime;
+    if (directive === 'COPY') {
+        const from = model.parseJson(src.obj.metadata, {});
+        md = { filename: key.split('/').pop().slice(0, 200), s3: true, created_by: req.s3.key.id };
+        for (const f of ['s3_meta', 'content_disposition', 'content_encoding', 'cache_control']) if (from[f] !== undefined) md[f] = from[f];
+        mime = src.obj.mime_type || 'application/octet-stream';
+    } else {
+        const meta = userMeta(req);
+        if (!meta) return s3error(req, res, 'InvalidArgument', `User metadata is limited to ${MAX_META_BYTES} bytes`);
+        md = objectMeta(req, key, meta);
+        mime = mimeOf(req);
+    }
+    const got = await copyBytes(req, src.obj, size ? { start: 0, end: size - 1 } : null);
+    if (got.error) return s3error(req, res, got.error[0], got.error[1]);
+    const outcome = await commitObject(req, zone, key, { tmp: got.tmp, bytes: got.bytes, sha256: got.sha256, mime, md: { ...md, md5: got.md5 } });
+    if (outcome.error) { try { fs.unlinkSync(got.tmp); } catch { /* */ } return s3error(req, res, outcome.error[0], outcome.error[1]); }
+    xml(res, 200, `<CopyObjectResult xmlns="${XMLNS}"><ETag>${esc(etagOf(outcome.obj))}</ETag><LastModified>${isoOf(lastModified(outcome.obj))}</LastModified></CopyObjectResult>`);
+}
+
+async function copyPart(req, res, zone, key, up, n) {
+    const src = await copySource(req, res);
+    if (!src) return;
+    const size = Number(src.obj.size_bytes) || 0;
+    let from = size ? { start: 0, end: size - 1 } : null;
+    const rangeHeader = req.headers['x-amz-copy-source-range'];
+    if (rangeHeader) {
+        const m = /^bytes=(\d+)-(\d+)$/.exec(String(rangeHeader).trim());
+        if (!m || Number(m[1]) > Number(m[2]) || Number(m[2]) >= size) return s3error(req, res, 'InvalidArgument', 'The x-amz-copy-source-range value must be of the form bytes=first-last where first and last are the zero-based offsets of the first and last bytes to copy, within the source');
+        from = { start: Number(m[1]), end: Number(m[2]) };
+    }
+    const bytes = from ? from.end - from.start + 1 : 0;
+    const cap = (config.objects.multipartMaxPartMb || 256) * 1024 * 1024;
+    if (bytes > cap) return s3error(req, res, 'EntityTooLarge', `A part is at most ${cap} bytes`);
+    const total = await mp.bytesSoFar(up, n) + bytes;
+    if (total > (config.objects.multipartMaxMb || 20480) * 1024 * 1024) return s3error(req, res, 'EntityTooLarge', 'The object would be larger than this surface accepts');
+    const pre = await namespaces.checkQuota(req.appRow, zone.namespace, { bytes: total, objects: 0 });
+    if (pre) return s3error(req, res, 'QuotaExceeded', pre.detail);
+    const got = await copyBytes(req, src.obj, from);
+    if (got.error) return s3error(req, res, got.error[0], got.error[1]);
+    if (!await mp.find(up.id, zone, key)) { try { fs.unlinkSync(got.tmp); } catch { /* */ } return s3error(req, res, 'NoSuchUpload', 'The upload was aborted or completed while this part was copied'); }
+    const part = await mp.storePart(up, n, got.tmp, { bytes: got.bytes, md5: got.md5 });
+    xml(res, 200, `<CopyPartResult xmlns="${XMLNS}"><ETag>"${part.md5}"</ETag><LastModified>${isoOf(new Date(Number(part.created_at) || Date.now()))}</LastModified></CopyPartResult>`);
 }
 
 // ── Multipart uploads ────────────────────────────────────────
@@ -453,11 +579,11 @@ async function createMultipart(req, res, zone, key) {
 async function uploadPart(req, res, zone, key) {
     const { key: akey, parsed } = req.s3;
     if (!mayWrite(akey)) { req.resume(); return s3error(req, res, 'AccessDenied', 'This access key is read-only'); }
-    if (req.headers['x-amz-copy-source']) { req.resume(); return s3error(req, res, 'NotImplemented', 'UploadPartCopy is not supported yet'); }
     const n = Number(req.query.partNumber);
     if (!Number.isInteger(n) || n < 1 || n > 10000) { req.resume(); return s3error(req, res, 'InvalidArgument', 'Part number must be an integer between 1 and 10000, inclusive'); }
     const up = await mp.find(req.query.uploadId, zone, key);
     if (!up) { req.resume(); return s3error(req, res, 'NoSuchUpload', 'The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.'); }
+    if (req.headers['x-amz-copy-source']) { req.resume(); return await copyPart(req, res, zone, key, up, n); }
     const declared = Number(sigv4.isStreaming(parsed) ? req.headers['x-amz-decoded-content-length'] : req.headers['content-length']);
     const cap = (config.objects.multipartMaxPartMb || 256) * 1024 * 1024;
     if (!Number.isFinite(declared)) { req.resume(); return s3error(req, res, 'MissingContentLength', 'You must provide the Content-Length HTTP header'); }
