@@ -50,6 +50,13 @@ const config = {
     },
     thumbnails: {
         path: process.env.THUMBNAILS_PATH || './data/thumbnails',
+        // Resized and re-encoded thumbnails (GET /t/:id?w=&fmt=, server/thumbnails/variants.js): a rebuildable cache,
+        // least recently used dropped over its budget.
+        variants: {
+            path: process.env.THUMBNAIL_VARIANTS_PATH || '',
+            maxBytes: intEnv('MEDIA_THUMB_VARIANTS_MAX_BYTES', 512 * 1024 * 1024),
+            concurrency: Math.max(1, intEnv('MEDIA_THUMB_VARIANTS_CONCURRENCY', 2)),
+        },
     },
     files: {
         path: process.env.FILES_PATH || './data/files',
@@ -192,6 +199,7 @@ config.vod.clipsPath = path.resolve(config.vod.clipsPath);
 config.pastes.path = path.resolve(config.pastes.path);
 config.assets.path = path.resolve(config.assets.path);
 config.thumbnails.path = path.resolve(config.thumbnails.path);
+config.thumbnails.variants.path = path.resolve(config.thumbnails.variants.path || path.join(path.dirname(config.thumbnails.path), 'thumbnail-variants'));
 config.files.path = path.resolve(config.files.path);
 config.objects.path = path.resolve(config.objects.path);
 config.dataDir = path.resolve(config.dataDir);

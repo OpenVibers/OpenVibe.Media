@@ -10,7 +10,7 @@
  * GET /p/:slug           301 to OpenVibe.Community — pastes live there now
  * GET /p/:slug/raw       301 to OpenVibe.Community's raw text
  * GET /p/:slug/screenshot 301 to the screenshot's or avatar's media object (/o/<id>), else to Community
- * GET /t/:id             thumbnails (id = filename)
+ * GET /t/:id             thumbnails (id = filename); ?w=&fmt= a resized WebP/AVIF/JPEG variant (F4)
  * GET /f/:key            files with correct Content-Type + Range
  * GET /og-image.png      the site's share card
  * GET /robots.txt, /sitemap.xml, /llms.txt, /llms-full.txt   crawler files (crawl.js): the sitemap lists only
