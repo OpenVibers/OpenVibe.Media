@@ -27,7 +27,8 @@ if (drill.enabled) {
 
 const fs = require('fs');
 const express = require('express');
-const { gracefulStop } = require('openvibe-sdk/service');
+const { gracefulStop, telemetry } = require('openvibe-sdk/service');
+const { createPgTelemetrySink, startTelemetryRetention } = require('openvibe-sdk/telemetry');
 const config = require('./config');
 const db = require('./db/database');
 const auth = require('./auth');
@@ -77,6 +78,7 @@ const ready = (async () => {
     const release = require('openvibe-shared/release').createRelease({ service: 'media', root: require('path').join(__dirname, '..') });
     const observability = require('./observability');
     const instrumented = observability.instrument(app, { release: release.release });
+    app.use(telemetry.middleware);   // request telemetry: a no-op until telemetry.init() below (never under a drill)
     // Per-actor limit refusals (server/actor-limits.js) are counted there: media_rate_limited_total.
     require('./actor-limits').bindMetrics(instrumented.registry);
     // A restore-drill instance answers reads only: 403 for every other method, on every path (before the
@@ -382,6 +384,14 @@ const ready = (async () => {
     // (deploy/systemd/openvibe-media.service). Media exits 0 past the deadline, like the 5 s family. A step
     // that throws is logged and the stop goes on: the try/catch the hand-written shutdown carried lives in
     // the kit now.
+    // Request telemetry (openvibe-sdk/service, plan T1): one aggregated sample per route template, method and status
+    // class each minute, stored in Media's telemetry_samples table; rows older than 14 days go daily. A restore drill
+    // starts neither (server/drill.js: no timer, no write).
+    let telemetryRetention = null;
+    if (!drill.enabled) {
+        telemetry.init({ service: 'media', sink: createPgTelemetrySink({ db: db.getDb(), log: console }), skipPrefixes: ['/shared'], intervalMs: 60_000 });
+        telemetryRetention = startTelemetryRetention({ db: db.getDb(), log: console, olderThanDays: 14 });
+    }
     gracefulStop({
         name: 'Media',
         server,
@@ -400,7 +410,7 @@ const ready = (async () => {
             () => { for (const t of timers) clearInterval(t); },
             () => require('./s3/usage').flush().catch((err) => console.warn('[S3] usage flush at stop:', err.message)),
         ],
-        close: [() => db.close()],
+        close: [async () => { if (telemetryRetention) await telemetryRetention.stop(); await telemetry.stop(); }, () => db.close()],
         deadlineMs: 70000,
         deadlineExitCode: 0,
     });
