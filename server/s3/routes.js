@@ -12,10 +12,12 @@
  *   PUT    /<zone>                   CreateBucket: 200 for a zone that exists (clients probe this way), else NotImplemented
  *   POST   /<zone>?delete            DeleteObjects
  *   PUT    /<zone>/<key>             PutObject (one request; aws-chunked bodies too)
+ *   POST   /<zone>/<key>?uploads     CreateMultipartUpload; PUT ?partNumber&uploadId UploadPart; POST ?uploadId Complete;
+ *                                    DELETE ?uploadId Abort; GET ?uploadId ListParts; GET /<zone>?uploads ListMultipartUploads
  *   GET    /<zone>/<key>             GetObject (Range)
  *   HEAD   /<zone>/<key>             HeadObject
  *   DELETE /<zone>/<key>             DeleteObject (Media's soft delete; refused under a retention hold)
- *   everything else                  NotImplemented (multipart, copy, ACLs, policies, versioning, bucket deletion)
+ *   everything else                  NotImplemented (copy, part copy, ACLs, policies, versioning, bucket deletion)
  *
  * Every request is signed (SigV4, header or presigned) with an access key (server/s3/keys.js). The key fixes the
  * project and environment, so a bucket name resolves to one zone id of that environment (server/s3/zones.js); a key
@@ -42,6 +44,7 @@ const namespaces = require('../objects/namespaces');
 const sigv4 = require('./sigv4');
 const keys = require('./keys');
 const zones = require('./zones');
+const mp = require('./multipart');
 
 const MAX_KEY_BYTES = 1024;
 const MAX_LIST = 1000;
@@ -55,6 +58,7 @@ const STATUS = {
     KeyTooLongError: 400, MissingContentLength: 411, EntityTooLarge: 400, BadDigest: 400, XAmzContentSHA256Mismatch: 400,
     IncompleteBody: 400, MalformedXML: 400, InvalidRange: 416, NoSuchBucket: 404, NoSuchKey: 404, QuotaExceeded: 403,
     NotImplemented: 501, MethodNotAllowed: 405, InternalError: 500, ServiceUnavailable: 503, InvalidBucketName: 400,
+    NoSuchUpload: 404, EntityTooSmall: 400, InvalidPart: 400, InvalidPartOrder: 400, PreconditionFailed: 412,
 };
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
@@ -87,6 +91,7 @@ function s3error(req, res, code, message, extra = '') {
 
 const etagOf = (obj) => {
     const md = model.parseJson(obj.metadata, {});
+    if (md.etag) return `"${md.etag}"`;                      // a multipart object: md5 of the parts' md5s, then -<parts>
     return md.md5 ? `"${md.md5}"` : `"${String(obj.content_hash || obj.id).slice(0, 32)}-1"`;
 };
 const lastModified = (obj) => new Date(String(obj.updated_at || obj.created_at).replace(' ', 'T') + (String(obj.updated_at || obj.created_at).endsWith('Z') ? '' : 'Z'));
@@ -303,6 +308,71 @@ function integrityProblem(req, parsed, got) {
     return null;
 }
 
+const mimeOf = (req) => String(req.headers['content-type'] || 'application/octet-stream').split(';')[0].trim().toLowerCase().slice(0, 127) || 'application/octet-stream';
+
+/** The metadata an S3 write keeps on its object: its file name, user metadata and the response headers it set. */
+function objectMeta(req, key, meta) {
+    const md = { filename: key.split('/').pop().slice(0, 200), s3: true, created_by: req.s3.key.id };
+    if (meta && Object.keys(meta).length) md.s3_meta = meta;
+    for (const [h, f] of [['content-disposition', 'content_disposition'], ['content-encoding', 'content_encoding'], ['cache-control', 'cache_control']]) {
+        if (req.headers[h] && String(req.headers[h]).length <= 512) md[f] = String(req.headers[h]);
+    }
+    return md;
+}
+
+/**
+ * Make stored bytes (the file at `tmp`) the object under `key`, in one transaction under the tenant's quota lock: the
+ * quota with the real size, the zone still active, the key's previous object through the deletion path (refused while
+ * held), then the new object, ready, with its location, invariant and media.object.uploaded event. PutObject and
+ * CompleteMultipartUpload both end here. → { obj } | { error: [code, message] } (the caller removes `tmp` on error).
+ */
+async function commitObject(req, zone, key, { tmp, bytes, sha256, mime, md }) {
+    let outcome;
+    try {
+        const events = require('../events');
+        outcome = await db.getDb().tx(async () => {
+            const previous = await db.get(`SELECT * FROM media_objects WHERE zone_id = ? AND object_key = ? AND lifecycle_status = 'ready'`, [zone.id, key]);
+            const q = await namespaces.checkQuota(req.appRow, zone.namespace, { bytes, objects: 1, excludeId: previous ? previous.id : null });
+            if (q) return { error: ['QuotaExceeded', q.detail] };
+            const fresh = await zones.byId(zone.id);
+            if (!fresh || fresh.state !== 'active') return { error: ['NoSuchBucket', 'The specified bucket does not exist'] };
+            if (previous) {
+                if (await model.isHeld(previous.id)) return { error: ['AccessDenied', 'The object under this key is under a retention hold and cannot be replaced'] };
+                const pmd = model.parseJson(previous.metadata, {});
+                pmd.pre_delete_status = previous.lifecycle_status;
+                pmd.retention_until = new Date(Date.now() + config.objects.retentionDays * 864e5).toISOString();
+                pmd.deleted_by = `${req.s3.key.id} (overwrite)`;
+                await db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = ov_now(), metadata = ?, updated_at = ov_now() WHERE id = ?`,
+                    [JSON.stringify(pmd), previous.id]);
+                await namespaces.settle(previous.id);
+            }
+            await namespaces.ensure(req.appRow, db.rootNamespace(req.appRow));
+            const id = await model.createObject({
+                app_id: req.appId, namespace: zone.namespace, kind: 'file', owner_subject: null, owner_app: req.appId, owner_user_id: null,
+                visibility: 'private', lifecycle_status: 'uploading', mime_type: mime, size_bytes: bytes, metadata: md,
+            });
+            const obj = await model.getObject(id);
+            const dest = model.objectFilePath(obj);
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.renameSync(tmp, dest);
+            await db.run(`UPDATE media_objects SET lifecycle_status = 'ready', content_hash = ?, canonical_provider = 'local', canonical_key = ?,
+                zone_id = ?, object_key = ?, updated_at = ov_now() WHERE id = ?`, [sha256, dest, zone.id, key, id]);
+            await model.upsertLocation(id, { provider: 'local', key: dest, state: 'present', size_bytes: bytes, checksum: sha256, verified: true });
+            const ready = await model.getObject(id);
+            await require('../objects/invariant').record(ready);
+            await events.record('media.object.uploaded', req.appId, await model.objectPublic(ready));
+            await events.recordObjectChanges();
+            return { obj: ready };
+        });
+        require('../events').kick();
+    } catch (err) {
+        console.error('[S3] commit error:', err.message);
+        return { error: ['InternalError', 'We encountered an internal error. Please try again.'] };
+    }
+    if (!outcome.error) await namespaces.reconcileChain(req.appRow, zone.namespace).catch(() => {});
+    return outcome;
+}
+
 async function putObject(req, res, zone, key) {
     const { key: akey, parsed } = req.s3;
     if (!mayWrite(akey)) { req.resume(); return s3error(req, res, 'AccessDenied', 'This access key is read-only'); }
@@ -333,61 +403,135 @@ async function putObject(req, res, zone, key) {
     const bad = integrityProblem(req, parsed, got);
     if (bad) { drop(); return s3error(req, res, bad[0], bad[1]); }
 
-    const mime = String(req.headers['content-type'] || 'application/octet-stream').split(';')[0].trim().toLowerCase().slice(0, 127) || 'application/octet-stream';
-    const md = { filename: key.split('/').pop().slice(0, 200), md5: got.md5.toString('hex'), s3: true, created_by: akey.id };
-    if (Object.keys(meta).length) md.s3_meta = meta;
-    for (const [h, f] of [['content-disposition', 'content_disposition'], ['content-encoding', 'content_encoding'], ['cache-control', 'cache_control']]) {
-        if (req.headers[h] && String(req.headers[h]).length <= 512) md[f] = String(req.headers[h]);
-    }
-    let outcome;
-    try {
-        const events = require('../events');
-        outcome = await db.getDb().tx(async () => {
-            const previous = await db.get(`SELECT * FROM media_objects WHERE zone_id = ? AND object_key = ? AND lifecycle_status = 'ready'`, [zone.id, key]);
-            const q = await namespaces.checkQuota(req.appRow, zone.namespace, { bytes: got.bytes, objects: 1, excludeId: previous ? previous.id : null });
-            if (q) return { error: ['QuotaExceeded', q.detail] };
-            const fresh = await zones.byId(zone.id);
-            if (!fresh || fresh.state !== 'active') return { error: ['NoSuchBucket', 'The specified bucket does not exist'] };
-            if (previous) {
-                if (await model.isHeld(previous.id)) return { error: ['AccessDenied', 'The object under this key is under a retention hold and cannot be replaced'] };
-                const pmd = model.parseJson(previous.metadata, {});
-                pmd.pre_delete_status = previous.lifecycle_status;
-                pmd.retention_until = new Date(Date.now() + config.objects.retentionDays * 864e5).toISOString();
-                pmd.deleted_by = `${akey.id} (overwrite)`;
-                await db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = ov_now(), metadata = ?, updated_at = ov_now() WHERE id = ?`,
-                    [JSON.stringify(pmd), previous.id]);
-                await namespaces.settle(previous.id);
-            }
-            await namespaces.ensure(req.appRow, db.rootNamespace(req.appRow));
-            const id = await model.createObject({
-                app_id: req.appId, namespace: zone.namespace, kind: 'file', owner_subject: null, owner_app: req.appId, owner_user_id: null,
-                visibility: 'private', lifecycle_status: 'uploading', mime_type: mime, size_bytes: got.bytes, metadata: md,
-            });
-            const obj = await model.getObject(id);
-            const dest = model.objectFilePath(obj);
-            fs.mkdirSync(path.dirname(dest), { recursive: true });
-            fs.renameSync(tmp, dest);
-            await db.run(`UPDATE media_objects SET lifecycle_status = 'ready', content_hash = ?, canonical_provider = 'local', canonical_key = ?,
-                zone_id = ?, object_key = ?, updated_at = ov_now() WHERE id = ?`, [got.sha256, dest, zone.id, key, id]);
-            await model.upsertLocation(id, { provider: 'local', key: dest, state: 'present', size_bytes: got.bytes, checksum: got.sha256, verified: true });
-            const ready = await model.getObject(id);
-            await require('../objects/invariant').record(ready);
-            await events.record('media.object.uploaded', req.appId, await model.objectPublic(ready));
-            await events.recordObjectChanges();
-            return { obj: ready };
-        });
-        require('../events').kick();
-    } catch (err) {
-        drop();
-        console.error('[S3] put error:', err.message);
-        return s3error(req, res, 'InternalError', 'We encountered an internal error. Please try again.');
-    }
+    const md = { ...objectMeta(req, key, meta), md5: got.md5.toString('hex') };
+    const outcome = await commitObject(req, zone, key, { tmp, bytes: got.bytes, sha256: got.sha256, mime: mimeOf(req), md });
     if (outcome.error) { drop(); return s3error(req, res, outcome.error[0], outcome.error[1]); }
-    await namespaces.reconcileChain(req.appRow, zone.namespace).catch(() => {});
     baseHeaders(res);
     res.set('ETag', etagOf(outcome.obj));
     for (const k of ['x-amz-checksum-crc32', 'x-amz-checksum-sha256']) if (req.headers[k] || got.trailers[k]) res.set(k, req.headers[k] || got.trailers[k]);
     res.status(200).end();
+}
+
+// ── Multipart uploads ────────────────────────────────────────
+
+/** Read a small XML request body (Complete, DeleteObjects), aws-chunked or not, checking x-amz-content-sha256. */
+async function readXmlBody(req, limit = 2 * 1024 * 1024) {
+    const chunks = [];
+    let n = 0;
+    const body = sigv4.isStreaming(req.s3.parsed) ? req.pipe(sigv4.chunkDecoder(req.s3.parsed)) : req;
+    for await (const c of body) {
+        n += c.length;
+        if (n > limit) return { error: ['MalformedXML', 'The request body is too large'] };
+        chunks.push(c);
+    }
+    const raw = Buffer.concat(chunks);
+    if (/^[0-9a-f]{64}$/.test(req.s3.parsed.payloadHash) && crypto.createHash('sha256').update(raw).digest('hex') !== req.s3.parsed.payloadHash) {
+        return { error: ['XAmzContentSHA256Mismatch', 'The provided x-amz-content-sha256 header does not match what was computed'] };
+    }
+    return { text: raw.toString('utf8') };
+}
+
+async function createMultipart(req, res, zone, key) {
+    req.resume();
+    if (!mayWrite(req.s3.key)) return s3error(req, res, 'AccessDenied', 'This access key is read-only');
+    const acl = String(req.headers['x-amz-acl'] || 'private');
+    if (acl !== 'private' && acl !== 'bucket-owner-full-control') return s3error(req, res, 'AccessDenied', 'Zones are private: objects cannot be made public over S3');
+    if (DERIVED_KEY.test(key)) return s3error(req, res, 'InvalidArgument', 'Keys of the form [path/]med_<id> are the ids of objects written through the native API; choose another key');
+    const meta = userMeta(req);
+    if (!meta) return s3error(req, res, 'InvalidArgument', `User metadata is limited to ${MAX_META_BYTES} bytes`);
+    const up = await mp.create({ zone, key, appId: req.appId, accessKeyId: req.s3.key.id, contentType: mimeOf(req), metadata: objectMeta(req, key, meta) });
+    xml(res, 200, `<InitiateMultipartUploadResult xmlns="${XMLNS}"><Bucket>${esc(zone.name)}</Bucket><Key>${esc(key)}</Key><UploadId>${up.id}</UploadId></InitiateMultipartUploadResult>`);
+}
+
+async function uploadPart(req, res, zone, key) {
+    const { key: akey, parsed } = req.s3;
+    if (!mayWrite(akey)) { req.resume(); return s3error(req, res, 'AccessDenied', 'This access key is read-only'); }
+    if (req.headers['x-amz-copy-source']) { req.resume(); return s3error(req, res, 'NotImplemented', 'UploadPartCopy is not supported yet'); }
+    const n = Number(req.query.partNumber);
+    if (!Number.isInteger(n) || n < 1 || n > 10000) { req.resume(); return s3error(req, res, 'InvalidArgument', 'Part number must be an integer between 1 and 10000, inclusive'); }
+    const up = await mp.find(req.query.uploadId, zone, key);
+    if (!up) { req.resume(); return s3error(req, res, 'NoSuchUpload', 'The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.'); }
+    const declared = Number(sigv4.isStreaming(parsed) ? req.headers['x-amz-decoded-content-length'] : req.headers['content-length']);
+    const cap = (config.objects.multipartMaxPartMb || 256) * 1024 * 1024;
+    if (!Number.isFinite(declared)) { req.resume(); return s3error(req, res, 'MissingContentLength', 'You must provide the Content-Length HTTP header'); }
+    if (declared > cap) { res.set('Connection', 'close'); req.resume(); return s3error(req, res, 'EntityTooLarge', `A part is at most ${cap} bytes`); }
+    const total = await mp.bytesSoFar(up, n) + declared;
+    if (total > (config.objects.multipartMaxMb || 20480) * 1024 * 1024) { res.set('Connection', 'close'); req.resume(); return s3error(req, res, 'EntityTooLarge', 'The object would be larger than this surface accepts'); }
+    const pre = await namespaces.checkQuota(req.appRow, zone.namespace, { bytes: total, objects: 0 });
+    if (pre) { res.set('Connection', 'close'); req.resume(); return s3error(req, res, 'QuotaExceeded', pre.detail); }
+    const tmpDir = path.join(config.objects.path, '.tmp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const tmp = path.join(tmpDir, `s3p-${crypto.randomBytes(8).toString('hex')}`);
+    const drop = () => { try { fs.unlinkSync(tmp); } catch { /* not written */ } };
+    const got = await receive(req, tmp, Math.max(declared, 0), parsed);
+    if (got.error) { drop(); return s3error(req, res, got.error.code, got.error.message); }
+    if (got.bytes !== declared) { drop(); return s3error(req, res, 'IncompleteBody', `You did not provide the number of bytes specified by the Content-Length HTTP header (${declared}; ${got.bytes} received)`); }
+    const bad = integrityProblem(req, parsed, got);
+    if (bad) { drop(); return s3error(req, res, bad[0], bad[1]); }
+    if (!await mp.find(up.id, zone, key)) { drop(); return s3error(req, res, 'NoSuchUpload', 'The upload was aborted or completed while this part arrived'); }
+    const part = await mp.storePart(up, n, tmp, { bytes: got.bytes, md5: got.md5.toString('hex') });
+    baseHeaders(res);
+    res.set('ETag', `"${part.md5}"`);
+    for (const k of ['x-amz-checksum-crc32', 'x-amz-checksum-sha256']) if (req.headers[k] || got.trailers[k]) res.set(k, req.headers[k] || got.trailers[k]);
+    res.status(200).end();
+}
+
+async function completeMultipart(req, res, zone, key) {
+    if (!mayWrite(req.s3.key)) { req.resume(); return s3error(req, res, 'AccessDenied', 'This access key is read-only'); }
+    const up = await mp.find(req.query.uploadId, zone, key);
+    if (!up) { req.resume(); return s3error(req, res, 'NoSuchUpload', 'The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.'); }
+    const body = await readXmlBody(req).catch((err) => ({ error: [err.code && STATUS[err.code] ? err.code : 'IncompleteBody', err.message] }));
+    if (body.error) return s3error(req, res, body.error[0], body.error[1]);
+    const items = body.text.match(/<Part>[\s\S]*?<\/Part>/g) || [];
+    if (!/<CompleteMultipartUpload[\s>]/.test(body.text) || !items.length || items.length > 10000) return s3error(req, res, 'MalformedXML', 'The XML you provided was not well-formed or did not validate');
+    const wanted = items.map((x) => ({ n: Number((/<PartNumber>\s*(\d+)\s*<\/PartNumber>/.exec(x) || [])[1]), etag: ((/<ETag>([\s\S]*?)<\/ETag>/.exec(x) || [])[1] || '').replace(/&quot;/g, '"') }));
+    if (wanted.some((w) => !Number.isInteger(w.n))) return s3error(req, res, 'MalformedXML', 'Every part names its PartNumber');
+    const joined = await mp.assemble(up, wanted);
+    if (joined.error) return s3error(req, res, joined.error[0], joined.error[1]);
+    const kept = up.metadata && typeof up.metadata === 'object' ? up.metadata : model.parseJson(up.metadata, {});   // jsonb
+    const md = { ...kept, etag: joined.etag };
+    const outcome = await commitObject(req, zone, key, { tmp: joined.tmp, bytes: joined.bytes, sha256: joined.sha256, mime: up.content_type, md });
+    if (outcome.error) { try { fs.unlinkSync(joined.tmp); } catch { /* moved or gone */ } return s3error(req, res, outcome.error[0], outcome.error[1]); }
+    await mp.abort(up);
+    const host = String(req.headers.host || '');
+    xml(res, 200, `<CompleteMultipartUploadResult xmlns="${XMLNS}"><Location>https://${esc(host)}/${esc(zone.name)}/${esc(sigv4.awsEncode(key, true))}</Location>`
+        + `<Bucket>${esc(zone.name)}</Bucket><Key>${esc(key)}</Key><ETag>${esc(etagOf(outcome.obj))}</ETag></CompleteMultipartUploadResult>`);
+}
+
+async function abortMultipart(req, res, zone, key) {
+    req.resume();
+    if (!mayWrite(req.s3.key)) return s3error(req, res, 'AccessDenied', 'This access key is read-only');
+    const up = await mp.find(req.query.uploadId, zone, key);
+    if (!up) return s3error(req, res, 'NoSuchUpload', 'The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.');
+    await mp.abort(up);
+    baseHeaders(res);
+    res.status(204).end();
+}
+
+async function listParts(req, res, zone, key) {
+    if (!mayRead(req.s3.key)) return s3error(req, res, 'AccessDenied', 'This access key cannot read');
+    const up = await mp.find(req.query.uploadId, zone, key);
+    if (!up) return s3error(req, res, 'NoSuchUpload', 'The specified upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.');
+    const after = Number(req.query['part-number-marker']) || 0;
+    const max = Math.min(1000, Math.max(1, Number(req.query['max-parts']) || 1000));
+    const all = (await mp.parts(up)).filter((p) => p.part_number > after);
+    const page = all.slice(0, max);
+    const items = page.map((p) => `<Part><PartNumber>${p.part_number}</PartNumber><LastModified>${new Date(Number(p.created_at)).toISOString()}</LastModified>`
+        + `<ETag>"${p.md5}"</ETag><Size>${Number(p.size_bytes)}</Size></Part>`).join('');
+    const truncated = all.length > max;
+    xml(res, 200, `<ListPartsResult xmlns="${XMLNS}"><Bucket>${esc(zone.name)}</Bucket><Key>${esc(key)}</Key><UploadId>${up.id}</UploadId>`
+        + `<PartNumberMarker>${after}</PartNumberMarker>${truncated ? `<NextPartNumberMarker>${page[page.length - 1].part_number}</NextPartNumberMarker>` : ''}`
+        + `<MaxParts>${max}</MaxParts><IsTruncated>${truncated}</IsTruncated><StorageClass>STANDARD</StorageClass>${items}</ListPartsResult>`);
+}
+
+async function listUploads(req, res, zone) {
+    if (!mayRead(req.s3.key)) return s3error(req, res, 'AccessDenied', 'This access key cannot read');
+    const prefix = typeof req.query.prefix === 'string' ? req.query.prefix : '';
+    const rows = await mp.listForZone(zone, { prefix });
+    const items = rows.map((u) => `<Upload><Key>${esc(u.object_key)}</Key><UploadId>${u.id}</UploadId><StorageClass>STANDARD</StorageClass>`
+        + `<Initiated>${new Date(Number(u.created_at)).toISOString()}</Initiated></Upload>`).join('');
+    xml(res, 200, `<ListMultipartUploadsResult xmlns="${XMLNS}"><Bucket>${esc(zone.name)}</Bucket><Prefix>${esc(prefix)}</Prefix>`
+        + `<MaxUploads>1000</MaxUploads><IsTruncated>false</IsTruncated>${items}</ListMultipartUploadsResult>`);
 }
 
 async function deleteOne(req, zone, key) {
@@ -542,7 +686,8 @@ router.use(async (req, res) => {
             if (req.method === 'HEAD') { if (!mayRead(req.s3.key)) return s3error(req, res, 'AccessDenied', ''); baseHeaders(res); res.set('x-amz-bucket-region', 'us-east-1'); return res.status(200).end(); }
             if (req.method === 'GET' && q.location !== undefined) return xml(res, 200, `<LocationConstraint xmlns="${XMLNS}"/>`);
             if (req.method === 'POST' && q.delete !== undefined) return await deleteObjects(req, res, zone);
-            if (req.method === 'GET' && !['acl', 'policy', 'versioning', 'cors', 'lifecycle', 'tagging', 'uploads', 'versions', 'website', 'encryption', 'logging', 'notification', 'replication', 'object-lock', 'ownershipControls', 'publicAccessBlock', 'accelerate', 'requestPayment'].some((k) => q[k] !== undefined)) {
+            if (req.method === 'GET' && q.uploads !== undefined) return await listUploads(req, res, zone);
+            if (req.method === 'GET' && !['acl', 'policy', 'versioning', 'cors', 'lifecycle', 'tagging', 'versions', 'website', 'encryption', 'logging', 'notification', 'replication', 'object-lock', 'ownershipControls', 'publicAccessBlock', 'accelerate', 'requestPayment'].some((k) => q[k] !== undefined)) {
                 if (!mayRead(req.s3.key)) return s3error(req, res, 'AccessDenied', 'This access key cannot read');
                 return await listObjects(req, res, zone, { v2: q['list-type'] === '2' });
             }
@@ -553,9 +698,16 @@ router.use(async (req, res) => {
         if (key == null) { req.resume(); return s3error(req, res, 'KeyTooLongError', `Keys are 1 to ${MAX_KEY_BYTES} bytes`); }
         const zone = await zoneFor(req, res, bucket);
         if (!zone) { req.resume(); return; }
-        if (q.uploads !== undefined || q.uploadId !== undefined || q.partNumber !== undefined) {
+        if (req.method === 'POST' && q.uploads !== undefined) return await createMultipart(req, res, zone, key);
+        if (q.uploadId !== undefined) {
+            if (req.method === 'PUT' && q.partNumber !== undefined) return await uploadPart(req, res, zone, key);
+            if (req.method === 'POST') return await completeMultipart(req, res, zone, key);
+            if (req.method === 'DELETE') return await abortMultipart(req, res, zone, key);
+            if (req.method === 'GET') return await listParts(req, res, zone, key);
+        }
+        if (q.partNumber !== undefined) {
             req.resume();
-            return s3error(req, res, 'NotImplemented', 'Multipart uploads are not supported yet: send objects up to the single-request limit in one PUT');
+            return s3error(req, res, 'NotImplemented', 'Reading one part of a completed object is not supported; use a Range');
         }
         if (['acl', 'tagging', 'retention', 'legal-hold', 'torrent', 'restore', 'attributes', 'versionId'].some((k) => q[k] !== undefined)) {
             req.resume();
