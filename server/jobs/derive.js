@@ -208,6 +208,41 @@ function cleanupWork(jobId) {
 }
 
 /**
+ * Remove the work directories (OBJECTS_PATH/.jobs/<job id>) that no job will use again: their job finished (succeeded,
+ * failed, cancelled) or no longer exists, and nothing has written to them for `minAgeMs`. A handler cleans up in its
+ * own `finally`, but a process killed mid-job (a restart, a deploy, the out-of-memory killer) never gets there: on
+ * 2026-10-15 four such directories held 12.8 GB of a 96 GB disk. A queued or running job's directory is kept (a retry
+ * may resume in it). → { removed: [ids], bytes }
+ */
+async function sweepWork({ minAgeMs = 3600 * 1000, now = Date.now() } = {}) {
+    const root = path.join(config.objects.path, '.jobs');
+    let names = [];
+    try { names = fs.readdirSync(root); } catch { return { removed: [], bytes: 0 }; }
+    const sizeOf = (p) => {
+        let total = 0;
+        const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else { try { total += fs.statSync(f).size; } catch { /* gone */ } } } };
+        try { walk(p); } catch { /* gone */ }
+        return total;
+    };
+    const removed = [];
+    let bytes = 0;
+    for (const name of names) {
+        if (!/^mjob_[0-9A-HJKMNP-TV-Z]{26}$/.test(name)) continue;
+        const dir = path.join(root, name);
+        let st;
+        try { st = fs.statSync(dir); } catch { continue; }
+        if (!st.isDirectory() || now - st.mtimeMs < minAgeMs) continue;
+        const job = await db.get('SELECT status FROM media_jobs WHERE id = ?', [name]);
+        if (job && !['succeeded', 'failed', 'cancelled'].includes(job.status)) continue;
+        const size = sizeOf(dir);
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch { continue; }
+        removed.push(name);
+        bytes += size;
+    }
+    return { removed, bytes };
+}
+
+/**
  * Register one finished output file as a private native object derived from `src`: create the row,
  * move the bytes under OBJECTS_PATH/<app>/<id>, verified local location, relationship; `alsoInTx`
  * (the job checkpoint) commits with it. Returns the new object id.
@@ -353,7 +388,7 @@ module.exports = {
     remux: { lane: 'heavy', maxAttempts: 3, timeoutMs: 3 * 3600 * 1000, needsObject: true, validate: validateRemux, run: runRemux },
     resolveSource, isMediaObject, extFor,
     // for the preview jobs (previews.js)
-    loadSource, adopt, ffmpeg, inputArgs, probeDuration, workDir, cleanupWork, existing, checkRoom,
+    loadSource, adopt, ffmpeg, inputArgs, probeDuration, workDir, cleanupWork, sweepWork, existing, checkRoom,
     // and object.cmaf (cmaf.js)
     budgetMs, probeStreams, sha256File,
 };
