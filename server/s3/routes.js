@@ -43,6 +43,7 @@ const model = require('../objects/model');
 const namespaces = require('../objects/namespaces');
 const sigv4 = require('./sigv4');
 const keys = require('./keys');
+const usage = require('./usage');
 const zones = require('./zones');
 const mp = require('./multipart');
 
@@ -83,6 +84,7 @@ function xml(res, status, body) {
 
 function s3error(req, res, code, message, extra = '') {
     const status = STATUS[code] || 400;
+    res.locals.s3code = code; // the zone's usage counts refusals by code (server/s3/usage.js)
     baseHeaders(res);
     if (req.method === 'HEAD') return res.status(status).end();
     xml(res, status, `<Error><Code>${esc(code)}</Code><Message>${esc(message)}</Message><Resource>${esc(req.originalUrl.split('?')[0])}</Resource>`
@@ -129,6 +131,7 @@ async function zoneFor(req, res, bucket) {
     const zone = await zones.byName(key.project_id, key.env, bucket);
     if (!zone || zone.state !== 'active') { s3error(req, res, 'NoSuchBucket', 'The specified bucket does not exist'); return null; }
     if (key.zones.length && !key.zones.includes(zone.id)) { s3error(req, res, 'AccessDenied', 'This access key is not scoped to this bucket'); return null; }
+    req.s3.zone = zone; // from here the request counts in the zone's usage
     return zone;
 }
 
@@ -668,6 +671,8 @@ router.use(async (req, res) => {
         const slash = p.indexOf('/', 1);
         const bucket = decodeURIComponent(slash < 0 ? p.slice(1) : p.slice(1, slash));
         const rest = slash < 0 ? '' : p.slice(slash + 1);
+        req.s3.hasKey = !!rest;
+        usage.track(req, res);
         const q = req.query;
         if (!bucket) {
             if (req.method === 'GET') return await listBuckets(req, res);
