@@ -585,7 +585,8 @@ thumbnail only while its VOD or clip is public. Tests: `test/security-*.test.js`
 `GET /o/:id` serves object bytes by canonical id (`med_…`): public/unlisted
 objects openly (and, for a JPEG, PNG, WebP, AVIF or GIF with a local copy, `?w=&fmt=` answers a resized variant exactly
 as `/t/:id` does, from its own cache `OBJECT_VARIANTS_PATH`, default `object-variants`; Network's `/avatar/:username?s=`
-and the shared navbar ask for avatars this way; without a local copy, or when the cache is busy, the original), private ones only with a valid signature from
+and the shared navbar ask for avatars this way; a private image takes a variant only with its signature, served
+private and no-store like the original, which is how openvibe.download shows its previews; without a local copy, or when the cache is busy, the original), private ones only with a valid signature from
 `/api/v2/:app/objects/:id/download`, deleted ones 410 (a deleted private object
 without a signature is a 404 like any other private one). A native object in the
 R2 popularity cache redirects to its verified R2 copy; a GET of a native object

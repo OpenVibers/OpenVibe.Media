@@ -156,7 +156,24 @@ const crypto = require('crypto');
         assert.deepStrictEqual([r.status, r.headers.get('content-type')], [200, 'image/png'], 'bytes that do not decode: the original');
         r = await call('GET', `/o/${imgId}`, { bearer: null });
         assert.deepStrictEqual([r.status, r.headers.get('content-type')], [200, 'image/png'], 'no query: the original');
-        console.log('✅ image variants: a public image in its asked size, the original otherwise');
+        // A private image takes a variant only with its signature (the drive's previews), private and no-store as the original.
+        r = await call('POST', O, { body: { kind: 'file', visibility: 'private' } });
+        const privId = r.body.id;
+        await call('PUT', `${O}/${privId}/content`, { raw: realPng, headers: { 'content-type': 'image/png' } });
+        r = await call('POST', `${O}/${privId}/complete`);
+        assert.strictEqual(r.body.lifecycle_status, 'ready');
+        r = await call('GET', `/o/${privId}?w=96&fmt=webp`, { bearer: null });
+        assert.strictEqual(r.status, 404, 'unsigned: indistinguishable from missing');
+        r = await call('GET', `${O}/${privId}/download`);
+        const privSigned = local(r.body.url);
+        const pv = await fetch(`${privSigned}&w=96&fmt=webp`);
+        const pbuf = Buffer.from(await pv.arrayBuffer());
+        assert.deepStrictEqual([pv.status, pv.headers.get('content-type'), pv.headers.get('cache-control')], [200, 'image/webp', 'private, no-store']);
+        assert.deepStrictEqual([(await require('sharp')(pbuf).metadata()).width, pbuf.length < realPng.length], [96, true]);
+        r = await call('GET', `${privSigned.replace(/sig=[^&]+/, 'sig=AAAA')}&w=96&fmt=webp`, { bearer: null });
+        assert.strictEqual(r.status, 404, 'a bad signature gets no variant either');
+        await db.run('DELETE FROM media_objects WHERE id = ?', [privId]);   // the listing checks below count the objects
+        console.log('✅ image variants: a public image in its asked size, the original otherwise; a private one only signed');
 
         // ── Service tokens ──
         r = await call('POST', O, { bearer: tok(), headers: { 'x-ov-subject': `user:${SUBJECT}` }, body: { kind: 'asset', size_bytes: 3 } });

@@ -455,7 +455,8 @@ reads are metered by CDN logs. Nothing here bills delivery.
   VODs, compute placement. (Slice 1 shipped: one on-demand 720p rung, queued by the master playlist / JSON download
   and cut into the timeline. Slice 2 shipped 2026-10-15: image variants. `/t/:id?w=&fmt=` and `/o/:id?w=&fmt=` (public
   images with a local copy) answer WebP, AVIF or JPEG at 64–640 px, kept in bounded LRU caches; openvibe.video's and
-  Live's cards and the shared navbar's avatars ask for them. The economics beyond an LRU budget, AV1 and compute
+  Live's cards and the shared navbar's avatars ask for them. A private image takes one with a valid signature (private,
+  no-store): the Download drive's previews. The economics beyond an LRU budget, AV1 and compute
   placement are still open.)
 - **F5 multi-CDN delivery:** Bunny path (B2 origin), R2 custom-domain path, OpenVibe edge first up to capacity, route
   epochs, canary shifts with auto-revert, player QoE beacons, seek SLOs.
