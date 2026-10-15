@@ -88,7 +88,7 @@ const http = require('http');
             lane: 'light', maxAttempts: 3, backoffS: () => 0,
             run: async (job, ctx) => {
                 flakyCalls++;
-                if (!ctx.checkpoint) { ctx.saveCheckpoint({ step: 1 }); throw new Error('transient'); }
+                if (!ctx.checkpoint) { await ctx.saveCheckpoint({ step: 1 }); throw new Error('transient'); }
                 return { resumed_from: ctx.checkpoint.step };
             },
         });
