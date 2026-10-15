@@ -200,6 +200,8 @@ config.pastes.path = path.resolve(config.pastes.path);
 config.assets.path = path.resolve(config.assets.path);
 config.thumbnails.path = path.resolve(config.thumbnails.path);
 config.thumbnails.variants.path = path.resolve(config.thumbnails.variants.path || path.join(path.dirname(config.thumbnails.path), 'thumbnail-variants'));
+// Variants of public image objects (GET /o/:id?w=&fmt=), beside the thumbnail variants, with the same budget each.
+config.thumbnails.variants.objectsPath = path.resolve(process.env.OBJECT_VARIANTS_PATH || path.join(path.dirname(config.thumbnails.path), 'object-variants'));
 config.files.path = path.resolve(config.files.path);
 config.objects.path = path.resolve(config.objects.path);
 config.dataDir = path.resolve(config.dataDir);

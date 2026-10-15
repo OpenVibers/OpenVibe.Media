@@ -6,7 +6,7 @@
  * request, kept in a bounded local cache, and dropped least recently used when the cache is over its budget.
  *
  *   parse(query)  → null (no variant asked: the original), { w, fmt }, or { error }
- *                   w snaps up to the ladder (160, 320, 480, 640; never wider than the source); fmt is webp (the
+ *                   w snaps up to the ladder (64, 96, 160, 320, 480, 640; never wider than the source); fmt is webp (the
  *                   default once w is given), avif or jpeg. The format is named in the URL, never negotiated from
  *                   Accept: Cloudflare caches by URL and ignores Vary.
  *   createVariants({ dir, maxBytes, concurrency, sharp }) → { get(srcPath, spec) → { file, size, type } | null }
@@ -19,7 +19,8 @@
 const fs = require('fs');
 const path = require('path');
 
-const LADDER = [160, 320, 480, 640];
+// 64 and 96 are avatar sizes (a 32 or 48 px avatar on a 2x screen); 320–640 are card thumbnails.
+const LADDER = [64, 96, 160, 320, 480, 640];
 const FORMATS = Object.freeze({ webp: 'image/webp', avif: 'image/avif', jpeg: 'image/jpeg' });
 
 function parse(query = {}) {

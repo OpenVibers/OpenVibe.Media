@@ -137,6 +137,27 @@ const crypto = require('crypto');
         assert.deepStrictEqual([r.status, r.headers.get('content-range'), r.headers.get('content-type')], [206, `bytes 0-7/${png.length}`, 'image/png']);
         console.log('✅ public objects: 302 to the public location, ranged bytes at /o/:id');
 
+        // ── Image variants (Fabric F4): ?w=&fmt= on a public image resizes its local copy; anything unmakeable is the original ──
+        const realPng = await require('sharp')({ create: { width: 300, height: 200, channels: 3, background: '#3366cc' } }).png().toBuffer();
+        r = await call('POST', O, { body: { kind: 'avatar', visibility: 'public' } });
+        const imgId = r.body.id;
+        await call('PUT', `${O}/${imgId}/content`, { raw: realPng, headers: { 'content-type': 'image/png' } });
+        r = await call('POST', `${O}/${imgId}/complete`);
+        assert.strictEqual(r.body.lifecycle_status, 'ready');
+        const variant = await fetch(`${base}/o/${imgId}?w=96&fmt=webp`);
+        const vbuf = Buffer.from(await variant.arrayBuffer());
+        assert.deepStrictEqual([variant.status, variant.headers.get('content-type'), variant.headers.get('cache-control')], [200, 'image/webp', 'public, max-age=3600']);
+        const vmeta = await require('sharp')(vbuf).metadata();
+        assert.deepStrictEqual([vmeta.format, vmeta.width, vmeta.height], ['webp', 96, 64]);
+        assert.ok(vbuf.length < realPng.length, 'smaller than the original');
+        r = await call('GET', `/o/${imgId}?w=96&fmt=gif`, { bearer: null });
+        assert.strictEqual(r.status, 400, 'a bad format is a 400');
+        r = await call('GET', `/o/${pubId}?w=96`, { bearer: null });
+        assert.deepStrictEqual([r.status, r.headers.get('content-type')], [200, 'image/png'], 'bytes that do not decode: the original');
+        r = await call('GET', `/o/${imgId}`, { bearer: null });
+        assert.deepStrictEqual([r.status, r.headers.get('content-type')], [200, 'image/png'], 'no query: the original');
+        console.log('✅ image variants: a public image in its asked size, the original otherwise');
+
         // ── Service tokens ──
         r = await call('POST', O, { bearer: tok(), headers: { 'x-ov-subject': `user:${SUBJECT}` }, body: { kind: 'asset', size_bytes: 3 } });
         assert.strictEqual(r.status, 201, JSON.stringify(r.body));
@@ -170,7 +191,7 @@ const crypto = require('crypto');
         assert.ok(page1.body.next_cursor);
         const page2 = await call('GET', `${O}?limit=2&cursor=${page1.body.next_cursor}`);
         const seen = [...page1.body.objects, ...page2.body.objects].map(o => o.id);
-        assert.deepStrictEqual(seen, [svcId, pubId, id], 'newest first, no duplicates');
+        assert.deepStrictEqual(seen, [svcId, imgId, pubId, id], 'newest first, no duplicates');
         assert.strictEqual(page2.body.next_cursor, null);
         assert.deepStrictEqual((await call('GET', `${O}?kind=screenshot`)).body.objects.map(o => o.id), [pubId]);
         assert.deepStrictEqual((await call('GET', `${O}?visibility=private&kind=file`)).body.objects.map(o => o.id), [id]);

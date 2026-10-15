@@ -787,6 +787,12 @@ router.delete('/:id/holds/:holdId', appOnly, async (req, res) => {
 const INLINE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$|text\/plain$)/;
 
 const publicRouter = express.Router();
+// Images a variant can be made of (sharp decodes them; a GIF's first frame); an SVG is never rasterized here.
+const VARIANT_MIME = /^image\/(jpeg|png|webp|avif|gif)$/i;
+let _objectVariants = null;
+const objectVariants = () => _objectVariants || (_objectVariants = require('../thumbnails/variants').createVariants({
+    dir: config.thumbnails.variants.objectsPath, maxBytes: config.thumbnails.variants.maxBytes, concurrency: config.thumbnails.variants.concurrency,
+}));
 
 // ── Segment-native video (docs/media-fabric.md §3, F3.1; MEDIA_HLS_ENABLED) ──
 // GET /o/:id/master.m3u8, /o/:id/source/index.m3u8, /o/:id/source/{init.mp4,NNNNNN.m4s} and — for a produced
@@ -992,6 +998,12 @@ publicRouter.get('/:id', async (req, res) => {
             'Cache-Control': obj.visibility === 'private' || sandbox ? 'private, no-store' : 'public, max-age=3600',
             'Content-Disposition': contentDisposition(md.filename || obj.id, { inline: INLINE.test(mime) }),
         };
+        // ?w=&fmt= on a public or unlisted image asks for a variant (Media Fabric F4, thumbnails/variants.js): resized
+        // from its local copy and cached (an avatar of 18 KB is under 1 KB at 96 px). Without a local copy, or when the
+        // cache is busy or the image cannot be decoded, the original answers.
+        const variants = require('../thumbnails/variants');
+        const spec = VARIANT_MIME.test(mime) && obj.visibility !== 'private' && !sandbox ? variants.parse(req.query) : null;
+        if (spec && spec.error) return res.status(400).json({ error: spec.error });
         // A viewer of a native object, counted once a day without being identified (objects/popularity.js); the
         // object tiering reads these counts. Sandbox objects are never tiered, so they are not counted.
         if (!obj.legacy_ref && !sandbox) await require('./popularity').record(obj, req);
@@ -1011,6 +1023,15 @@ publicRouter.get('/:id', async (req, res) => {
         // A stale `present` local row whose file is gone falls through to the next copy.
         // The router's candidates carry their keys: a copy it resolved without a media_locations row (the object's
         // own canonical copy) is served too.
+        if (spec) {
+            const local = (decision.candidates || []).find((loc) => loc.provider === 'local' && fs.existsSync(loc.key));
+            let v = null;
+            if (local) { try { v = await objectVariants().get(local.key, spec); } catch { v = null; } }
+            if (v) {
+                res.writeHead(200, { ...headers, 'Content-Type': v.type, 'Content-Length': v.size, 'Content-Disposition': contentDisposition(md.filename || obj.id, { inline: true }) });
+                return fs.createReadStream(v.file).on('error', () => res.destroy()).pipe(res);
+            }
+        }
         for (const loc of decision.candidates || []) {
             const provider = loc.provider;
             if (provider === 'local') {
