@@ -138,14 +138,14 @@ function amzDateMs(amzDate) {
     return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : NaN;
 }
 
-/** The signature the client should have sent, given the secret. */
-function expectedSignature(req, parsed, secret) {
+/** The signature the client should have sent, given the secret (for `method`, by default the request's own). */
+function expectedSignature(req, parsed, secret, method = req.method) {
     const headers = parsed.signedHeaders.map((h) => {
         const v = h === 'host' ? (headerValue(req, 'host') || '') : headerValue(req, h);
         return `${h}:${v === undefined ? '' : v}\n`;
     }).join('');
     const canonical = [
-        req.method,
+        method,
         canonicalPath(signedPath(req)),
         canonicalQuery(parsed.pairs),
         headers,
@@ -176,12 +176,26 @@ function verify(req, parsed, secret, { now = Date.now() } = {}) {
         if (at - now > SKEW_MS) return { code: 'AccessDenied', message: 'Request is not valid yet' };
         if (now > at + parsed.expires * 1000) return { code: 'AccessDenied', message: 'Request has expired' };
     }
-    const { signature, key } = expectedSignature(req, parsed, secret);
+    let { signature, key } = expectedSignature(req, parsed, secret);
+    if (!safeEqual(signature, parsed.signature) && headSentAsGet(req, parsed)) {
+        ({ signature, key } = expectedSignature(req, parsed, secret, 'HEAD'));
+        if (safeEqual(signature, parsed.signature)) parsed.signedAsHead = true;
+    }
     if (!safeEqual(signature, parsed.signature)) {
         return { code: 'SignatureDoesNotMatch', message: 'The request signature we calculated does not match the signature you provided' };
     }
     parsed.signingKey = key;
     return null;
+}
+
+/**
+ * A HEAD that a proxy forwarded as GET: Cloudflare turns HEAD into GET for paths it may cache (by extension: .jpg,
+ * .bin, .zip …), and SigV4 signs the method, so the signature is a HEAD's. Taken only for a header-signed request
+ * with no body; never for a presigned URL, which may be shared for a HEAD alone. Serving it as a GET gives the
+ * signer nothing their key could not read with a GET of its own, and the proxy returns only the headers to them.
+ */
+function headSentAsGet(req, parsed) {
+    return parsed.kind === 'header' && req.method === 'GET' && (parsed.payloadHash === EMPTY_SHA256 || parsed.payloadHash === 'UNSIGNED-PAYLOAD');
 }
 
 /** Is the payload an aws-chunked stream (x-amz-content-sha256 says so)? */
