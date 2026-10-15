@@ -204,6 +204,27 @@ const { Readable } = require('stream');
         assert.deepStrictEqual([res.status, /Request has expired/.test(await res.text())], [403, true], 'an expired URL is refused');
         console.log('✅ presigned GET and PUT; a URL reaches its own key only and expires');
 
+        // ── A HEAD that a proxy forwarded as GET (Cloudflare does for cacheable extensions) ──
+        const asGet = client(full);
+        asGet.middlewareStack.addRelativeTo((next) => (args) => { args.request.method = 'GET'; return next(args); },
+            { relation: 'after', toMiddleware: 'awsAuthMiddleware', name: 'headSentAsGet' });
+        out = await asGet.send(new S3.HeadObjectCommand({ Bucket: 'assets', Key: 'readme.txt' }));
+        assert.strictEqual(Number(out.ContentLength), 'readme.txt'.length, 'a header-signed HEAD that arrives as GET is served');
+        const asDelete = client(full);
+        asDelete.middlewareStack.addRelativeTo((next) => (args) => { args.request.method = 'DELETE'; return next(args); },
+            { relation: 'after', toMiddleware: 'awsAuthMiddleware', name: 'headSentAsDelete' });
+        await assert.rejects(asDelete.send(new S3.HeadObjectCommand({ Bucket: 'assets', Key: 'readme.txt' })), (e) => e.$metadata.httpStatusCode === 403, 'only GET stands in as HEAD');
+        await s3.send(new S3.HeadObjectCommand({ Bucket: 'assets', Key: 'readme.txt' }));
+        const headUrl = await getSignedUrl(s3, new S3.HeadObjectCommand({ Bucket: 'assets', Key: 'readme.txt' }), { expiresIn: 60 });
+        assert.strictEqual((await fetch(headUrl, { method: 'HEAD' })).status, 200, 'a presigned HEAD reads the headers');
+        res = await fetch(headUrl);
+        assert.deepStrictEqual([res.status, /SignatureDoesNotMatch/.test(await res.text())], [403, true], 'a presigned HEAD URL never reads the body');
+        const putAsGet = client(full);
+        putAsGet.middlewareStack.addRelativeTo((next) => (args) => { args.request.method = 'GET'; return next(args); },
+            { relation: 'after', toMiddleware: 'awsAuthMiddleware', name: 'putSentAsGet' });
+        await assert.rejects(putAsGet.send(new S3.PutObjectCommand({ Bucket: 'assets', Key: 'readme.txt', Body: 'nope' })), (e) => e.$metadata.httpStatusCode === 403);
+        console.log('✅ a header-signed HEAD forwarded as GET is served; presigned HEAD URLs and other methods are not');
+
         // ── Isolation and permissions ──
         await assert.rejects(client(scoped).send(new S3.GetObjectCommand({ Bucket: 'assets', Key: 'readme.txt' })), /AccessDenied/, 'a zone-scoped key cannot reach another zone');
         await client(scoped).send(new S3.PutObjectCommand({ Bucket: 'logs', Key: 'a.log', Body: 'x' }));
