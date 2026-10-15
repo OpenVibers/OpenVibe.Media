@@ -58,7 +58,7 @@ function suite(name) {
 const t = suite('service-kit');
 
 t('server/index.js imports gracefulStop from openvibe-sdk/service and owns no signal handler', () => {
-    assert.match(source, /const \{ gracefulStop \} = require\('openvibe-sdk\/service'\)/);
+    assert.match(source, /const \{ gracefulStop(, [A-Za-z]+)* \} = require\('openvibe-sdk\/service'\)/);
     assert.doesNotMatch(source, /process\.on\('SIGTERM'/);
     assert.doesNotMatch(source, /process\.on\('SIGINT'/);
     assert.doesNotMatch(source, /function shutdown\(/, 'the hand-written shutdown() is gone');
@@ -71,7 +71,7 @@ t("the one stop names Media, stops the recorder first, keeps every handle, and u
     assert.match(call, /drainMs: 60000/, "a 60 s drain (VOD_STOP_GRACE_MS) so in-flight uploads/large downloads are not cut at the kit's 4 s default");
     assert.match(call, /deadlineMs: 70000/, 'the 70 s stop the systemd unit leaves room for (TimeoutStopSec=80)');
     assert.match(call, /deadlineExitCode: 0/, 'Media exits 0 past the deadline, like the 5 s family');
-    assert.match(call, /close: \[\(\) => db\.close\(\)\]/);
+    assert.match(call, /close: \[async \(\) => \{ if \(telemetryRetention\) await telemetryRetention\.stop\(\); await telemetry\.stop\(\); \}, \(\) => db\.close\(\)\]/, 'request telemetry flushes, then the database closes');
     assert.doesNotMatch(call, /beforeDrain/, 'the recorder is a stop step now, not beforeDrain (the kit runs beforeDrain after stop)');
 
     // The recorder stops first, before every other handle — the order the hand-written shutdown ran.
