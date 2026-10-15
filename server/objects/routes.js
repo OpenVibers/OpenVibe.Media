@@ -998,11 +998,12 @@ publicRouter.get('/:id', async (req, res) => {
             'Cache-Control': obj.visibility === 'private' || sandbox ? 'private, no-store' : 'public, max-age=3600',
             'Content-Disposition': contentDisposition(md.filename || obj.id, { inline: INLINE.test(mime) }),
         };
-        // ?w=&fmt= on a public or unlisted image asks for a variant (Media Fabric F4, thumbnails/variants.js): resized
-        // from its local copy and cached (an avatar of 18 KB is under 1 KB at 96 px). Without a local copy, or when the
-        // cache is busy or the image cannot be decoded, the original answers.
+        // ?w=&fmt= on an image asks for a variant (Media Fabric F4, thumbnails/variants.js): resized from its local copy
+        // and cached (an avatar of 18 KB is under 1 KB at 96 px). Without a local copy, or when the cache is busy or the
+        // image cannot be decoded, the original answers. A private or sandbox image takes one only with a valid
+        // signature (the drive's previews, MediaHub), served with the same private, no-store headers as the original.
         const variants = require('../thumbnails/variants');
-        const spec = VARIANT_MIME.test(mime) && obj.visibility !== 'private' && !sandbox ? variants.parse(req.query) : null;
+        const spec = VARIANT_MIME.test(mime) && (signed || (obj.visibility !== 'private' && !sandbox)) ? variants.parse(req.query) : null;
         if (spec && spec.error) return res.status(400).json({ error: spec.error });
         // A viewer of a native object, counted once a day without being identified (objects/popularity.js); the
         // object tiering reads these counts. Sandbox objects are never tiered, so they are not counted.
