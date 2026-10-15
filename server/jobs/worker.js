@@ -36,6 +36,15 @@ let timer = null;
 let started = false;
 let ticking = false;
 let lastScheduleAt = 0;
+let lastSweepAt = 0;
+
+/** The work directories of finished or vanished jobs (derive.sweepWork), at start and hourly. */
+async function sweepWorkDirs() {
+    try {
+        const r = await require('./derive').sweepWork();
+        if (r.removed.length) console.log(`[Jobs] removed ${r.removed.length} leftover work director${r.removed.length === 1 ? 'y' : 'ies'} (${(r.bytes / 1e9).toFixed(2)} GB) of finished or vanished jobs`);
+    } catch (err) { console.warn('[Jobs] work directory sweep:', err.message); }
+}
 let lastPruneAt = 0;
 let kicked = false;
 
@@ -162,6 +171,10 @@ async function tick() {
                 try { await require('./move-cleanup').schedule(now); } catch (err) { console.warn('[Jobs] move cleanup schedule:', err.message); }
             }
             try { await require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
+            if (now - lastSweepAt > 3600 * 1000) {
+                lastSweepAt = now;
+                await sweepWorkDirs();
+            }
             if (now - lastPruneAt > 6 * 3600 * 1000) {
                 lastPruneAt = now;
                 try { const n = await queue.prune({ days: cfg().retentionDays }); if (n) console.log(`[Jobs] pruned ${n} finished thumbnail/hash job(s)`); } catch { /* next time */ }
@@ -202,6 +215,9 @@ async function start() {
     // or a job claimed before start()): failing it here would refuse its own result as stale (jobs.test.js flaked on it).
     const n = await queue.recoverInterrupted({ all: true, except: new Set(running.keys()) });
     if (n) console.log(`[Jobs] ${n} job(s) interrupted by the restart were requeued or failed`);
+    // A job the restart failed for good left its work directory behind: sweep it now (and hourly from tick()).
+    lastSweepAt = Date.now();
+    await sweepWorkDirs();
     lastScheduleAt = Date.now();           // the first scheduled scan waits a few minutes after boot
     timer = setInterval(() => { tick().catch(() => {}); }, cfg().pollMs);
     if (timer.unref) timer.unref();
