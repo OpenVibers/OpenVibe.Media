@@ -119,7 +119,8 @@ function baseCss() {
   .meta a:hover { text-decoration: underline; }
   .note { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: .7rem 1rem; margin: 0 0 1rem; color: var(--muted); font-size: .9rem; }
   .note a { font-weight: 600; }
-  .btn { display: inline-block; padding: .5rem .95rem; border-radius: 10px; background: var(--acc); color: var(--on-acc); text-decoration: none; font-weight: 600; font-size: .9rem; }
+  /* A filled button uses the strong accent: white on --accent (#3b82f6) is 3.7:1, under AA; on --accent-strong it passes. */
+  .btn { display: inline-block; padding: .5rem .95rem; border-radius: 10px; background: var(--accent-strong, #2563eb); color: var(--on-accent-strong, #fff); text-decoration: none; font-weight: 600; font-size: .9rem; }
   .btn.ghost { background: transparent; color: var(--link); border: 1px solid var(--line); }
   .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; }
   .desc { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
