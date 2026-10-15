@@ -13,6 +13,8 @@ const assert = require('assert');
         assert.ok(css.includes(`${k}:${DEFAULT_VARS[k]}`), `the page defines ${k} as the default theme does`);
     }
     assert.ok(!/url\(|;\s*}/.test(css.split('\n').find((l) => l.includes('--accent:')) || ''), 'only plain token values');
+    // A filled button is white on the strong accent (AA); white on --accent is 3.7:1 (axe color-contrast on /v/:id).
+    assert.ok(/\.btn \{[^}]*background: var\(--accent-strong, #2563eb\); color: var\(--on-accent-strong, #fff\)/.test(css), 'buttons use the strong accent');
     // The index page (browse.js) is composed by page-frame too, so it carries the same tokens.
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'server', 'public', 'browse.js'), 'utf8');
     assert.ok(/pageFrame\.page\(/.test(src) && !/<!DOCTYPE/i.test(src), 'browse.js renders through page-frame, not its own document');
