@@ -157,7 +157,10 @@ const crypto = require('crypto');
         console.log('✅ never deletes: files, objects, locations and legacy rows all remain');
 
         // ── Count, /metrics and /api/ready ──
-        assert.strictEqual(await copyReport.countNoGoodCopy(db), 3, 'c (remote corrupt), d (local gone), h (no locations)');
+        // A virtual clip (clip-jobs makeVirtual) has no copy of its own by design: its bytes are its VOD's.
+        await model.createObject({ app_id: 'live', kind: 'clip', lifecycle_status: 'ready', size_bytes: 0,
+            owner_user_id: 7, owner_subject: 'usr_01JAB2C3D4E5F6G7H8J9K0MNPQ', mime_type: 'video/mp4', metadata: { virtual: true } });
+        assert.strictEqual(await copyReport.countNoGoodCopy(db), 3, 'c (remote corrupt), d (local gone), h (no locations); not the virtual clip');
         const st = await job.status();
         assert.strictEqual(st.no_good_copy, 3);
         assert.strictEqual(st.verified_objects, READY);

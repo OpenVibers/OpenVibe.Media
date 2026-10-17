@@ -3,7 +3,7 @@
  *
  * A ready object has NO GOOD COPY when none of its locations is `present` (verified there) or
  * `pending` (not verified yet, so possibly fine). That covers objects whose every copy was found
- * missing/corrupt, and ready objects with no location row at all.
+ * missing/corrupt, and ready objects with no location row at all, except virtual clips (a window over their VOD).
  *
  * Pure SQL over a small `q` interface — { all(sql, params), get(sql, params) } — so the service
  * (server/db/database.js), the metrics/readiness checks and the read-only report script
@@ -12,8 +12,12 @@
  */
 'use strict';
 
+// A virtual clip (clip-jobs makeVirtual: a window over its VOD's timeline) has no copy of its own by design: its bytes
+// are its VOD's, whose object is checked on its own. The same test as verify-job's selection; five of them held
+// /api/ready at "degraded" (2026-10-17).
 const NO_GOOD_COPY_WHERE = `o.lifecycle_status = 'ready'
-    AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.state IN ('present', 'pending'))`;
+    AND NOT EXISTS (SELECT 1 FROM media_locations l WHERE l.object_id = o.id AND l.state IN ('present', 'pending'))
+    AND NOT (o.kind = 'clip' AND (CASE WHEN json_valid(o.metadata) THEN json_extract(o.metadata, '$.virtual') END) IS NOT NULL)`;
 
 async function countNoGoodCopy(q, { appId = null } = {}) {
     const r = await q.get(`SELECT COUNT(*) AS n FROM media_objects o WHERE ${NO_GOOD_COPY_WHERE}${appId ? ' AND o.app_id = ?' : ''}`, appId ? [appId] : []);
