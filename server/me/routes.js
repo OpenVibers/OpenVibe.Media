@@ -47,6 +47,9 @@ function privateHeaders(_req, res, next) {
     res.set('Cache-Control', cache.htmlHeaders({ private: true }));
     res.set('X-Robots-Tag', 'noindex, nofollow');
     res.set('X-Content-Type-Options', 'nosniff');
+    // A person's own pages and the staff form are never framed by another site (clickjacking).
+    res.set('X-Frame-Options', 'DENY');
+    res.set('Content-Security-Policy', "frame-ancestors 'none'");
     next();
 }
 
