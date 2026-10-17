@@ -357,7 +357,13 @@ const ready = (async () => {
 
     // ── Listen + graceful shutdown ───────────────────────────────
 
-    const server = app.listen(config.port, config.host, () => {
+    // Zero-downtime restarts (as OpenVibe.Live): when systemd owns the listener (deploy/systemd/openvibe-media.socket) it
+    // hands it over as file descriptor 3, and connections that arrive during a restart wait in the kernel's accept queue
+    // instead of being refused (64 refused connections on 2026-10-17 alone: thumbnails, pictures and video for every
+    // site). Without the socket unit this is the usual listen.
+    const socketActivated = process.env.LISTEN_FDS === '1' && Number(process.env.LISTEN_PID) === process.pid;
+    if (socketActivated) console.log('[Server] socket-activated: listening on the socket systemd handed over (fd 3)');
+    const server = app.listen(...(socketActivated ? [{ fd: 3 }] : [config.port, config.host]), () => {
         // Subscribe to Network's sign-out-everywhere cutoffs (not on a restore drill; retried a few times).
         if (!drill.enabled) {
             const subscribe = (n) => require('./revocations').ensureSubscription().catch((e) => {

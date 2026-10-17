@@ -1,0 +1,21 @@
+# OpenVibe.Media — listening socket, owned by systemd rather than by the process (as OpenVibe.Live's and Network's).
+#
+# nginx proxies straight to 127.0.0.1:4100. Without this, each restart closed that listener for the whole boot and
+# nginx got ECONNREFUSED: 64 refused connections on 2026-10-17 alone: thumbnails, pictures and video for every site. With the socket held here, connections that arrive mid-restart wait in the
+# kernel's accept queue and are served as soon as the new process calls accept().
+#
+# It does not preserve established connections (WebSockets, streams): those reconnect.
+[Unit]
+Description=OpenVibe.Media HTTP socket
+# No PartOf=openvibe-media.service: PartOf propagates the service's stop/restart to this unit, and the
+# listener would close and reopen on every deploy. The socket must outlive every restart.
+
+[Socket]
+# Loopback only: nginx is the only client (the host firewall is off, so 0.0.0.0 would be public).
+ListenStream=127.0.0.1:4100
+NoDelay=true
+# Match the listen backlog the process would have used itself.
+Backlog=511
+
+[Install]
+WantedBy=sockets.target
