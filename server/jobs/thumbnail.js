@@ -7,6 +7,8 @@
  *
  *   params { kind: 'vod' | 'clip', id: <row id> }   (derived from the object's legacy ref when omitted)
  *   result { url, kind, id }
+ * A virtual clip (clip-jobs makeVirtual: a window over its VOD's timeline, no file of its own) takes its
+ * picture from its VOD, half a second after the clip's start.
  * Failures: media_unavailable (no local file and no cloud copy, an empty file, or a recording the
  * health scan found zero-byte / missing; permanent, answered 404 by the v1 route), no_video (an
  * audio-only recording: no frame exists; permanent, 404), not_found (permanent), generate_failed
@@ -49,12 +51,17 @@ async function run(job) {
     const thumbService = require('../thumbnails/thumbnail-service');
     // A recording the health scan found empty or gone has no frame to take (five such VODs failed as
     // generate_failed on 2026-09-23: ffmpeg was run on 0-byte files and Live got a 500).
-    if (kind === 'vod' && ['zero_byte', 'missing_file'].includes(row.health_status)) {
-        throw new JobError('media_unavailable', `The recording is ${row.health_status === 'zero_byte' ? 'empty (0 bytes)' : 'missing'}`, { permanent: true, status: 404 });
+    // A virtual clip has no file: its frame comes from its VOD (five such clips failed every page view as
+    // generate_failed on 2026-10-17: ffmpeg was pointed at the clip row's own path, which never existed).
+    const virtual = kind === 'clip' && !row.file_path && row.vod_id != null;
+    const recording = virtual ? await db.getVodById(row.vod_id, job.app_id) : (kind === 'vod' ? row : null);
+    if (virtual && !recording) throw new JobError('media_unavailable', `The clip's recording (vod ${row.vod_id}) is gone`, { permanent: true, status: 404 });
+    if (recording && ['zero_byte', 'missing_file'].includes(recording.health_status)) {
+        throw new JobError('media_unavailable', `The recording is ${recording.health_status === 'zero_byte' ? 'empty (0 bytes)' : 'missing'}`, { permanent: true, status: 404 });
     }
     let source = null;
     if (kind === 'clip' && row.file_path && require('fs').existsSync(row.file_path)) source = { kind: 'file', value: row.file_path };
-    else source = await require('../vod/vod-storage').resolveMediaSource(row);
+    else source = await require('../vod/vod-storage').resolveMediaSource(virtual ? recording : row);
     if (!source) throw new JobError('media_unavailable', 'Media file unavailable', { permanent: true, status: 404 });
     if (source.kind === 'file') {
         let size = 0;
@@ -66,7 +73,7 @@ async function run(job) {
     }
     const url = kind === 'vod'
         ? await thumbService.generateVodThumbnail(id, source.value)
-        : await thumbService.generateClipThumbnail(id, source.value);
+        : await thumbService.generateClipThumbnail(id, source.value, virtual ? { seekSeconds: (Number(row.start_time) || 0) + 0.5 } : {});
     if (!url) throw new JobError('generate_failed', 'Failed to generate thumbnail');
     return { url, kind, id };
 }
