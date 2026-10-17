@@ -56,7 +56,7 @@ const path = require('path');
         assert.ok(fs.existsSync(kept.file), 'a named file stays');
         assert.ok(fs.existsSync(waiting.file), 'a busy object\'s file stays');
         assert.strictEqual(cache.orphansRemoved(), 2);
-        assert.strictEqual(cache.status({ fresh: true }).bytes, fresh.bytes.length + kept.bytes.length + waiting.bytes.length, 'the cache counts what is left');
+        assert.strictEqual((await cache.refresh()).bytes, fresh.bytes.length + kept.bytes.length + waiting.bytes.length, 'the cache counts what is left');
 
         // The queued cut finishes (and fails): the next sweep takes its object's leftover too.
         await db.run("UPDATE media_jobs SET status = 'failed' WHERE id = 'job_busy'");

@@ -45,8 +45,8 @@ const { EventEmitter } = require('events');
         const old = await make(1, 'aaaaaa', true, 1000);
         const recent = await make(2, 'bbbbbb', true, 3000);
         const only = await make(3, 'cccccc', false, 500);
-        assert.strictEqual(cache.status().bytes, 18);
-        assert.strictEqual(cache.shouldKeepLocal(), false);
+        assert.strictEqual((await cache.refresh()).bytes, 18);
+        assert.strictEqual(await cache.shouldKeepLocal(), false);
         const first = await cache.sweep();
         assert.strictEqual(first.removed, 2);
         assert.strictEqual(fs.existsSync(old), false);
@@ -125,6 +125,24 @@ const { EventEmitter } = require('events');
         }
         assert.strictEqual(fs.existsSync(only), true);
         console.log('timeline cache: oldest verified copies and packed range evicted; sole copy retained');
+
+        // Emptied directories: the sweep removes the ones nothing touched for an hour; a new one (a cut may be writing
+        // into it) and the <app> level stay. The walk itself never blocks (no synchronous readdir/stat in the module).
+        const tlRoot = timeline.localRoot();
+        const stale = path.join(tlRoot, 'live', 'gone-object', 'source', 'v1');
+        const young = path.join(tlRoot, 'live', 'new-object', 'source');
+        const appDir = path.join(tlRoot, 'empty-app');
+        for (const d of [stale, young, appDir]) fs.mkdirSync(d, { recursive: true });
+        const hourAgo = (Date.now() - 2 * 3600 * 1000) / 1000;
+        for (const d of [stale, path.dirname(stale), path.dirname(path.dirname(stale)), appDir]) fs.utimesSync(d, hourAgo, hourAgo);
+        await cache.sweep();
+        assert.strictEqual(fs.existsSync(path.join(tlRoot, 'live', 'gone-object')), false, 'an old emptied object directory goes, down to its leaves');
+        assert.strictEqual(fs.existsSync(young), true, 'a new empty directory stays');
+        assert.strictEqual(fs.existsSync(appDir), true, 'the app level stays');
+        assert.strictEqual(fs.existsSync(only), true, 'files are never touched by the pruning');
+        const src = fs.readFileSync(path.join(__dirname, '../server/objects/timeline-cache.js'), 'utf8');
+        assert.ok(!/readdirSync|statSync\(/.test(src), 'the walk is asynchronous');
+        console.log('timeline cache: emptied directories pruned, the walk does not block');
 
         // The CMAF publisher stages normally, verifies the upload, then publishes remote-only rows below the floor.
         const publishDir = path.join(root, 'publish');
