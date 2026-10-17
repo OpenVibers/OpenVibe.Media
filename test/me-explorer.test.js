@@ -162,6 +162,8 @@ const http = require('http');
             assert.ok(r.text.includes('href="/auth/login?next=%2Fme"'), 'the sign-in prompt comes back to /me');
             assert.ok(r.text.includes('<meta name="robots" content="noindex, nofollow">'));
             assert.ok(r.headers['x-robots-tag'].includes('noindex') && r.headers['cache-control'] === 'private, no-store');
+            assert.strictEqual(r.headers['x-frame-options'], 'DENY', 'never framed by another site');
+            assert.strictEqual(r.headers['content-security-policy'], "frame-ancestors 'none'");
             assert.ok(!r.text.includes(anaReady[0]) && !r.text.includes('<table'), 'nothing of anyone is shown');
             assert.ok(r.text.includes('navbar.js') && r.text.includes('"sessionUrl":"/auth/me"'), 'in the OpenVibe Frame');
             console.log('✅ signed out: the API answers 401, /me is a sign-in prompt in the Frame');

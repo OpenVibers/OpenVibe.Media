@@ -70,6 +70,7 @@ const ready = (async () => {
     }
 
     const app = express();
+    app.disable('x-powered-by');   // the framework is nobody's business (it was in every answer)
     // Only the local reverse proxy (nginx on this host) is trusted to say who the client is: req.ip is
     // its X-Forwarded-For for loopback peers and the socket address for anyone else, so a direct caller
     // cannot pick its own IP (views, rate limits). `true` trusted every peer's header.
