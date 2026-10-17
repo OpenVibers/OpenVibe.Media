@@ -224,8 +224,9 @@ async function generateVodThumbnail(vodId, filePath, opts = {}) {
 }
 
 // ── Generate Clip Thumbnail (first frames) ───────────────────
-async function generateClipThumbnail(clipId, filePath) {
-    const thumbUrl = await generateFromVideo(filePath, 'clip', clipId, { seekSeconds: 0.5 });
+// opts.seekSeconds: where the clip starts in filePath (a virtual clip's picture comes from its VOD).
+async function generateClipThumbnail(clipId, filePath, opts = {}) {
+    const thumbUrl = await generateFromVideo(filePath, 'clip', clipId, { seekSeconds: opts.seekSeconds || 0.5 });
     if (thumbUrl) {
         const old = (await db.get('SELECT thumbnail_url FROM clips WHERE id = ?', [clipId]))?.thumbnail_url;
         await db.withObject('clip', clipId, async () => await db.run('UPDATE clips SET thumbnail_url = ? WHERE id = ?', [thumbUrl, clipId]));
