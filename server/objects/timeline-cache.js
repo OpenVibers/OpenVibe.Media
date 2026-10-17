@@ -8,7 +8,13 @@ const db = require('../db/database');
 const timeline = require('./timeline');
 
 let evictions = 0;
+let orphansRemoved = 0;
 let sweeping = false;
+// A cut stages its segments here and names them in one commit at the end (jobs/segments.js publishRendition); a failure
+// before that commit removes them again, but a process that dies there (a restart, a killed worker) leaves files no row
+// names. They are removed once older than any cut can run (a heavy job's limit is 13 h) and their object has no job
+// queued or running. Before this, the sweep skipped them for good: VOD 5726's three failed cuts on 2026-10-15 left 7 GB.
+const ORPHAN_AGE_MS = 24 * 3600 * 1000;
 
 function freeBytes() {
     try {
@@ -58,11 +64,34 @@ function served(file, now = Date.now()) {
     try { fs.utimesSync(file, now / 1000, now / 1000); } catch { /* an eviction may have just unlinked it */ }
 }
 
-async function sweep() {
+/** The object a timeline file belongs to: <root>/<app>/<object>/<rendition>/[<version>/]<name>, or null. */
+function objectOf(file) {
+    const parts = path.relative(timeline.localRoot(), file).split(path.sep);
+    return parts.length >= 4 && !parts.includes('..') ? parts[1] : null;
+}
+
+/** Remove the unnamed files that are old enough and whose object is idle. Returns the files that remain. */
+async function sweepOrphans(entries, now) {
+    const keep = [];
+    const idle = new Map();
+    for (const file of entries) {
+        const object = objectOf(file.path);
+        if (!object || now - file.servedAt < ORPHAN_AGE_MS) { keep.push(file); continue; }
+        if (await db.get('SELECT 1 AS named FROM media_timeline WHERE local_path = ? LIMIT 1', [file.path])) { keep.push(file); continue; }
+        if (!idle.has(object)) idle.set(object, !(await db.get("SELECT 1 AS busy FROM media_jobs WHERE object_id = ? AND status IN ('queued', 'running') LIMIT 1", [object])));
+        if (!idle.get(object)) { keep.push(file); continue; }
+        try { fs.unlinkSync(file.path); orphansRemoved++; } catch { keep.push(file); }
+    }
+    return keep;
+}
+
+async function sweep({ now = Date.now() } = {}) {
     if (sweeping) return { skipped: true };
     sweeping = true;
     try {
-        const entries = files().sort((a, b) => a.servedAt - b.servedAt);
+        const before = orphansRemoved;
+        const entries = (await sweepOrphans(files(), now)).sort((a, b) => a.servedAt - b.servedAt);
+        const orphans = orphansRemoved - before;
         let bytes = entries.reduce((n, f) => n + f.size, 0);
         let free = freeBytes();
         let removed = 0;
@@ -96,9 +125,9 @@ async function sweep() {
             });
             free = freeBytes();
         }
-        if (removed) memo = null;
-        return { removed, ...status({ fresh: true }) };
+        if (removed || orphans) memo = null;
+        return { removed, orphans, ...status({ fresh: true }) };
     } finally { sweeping = false; }
 }
 
-module.exports = { status, freeBytes, shouldKeepLocal, served, sweep, evictions: () => evictions };
+module.exports = { status, freeBytes, shouldKeepLocal, served, sweep, evictions: () => evictions, orphansRemoved: () => orphansRemoved, ORPHAN_AGE_MS };

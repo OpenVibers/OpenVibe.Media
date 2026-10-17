@@ -313,7 +313,11 @@ const ready = (async () => {
             try { const n = await require('./objects/model').purgeExpired(); if (n) console.log(`[Objects] Purged ${n} expired deleted object(s)`); } catch (err) { console.warn('[Objects] purge:', err.message); }
             // A projected object (a deleted clip's/VOD's) whose durable timeline delete failed keeps its rows; retry them.
             try { const r = await require('./objects/timeline').sweepPendingRemovals(); if (r.objects) console.log(`[Objects] Timeline retry: ${r.removed} row(s) of ${r.objects} gone object(s) removed, ${r.pending} still pending`); } catch (err) { console.warn('[Objects] timeline retry:', err.message); }
-            try { const r = await require('./objects/timeline-cache').sweep(); if (r.removed) console.log(`[Objects] Timeline cache: evicted ${r.removed} local file(s)`); } catch (err) { console.warn('[Objects] timeline cache:', err.message); }
+            try {
+                const r = await require('./objects/timeline-cache').sweep();
+                if (r.removed) console.log(`[Objects] Timeline cache: evicted ${r.removed} local file(s)`);
+                if (r.orphans) console.log(`[Objects] Timeline cache: removed ${r.orphans} file(s) no row names (a cut that died before its commit)`);
+            } catch (err) { console.warn('[Objects] timeline cache:', err.message); }
             // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).
             try { const r = await require('./objects/multipart').purgeExpired(); if (r.expired || r.orphan_dirs) console.log(`[Objects] Multipart: ${r.expired} expired session(s), ${r.orphan_dirs} orphan part dir(s) removed`); } catch (err) { console.warn('[Objects] multipart purge:', err.message); }
             // S3 multipart uploads past their expiry (MEDIA_MULTIPART_TTL_HOURS): their parts are removed (server/s3/multipart.js).
