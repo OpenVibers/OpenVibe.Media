@@ -23,38 +23,60 @@ function freeBytes() {
     } catch { return 0; } // Unknown free space must not authorize another local copy.
 }
 
-function files() {
+// An emptied directory (its files evicted or swept) older than this is removed by the sweep. Evictions used to leave
+// every <app>/<object>/<rendition>/<version> directory behind: 193,900 directories for 1,080 files on 2026-10-17, and
+// walking them took 1.9 s of the event loop on every /metrics scrape (every 30 s).
+const EMPTY_DIR_AGE_MS = 3600 * 1000;
+
+/** Every local timeline file, read without blocking the event loop. `prune`: remove emptied directories on the way. */
+async function files({ prune = false, now = Date.now() } = {}) {
     const root = timeline.localRoot();
     const out = [];
-    function visit(dir) {
+    async function visit(dir, depth) {
         let entries;
-        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return 1; }
+        // Its age from before this walk removed anything inside it (a removal touches the parent's mtime).
+        let touched = null;
+        if (prune && depth >= 2) { try { touched = (await fs.promises.stat(dir)).mtimeMs; } catch { /* gone */ } }
+        let left = 0;
         for (const entry of entries) {
             const file = path.join(dir, entry.name);
-            if (entry.isDirectory()) visit(file);
-            else if (entry.isFile()) {
-                try { const st = fs.statSync(file); out.push({ path: file, size: st.size, servedAt: st.mtimeMs }); }
-                catch { /* disappeared while scanning */ }
-            }
+            if (entry.isDirectory()) { left += await visit(file, depth + 1); continue; }
+            left++;
+            if (!entry.isFile()) continue;
+            try { const st = await fs.promises.stat(file); out.push({ path: file, size: st.size, servedAt: st.mtimeMs }); }
+            catch { /* disappeared while scanning */ }
         }
+        // <root> and <root>/<app> stay; below them an empty directory nothing has touched for an hour goes (a cut
+        // writing into a new one is minutes old).
+        if (!left && touched !== null && now - touched >= EMPTY_DIR_AGE_MS) {
+            try { await fs.promises.rmdir(dir); return 0; } catch { /* written to meanwhile */ }
+        }
+        return 1;   // still there: it counts in its parent
     }
-    visit(root);
+    await visit(root, 0);
     return out;
 }
 
-// status() walks every local timeline file, so readiness and /metrics read a copy at most 30 s old; a write decision
-// (shouldKeepLocal) and the sweep read it fresh, and a sweep that removed files drops the copy.
+// status() is synchronous (readiness, /metrics) and never walks: it answers with the last measurement and starts a new
+// one in the background once that is 30 s old. refresh() measures now; the sweep leaves its own count behind.
 const STATUS_TTL_MS = 30_000;
 let memo = null;
-function status({ fresh = false } = {}) {
-    const now = Date.now();
-    // Only the measured numbers are kept; the budget and the floor are read from config on every call.
-    if (fresh || !memo || now - memo.at >= STATUS_TTL_MS) memo = { at: now, bytes: files().reduce((n, f) => n + f.size, 0), free: freeBytes() };
-    return { bytes: memo.bytes, max_bytes: config.hls.localMaxBytes, free_bytes: memo.free, min_free_bytes: config.hls.localMinFreeBytes };
+let measuring = null;
+function refresh() {
+    if (!measuring) {
+        measuring = files().then((list) => { memo = { at: Date.now(), bytes: list.reduce((n, f) => n + f.size, 0) }; return status(); })
+            .finally(() => { measuring = null; });
+    }
+    return measuring;
+}
+function status() {
+    if (!memo || Date.now() - memo.at >= STATUS_TTL_MS) refresh().catch(() => {});
+    return { bytes: memo ? memo.bytes : 0, max_bytes: config.hls.localMaxBytes, free_bytes: freeBytes(), min_free_bytes: config.hls.localMinFreeBytes, ...(memo ? {} : { measuring: true }) };
 }
 
-function shouldKeepLocal() {
-    const s = status({ fresh: true });
+async function shouldKeepLocal() {
+    const s = await refresh();
     return s.max_bytes > 0 && s.bytes < s.max_bytes && s.free_bytes >= s.min_free_bytes;
 }
 
@@ -90,7 +112,7 @@ async function sweep({ now = Date.now() } = {}) {
     sweeping = true;
     try {
         const before = orphansRemoved;
-        const entries = (await sweepOrphans(files(), now)).sort((a, b) => a.servedAt - b.servedAt);
+        const entries = (await sweepOrphans(await files({ prune: true, now }), now)).sort((a, b) => a.servedAt - b.servedAt);
         const orphans = orphansRemoved - before;
         let bytes = entries.reduce((n, f) => n + f.size, 0);
         let free = freeBytes();
@@ -125,9 +147,9 @@ async function sweep({ now = Date.now() } = {}) {
             });
             free = freeBytes();
         }
-        if (removed || orphans) memo = null;
-        return { removed, orphans, ...status({ fresh: true }) };
+        memo = { at: Date.now(), bytes };   // what is left, counted by this walk
+        return { removed, orphans, ...status() };
     } finally { sweeping = false; }
 }
 
-module.exports = { status, freeBytes, shouldKeepLocal, served, sweep, evictions: () => evictions, orphansRemoved: () => orphansRemoved, ORPHAN_AGE_MS };
+module.exports = { status, refresh, freeBytes, shouldKeepLocal, served, sweep, evictions: () => evictions, orphansRemoved: () => orphansRemoved, ORPHAN_AGE_MS };
