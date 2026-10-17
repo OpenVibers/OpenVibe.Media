@@ -18,8 +18,10 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ESC[c]);
 
 function notFound(req, res) {
     res.status(404);
-    res.set('Content-Security-Policy', CSP);
     res.set('X-Content-Type-Options', 'nosniff');
+    // An API caller gets JSON, as from Media's own API routes (it got this HTML page).
+    if (req.path === '/api' || req.path.startsWith('/api/')) return res.json({ error: 'Not found' });
+    res.set('Content-Security-Policy', CSP);
     res.type('html').send(`<!DOCTYPE html>
 <html lang="en">
 <head>

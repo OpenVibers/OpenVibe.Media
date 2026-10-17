@@ -160,6 +160,10 @@ const { spawn } = require('child_process');
             }).on('error', reject));
             assert.deepStrictEqual([nf.status, nf.csp], [404, require('../server/not-found').CSP]);
             assert.ok(nf.body.includes('<pre>Cannot GET /__ovcheck-404</pre>'));
+            // ...and an unknown /api path is JSON, as from Media's API routes.
+            const api404 = await request(b2, '/api/nope');
+            assert.strictEqual(api404.status, 404);
+            assert.deepStrictEqual(typeof api404.body === 'string' ? JSON.parse(api404.body) : api404.body, { error: 'Not found' });
             // The release manifest (registry.release-manifest@1) names where open tabs report updates,
             // and those reports land in /metrics.
             const rel = await request(b2, '/release.json');
