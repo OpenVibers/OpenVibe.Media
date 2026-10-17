@@ -413,11 +413,17 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
         const clip = await _getClipForWrite(req, res);
         if (!clip) return;
-        const { title, visibility, auto_generated: autoGen } = req.body || {};
+        const { title, description, visibility, auto_generated: autoGen } = req.body || {};
         if (title !== undefined) {
             const t = sanitizeClipTitle(title, '');
             if (!t) return res.status(400).json({ error: 'Title must be 1-200 characters' });
             await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET title = ? WHERE id = ?', [t, clip.id]));
+        }
+        // The same cleaning as a create: no markup, at most 1000 characters; null or '' clears it.
+        if (description !== undefined) {
+            if (description !== null && typeof description !== 'string') return res.status(400).json({ error: 'description must be a string' });
+            const d = (description || '').replace(/<[^>]*>/g, '').trim().slice(0, 1000);
+            await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET description = ? WHERE id = ?', [d, clip.id]));
         }
         // Only the app itself (its automation's own records) may say a clip was machine-made.
         if (autoGen !== undefined && flag(autoGen) !== null) {

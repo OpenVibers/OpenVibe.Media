@@ -175,6 +175,11 @@ const sharp = require('sharp');
         ({ obj } = await linked('clips', 'id', upId, 'clip update'));
         assert.strictEqual(obj.visibility, 'public');
         assert.deepStrictEqual([model.parseJson(obj.metadata, {}).title, model.parseJson(obj.metadata, {}).auto_generated], ['Better', true]);
+        // The description is editable too (docs/object-model.md), cleaned as on create.
+        r = await call('PUT', `/clips/${upId}`, { description: '  <b>A person</b> builds a desk.  ' });
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual((await db.get('SELECT description FROM clips WHERE id = ?', [upId])).description, 'A person builds a desk.');
+        assert.strictEqual((await call('PUT', `/clips/${upId}`, { description: 42 })).status, 400);
 
         const doomedFile = path.join(process.env.CLIPS_PATH, 'doomed.webm');
         fs.writeFileSync(doomedFile, Buffer.alloc(700, 5));
