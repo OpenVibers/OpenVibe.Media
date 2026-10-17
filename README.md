@@ -743,7 +743,9 @@ fast-forward `/opt/openvibe.media`, install on a lockfile change, restart, wait 
 ovhost refuses the restart while a VOD is recording (`recordings_in_progress` on `/api/ready`); `--wait-idle`
 holds it until none is. The unit is `openvibe-media.service` ([deploy/systemd/](deploy/systemd/openvibe-media.service),
 runs as `ubuntu`, media under `/opt/openvibe.media/data`) on `127.0.0.1:4100`, the env file
-`/etc/openvibe/media.env`. The database is `ov_media` on the host's data role (`sudo /opt/openvibe.host/roles/data/add-service.sh media`
+`/etc/openvibe/media.env`. The listener belongs to `openvibe-media.socket` (with the
+`openvibe-media.service.d/socket.conf` drop-in): requests that arrive during a restart wait for the new process
+instead of getting 502s; ovhost restarts the service, never the socket. The database is `ov_media` on the host's data role (`sudo /opt/openvibe.host/roles/data/add-service.sh media`
 writes its settings); the release migrates it at boot; nginx serves `openvibe.media` from
 [deploy/nginx/openvibe.media.conf](deploy/nginx/openvibe.media.conf). After a deploy, record the N-1
 fixtures (`npm run n-1:record`).
