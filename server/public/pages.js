@@ -144,7 +144,7 @@ function renderWatchPage(kind, record, readiness = null) {
     const [stateTitle, stateText] = playable ? [null, null] : unavailableText(kind, readiness.reason);
     const player = playable
         ? `<div class="player">
-    <video controls playsinline preload="metadata"${thumb ? ` poster="${esc(thumb)}"` : ''} src="${esc(rawUrl)}">
+    <video data-ov-player controls playsinline preload="metadata"${thumb ? ` poster="${esc(thumb)}"` : ''} src="${esc(rawUrl)}">
       Your browser cannot play this video. <a href="${esc(rawUrl)}">Download it</a> instead.
     </video>
   </div>`

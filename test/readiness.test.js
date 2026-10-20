@@ -143,10 +143,14 @@ const http = require('http');
         const hasPlayer = (html) => /<video[\s>]/.test(html);
         res = await get('/v/1', nav);
         assert.ok(hasPlayer(res.body) && res.body.includes('<meta property="og:video"'), 'a playable VOD gets its player');
+        // The network's player (openvibe-shared player.js/css): the video is marked and both files load.
+        assert.ok(res.body.includes('<video data-ov-player controls playsinline'), 'the video takes the network player');
+        assert.ok(/<link rel="stylesheet" href="\/shared\/player\.css\?v=[0-9a-f]+">/.test(res.body) && /<script src="\/shared\/player\.js\?v=[0-9a-f]+" defer><\/script>/.test(res.body));
         res = await get('/v/2', nav);
         assert.strictEqual(res.status, 200);
         assert.ok(!hasPlayer(res.body), 'no player for bytes nobody verified');
         assert.ok(res.body.includes('Still processing') && res.body.includes('data-readiness="verification_pending"'));
+        assert.ok(!res.body.includes('/shared/player.js'), 'no player files where nothing plays');
         assert.ok(res.body.includes('content="noindex, follow"') && !res.body.includes('og:video') && !res.body.includes('application/ld+json') && !res.body.includes(' download>'),
             'no index, no video metadata, no structured data, no download');
         res = await get('/v/3', nav);
