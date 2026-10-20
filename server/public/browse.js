@@ -19,7 +19,7 @@ const THUMB_DIR = path.resolve(config.thumbnails.path);
 
 // Public base URL per app for "source" links — shared with the watch pages.
 const pageFrame = require('./page-frame');
-const { appUrl, isoDate } = pageFrame;
+const { appUrl, watchPageUrl, isoDate } = pageFrame;
 const cache = require('openvibe-shared/cache-policy');
 const frame = require('openvibe-shared/frame');
 const showcase = require('openvibe-shared/showcase');
@@ -36,7 +36,7 @@ function vodCard(v) {
         thumb: abs(v.thumbnail_url), duration: v.duration_seconds,
         text: snip(v.description || v.ai_overview),
         view: `${config.publicUrl}/v/${v.id}`,
-        source: `${appUrl(v.app_id)}/vod/${v.id}`, sourceLabel: 'VOD page',
+        source: watchPageUrl('vod', v.app_id, v.id), sourceLabel: 'VOD page',
     };
 }
 function clipCard(c) {
@@ -45,7 +45,7 @@ function clipCard(c) {
         thumb: abs(c.thumbnail_url), duration: c.duration_seconds,
         text: snip(c.description || c.ai_overview),
         view: `${config.publicUrl}/c/${c.id}`,
-        source: `${appUrl(c.app_id)}/clip/${c.id}`, sourceLabel: 'Clip page',
+        source: watchPageUrl('clip', c.app_id, c.id), sourceLabel: 'Clip page',
     };
 }
 function fileCard(f) {
@@ -76,8 +76,8 @@ function thumbCard(name, mtimeMs) {
     let source = null, sourceLabel = null;
     if (m) {
         const base = appUrl('live');
-        if (m[1] === 'vod') { source = `${base}/vod/${m[2]}`; sourceLabel = 'VOD page'; }
-        else if (m[1] === 'clip') { source = `${base}/clip/${m[2]}`; sourceLabel = 'Clip page'; }
+        if (m[1] === 'vod') { source = watchPageUrl('vod', 'live', m[2]); sourceLabel = 'VOD page'; }
+        else if (m[1] === 'clip') { source = watchPageUrl('clip', 'live', m[2]); sourceLabel = 'Clip page'; }
         else { source = `${base}/stream/${m[2]}`; sourceLabel = 'Stream'; }
     }
     return {

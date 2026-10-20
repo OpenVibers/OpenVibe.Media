@@ -34,7 +34,11 @@ const http = require('http');
     };
     const html = pages.renderWatchPage('vod', vod);
     assert.ok(html.includes('<title>Late night &lt;build&gt; — OpenVibe.Media</title>'));
-    assert.ok(html.includes('<link rel="canonical" href="https://openvibe.live/vod/42">'), 'Live-owned VOD is canonical on Live');
+    assert.ok(html.includes('<link rel="canonical" href="https://openvibe.video/v/42">'), 'Live-owned VOD is canonical on OpenVibe.Video');
+    // The browse cards' "VOD page" and "Clip page" links use the same rule: Live's on OpenVibe.Video, another app's own.
+    assert.strictEqual(pageFrame.watchPageUrl('vod', 'live', 42), 'https://openvibe.video/v/42');
+    assert.strictEqual(pageFrame.watchPageUrl('clip', null, 9), 'https://openvibe.video/c/9');
+    assert.strictEqual(pageFrame.watchPageUrl('vod', 'games', 3), 'https://openvibe.games/vod/3');
     assert.ok(html.includes('<meta name="robots" content="noindex, follow">'));
     assert.ok(/\/shared\/theme-loader\.js\?v=[0-9a-f]{12}/.test(html), 'this site\'s own pinned Frame files');
     // The shell loads the theme-loader eagerly (no defer) inside <head>, so it applies the user's
@@ -59,7 +63,7 @@ const http = require('http');
     assert.strictEqual(ld.duration, 'PT1H2M5S');
     assert.strictEqual(ld.uploadDate, '2026-09-10T20:15:00.000Z');
     assert.deepStrictEqual(ld.thumbnailUrl, ['https://media.test/t/vod-42-1.jpg']);
-    assert.strictEqual(ld.url, 'https://openvibe.live/vod/42');
+    assert.strictEqual(ld.url, 'https://openvibe.video/v/42');
     assert.ok(!html.includes('</script>"'), 'no script-closing sequence smuggled through JSON');
 
     const other = pages.renderWatchPage('clip', { ...vod, id: 7, app_id: 'games', title: 'Frag' });
@@ -70,7 +74,7 @@ const http = require('http');
     // The AI summary (openvibe-shared/seo pageSummary) on public watch pages: description, canonical, facts.
     assert.ok(html.includes('<meta name="ai-summary" content="We built a thing &amp; it worked.">'), 'the watch page carries the AI summary');
     assert.ok(html.includes('<li>Duration: 1:02:05</li>') && html.includes('<li>Views: 1,234</li>'), 'with its facts');
-    assert.ok(html.includes('"@type":"WebPage"') && html.includes('"url":"https://openvibe.live/vod/42"'), 'its WebPage names the canonical');
+    assert.ok(html.includes('"@type":"WebPage"') && html.includes('"url":"https://openvibe.video/v/42"'), 'its WebPage names the canonical');
     assert.ok(!unlisted.includes('name="ai-summary"'), 'unlisted pages carry none');
 
     // ── Next-step cards (Shared ADR 0002, D94): real, signed-out targets, ov_from=media, at most four ──
@@ -88,16 +92,16 @@ const http = require('http');
     };
     // A playable public Live-owned VOD: the Live card (the canonical) and the index; no clip-cutting card on a VOD.
     assert.ok(html.includes('class="sc-sec sc-next"') && html.includes('<ol class="sc-next-list">'), 'a playable public VOD page carries the next-step cards');
-    assert.deepStrictEqual(checkCards(html, 'Live VOD'), ['https://openvibe.live/vod/42?ov_from=media', 'https://media.test/?ov_from=media'],
+    assert.deepStrictEqual(checkCards(html, 'Live VOD'), ['https://openvibe.video/v/42?ov_from=media', 'https://media.test/?ov_from=media'],
         'a Live-owned item\'s card is its canonical; the index card is always there');
     // A VOD another app owns: only the index.
     assert.deepStrictEqual(checkCards(pages.renderWatchPage('vod', { ...vod, id: 43, app_id: 'games' }), 'games VOD'), ['https://media.test/?ov_from=media']);
     // A playable person-cut clip on Live: Live, cut your own, the index.
     assert.deepStrictEqual(checkCards(pages.renderWatchPage('clip', { ...vod, id: 9 }), 'Live clip'),
-        ['https://openvibe.live/clip/9?ov_from=media', 'https://openvibe.live/?ov_from=media', 'https://media.test/?ov_from=media']);
+        ['https://openvibe.video/c/9?ov_from=media', 'https://openvibe.live/?ov_from=media', 'https://media.test/?ov_from=media']);
     // An AI clip with a source VOD: every card applies, and four is the most that render.
     const aiClip = pages.renderWatchPage('clip', { ...vod, id: 10, auto_generated: 1, vod_id: 42 });
-    assert.deepStrictEqual(checkCards(aiClip, 'AI clip'), ['https://openvibe.live/clip/10?ov_from=media', 'https://media.test/v/42?ov_from=media',
+    assert.deepStrictEqual(checkCards(aiClip, 'AI clip'), ['https://openvibe.video/c/10?ov_from=media', 'https://media.test/v/42?ov_from=media',
         'https://openvibe.live/?ov_from=media', 'https://media.test/?ov_from=media'], 'a clip with a source VOD shows the VOD card');
     assert.ok(aiClip.includes('See the VOD this clip came from'));
     assert.strictEqual((aiClip.match(/class="sc-next-item"/g) || []).length, 4, 'at most four cards');

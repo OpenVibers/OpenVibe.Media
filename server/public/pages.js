@@ -17,7 +17,7 @@ const config = require('../config');
 const pageFrame = require('./page-frame');
 const showcase = require('openvibe-shared/showcase');
 
-const { esc, abs, snip, appUrl, isoDate, isoDuration, fmtDuration, fmtDate, SITE_NAME, NETWORK_URL } = pageFrame;
+const { esc, abs, snip, appUrl, watchPageUrl, isoDate, isoDuration, fmtDuration, fmtDate, SITE_NAME, NETWORK_URL } = pageFrame;
 
 const VIDEO_MIME = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska' };
 /** Link-preview and search crawlers: they want the page, never the bytes. */
@@ -45,10 +45,9 @@ function creatorLine(record) {
     return record.username || record.display_name || null;
 }
 
-/** Where the owning app shows this item — Live's /vod and /clip pages. */
+/** Where this item is watched: OpenVibe.Video for Live's, the owning app's own page otherwise. */
 function sourcePage(kind, record) {
-    const base = appUrl(record.app_id || 'live');
-    return `${base}/${kind === 'vod' ? 'vod' : 'clip'}/${record.id}`;
+    return watchPageUrl(kind, record.app_id, record.id);
 }
 
 /** A clip the owning app's automation cut (AI moments), not a person. */
@@ -58,7 +57,7 @@ function isAiClip(kind, record) {
 
 /**
  * May search engines index this watch page? Only when it is public, Media is its canonical home (the
- * owning app is not Live, which serves its own /vod and /clip pages), and a person made it: AI clips
+ * owning app is not Live, whose items are canonical on OpenVibe.Video), and a person made it: AI clips
  * are noindex, as on Live. The sitemap lists exactly these pages (server/public/crawl.js).
  */
 function watchIndexable(kind, record) {
