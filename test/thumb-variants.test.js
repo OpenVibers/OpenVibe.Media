@@ -26,6 +26,12 @@ const http = require('http');
         .composite([{ input: Buffer.from('<svg width="640" height="360"><circle cx="320" cy="180" r="120" fill="#fff"/></svg>') }])
         .jpeg({ quality: 85 }).toFile(file);
     await jpeg(path.join(process.env.THUMBNAILS_PATH, 'vod-1-1.jpg'), '#3366cc');
+    // A recording's thumbnail is served while its row exists (a deleted item's is not: deleted-item-thumbnails.test.js).
+    // Under the test runner there is a database; run alone there is none, and the thumbnail is served as before.
+    try {
+        await require('../server/db/database').getDb().prepare(`INSERT INTO vods (id, app_id, file_path, file_size, duration_seconds, visibility, is_public, storage_provider)
+            OVERRIDING SYSTEM VALUE VALUES (1, 'live', '/v/1.webm', 100, 60, 'public', 1, 'local') RETURNING id`).run();
+    } catch { /* no database */ }
     await jpeg(path.join(process.env.THUMBNAILS_PATH, 'stream-live-1.jpg'), '#cc3333');
 
     const server = http.createServer((req, res) => {

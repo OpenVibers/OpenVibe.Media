@@ -117,13 +117,20 @@ const crypto = require('crypto');
         const rc = await run('reconcile-objects.js', ['--json']);
         assert.strictEqual(rc.code, 1, 'issues → exit 1');
         assert.ok(JSON.parse(rc.out).issues.orphan_location.count === 1);
-        // A deleted object's thumbnail that is still served is reachable too.
+        // A deleted object's thumbnail is deleted with it (migration 0013), so it is not flagged; one left ready (as
+        // before that migration) is.
         write(path.join(env.THUMBNAILS_PATH, 'vod-1-5.jpg'), 'jpg');
         await db.run("UPDATE vods SET thumbnail_url = '/t/vod-1-5.jpg' WHERE id = 1");
         await model.sync('vod', 1);
+        const vod1 = await objId(1);
         await db.run('DELETE FROM vods WHERE id = 1');
+        const derived = (await db.get("SELECT derived_object_id AS id FROM media_variants WHERE object_id = ? AND variant_name = 'thumbnail'", [vod1])).id;
+        assert.strictEqual((await model.getObject(derived)).lifecycle_status, 'deleted', 'the thumbnail went with its recording');
+        const isDerivative = (i) => i.reason.startsWith('derivative');
+        assert.ok(!(await reconcile({})).issues.deleted_publicly_reachable.items.some(isDerivative), 'so it is not flagged');
+        await db.run("UPDATE media_objects SET lifecycle_status = 'ready', deleted_at = NULL WHERE id = ?", [derived]);
         const t = await reconcile({});
-        assert.ok(t.issues.deleted_publicly_reachable.items.some(i => i.reason.startsWith('derivative')), 'thumbnail of a deleted vod is flagged');
+        assert.ok(t.issues.deleted_publicly_reachable.items.some(isDerivative), 'a thumbnail left behind is flagged');
 
         await db.run('UPDATE vods SET file_size = ? WHERE id = 3', [5 * MB]);
         await model.sync('vod', 3);

@@ -306,6 +306,27 @@ function sendFile(res, filePath, size, contentType, cacheControl) {
     stream.pipe(res);
 }
 
+// A recording's or clip's thumbnail is named for it (vod-<id>-<time>.jpg, clip-<id>-<time>.jpg). Once the item is deleted
+// its row is gone (every delete path removes it) and the thumbnail is no longer served: 57 thumbnails of deleted
+// recordings still answered on 2026-10-20. The file stays on disk. Asked per item, remembered for a minute.
+const ITEM_THUMB_RE = /^(vod|clip)-(\d{1,15})-/;
+const ITEM_TTL_MS = 60 * 1000;
+const _itemExists = new Map();   // 'vod:12' → { at, exists }
+async function thumbnailItemGone(filename) {
+    const m = ITEM_THUMB_RE.exec(filename);
+    if (!m) return false;
+    const key = `${m[1]}:${m[2]}`;
+    const hit = _itemExists.get(key);
+    if (hit && Date.now() - hit.at < ITEM_TTL_MS) return !hit.exists;
+    let exists;
+    try {
+        exists = Boolean(await require('../db/database').get(`SELECT 1 AS x FROM ${m[1] === 'vod' ? 'vods' : 'clips'} WHERE id = ?`, [Number(m[2])]));
+    } catch { return false; }   // no database to ask (a test, a drill): serve as before
+    if (_itemExists.size > 5000) _itemExists.clear();
+    _itemExists.set(key, { at: Date.now(), exists });
+    return !exists;
+}
+
 async function serveThumbnail(req, res) {
     if (require('../drill').refuseBytes(res)) return;   // a restore drill serves no stored file
     try {
@@ -316,7 +337,7 @@ async function serveThumbnail(req, res) {
         const spec = require('./variants').parse(req.query);
         if (spec && spec.error) return res.status(400).json({ error: spec.error });
 
-        if (!filename || !fs.existsSync(filePath)) {
+        if (!filename || !fs.existsSync(filePath) || await thumbnailItemGone(filename)) {
             // Return a 1x1 transparent pixel JPEG as fallback
             const pixel = Buffer.from(
                 '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AKwA=',

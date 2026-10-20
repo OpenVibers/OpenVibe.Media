@@ -627,8 +627,17 @@ async function restore(obj) {
     if (md.purged_at || md.no_restore) return null;     // a zone deletion's tombstones are never restored
     const back = md.pre_delete_status && md.pre_delete_status !== 'deleted' ? md.pre_delete_status : 'ready';
     delete md.pre_delete_status; delete md.retention_until; delete md.deleted_by;
-    await db.run(`UPDATE media_objects SET lifecycle_status = ?, deleted_at = NULL, metadata = ?, updated_at = ov_now() WHERE id = ?`,
-        [back, JSON.stringify(md), obj.id]);
+    await db.getDb().tx(async () => {
+        await db.run(`UPDATE media_objects SET lifecycle_status = ?, deleted_at = NULL, metadata = ?, updated_at = ov_now() WHERE id = ?`,
+            [back, JSON.stringify(md), obj.id]);
+        // Its derivatives (thumbnails) were deleted with it (migration 0013's trigger): those come back too, not ones
+        // deleted on their own before it.
+        if (obj.deleted_at) {
+            await db.run(`UPDATE media_objects d SET lifecycle_status = 'ready', deleted_at = NULL, updated_at = ov_now()
+                    FROM media_variants v WHERE v.object_id = ? AND d.id = v.derived_object_id AND d.lifecycle_status = 'deleted' AND d.deleted_at >= ?`,
+                [obj.id, obj.deleted_at]);
+        }
+    });
     return await getObject(obj.id);
 }
 
