@@ -8,7 +8,7 @@
  * (state present/missing/corrupt, size, verified_at). Never deletes anything.
  *
  * Detects:
- *   no_canonical_location           ready object with no row for its canonical copy
+ *   no_canonical_location           ready object with no row for its canonical copy (a virtual clip needs none)
  *   canonical_missing_replica_present canonical copy gone/corrupt while another copy is present
  *   no_present_copy                 ready object with no present copy anywhere
  *   missing_local_file              ready object's local location whose file is not on disk
@@ -144,6 +144,9 @@ async function reconcile({ verify = false, hash = false, head = defaultHead, has
     // Per object: is the canonical copy there, and is any copy there at all?
     for (const obj of objects) {
         if (obj.lifecycle_status !== 'ready') continue;
+        // A virtual clip (F3.5/F3.6) plays its window of the recording's timeline: no location of its own is needed, as
+        // readiness and the verify job already read it. Eleven ready ones were listed as no_canonical_location.
+        if (model.parseJson(obj.metadata, {}).virtual) continue;
         const locs = byObject.get(obj.id) || [];
         const canon = obj.canonical_provider ? locs.find(l => l.provider === obj.canonical_provider) : null;
         const present = locs.filter(l => effective.get(l.id) === 'present');

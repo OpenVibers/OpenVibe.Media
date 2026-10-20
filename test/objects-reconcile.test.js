@@ -61,6 +61,7 @@ const crypto = require('crypto');
     await db.run("UPDATE media_objects SET lifecycle_status = 'deleted' WHERE id = ?", [await objId(2)]);                      // deleted, but /v/2 still serves it
     await d.prepare("INSERT INTO clips (id, app_id, file_path, status) OVERRIDING SYSTEM VALUE VALUES (9, 'live', '/x.webm', 'ready') RETURNING id").run();     // row with no object
     const ready = await model.createObject({ app_id: 'live', kind: 'file', lifecycle_status: 'ready' });                  // ready object, no location
+    await model.createObject({ app_id: 'live', kind: 'clip', lifecycle_status: 'ready', metadata: { virtual: true } });    // a virtual clip: needs none
 
     // Fake provider: key → size (absent = 404). B2 lost c.webm (R2 still has it) and holds a wrong-size d.webm.
     const bucket = { b2: { 'vods/b.webm': 200, 'vods/d.webm': 12345 }, r2: { 'vods/c.webm': 300 } };
@@ -83,7 +84,7 @@ const crypto = require('crypto');
         assert.strictEqual(ro.issues.deleted_publicly_reachable.items[0].table, 'vods');
         assert.strictEqual(count(ro, 'missing_projection'), 1);
         assert.deepStrictEqual(ro.issues.missing_projection.items[0], { table: 'clips', id: 9 });
-        assert.strictEqual(count(ro, 'no_canonical_location'), 1);
+        assert.strictEqual(count(ro, 'no_canonical_location'), 1, 'the virtual clip plays from its recording\'s timeline: not listed');
         assert.strictEqual(ro.issues.no_canonical_location.items[0].object_id, ready);
         assert.strictEqual(count(ro, 'canonical_missing_replica_present'), 0, 'remote copies are unverified until --verify');
         assert.strictEqual(ro.counts.remote_unverified, 4, 'b2 ×3 + r2 ×1 pending');
