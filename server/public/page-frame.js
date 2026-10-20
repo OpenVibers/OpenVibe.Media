@@ -92,6 +92,8 @@ function extraHead(seo, css) {
         appIcon.headTags({ site: 'media', iconBase: '/assets' }),
         // openvibe-shared/showcase's stylesheet (the index's hero; the kit's sections on any page).
         `<link rel="stylesheet" href="${ovServe.url('showcase.css')}">`,
+        // A page with a video plays it in the network's player (openvibe-shared player.js/css on video[data-ov-player]).
+        seo.video ? `<link rel="stylesheet" href="${ovServe.url('player.css')}">\n<script src="${ovServe.url('player.js')}" defer></script>` : '',
         `<style>${baseCss()}${css}</style>`,
         videoTags,
         // The default share card is 1200×630; a media thumbnail carries its own dimensions.
