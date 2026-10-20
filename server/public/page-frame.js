@@ -36,6 +36,14 @@ const APP_PUBLIC_URLS = (() => {
     return defaults;
 })();
 const appUrl = (appId) => APP_PUBLIC_URLS[appId] || APP_PUBLIC_URLS.live;
+// Live's recordings and clips are watched on OpenVibe.Video since 2026-10-19: Live's /vod/<id> and /clip/<id> 301 there.
+const VIDEO_PUBLIC_URL = String(process.env.VIDEO_PUBLIC_URL || 'https://openvibe.video').replace(/\/+$/, '');
+/** The canonical watch page of an app's VOD or clip: OpenVibe.Video's for Live's, the app's own /vod or /clip otherwise. */
+function watchPageUrl(kind, appId, id) {
+    const app = appId || 'live';
+    if (app === 'live') return `${VIDEO_PUBLIC_URL}/${kind === 'clip' ? 'c' : 'v'}/${id}`;
+    return `${appUrl(app)}/${kind === 'clip' ? 'clip' : 'vod'}/${id}`;
+}
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`));
@@ -215,7 +223,7 @@ function page({ seo, css = '', body, history, footer, summary }) {
 }
 
 module.exports = {
-    NETWORK_URL, SITE_NAME, DEFAULT_OG_IMAGE, APP_PUBLIC_URLS, appUrl,
+    NETWORK_URL, SITE_NAME, DEFAULT_OG_IMAGE, APP_PUBLIC_URLS, appUrl, VIDEO_PUBLIC_URL, watchPageUrl,
     esc, abs, snip, isoDate, isoDuration, fmtDuration, fmtDate, jsonForScript,
     extraHead, baseCss, navOptions, footerOptions, defaultFooterLinks, page, DEFAULT_THEME_CSS,
 };
