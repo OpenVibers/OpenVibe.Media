@@ -60,7 +60,7 @@ key ([Tenancy & auth](#tenancy--auth)).
 |---|---|---|---|
 | `media.resource.read` | first-party | `GET /api/v1/resources`, `GET /api/v1/resources/:ovrn` | the authority resource index ([Resource index](#resource-index-apiv1resources-first-party)). Active in openvibe-contracts since 0.108.0; the route enforces it (a Network service token holding it, loopback, audience `openvibe.media`) |
 | `media.resource.control` | first-party | `POST /api/v1/resources/control` | `delete` a person's (or their project's) object: the soft delete, restorable until its retention ends ([Resource index](#resource-index-apiv1resources-first-party)). Active in openvibe-contracts since 0.169.0 |
-| `media.object.s3` | public (an access key) | the S3 surface at `s3.openvibe.network` (`s3.openvibe.media` once its DNS record exists; [docs/s3.md](docs/s3.md)) | PutObject, GetObject, HeadObject, DeleteObject(s), ListObjects(V2), ListBuckets, HeadBucket, presigned GET/PUT; a bucket is a zone |
+| `media.object.s3` | public (an access key) | the S3 surface at `s3.openvibe.media` ([docs/s3.md](docs/s3.md)) | PutObject, GetObject, HeadObject, DeleteObject(s), ListObjects(V2), ListBuckets, HeadBucket, presigned GET/PUT; a bucket is a zone |
 | `media.access_key.manage` | first-party | `POST/GET/DELETE /api/v1/projects/:project/access-keys` | S3 access keys for a project admin, the secret shown once (Zone's console, Services) |
 | `media.zone.provision` | first-party (Zone) | `PUT/GET /internal/zones/:id` | OpenVibe.Zone's zone records, applied by revision; usage and deletion progress |
 
@@ -594,7 +594,7 @@ counts its viewer for the day, identifying no one (see Storage tiering).
 
 ## S3 surface and zones
 
-Media answers a subset of S3 at `https://s3.openvibe.network` (ADR-031; `https://s3.openvibe.media` once that name's DNS record exists). Each bucket is a zone of a project environment, and zones are managed by OpenVibe.Zone. Media issues and verifies the `ovk_` access keys, and every object stays an ordinary Media object.
+Media answers a subset of S3 at `https://s3.openvibe.media` (ADR-031; DNS-only since 2026-10-21, so an object may be larger than Cloudflare's 100 MB; `https://s3.openvibe.network` is the same surface behind Cloudflare). Each bucket is a zone of a project environment, and zones are managed by OpenVibe.Zone. Media issues and verifies the `ovk_` access keys, and every object stays an ordinary Media object.
 
 See [docs/s3.md](docs/s3.md) for the operations, the rules and the tests.
 
