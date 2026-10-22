@@ -102,12 +102,15 @@ class TimelineChanged extends Error {}
  * `dropOtherRenditions` (a source re-cut) also removes every other rendition's rows of the object IN THE SAME
  * TRANSACTION: a rendition cut against the old source can never play against the new one. The removed rows are returned
  * as `dropped`, for the caller to delete their bytes after the commit (deleteBytes, guarded by isNamed).
+ * `check` (async, optional) runs inside the transaction before anything is written; it throws to write nothing (cmaf.js:
+ * the clip's file is still the one that was cut).
  */
-async function replace(objectId, rendition, rows, { jobId = null, expect = null, dropOtherRenditions = false } = {}) {
+async function replace(objectId, rendition, rows, { jobId = null, expect = null, dropOtherRenditions = false, check = null } = {}) {
     const out = { inserted: 0, updated: 0, unchanged: 0, removed: 0 };
     let dropped = null;
     await db.getDb().tx(async () => {
         await lockObject(objectId);
+        if (check) await check();
         const before = new Map((await list(objectId, rendition)).map((r) => [Number(r.seq), r]));
         if (expect) {
             const at = (r) => (r ? ['key', 'local_path', 'durable_provider', 'packed_object_id', 'sha256'].map((f) => (r[f] == null ? '' : String(r[f]))).join('\n') : null);

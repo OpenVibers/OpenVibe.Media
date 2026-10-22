@@ -159,7 +159,9 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   rule. No schema besides the two indexes; additive, an older release never reads it.
 - **F3.c, shipped: the timeline queued by itself, signed playlists, the MP4 fallback.** A recording's finalize queues
   `object.cmaf` for its object once it is ready (`server/objects/timeline-queue.js`; `dedupeActive` and the idempotency
-  key `object.cmaf:<id>`, so a second finalize joins the same job; a queue error is logged, never fails the finalize),
+  key `object.cmaf:<id>`, so a second finalize joins the same job; a clip's key also names its file,
+  `object.cmaf:<id>:<file version>`, because a trim or re-cut replaces the file in place and drops the rows, and a
+  clip's cut commits nothing once its file changed under it; a queue error is logged, never fails the finalize),
   and `GET …/download?format=json` queues it lazily for a media object without a timeline (a VOD older than F3.1):
   `hls_url` appears once the job ran. Nothing is queued with `MEDIA_HLS_ENABLED` off, for a non-media object or once
   the source timeline exists. For a private or sandbox object `hls_url` is a **playlist token**: its own MAC purpose
