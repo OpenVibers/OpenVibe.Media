@@ -84,9 +84,10 @@ async function storeRenditionMeta(objectId, rendition, meta) {
 /**
  * Publish `files` (producedFiles) of `rendition` for `src` from the work directory `out`. Returns the row counts and
  * the totals the job result is built from. Throws JobError: the timeline changed under a pack, or a segment that is not
- * durable yet. `label` names the job in warnings (e.g. 'Cmaf').
+ * durable yet. `label` names the job in warnings (e.g. 'Cmaf'). `check` is passed to timeline.replace: it runs in the
+ * commit's transaction and throws to publish nothing (the staged bytes are removed as for any failure before the commit).
  */
-async function publishRendition({ job, ctx, src, rendition, out, list, label = 'Segments' }) {
+async function publishRendition({ job, ctx, src, rendition, out, list, label = 'Segments', check = null }) {
     const files = producedFiles(list);
     // Read the init segment while it is still in the work directory (the loop below moves it to its content-addressed
     // location): its codecs/resolution go into the object's metadata for the master playlist.
@@ -168,7 +169,7 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
         try {
             // A source re-cut (object.cmaf) drops every other rendition's rows here, in this same transaction: the
             // rendition was cut against the old source and would otherwise play beside the new one.
-            written = await timeline.replace(src.id, rendition, rows, { jobId: job.id, expect: prev, dropOtherRenditions: rendition === timeline.SOURCE });
+            written = await timeline.replace(src.id, rendition, rows, { jobId: job.id, expect: prev, dropOtherRenditions: rendition === timeline.SOURCE, check });
         } catch (err) {
             // An object.pack committed after `prev` was read: these rows would name the segment keys it deleted.
             if (err instanceof timeline.TimelineChanged) throw new JobError('media.timeline.changed', 'The timeline changed while cutting (a pack); a retry cuts against the new rows', { retryAfterS: 60 });

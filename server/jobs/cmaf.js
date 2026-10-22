@@ -20,7 +20,8 @@
  * Idempotent: a rerun makes the same bytes (bitexact), reuses a row whose sha256 matches and its location as it is, and
  * uploads only what is not durable yet. A run that aborts or fails before the commit removes its staged files and keys.
  * Refused: MEDIA_HLS_ENABLED off, a source that is not ready or not media (permanent), less free disk than the source
- * size plus MEDIA_UPLOAD_MIN_FREE_MB (retried later), a codec fMP4 cannot carry (permanent).
+ * size plus MEDIA_UPLOAD_MIN_FREE_MB (retried later), a codec fMP4 cannot carry (permanent), a clip whose file was
+ * replaced (a trim or re-cut) while it ran (permanent, media.source.changed: nothing is committed).
  */
 'use strict';
 
@@ -58,6 +59,10 @@ function validate({ obj, params }) {
 async function run(job, ctx) {
     if (!config.hls.enabled) throw disabled();
     const src = await derive.loadSource(job);
+    // A clip can be cut again in place (a trim, a re-cut): its object keeps its id while its file changes. The rows are
+    // committed only while the file is still the one this run cut (read FOR SHARE in the commit's transaction, so a
+    // re-cut's row update waits for it); otherwise nothing is published and the next request queues the new file's job.
+    const version = await derive.fileVersion(src);
     const source = await derive.resolveSource(src);
     if (!source) throw new JobError('media_unavailable', 'The source bytes are unavailable (no local file and no cloud copy)', { permanent: true });
     let video = 'copy';
@@ -111,7 +116,12 @@ async function run(job, ctx) {
         const list = derive.existing(path.join(out, 'index.m3u8')) ? segments.parsePlaylist(fs.readFileSync(path.join(out, 'index.m3u8'), 'utf8')) : [];
         if (!list.length || !derive.existing(path.join(out, timeline.INIT_NAME))) throw new JobError('ffmpeg_failed', `ffmpeg wrote no segments: ${tail}`);
 
-        const published = await segments.publishRendition({ job, ctx, src, rendition, out, list, label: 'Cmaf' });
+        const check = version == null ? null : async () => {
+            if (await derive.fileVersion(src, { lock: true }) !== version) {
+                throw new JobError('media.source.changed', 'The clip was cut again while this ran; its new file gets a timeline of its own', { permanent: true });
+            }
+        };
+        const published = await segments.publishRendition({ job, ctx, src, rendition, out, list, label: 'Cmaf', check });
         if (video === 'h264') require('../placement/metrics-binding').inc('media_cmaf_transcodes_total', { stream: 'video' });
         if (audio === 'aac') require('../placement/metrics-binding').inc('media_cmaf_transcodes_total', { stream: 'audio' });
         return {

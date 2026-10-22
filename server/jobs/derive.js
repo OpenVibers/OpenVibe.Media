@@ -94,6 +94,20 @@ async function resolveSource(obj) {
     return null;
 }
 
+/**
+ * Which file a clip object is cut from now: the first 12 hex of sha256 over its row's file_path ('none' without one), or
+ * null for any other object (a VOD or native object keeps its bytes). A trim or re-cut writes a new file in place under
+ * the same object, so object.cmaf is keyed on this (objects/timeline-queue.js) and commits only while it is unchanged
+ * (cmaf.js). `lock` reads the row FOR SHARE, inside the caller's transaction: a re-cut's row update waits for it.
+ */
+async function fileVersion(obj, { lock = false } = {}) {
+    const ref = obj && model.parseLegacyRef(obj.legacy_ref);
+    if (!ref || ref.kind !== 'clip') return null;
+    const row = await db.get(`SELECT file_path FROM clips WHERE id = ?${lock ? ' FOR SHARE' : ''}`, [Number(ref.id)]);
+    const file = row && row.file_path ? String(row.file_path) : '';
+    return file ? crypto.createHash('sha256').update(file).digest('hex').slice(0, 12) : 'none';
+}
+
 function freeBytes(dir) {
     try { const st = fs.statfsSync(dir); return Number(st.bavail) * Number(st.bsize); } catch { return Infinity; }
 }
@@ -386,7 +400,7 @@ async function runRemux(job, ctx) {
 module.exports = {
     split: { lane: 'heavy', maxAttempts: 3, timeoutMs: 6 * 3600 * 1000, needsObject: true, validate: validateSplit, run: runSplit },
     remux: { lane: 'heavy', maxAttempts: 3, timeoutMs: 3 * 3600 * 1000, needsObject: true, validate: validateRemux, run: runRemux },
-    resolveSource, isMediaObject, extFor,
+    resolveSource, fileVersion, isMediaObject, extFor,
     // for the preview jobs (previews.js)
     loadSource, adopt, ffmpeg, inputArgs, probeDuration, workDir, cleanupWork, sweepWork, existing, checkRoom,
     // and object.cmaf (cmaf.js)

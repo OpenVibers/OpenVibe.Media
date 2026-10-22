@@ -416,9 +416,13 @@ router.post('/:id/recut', tenantAuth({ verb: 'write' }), async (req, res) => {
  * keeps its id, title and links; its window of the source VOD shrinks to that part and it is cut again from the source
  * (202 { id, status: 'processing', job_id }, clip.cut; the superseded file is removed once the new one is in), or, a
  * virtual clip, it plays the narrower window of the source's timeline at once (200, the clip). Asking for the whole
- * clip changes nothing (200, the clip, unchanged: true). A clip with no source VOD (a browser upload, already cut) or
- * whose file has moved to cloud storage is not trimmed (422). An app-key call acting for a user trims only that user's
- * own clips, as for every write.
+ * clip changes nothing (200, the clip, unchanged: true). A clip with no source VOD (a browser upload, already cut),
+ * whose file has moved to cloud storage, or whose source recording cannot be read is not trimmed (422). A clip under a
+ * retention hold (its own or its source VOD's, as DELETE decides) is not trimmed (409 media.object.held), nor one that
+ * is being cut (409: a cut job that already read the old window would finish it with the old end). A file clip is
+ * `processing` from the answer until its cut is in (clip.ready); a cut that fails for good gives the clip its previous
+ * window and file back (clip.ready again). An app-key call acting for a user trims only that user's own clips, as for
+ * every write.
  */
 router.post('/:id/trim', tenantAuth({ verb: 'write' }), async (req, res) => {
     try {
@@ -433,30 +437,51 @@ router.post('/:id/trim', tenantAuth({ verb: 'write' }), async (req, res) => {
         to = Math.min(to, len);
         if (to - from < 1) return res.status(400).json({ error: 'Clip must be at least 1 second' });
         if (from < 0.05 && to > len - 0.05) return res.json({ ...await clipPublic(clip, { readiness: true }), unchanged: true });
+        if (await objects.isHeldRow(clip)) return res.status(409).json({ error: 'Clip is under a retention hold', code: 'media.object.held' });
         const clipJobs = require('./clip-jobs');
+        if (await clipJobs.activeCut(req.appId, clip.id)) return res.status(409).json({ error: 'Clip is still being cut' });
         const vod = clip.vod_id ? await db.getVodById(clip.vod_id, req.appId) : null;
         if (!vod) return res.status(422).json({ error: 'Clip has no source VOD to trim from' });
         const virtual = clipJobs.isVirtual(clip);
-        if (!virtual && require('./vod-storage').isRemote(clip)) return res.status(422).json({ error: 'Clip has moved to cloud storage and can no longer be trimmed' });
+        const vodStorage = require('./vod-storage');
+        if (!virtual && vodStorage.isRemote(clip)) return res.status(422).json({ error: 'Clip has moved to cloud storage and can no longer be trimmed' });
 
-        const before = [clip.start_time, clip.end_time, clip.duration_seconds];
         const start = (Number(clip.start_time) || 0) + from, end = (Number(clip.start_time) || 0) + to;
-        const setWindow = async (w) => await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET start_time = ?, end_time = ?, duration_seconds = ?, cut_attempts = 0 WHERE id = ?', [...w, clip.id]));
-        await setWindow([start, end, end - start]);
         // A plain virtual clip plays the narrower window at once; a materialized one has rows of its own, which the cut rebuilds.
         const obj = virtual ? await objects.getObject(clip.object_id) : null;
         const materialized = !!(obj && /"materialized":\s*true/.test(String(obj.metadata || '')));
         const win = virtual && !materialized && await clipJobs.timelineWindow(vod, start, end);
+        // Anything else is cut again: refuse now, before the window changes, when there is nothing to cut it from (no
+        // readable source file, and no source timeline for a materialized cut either).
+        if (!win && !await vodStorage.resolveMediaSource(vod)
+            && !(config.hls.enabled && config.hls.materialized && await clipJobs.timelineWindow(vod, start, end))) {
+            return res.status(422).json({ error: 'The source recording is unavailable, so the clip cannot be cut again' });
+        }
+
+        // A file clip is processing until the new cut is in (a second trim waits, and so does whoever waits for clip.ready);
+        // a virtual one keeps playing. The status condition makes a concurrent trim of the same clip find nothing to update.
+        const file = !virtual;
+        const prev = { start_time: clip.start_time, end_time: clip.end_time, duration_seconds: clip.duration_seconds };
+        const setWindow = async (w, { forward }) => await objects.withObject('clip', clip.id, async () => await db.run(
+            `UPDATE clips SET start_time = ?, end_time = ?, duration_seconds = ?, cut_attempts = 0${file ? `, status = '${forward ? 'processing' : 'ready'}'` : ''}
+             WHERE id = ?${file && forward ? " AND status = 'ready'" : ''}`, [...w, clip.id]));
+        const set = await setWindow([start, end, end - start], { forward: true });
+        if (file && !(set && set.changes)) return res.status(409).json({ error: 'Clip is still being cut' });
         if (win) {
             await clipJobs.makeVirtual(clip.id, win);
             return res.json({ ...await clipPublic(await db.getClipById(clip.id, req.appId), { readiness: true }) });
         }
         let job;
-        try { ({ job } = await clipJobs.enqueueCut(req.appId, clip.id, { reason: 'trim', createdBy: `app:${req.appId}` })); }
-        catch (err) { await setWindow(before); throw err; }
+        try { ({ job } = await clipJobs.enqueueCut(req.appId, clip.id, { reason: 'trim', createdBy: `app:${req.appId}`, prev })); }
+        catch (err) { await setWindow([prev.start_time, prev.end_time, prev.duration_seconds], { forward: false }); throw err; }
         console.log(`[Clips] Clip ${clip.id} trimmed to ${start.toFixed(1)}-${end.toFixed(1)}s of vod ${clip.vod_id}`);
         res.status(202).json({ id: clip.id, status: 'processing', job_id: job.id });
     } catch (err) {
+        // A queue refusal (too many cuts queued: 429 with Retry-After) is answered as the queue says; the window is back.
+        if (err && err.code === 'media.job.too_many') {
+            if (err.retryAfterS) res.set('Retry-After', String(err.retryAfterS));
+            return res.status(429).json({ error: err.message, code: err.code });
+        }
         console.error('[Clips] Trim error:', err.message);
         res.status(500).json({ error: 'Failed to trim clip' });
     }

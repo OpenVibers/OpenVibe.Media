@@ -6,7 +6,9 @@
  * gets one on its first request. Nothing happens (null) with MEDIA_HLS_ENABLED off, for a missing, unready or non-media
  * object, or once the timeline exists. One job per object: dedupeActive joins a queued or running cut, and the
  * idempotency key `object.cmaf:<id>` (or `:transcode` when first queued with transcoding on) answers a later call with
- * the same job. → the job id, or null.
+ * the same job. A clip's key also names its file (`object.cmaf:<id>:<file version>`, derive.fileVersion): a trim or
+ * re-cut gives the clip a new file and drops its rows, and its next request queues a job for the new file instead of
+ * replaying the old one. → the job id, or null.
  *
  * queuePack(appId, objectId, { rendition }) enqueues `object.pack` once a cut's rows are committed (server/jobs/cmaf.js,
  * server/jobs/rendition.js), so packing follows the cut by itself instead of an operator's hand. Nothing happens (null)
@@ -57,11 +59,14 @@ async function queueCmaf(appId, objectId, { segment_seconds = null, lazy = false
     const params = require('../jobs/cmaf').spec.validate({ appId, obj, params: segment_seconds != null ? { segment_seconds } : {} });
     // Mark jobs first queued with transcoding on. An older copy-only codec failure gets this one new key on a lazy
     // request. A failed transcode job already has the key and is replayed, so lazy reads cannot start a retry loop.
-    let idempotencyKey = `object.cmaf:${obj.id}`;
+    // A clip is keyed on its file as well (derive.fileVersion): a trim or re-cut replaces the file under the same object and
+    // drops its rows, and the old key would only replay the job that cut the superseded file.
+    const version = await require('../jobs/derive').fileVersion(obj);
+    let idempotencyKey = version ? `object.cmaf:${obj.id}:${version}` : `object.cmaf:${obj.id}`;
     if (config.hls.transcode) {
         const last = await require('../db/database').get(`SELECT status, error_code, idempotency_key FROM media_jobs
-            WHERE app_id = ? AND object_id = ? AND job_type = 'object.cmaf'
-            ORDER BY created_at DESC, id DESC LIMIT 1`, [appId, obj.id]);
+            WHERE app_id = ? AND object_id = ? AND job_type = 'object.cmaf'${version ? ' AND idempotency_key IN (?, ?)' : ''}
+            ORDER BY created_at DESC, id DESC LIMIT 1`, version ? [appId, obj.id, idempotencyKey, `${idempotencyKey}:transcode`] : [appId, obj.id]);
         if (!last || last.idempotency_key === `${idempotencyKey}:transcode` ||
             (lazy && last.status === 'failed' && last.error_code === 'codec_unsupported')) idempotencyKey += ':transcode';
     }

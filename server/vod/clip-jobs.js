@@ -133,10 +133,17 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null
     const tl = await require('../objects/timeline').removeObject(clip.object_id)
         .catch(err => { console.warn(`[Clips] Clip ${clipId} timeline cleanup failed: ${err.message}`); return null; });
     if (tl && tl.pending) console.warn(`[Clips] Clip ${clipId}: ${tl.pending} timeline segment row(s) kept — their durable copy could not be deleted; the object sweep retries`);
+    // A clip that played as HLS (its rows just went with the old cut) gets the new file's timeline now, not on a later read.
+    if (tl && tl.removed > 0 && config.hls.enabled) {
+        await require('../objects/timeline-queue').queueCmaf(clip.app_id, clip.object_id)
+            .catch(err => console.warn(`[Clips] Clip ${clipId}: queueing the new cut's timeline failed: ${err.message}`));
+    }
     // A clip that had a file already (a trim, a re-cut of a ready clip) leaves its previous cut behind: the row names the new one now.
+    // Under a retention hold (its own or its source VOD's) the previous cut is kept: a hold keeps bytes, whatever the row says.
     const old = clip.file_path ? path.resolve(clip.file_path) : null;
     if (old && old !== path.resolve(cut.filePath) && path.dirname(old) === cutter.CLIPS_DIR) {
-        try { fs.unlinkSync(old); } catch { /* already gone */ }
+        if (await objects().isHeldRow(clip)) console.warn(`[Clips] Clip ${clipId} is under a retention hold: its previous cut ${path.basename(old)} is kept`);
+        else { try { fs.unlinkSync(old); } catch { /* already gone */ } }
     }
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
     // A public, person-made clip that just became ready is indexable: announce its watch page and the sitemap.
@@ -281,12 +288,50 @@ async function clipObjectId(appId, clipId) {
     return row ? row.id : null;
 }
 
-/** Queue the cut of a clip row → { job, created }. A repeated request for the same clip reuses its active job. */
-async function enqueueCut(appId, clipId, { reason = 'cut', createdBy = null, ownerUserId = null } = {}) {
+/**
+ * Queue the cut of a clip row → { job, created }. A repeated request for the same clip reuses its active job. `prev` (a
+ * trim) is the window the clip had before it was narrowed, { start_time, end_time, duration_seconds }: a trim whose cut
+ * fails for good puts it back (restoreTrim), so the clip plays its previous cut again instead of turning failed.
+ */
+async function enqueueCut(appId, clipId, { reason = 'cut', createdBy = null, ownerUserId = null, prev = null } = {}) {
     const queue = require('../jobs/queue');
-    const out = await queue.enqueue({ appId, type: 'clip.cut', objectId: await clipObjectId(appId, clipId), params: { clip_id: Number(clipId), reason }, dedupeActive: true, createdBy, ownerUserId });
+    const params = { clip_id: Number(clipId), reason, ...(prev ? { prev } : {}) };
+    const out = await queue.enqueue({ appId, type: 'clip.cut', objectId: await clipObjectId(appId, clipId), params, dedupeActive: true, createdBy, ownerUserId });
     try { require('../jobs/worker').kick(); } catch { /* the poll picks it up */ }
     return out;
+}
+
+/** The queued or running clip.cut job of a clip, or null. */
+async function activeCut(appId, clipId) {
+    return await db.get(`SELECT id, status FROM media_jobs WHERE app_id = ? AND job_type = 'clip.cut' AND status IN ('queued', 'running')
+        AND CAST(json_extract(params, '$.clip_id') AS INTEGER) = ? ORDER BY id DESC LIMIT 1`, [appId, Number(clipId)]) || null;
+}
+
+/**
+ * A trim whose cut failed for good: the clip gets the window it had before (`prev`) and, a file clip, is ready again on
+ * the file it already had (the superseded file is only removed once a new cut is in, so it is still there), with its
+ * clip.ready event. A virtual or materialized clip never left ready; it only gets its window back. Nothing changes when
+ * the previous file is gone or the row no longer looks like this trim's failure. → true when the clip was restored.
+ */
+async function restoreTrim(clipId, prev, error) {
+    const clip = await db.getClipById(clipId);
+    if (!clip || !prev) return false;
+    const w = [Number(prev.start_time) || 0, Number(prev.end_time) || 0, Number(prev.duration_seconds) || 0];
+    if (!(w[1] > w[0])) return false;
+    if (!clip.file_path) {
+        if (!isVirtual(clip)) return false;
+        await objects().withObject('clip', clipId, async () => await db.run('UPDATE clips SET start_time = ?, end_time = ?, duration_seconds = ? WHERE id = ?', [...w, clipId]));
+        console.warn(`[Clips] Clip ${clipId}: the trim could not be cut (${error}) — it keeps its previous window`);
+        return true;
+    }
+    if (clip.status !== 'failed' || !fs.existsSync(clip.file_path)) return false;
+    await announce(clip.app_id, 'clip.ready', {
+        change: async () => await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET start_time = ?, end_time = ?, duration_seconds = ?,
+            status = 'ready', cut_error = NULL, cut_next_at = NULL WHERE id = ? AND status = 'failed'`, [...w, clipId])),
+        payload: async () => await _clipPublic(await db.getClipById(clipId)),
+    });
+    console.warn(`[Clips] Clip ${clipId}: the trim could not be cut (${error}) — it is ready again on its previous cut`);
+    return true;
 }
 
 const spec = {
@@ -305,9 +350,18 @@ const spec = {
         const clip = await db.getClipById(job.params.clip_id);
         if (!clip || clip.app_id !== job.app_id) throw new JobError('not_found', 'The clip no longer exists', { permanent: true });
         const r = await recutClip(clip.id, { reason: job.params.reason || 'cut', viaJob: true, job, ctx });
-        if (!r.ok) throw new JobError('clip_cut_failed', r.error || 'cut failed', { permanent: !!r.hopeless });
+        if (!r.ok) {
+            // The last attempt of a trim (the worker retries only a non-permanent failure with attempts left): the
+            // clip gets its previous window back instead of staying failed.
+            const attempts = Number((ctx && ctx.attempt) ?? job.attempts) || 0;
+            const last = !!r.hopeless || attempts >= (Number(job.max_attempts) || MAX_ATTEMPTS);
+            if (last && job.params.reason === 'trim' && job.params.prev) {
+                try { await restoreTrim(clip.id, job.params.prev, r.error); } catch (err) { console.warn(`[Clips] Clip ${clip.id}: restoring the window before the trim failed: ${err.message}`); }
+            }
+            throw new JobError('clip_cut_failed', r.error || 'cut failed', { permanent: !!r.hopeless });
+        }
         return { clip_id: clip.id, status: 'ready', duration_seconds: r.duration_seconds ?? null };
     },
 };
 
-module.exports = { recutClip, sweep, start, enqueueCut, clipObjectId, timelineWindow, makeVirtual, isVirtual, spec, MAX_ATTEMPTS };
+module.exports = { recutClip, sweep, start, enqueueCut, activeCut, restoreTrim, clipObjectId, timelineWindow, makeVirtual, isVirtual, spec, MAX_ATTEMPTS };

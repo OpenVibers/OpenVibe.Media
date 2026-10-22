@@ -126,7 +126,8 @@ const { spawn, spawnSync } = require('child_process');
         const pub = await native('public');
         const priv = await native('private');
         // The cut adds only derived metadata (renditions.<name> = width/height/codecs): everything the object IS stays.
-        const untouched = async () => { const o = await model.getObject(pub); const md = model.parseJson(o.metadata, {}); delete md.renditions; return [{ ...o, metadata: JSON.stringify(md) }, await model.listLocations(pub)]; };
+        // The derived rendition metadata (and the updated_at its write sets, segments.storeRenditionMeta) is left out.
+        const untouched = async () => { const o = await model.getObject(pub); const md = model.parseJson(o.metadata, {}); delete md.renditions; return [{ ...o, metadata: JSON.stringify(md), updated_at: null }, await model.listLocations(pub)]; };
         const before = JSON.stringify(await untouched());
 
         const runJob = async (objectId, params, type = 'object.cmaf') => {
