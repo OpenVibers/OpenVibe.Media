@@ -133,6 +133,11 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null
     const tl = await require('../objects/timeline').removeObject(clip.object_id)
         .catch(err => { console.warn(`[Clips] Clip ${clipId} timeline cleanup failed: ${err.message}`); return null; });
     if (tl && tl.pending) console.warn(`[Clips] Clip ${clipId}: ${tl.pending} timeline segment row(s) kept — their durable copy could not be deleted; the object sweep retries`);
+    // A clip that had a file already (a trim, a re-cut of a ready clip) leaves its previous cut behind: the row names the new one now.
+    const old = clip.file_path ? path.resolve(clip.file_path) : null;
+    if (old && old !== path.resolve(cut.filePath) && path.dirname(old) === cutter.CLIPS_DIR) {
+        try { fs.unlinkSync(old); } catch { /* already gone */ }
+    }
     console.log(`[Clips] Clip ${clipId} ${reason} OK from vod ${clip.vod_id} (${startTime.toFixed(1)}-${(startTime + cut.duration).toFixed(1)}s, attempt ${attempt})`);
     // A public, person-made clip that just became ready is indexable: announce its watch page and the sitemap.
     await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clipId));

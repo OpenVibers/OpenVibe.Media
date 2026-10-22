@@ -8,6 +8,7 @@
  *                 VOD (clamped to flushed footage, like the predecessor).
  * GET    /:id     clip meta (status: processing | ready | failed)
  * GET    /        list (?limit&offset&vod_id&stream_id&user_id&auto_generated&status&since)
+ * POST   /:id/trim { start_s, end_s } (seconds into the clip) → narrowed in place, cut again from the source
  * PUT    /:id     update title/visibility (and auto_generated, app key only)
  * DELETE /:id     delete file + offloaded objects + row
  */
@@ -406,6 +407,58 @@ router.post('/:id/recut', tenantAuth({ verb: 'write' }), async (req, res) => {
     } catch (err) {
         console.error('[Clips] Re-cut error:', err.message);
         res.status(500).json({ error: 'Failed to re-cut clip' });
+    }
+});
+
+// ── Trim ─────────────────────────────────────────────────────
+/**
+ * Narrow a ready clip in place: { start_s, end_s } are seconds into the clip (at least 1 s apart, inside it). The clip
+ * keeps its id, title and links; its window of the source VOD shrinks to that part and it is cut again from the source
+ * (202 { id, status: 'processing', job_id }, clip.cut; the superseded file is removed once the new one is in), or, a
+ * virtual clip, it plays the narrower window of the source's timeline at once (200, the clip). Asking for the whole
+ * clip changes nothing (200, the clip, unchanged: true). A clip with no source VOD (a browser upload, already cut) or
+ * whose file has moved to cloud storage is not trimmed (422). An app-key call acting for a user trims only that user's
+ * own clips, as for every write.
+ */
+router.post('/:id/trim', tenantAuth({ verb: 'write' }), async (req, res) => {
+    try {
+        const clip = await _getClipForWrite(req, res);
+        if (!clip) return;
+        if (clip.status !== 'ready') return res.status(409).json({ error: clip.status === 'processing' ? 'Clip is still being cut' : 'Clip has no footage to trim' });
+        const len = Number(clip.duration_seconds) || 0;
+        const from = Number.parseFloat((req.body || {}).start_s);
+        let to = Number.parseFloat((req.body || {}).end_s);
+        if (!Number.isFinite(from) || !Number.isFinite(to)) return res.status(400).json({ error: 'start_s and end_s are required' });
+        if (from < 0 || to > len + 0.5) return res.status(400).json({ error: `start_s and end_s must lie inside the clip (0 to ${len.toFixed(1)} s)` });
+        to = Math.min(to, len);
+        if (to - from < 1) return res.status(400).json({ error: 'Clip must be at least 1 second' });
+        if (from < 0.05 && to > len - 0.05) return res.json({ ...await clipPublic(clip, { readiness: true }), unchanged: true });
+        const clipJobs = require('./clip-jobs');
+        const vod = clip.vod_id ? await db.getVodById(clip.vod_id, req.appId) : null;
+        if (!vod) return res.status(422).json({ error: 'Clip has no source VOD to trim from' });
+        const virtual = clipJobs.isVirtual(clip);
+        if (!virtual && require('./vod-storage').isRemote(clip)) return res.status(422).json({ error: 'Clip has moved to cloud storage and can no longer be trimmed' });
+
+        const before = [clip.start_time, clip.end_time, clip.duration_seconds];
+        const start = (Number(clip.start_time) || 0) + from, end = (Number(clip.start_time) || 0) + to;
+        const setWindow = async (w) => await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET start_time = ?, end_time = ?, duration_seconds = ?, cut_attempts = 0 WHERE id = ?', [...w, clip.id]));
+        await setWindow([start, end, end - start]);
+        // A plain virtual clip plays the narrower window at once; a materialized one has rows of its own, which the cut rebuilds.
+        const obj = virtual ? await objects.getObject(clip.object_id) : null;
+        const materialized = !!(obj && /"materialized":\s*true/.test(String(obj.metadata || '')));
+        const win = virtual && !materialized && await clipJobs.timelineWindow(vod, start, end);
+        if (win) {
+            await clipJobs.makeVirtual(clip.id, win);
+            return res.json({ ...await clipPublic(await db.getClipById(clip.id, req.appId), { readiness: true }) });
+        }
+        let job;
+        try { ({ job } = await clipJobs.enqueueCut(req.appId, clip.id, { reason: 'trim', createdBy: `app:${req.appId}` })); }
+        catch (err) { await setWindow(before); throw err; }
+        console.log(`[Clips] Clip ${clip.id} trimmed to ${start.toFixed(1)}-${end.toFixed(1)}s of vod ${clip.vod_id}`);
+        res.status(202).json({ id: clip.id, status: 'processing', job_id: job.id });
+    } catch (err) {
+        console.error('[Clips] Trim error:', err.message);
+        res.status(500).json({ error: 'Failed to trim clip' });
     }
 });
 
