@@ -16,7 +16,7 @@ const assert = require('assert');
     // The revisioned tier policies load once the database is open (server/index.js does this at boot).
     await storage.tierConfig.init(storage.DEFAULTS);
     await require('../server/objects/tier-policy').init();
-    const { DEFAULTS, OFFLOADABLE_WHERE, needsDrain, drainSatisfied, isCritical, planNextDelayMs, uploadTimeoutMs } = storage;
+    const { DEFAULTS, OFFLOADABLE_WHERE, needsDrain, drainSatisfied, isCritical, assessDrain, planNextDelayMs, uploadTimeoutMs } = storage;
 
     const GB = 1024 * 1024 * 1024;
     const disk = (usePct, freeGb, totalGb = 96) => ({ total: totalGb * GB, used: (totalGb - freeGb) * GB, available: freeGb * GB, usePct, mount: '/' });
@@ -56,6 +56,21 @@ const assert = require('assert');
     assert.strictEqual(isCritical(disk(90, 9), DEFAULTS), true);
     assert.strictEqual(isCritical(disk(89, 10), DEFAULTS), false);
     console.log('✅ free-space budget: percent ceiling OR GB floor start a drain; both targets end it');
+
+    // ── Alerting measures what Media can act on: a shared 96 GB disk sits above the targets for days ──
+    const shared = disk(70, 28);   // under pressure (≥70%), well above the recorder's 15 GB warn line
+    assert.deepStrictEqual(assessDrain({ underPressure: true, candidates: 0, migrated: 0, disk: shared }, DEFAULTS),
+        { nothingEligible: true, stalled: false, belowRecorderGuard: false }, 'nothing old enough to move is not a stall');
+    assert.strictEqual(assessDrain({ underPressure: true, candidates: 3, migrated: 0, disk: shared }, DEFAULTS).stalled, true,
+        'eligible candidates that could not be moved are a stall');
+    assert.strictEqual(assessDrain({ underPressure: true, candidates: 3, migrated: 1, disk: shared }, DEFAULTS).stalled, false, 'progress is no stall');
+    const tight = disk(88, 12);    // under VOD_DISK_WARN_GB (15 GB) free
+    assert.deepStrictEqual(assessDrain({ underPressure: true, candidates: 0, migrated: 0, disk: tight }, DEFAULTS),
+        { nothingEligible: true, stalled: true, belowRecorderGuard: true }, 'under the recorder guard rail it alerts even with nothing eligible');
+    assert.strictEqual(assessDrain({ underPressure: false, candidates: 0, migrated: 0, disk: disk(50, 48) }, DEFAULTS).stalled, false);
+    assert.strictEqual(DEFAULTS.recorderWarnGb, parseFloat(process.env.VOD_DISK_WARN_GB) || 15);
+    assert.strictEqual(DEFAULTS.recorderCritGb, parseFloat(process.env.VOD_DISK_CRIT_GB) || 5);
+    console.log('✅ drain_stalled only when eligible VODs could not move, or free space is under the recorder guard rail');
 
     // ── Cadence: come back quickly while a drain is making (or could make) progress ──
     assert.strictEqual(planNextDelayMs({ stillNeedsDrain: true, migrated: 3 }, DEFAULTS), DEFAULTS.pressureRetryMs, 'progress under pressure → soon');

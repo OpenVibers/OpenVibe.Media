@@ -92,6 +92,13 @@ const DEFAULTS = {
     // free space is below minFreeGb and keep going until targetFreeGb is free again.
     minFreeGb: 25,
     targetFreeGb: 40,
+    // The recorder's real guard rails (server/vod/recorder.js): it warns below VOD_DISK_WARN_GB free and
+    // refuses new recordings below VOD_DISK_CRIT_GB. The disk is shared with ~50 services, so the
+    // percentage/GB targets above can stay unmet for days with nothing Media could move; a drain that
+    // freed nothing is alert-worthy only when there was something eligible to move, or when free space
+    // is under these.
+    recorderWarnGb: parseFloat(process.env.VOD_DISK_WARN_GB) || 15,
+    recorderCritGb: parseFloat(process.env.VOD_DISK_CRIT_GB) || 5,
     // While a drain is still needed after a pass, re-run this soon instead of waiting
     // for the regular interval — recovery from a full disk should take minutes.
     pressureRetryMs: 2 * 60 * 1000,
@@ -938,6 +945,20 @@ function drainSatisfied(disk, settings) {
     return disk.usePct <= settings.localLowWaterPct && freeGb >= settings.targetFreeGb;
 }
 
+/**
+ * What a pressure pass means for alerting. `nothingEligible`: under pressure with no candidate at all
+ * (nothing old enough on local disk; not Media's to fix). `stalled`: a pressure pass freed nothing
+ * although candidates existed (uploads failing, back-off, holds) or free space is under the
+ * recorder's warn guard rail. Only `stalled` counts toward drain_stalled.
+ */
+function assessDrain({ underPressure, candidates, migrated, disk }, settings) {
+    const freeGb = disk && disk.total ? disk.available / GB : Infinity;
+    const belowRecorderGuard = freeGb < settings.recorderWarnGb;
+    const nothingEligible = !!underPressure && !candidates;
+    const stalled = !!underPressure && !migrated && (candidates > 0 || belowRecorderGuard);
+    return { nothingEligible, stalled, belowRecorderGuard };
+}
+
 function isCritical(disk, settings) {
     return !!disk && !!disk.total && disk.usePct >= settings.criticalDiskPct;
 }
@@ -960,8 +981,9 @@ const sweepState = {
     lastResult: null,
     nextRunAt: null,
     startedAt: null,
-    stalledPasses: 0,   // consecutive pressure passes that freed nothing
+    stalledPasses: 0,   // consecutive pressure passes that freed nothing although they could have (assessDrain)
     stalled: false,
+    nothingEligible: false,   // last pass was under pressure with nothing old enough to move (logged once per change)
 };
 const alertLastSentAt = new Map(); // kind → epoch ms
 
@@ -1012,8 +1034,6 @@ async function runSweep() {
         let candidates;
         if (underPressure) {
             const minAge = critical ? `-${settings.criticalMinAgeHours} hours` : '-1 day';
-            console.log(`[VodStorage] Disk at ${disk.usePct}%, ${(disk.available / GB).toFixed(1)} GB free (${critical ? 'CRITICAL' : 'pressure'}) — draining to ≤${settings.localLowWaterPct}% / ≥${settings.targetFreeGb} GB free`
-                + (ghosts ? `; quarantined ${ghosts} file-less VOD row(s)` : ''));
             candidates = await db.all(`
                 SELECT id, file_path, file_size FROM vods
                 WHERE ${OFFLOADABLE_WHERE}
@@ -1021,6 +1041,11 @@ async function runSweep() {
                 ORDER BY (last_accessed_at IS NOT NULL), last_accessed_at ASC, view_count ASC, file_size DESC
                 LIMIT 200
             `, [minAge]);
+            // With nothing old enough to move the pass can do nothing; say so once per change, not every pass.
+            if (candidates.length || ghosts || !sweepState.nothingEligible) {
+                console.log(`[VodStorage] Disk at ${disk.usePct}%, ${(disk.available / GB).toFixed(1)} GB free (${critical ? 'CRITICAL' : 'pressure'}) — draining to ≤${settings.localLowWaterPct}% / ≥${settings.targetFreeGb} GB free`
+                    + (ghosts ? `; quarantined ${ghosts} file-less VOD row(s)` : ''));
+            }
         } else {
             if (ghosts) console.log(`[VodStorage] Quarantined ${ghosts} file-less VOD row(s)`);
             candidates = await db.all(`
@@ -1065,24 +1090,31 @@ async function runSweep() {
 
         // Say what happened whenever it matters: the old sweep only logged on success, so
         // weeks of "draining" that freed nothing looked healthy in the journal.
-        if (underPressure || errors.length || quarantined || skippedHeld) {
+        const diskAfter = diskUsage(config.vod.path);
+        const verdict = assessDrain({ underPressure, candidates: candidates.length, migrated, disk: diskAfter }, settings);
+        const nothingEligibleNews = verdict.nothingEligible && !sweepState.nothingEligible;
+        if ((underPressure && (candidates.length || nothingEligibleNews)) || errors.length || quarantined || skippedHeld) {
             const freedMb = (bytesFreed / 1048576).toFixed(1);
             console.log(`[VodStorage] Offload pass: ${candidates.length} candidate(s), ${migrated} uploaded (${freedMb} MB freed), `
                 + `${errors.length} failed, ${skippedBackoff} in retry back-off, ${quarantined} quarantined`
                 + (skippedHeld ? `, ${skippedHeld} under a retention hold` : '')
-                + (underPressure ? `, disk now ${diskUsage(config.vod.path).usePct}%` : ''));
+                + (underPressure ? `, disk now ${diskAfter.usePct}%` : ''));
             for (const e of errors.slice(0, 5)) console.warn(`[VodStorage]   VOD ${e.id}: ${e.error}`);
-            if (underPressure && !migrated && !candidates.length) {
-                console.warn('[VodStorage] Disk is under pressure but nothing is eligible to offload — check for stuck recordings or non-VOD files in the VOD directory');
+            if (nothingEligibleNews) {
+                console.warn(`[VodStorage] Disk is under pressure but nothing is eligible to offload (recordings under ${critical ? `${settings.criticalMinAgeHours} hours` : 'a day'} old stay local); `
+                    + `not logged again until that changes. Alerts only below ${settings.recorderWarnGb} GB free (VOD_DISK_WARN_GB).`);
             }
         }
+        if (sweepState.nothingEligible && !verdict.nothingEligible && underPressure && candidates.length) {
+            console.log(`[VodStorage] ${candidates.length} VOD(s) now eligible to offload`);
+        }
+        sweepState.nothingEligible = verdict.nothingEligible;
 
-        // Stall detection: a pressure pass that freed nothing is the failure mode that
-        // went unnoticed for weeks. Count them, and after a couple in a row raise an
-        // alert; announce recovery once the drain works again.
-        const diskAfter = diskUsage(config.vod.path);
+        // Stall detection: a pressure pass that freed nothing although it could have is the
+        // failure mode that went unnoticed for weeks. Count them, and after a couple in a row
+        // raise an alert; announce recovery once the drain works again (or has nothing to do).
         const stillNeedsDrain = underPressure && !drainSatisfied(diskAfter, settings);
-        if (underPressure && !migrated) {
+        if (verdict.stalled) {
             sweepState.stalledPasses++;
             if (sweepState.stalledPasses >= settings.alertAfterStalledPasses) {
                 sweepState.stalled = true;
@@ -1092,8 +1124,9 @@ async function runSweep() {
                     stalled_passes: sweepState.stalledPasses,
                     candidates: candidates.length,
                     errors: errors.slice(0, 3),
+                    below_recorder_warn_gb: verdict.belowRecorderGuard,
                     hint: !candidates.length
-                        ? 'nothing eligible to offload (stuck recordings? non-VOD files in the VOD directory?)'
+                        ? `under ${settings.recorderWarnGb} GB free (VOD_DISK_WARN_GB) and nothing eligible to offload (stuck recordings? other services filling the disk?)`
                         : errors.length ? 'uploads failing — check B2 credentials/bucket and network' : 'all candidates in retry back-off',
                 }, settings);
             }
@@ -1492,6 +1525,7 @@ module.exports = {
     needsDrain,
     drainSatisfied,
     isCritical,
+    assessDrain,
     planNextDelayMs,
     uploadTimeoutMs,
     providerOf,
