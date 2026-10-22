@@ -13,8 +13,8 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
 
 (async () => {
     const BUDGETS = {
-        htmlRawKB: 25,   // measured 19.8 (fresh database)
-        htmlBrotliKB: 6.5,   // 5.0
+        htmlRawKB: 43,   // measured 38.8 on 2026-10-22 (fresh database): the home gained its developer half (what it does, code, limits, questions and their FAQPage data); 19.8 before
+        htmlBrotliKB: 10.7,   // 9.7 on 2026-10-22; 5.0 before
         jsFiles: 4,   // 3
         // 2026-09-27: theme-loader (44.3 KB, 8.3 brotli) now comes from Media's own /shared (D42) instead of
         // openvibe.network, so it is counted here; the page itself did not grow.

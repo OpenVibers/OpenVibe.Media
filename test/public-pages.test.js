@@ -160,8 +160,17 @@ const http = require('http');
         for (const k of ['all', 'videos', 'clips', 'emotes', 'sounds', 'thumbnails', 'files']) assert.ok(r.body.includes(`href="/?tab=${k}"`), `tab ${k}`);
         assert.ok(r.body.includes('class="pager"') && r.body.includes('Page 1 /'), 'the pager');
         assert.ok(r.body.includes('<meta name="robots" content="index, follow">'));
+        // The front page is also Media's public home for developers: what it does, how an app uses it, the limits it
+        // enforces (limitsOf, the same numbers as /limits.json) and the questions, which are FAQPage data too.
+        assert.ok(r.body.includes('<title>OpenVibe.Media: open media and object storage'), 'the title says what it is');
+        for (const id of ['media', 'what', 'api', 'questions']) assert.ok(r.body.includes(`id="${id}"`), `the home has #${id}`);
+        assert.ok(r.body.includes('sc-limits') && r.body.includes('/limits.json'), 'the limits table and its source');
+        const faq = ld.find((x) => x['@type'] === 'FAQPage');
+        assert.ok(faq && faq.mainEntity.length >= 5, 'FAQPage data');
+        for (const q of faq.mainEntity) assert.ok(r.body.includes(`<summary>${q.name.replace(/'/g, '&#39;')}</summary>`) || r.body.includes(`<summary>${q.name}</summary>`), `the page asks "${q.name}"`);
         r = await get('/?tab=videos', nav);
         assert.ok(!r.body.includes('sc-hero') && h1s(r.body) === 1, 'the hero is the front page\'s only');
+        assert.ok(!r.body.includes('id="questions"') && !r.body.includes('FAQPage'), 'the developer half is the front page\'s only');
         r = await get('/?page=2', nav);
         assert.ok(!r.body.includes('application/ld+json'), 'a later (noindex) page carries none');
         assert.ok(!r.body.includes('sc-hero') && h1s(r.body) === 1, 'no hero after page 1');

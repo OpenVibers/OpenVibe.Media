@@ -234,7 +234,7 @@ nav.tabs{display:flex;gap:.25rem;padding:.2rem 0 .7rem;flex-wrap:wrap}
 nav.tabs a{color:var(--muted);text-decoration:none;padding:.45rem .9rem;border-radius:999px;font-size:.88rem;border:1px solid transparent}
 nav.tabs a:hover{color:var(--text)}nav.tabs a.on{color:var(--on-accent-strong,#fff);background:var(--accent-strong,#1d4ed8)}
 nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{opacity:1}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:1rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(250px,100%),1fr));gap:1rem}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
 .card .thumb{position:relative;display:block;aspect-ratio:16/9;background:#0b0f18}
 .card .thumb img{width:100%;height:100%;object-fit:cover;display:block}
@@ -250,9 +250,71 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 .pg{color:var(--acc);text-decoration:none;padding:.35rem .8rem;border:1px solid var(--line);border-radius:8px}
 .pg.dis{color:var(--muted);opacity:.4}
 .empty{padding:3rem;text-align:center;color:var(--muted)}
+.sec-h{font-size:1.3rem;margin:2rem 0 .6rem}
+.hero-stats{margin:0;display:grid;gap:10px}
+.hero-stats div{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
+.hero-stats dt{font-size:1.25rem;font-weight:700}.hero-stats dd{margin:2px 0 0;color:var(--muted);font-size:.92rem}
+.faq{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px 16px;margin:8px 0}
+.faq[open]{padding-bottom:12px}.faq summary{cursor:pointer;font-weight:600;padding:8px 0}.faq p{margin:4px 0 0;color:var(--muted)}
 `;
 
-const DESCRIPTION = 'Index of all public media on the OpenVibe network — videos, clips, files and thumbnails.';
+const DESCRIPTION = 'Videos, clips, pictures and files for every OpenVibe site, and the same API for your apps: objects, S3, thumbnails in any size and HLS.';
+const TITLE = 'OpenVibe.Media: open media and object storage';
+
+/** The home's questions: shown on the first page and given to search engines as FAQPage data (the same text). */
+const HOME_FAQ = [
+    { q: 'Do I need an account to watch?', a: 'No. Public videos, clips, sounds and files play and download without an account; watch pages for recordings and clips are on OpenVibe.Video.' },
+    { q: 'How does my app store files here?', a: 'Over S3 with a project key from OpenVibe.Zone (any S3 tool, endpoint s3.openvibe.media), or through the object API with the openvibe-sdk/media client: single or multipart uploads, resumable, signed URLs.' },
+    { q: 'What sizes can a thumbnail be?', a: 'Any public thumbnail answers /t/<id>?w=<width>&fmt=<format>: widths 64, 96, 160, 320, 480 or 640, as WebP, AVIF or JPEG, made once and cached.' },
+    { q: 'Can I show what a live stream looks like right now?', a: 'Yes: /live/@<username>/frame.jpg is a near-real-time frame of that streamer\'s live recording (?w= for a width, ?format=json for a status). When they are offline it is an offline card with a 404.' },
+    { q: 'What happens to something I delete?', a: 'A deleted object can be restored for a while before it is purged; the limits below say for how long. Its thumbnails and copies go with it.' },
+    { q: 'What are the limits?', a: 'They are published as JSON at /limits.json and in the table on this page: storage per project, upload and part sizes, and how long an unfinished upload holds its space.' },
+];
+function homeFaqJsonLd() {
+    return { '@context': 'https://schema.org', '@type': 'FAQPage', mainEntity: HOME_FAQ.map((f) => ({ '@type': 'Question', name: f.q, acceptedAnswer: { '@type': 'Answer', text: f.a.replace(/<(\w+)>/g, '$1') } })) };
+}
+const bytes = (n) => { const v = Number(n) || 0; return v >= 1024 ** 3 ? `${+(v / 1024 ** 3).toFixed(1)} GB` : `${Math.round(v / 1024 ** 2)} MB`; };
+
+/** The first page's developer half: what Media is for, how an app uses it, the limits it enforces, the questions. */
+function developerSections() {
+    const L = require('../limits').limitsOf(config).limits;
+    const rows = L.filter((l) => ['storage_bytes', 'single_upload_bytes', 'multipart_bytes', 'part_bytes', 'unfinished_upload_hours', 'deleted_retention_days'].includes(l.id))
+        .map((l) => ({ label: l.label, values: [l.unit === 'bytes' ? bytes(l.production) : `${l.production} ${l.unit}`, l.unit === 'bytes' ? bytes(l.sandbox) : `${l.sandbox} ${l.unit}`] }));
+    return showcase.features({
+        id: 'what',
+        title: 'What it does',
+        lede: 'The media layer under every OpenVibe site, open to your apps through the same API.',
+        items: [
+            { icon: 'ov:media', title: 'Objects and S3', text: 'Store any file in a project namespace: single or multipart uploads, signed URLs, and an S3 endpoint for the tools you have (through OpenVibe.Zone).', href: 'https://openvibe.zone/' },
+            { icon: 'ov:video', title: 'Recordings and clips', text: 'Live recordings, clips cut from them or straight from the stream timeline, and clips trimmed in place. Watch pages are on OpenVibe.Video.', href: 'https://openvibe.video/' },
+            { icon: 'ov:live', title: 'Streaming playback', text: 'Byte-range playback for every video, HLS for the ones that have a timeline, so players can seek without downloading.' },
+            { icon: 'ov:pics', title: 'Thumbnails in any size', text: '/t/<id>?w=&fmt= gives WebP, AVIF or JPEG at six widths, so a card loads about half the bytes.' },
+            { icon: 'ov:camera', title: 'Live frames', text: '/live/@<name>/frame.jpg: a near-real-time picture of a live stream, for embeds and bots.' },
+            { icon: 'ov:check', title: 'Limits in public', text: 'Every limit Media enforces is published at /limits.json, the same numbers OpenVibe.Services and Zone show.', href: '/limits.json' },
+        ],
+    }) + showcase.code({
+        id: 'api',
+        title: 'From your app',
+        lede: 'Public media needs no key. Your own objects take a project token or a Zone key.',
+        samples: [
+            { label: 'Thumbnail', lang: 'html', code: `<img src="${config.publicUrl}/t/<thumbnail>?w=320&fmt=webp" width="320" loading="lazy" alt="">
+<img src="${config.publicUrl}/live/@goosely/frame.jpg?w=640" alt="goosely, live now">` },
+            { label: 'Node (openvibe-sdk)', lang: 'js', code: `const { createObjectsClient } = require('openvibe-sdk/media');
+
+// tokens: createServiceTokenClient() for your developer app; app is your project id
+const objects = createObjectsClient({ app: 'prj_…', tokenClient: tokens });
+const obj = await objects.upload(fs.readFileSync('q3.pdf'), { kind: 'file', mimeType: 'application/pdf', filename: 'q3.pdf' });
+const { url } = await objects.signedUrl(obj.id, { ttl: 300 });` },
+            { label: 'S3 (any tool)', lang: 'bash', code: `aws --endpoint-url https://s3.openvibe.media s3 cp ./site s3://assets/ --recursive   # a Zone key and zone` },
+        ],
+    }) + showcase.limits({
+        title: 'Limits',
+        lede: 'What one project gets in each environment.',
+        columns: ['Production', 'Sandbox'],
+        rows,
+        source: `${config.publicUrl}/limits.json`,
+    }) + `<section class="sc-sec" id="questions" aria-labelledby="faq-h"><h2 id="faq-h">Questions</h2>${HOME_FAQ.map((f) => `<details class="faq"><summary>${esc(f.q)}</summary><p>${esc(f.a)}</p></details>`).join('')}</section>`;
+}
 
 function renderPage(tab, page, data, counts) {
     const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
@@ -260,26 +322,34 @@ function renderPage(tab, page, data, counts) {
     const first = tab === 'all' && page === 1;
     const canonical = `${config.publicUrl}/${first ? '' : `?tab=${tab}${page > 1 ? `&page=${page}` : ''}`}`;
     // The one <h1> on the page: the showcase hero on the index's front page, the plain intro elsewhere.
+    const stats = [
+        [counts.videos, 'public recordings and videos'], [counts.clips, 'public clips'],
+        [counts.emotes + counts.sounds, 'emotes and sounds'], [counts.thumbnails, 'thumbnails in six sizes'],
+    ].filter(([n]) => n > 0);
     const heading = first ? showcase.hero({
         eyebrow: 'OpenVibe.Media',
-        title: 'Every public file on the',
-        accent: 'OpenVibe network',
-        lede: 'Videos, clips, emotes, sounds, files and thumbnails from every OpenVibe site, in one index. Watch and download public media without an account.',
+        title: 'Open media and object storage',
+        accent: 'for OpenVibe and your apps.',
+        lede: 'Every video, clip, picture and file on the OpenVibe sites lives here, and your apps get the same API: objects and S3, thumbnails in any size, streaming playback and live frames. Public media plays and downloads without an account.',
         actions: [
-            { label: 'Browse videos', href: '/?tab=videos', primary: true },
-            { label: 'Watch on OpenVibe.Live', href: appUrl('live') + '/' },
+            { label: 'Browse public media', href: '#media', primary: true },
+            { label: 'Watch on OpenVibe.Video', href: 'https://openvibe.video/' },
+            { label: 'Use it from your app', href: '#api' },
         ],
+        html: stats.length ? `<dl class="hero-stats">${stats.map(([n, d]) => `<div><dt>${Number(n).toLocaleString('en-US')}</dt><dd>${d}</dd></div>`).join('')}</dl>` : undefined,
     }) : '<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>';
     const body = `${heading}
+${first ? `<h2 id="media" class="sec-h">Latest public media</h2>` : ''}
 <nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>
+${first ? developerSections() : ''}
 ${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' }) : ''}`;
     return pageFrame.page({
         seo: {
-            title: 'OpenVibe.Media — Media Index', description: DESCRIPTION, canonical,
+            title: TITLE, description: DESCRIPTION, canonical,
             robots: page > 1 ? 'noindex, follow' : 'index, follow', ogType: 'website',
-            jsonLd: page === 1 ? browseJsonLd(tab, data.cards) : [],
+            jsonLd: page === 1 ? [...browseJsonLd(tab, data.cards), ...(first ? [homeFaqJsonLd()] : [])] : [],
         },
         css: BROWSE_CSS,
         body,
