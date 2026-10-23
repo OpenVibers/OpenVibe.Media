@@ -5,7 +5,7 @@
  * own their stream state and point ingest at a VOD they created):
  *
  *   RTMP:  POST ingest/rtmp { rtmp_url }   → ffmpeg pulls the URL (allow-listed RTMP servers
- *          only: MEDIA_RTMP_PULL_ALLOW, default Live's on this host), lossless
+ *          only: MEDIA_RTMP_PULL_ALLOW, default Live's and OpenRestream's on this host), lossless
  *          stream-copy into a fragmented MP4 (H.264/AAC passthrough — near-zero
  *          CPU, live-seekable, kill-tolerant, and IS its own lossless master).
  *   RTP:   POST ingest/rtp/start { video, audio } → allocates a UDP port pair
@@ -39,8 +39,18 @@ const STOP_GRACE_MS = parseInt(process.env.VOD_STOP_GRACE_MS, 10) || 60000;
  * Is this an RTMP URL ffmpeg may pull? Only rtmp:// or rtmps:// with a plain host (a name, IPv4 or
  * [IPv6]), an optional port and a plain path/query: no user info, no backslash, no whitespace or
  * control characters, nothing ffmpeg and a URL parser could read differently. The host:port (default
- * 1935 / 443) must be in `allow` (config.rtmpPull.allow). Returns { ok, host, port, url } or { ok: false, error }.
+ * 1935 / 443) must be in `allow` (config.rtmpPull.allow): an exact host:port, or host:low-high for a range of ports.
+ * Returns { ok, host, port, url } or { ok: false, error }.
  */
+function allows(entries, host, port) {
+    for (const raw of entries || []) {
+        const a = String(raw).toLowerCase();
+        const m = /^(.+):(\d{1,5})-(\d{1,5})$/.exec(a);
+        if (m ? m[1] === host && port >= Number(m[2]) && port <= Number(m[3]) : a === `${host}:${port}`) return true;
+    }
+    return false;
+}
+
 function checkRtmpUrl(url, allow = config.rtmpPull.allow) {
     const u = String(url == null ? '' : url);
     if (!u || u.length > 2048) return { ok: false, error: 'rtmp_url must be an rtmp:// or rtmps:// URL' };
@@ -49,8 +59,7 @@ function checkRtmpUrl(url, allow = config.rtmpPull.allow) {
     const host = m[2].toLowerCase();
     const port = m[3] ? Number(m[3]) : (m[1].toLowerCase() === 'rtmps' ? 443 : 1935);
     if (!(port > 0 && port < 65536)) return { ok: false, error: 'rtmp_url has an invalid port' };
-    const allowed = (allow || []).map(a => String(a).toLowerCase());
-    if (!allowed.includes(`${host}:${port}`)) return { ok: false, error: `rtmp_url host ${host}:${port} is not an allowed RTMP ingest (MEDIA_RTMP_PULL_ALLOW)` };
+    if (!allows(allow, host, port)) return { ok: false, error: `rtmp_url host ${host}:${port} is not an allowed RTMP ingest (MEDIA_RTMP_PULL_ALLOW)` };
     // ffmpeg matches protocol names case-sensitively: hand it the scheme in lower case.
     return { ok: true, host, port, url: `${m[1].toLowerCase()}${u.slice(m[1].length)}` };
 }

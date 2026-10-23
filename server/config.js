@@ -150,10 +150,12 @@ const config = {
         intervalMin: intEnv('MEDIA_OWNER_SUBJECT_INTERVAL_MIN', 10),
     },
 
-    // Where POST /vods/:id/ingest/rtmp may make ffmpeg connect (an SSRF guard): host:port entries,
-    // by default Live's RTMP server on this host. A URL without a port means 1935 (rtmp) / 443 (rtmps).
+    // Where POST /vods/:id/ingest/rtmp may make ffmpeg connect (an SSRF guard): host:port entries, or
+    // host:low-high for a range of ports. By default Live's RTMP server on this host, and the loopback
+    // play ports OpenRestream's RTMP workers take (OPENRE_RTMP_INTERNAL_PORT_MIN..MAX, 19360-19399):
+    // its recordings are pulled from there. A URL without a port means 1935 (rtmp) / 443 (rtmps).
     rtmpPull: {
-        allow: String(process.env.MEDIA_RTMP_PULL_ALLOW || '127.0.0.1:1935,localhost:1935,[::1]:1935')
+        allow: String(process.env.MEDIA_RTMP_PULL_ALLOW || '127.0.0.1:1935,localhost:1935,[::1]:1935,127.0.0.1:19360-19399')
             .split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
     },
 
