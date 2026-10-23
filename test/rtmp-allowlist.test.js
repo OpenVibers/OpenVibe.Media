@@ -23,7 +23,18 @@ const express = require('express');
     const recorder = require('../server/vod/recorder');
     const { checkRtmpUrl } = recorder;
 
-    assert.deepStrictEqual(config.rtmpPull.allow, ['127.0.0.1:1935', 'localhost:1935', '[::1]:1935'], 'default: Live\'s RTMP server on this host');
+    assert.deepStrictEqual(config.rtmpPull.allow, ['127.0.0.1:1935', 'localhost:1935', '[::1]:1935', '127.0.0.1:19360-19399'], 'default: Live\'s RTMP server and OpenRestream\'s loopback play ports on this host');
+
+    // OpenRestream's RTMP workers serve each session on a loopback play port from 19360-19399 (a record-only stream's
+    // recording is pulled from there, 2026-10-23): the whole range, on 127.0.0.1 only, and nothing past it.
+    for (const port of [19360, 19377, 19399]) assert.ok(checkRtmpUrl(`rtmp://127.0.0.1:${port}/live/ses_01M5K5W32ZN3NR76M1DQK8F76Q`).ok, `OpenRestream play port ${port}`);
+    for (const url of ['rtmp://127.0.0.1:19359/live/x', 'rtmp://127.0.0.1:19400/live/x', 'rtmp://localhost:19360/live/x', 'rtmp://[::1]:19360/live/x']) {
+        assert.ok(!checkRtmpUrl(url).ok, `outside the range: ${url}`);
+    }
+    // A range in MEDIA_RTMP_PULL_ALLOW is host:low-high; a malformed entry matches nothing.
+    assert.ok(checkRtmpUrl('rtmp://rtmp.example:2001/live/k', ['rtmp.example:2000-2010']).ok);
+    assert.ok(!checkRtmpUrl('rtmp://rtmp.example:2011/live/k', ['rtmp.example:2000-2010']).ok);
+    assert.ok(!checkRtmpUrl('rtmp://rtmp.example:2001/live/k', ['rtmp.example:2000-']).ok);
 
     // ── 1. The allow-list and the URL shape ──
     for (const ok of ['rtmp://127.0.0.1:1935/live/abc123', 'rtmp://localhost:1935/live/Key_9-x', 'rtmp://127.0.0.1/live/k', 'rtmp://[::1]:1935/live/k',
