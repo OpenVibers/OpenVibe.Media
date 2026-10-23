@@ -67,6 +67,9 @@ function checkRtmpUrl(url, allow = config.rtmpPull.allow) {
 // Disk guardian thresholds (free bytes on the VOD volume).
 const DISK_WARN_BYTES = (parseFloat(process.env.VOD_DISK_WARN_GB) || 15) * 1024 * 1024 * 1024;
 const DISK_CRIT_BYTES = (parseFloat(process.env.VOD_DISK_CRIT_GB) || 5) * 1024 * 1024 * 1024;
+// The last resort: under this, the largest running recording is stopped (checkDisk), because a full disk stops
+// PostgreSQL and every service on the host with it.
+const DISK_STOP_BYTES = (parseFloat(process.env.VOD_DISK_STOP_GB) || 3) * 1024 * 1024 * 1024;
 
 function _isControlledFfmpegError(line, expectedShutdown) {
     if (!line || !expectedShutdown) return false;
@@ -586,11 +589,12 @@ class StreamRecorder {
 
     /**
      * Disk guardian: sample free space on the VOD volume. Under 'critical' no
-     * new recordings start (existing ones keep running). Called on an interval.
+     * new recordings start (existing ones keep running); under VOD_DISK_STOP_GB the
+     * largest running one is stopped too (_stopLargestForDisk). Called on an interval.
      */
     checkDisk() {
         let free = 0;
-        try { free = require('./vod-storage').diskUsage(config.vod.path).available || 0; } catch { return; }
+        try { free = this._freeBytes(); } catch { return; }
         if (!free) return;
         const prev = this._diskState;
         const state = free < DISK_CRIT_BYTES ? 'critical' : free < DISK_WARN_BYTES ? 'warning' : 'ok';
@@ -601,9 +605,41 @@ class StreamRecorder {
             else console.warn(`[VOD] Disk ${state.toUpperCase()} — only ${gb}GB free on the VOD volume`);
         }
         if (state === 'ok') return;
+        if (free < DISK_STOP_BYTES) this._stopLargestForDisk(free);
 
         // Under pressure: nudge the storage sweep to offload cold VODs.
         try { const vs = require('./vod-storage'); if (typeof vs.runSweep === 'function') vs.runSweep().catch(() => {}); } catch { /* */ }
+    }
+
+    /** Free bytes on the VOD volume. */
+    _freeBytes() {
+        return require('./vod-storage').diskUsage(config.vod.path).available || 0;
+    }
+
+    /**
+     * The last resort under VOD_DISK_STOP_GB free (default 3): stop the largest running recording, one per check.
+     * Under 'critical' only new recordings are refused, and running ones keep writing: on 2026-10-23 two long
+     * streams and their DVR copies grew the disk about 5 GB an hour. Unchecked, that fills the disk, and PostgreSQL
+     * and every service on the host stop with it. The stopped recording finalizes as usual (its remux is skipped
+     * when there is no room for the copy) and the storage sweep can then move it. → the vod id stopped, or null.
+     */
+    _stopLargestForDisk(free) {
+        let pick = null;
+        for (const [vodId, rec] of this.activeRecordings) {
+            if (rec._expectedShutdown) continue;
+            let size = 0;
+            try { size = fs.statSync(rec.filePath).size; } catch { /* nothing written yet */ }
+            if (!pick || size > pick.size) pick = { vodId, size };
+        }
+        if (!pick) return null;
+        const gb = (n) => Number((n / 1024 / 1024 / 1024).toFixed(1));
+        console.error(`[VOD] Disk at ${gb(free)} GB free (under VOD_DISK_STOP_GB): stopping the largest recording, vod ${pick.vodId} (${gb(pick.size)} GB), so the disk does not fill`);
+        try {
+            const vs = require('./vod-storage');
+            if (typeof vs.emitStorageEvent === 'function') vs.emitStorageEvent('storage.alert', 'recording_stopped_disk', { vod_id: pick.vodId, free_gb: gb(free), size_gb: gb(pick.size) }).catch(() => {});
+        } catch { /* the stop matters more than the alert */ }
+        this.stopRecording(pick.vodId);
+        return pick.vodId;
     }
 
     /** Stop all active recordings (for graceful shutdown). */
