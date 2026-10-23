@@ -73,6 +73,11 @@ const express = require('express');
 
     (async () => {
         await new Promise((res) => (server.listening ? res() : server.once('listening', res)));
+        // ── thumbnails: open to every origin (Live samples a stream thumbnail's colours on a canvas) ──
+        let t = await get('/t/g1.jpg', { origin: 'https://openvibe.live' });
+        assert.strictEqual(t.status, 200);
+        assert.strictEqual(t.headers['access-control-allow-origin'], '*', 'a thumbnail may be read cross-origin');
+        assert.strictEqual(t.headers['cross-origin-resource-policy'], 'cross-origin');
         // ── robots.txt ──
         let r = await get('/robots.txt');
         assert.strictEqual(r.status, 200);
