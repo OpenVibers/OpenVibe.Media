@@ -272,6 +272,11 @@ router.get('/og-image.png', (req, res) => {
 // ── Thumbnails ───────────────────────────────────────────────
 router.get('/t/:id', (req, res) => {
     if (drill.refuseBytes(res)) return;
+    // Open to every origin like the other public images: Live's player samples a stream thumbnail's colours on a
+    // canvas (an anonymous CORS load), which failed with a console error on every offline channel page (2026-10-23).
+    // Whoever has the URL can already load the image; this lets a page read its pixels.
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
     require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
 });
 
