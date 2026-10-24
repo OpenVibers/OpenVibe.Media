@@ -1,10 +1,11 @@
 'use strict';
 // Plan §9 gate: seek works during an active DVR. A recording still being written is a fragmented MP4
 // (frag_keyframe+empty_moov, as the recorder writes it); Live's DVR player reads it through /v/:id, which
-// serves the live seek snapshot (remuxForLiveSeeking: a copy-remux with the whole index at the front). Here
+// serves the live seek snapshot (remuxForLiveSeeking: one copy-remux, the whole index after the media). Here
 // with real ffmpeg: the snapshot of a recording mid-stream answers ranged reads from any offset with no-cache,
-// carries its index before its media, and a player can seek to a late moment in it; after the recording grows,
-// the next snapshot reaches the new live edge; once finalized, /v/:id serves the recording itself again.
+// carries one whole index (a player reads a tail moov with one range request), and a player can seek to a late
+// moment in it; after the recording grows, the next snapshot reaches the new live edge and keeps the earlier
+// samples at the same offsets; once finalized, /v/:id serves the recording itself again.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
@@ -70,7 +71,7 @@ const { spawnSync } = require('child_process');
 
     try {
         const sidecar = tools.seekableSidecarPath(rec);
-        await check('mid-recording, /v/:id serves the seek snapshot: ranged, uncached, its index before its media', async () => {
+        await check('mid-recording, /v/:id serves the seek snapshot: ranged, uncached, one whole index after its media', async () => {
             assert.ok(await snapshot(), 'the first snapshot ran');
             const size = fs.statSync(sidecar).size;
             const whole = await get('bytes=0-');
@@ -79,7 +80,7 @@ const { spawnSync } = require('child_process');
             assert.strictEqual(whole.headers.get('content-range'), `bytes 0-${size - 1}/${size}`);
             assert.ok(whole.body.equals(fs.readFileSync(sidecar)), 'the snapshot, not the growing file');
             const moov = whole.body.indexOf('moov'), mdat = whole.body.indexOf('mdat');
-            assert.ok(moov > 0 && mdat > moov, `the index sits before the media (moov ${moov}, mdat ${mdat})`);
+            assert.ok(mdat > 0 && moov > mdat, `the index follows the media, written in one pass (moov ${moov}, mdat ${mdat})`);
             assert.strictEqual(whole.body.indexOf('moof'), -1, 'one whole index, not fragments a player must walk');
             // A seek lands mid-file: the player asks for a range starting there.
             const mid = Math.floor(size / 2);
@@ -99,12 +100,18 @@ const { spawnSync } = require('child_process');
             assert.ok(times.length > 0 && times[0] >= 2.9 && times[0] < 3.6, `seeking to 3.5 s decodes from its keyframe (3 s), not the start: ${times.slice(0, 3)}`);
         });
 
-        await check('as the recording grows, the next snapshot reaches the new live edge', async () => {
+        await check('as the recording grows, the next snapshot reaches the new live edge, earlier samples where they were', async () => {
+            const earlier = fs.readFileSync(path.join(tmp, 'served.mp4'));
             record(rec, 8);
             assert.ok(await snapshot(), 'the next snapshot ran');
             const served = path.join(tmp, 'served-later.mp4');
             fs.writeFileSync(served, (await get()).body);
             assert.ok(Math.abs(duration(served) - 8) < 0.5, `the later snapshot covers 8 s: ${duration(served)} s`);
+            // A player that started on the earlier snapshot keeps reading ranges after the swap: the media before the
+            // earlier snapshot's tail (its last fragment can be cut differently) is byte-identical in the later one.
+            const later = fs.readFileSync(served);
+            const from = earlier.indexOf('mdat') + 4, to = Math.floor(earlier.indexOf('moov') * 0.8);
+            assert.ok(to > from && earlier.subarray(from, to).equals(later.subarray(from, to)), `the earlier media sits at the same offsets (${from}-${to})`);
         });
 
         await check('once finalized, /v/:id serves the recording itself, cacheable again', async () => {

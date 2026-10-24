@@ -291,8 +291,7 @@ function cleanupTempFile(filePath) {
 // ── Live DVR sidecar ─────────────────────────────────────────
 
 // Per recording: { running, proc, notBefore, retired, warned }. Every pass rewrites the whole growing
-// file (twice for MP4 +faststart), so a 4-hour recording's pass takes minutes and its copy is as big
-// as the recording. One pass runs at a time, it may use at most 1/LIVE_REMUX_DUTY of the wall clock
+// file once, so a 4-hour recording's pass takes minutes and its copy is as big as the recording. One pass runs at a time, it may use at most 1/LIVE_REMUX_DUTY of the wall clock
 // (the next waits 9× as long as the last took), its kill budget scales with the file, and it is
 // skipped while the disk cannot take the copy. The old flat 30 s kill cut every long pass short,
 // dropped the guard while ffmpeg still ran and let the next tick start another full copy.
@@ -310,7 +309,10 @@ function seekableSidecarPath(filePath) {
 /**
  * Produce a fully-indexed seekable snapshot of the growing recording so DVR
  * viewers can seek anywhere without the whole file. WebM: copy-remux to write
- * cues. MP4: copy-remux with +faststart so a complete moov sits at the front.
+ * cues. MP4: copy-remux into a plain MP4 whose complete moov sits at the end. No +faststart: moving the
+ * moov to the front rewrote the whole copy a second time on every pass (2026-10-24), and players read a
+ * tail moov with one Range request (/v/<id> serves ranges). With the moov last, a later snapshot keeps
+ * the earlier samples at the same offsets, so a player's next range read still finds them.
  * Writes to <file>.seekable.<ext> WITHOUT touching the growing original.
  * → true when a new snapshot replaced the old one; false when this call did nothing
  * (a pass is running or not yet due, no room, or the pass failed).
@@ -333,10 +335,7 @@ async function remuxForLiveSeeking(filePath) {
             return false;
         }
         state.warned = false;
-        const outArgs = filePath.endsWith('.mp4')
-            ? ['-c', 'copy', '-movflags', '+faststart', '-fflags', '+genpts']
-            : ['-c', 'copy', '-fflags', '+genpts'];
-        const { code } = await runFfmpeg(['-y', '-i', filePath, ...outArgs, tmpPath], {
+        const { code } = await runFfmpeg(['-y', '-i', filePath, '-c', 'copy', '-fflags', '+genpts', tmpPath], {
             budgetMs: remuxBudgetMs(bytes),
             // Lower priority than the recordings it copies. Only with a pid: setPriority(undefined) renices Media itself.
             onSpawn: (proc) => { state.proc = proc; if (proc.pid) { try { os.setPriority(proc.pid, LIVE_REMUX_NICE); } catch { /* not permitted: run as is */ } } },
