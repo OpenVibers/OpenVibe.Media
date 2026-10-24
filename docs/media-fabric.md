@@ -221,6 +221,11 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   never decoded end to end. The layout (`sprite: { count, interval_seconds, columns, rows, tile_width, tile_height }`)
   and metadata are the seek path's, so the player contract is unchanged. A source without a timeline, or with
   `MEDIA_HLS_ENABLED` off, keeps the one-fast-seek-per-frame path; captions stay with AI's `media.analyze`.
+  **F3.2, first step (2026-10-24): the DVR playlist over the recording itself.** While an MP4 recording is written,
+  `/v/:id/dvr.m3u8` is an EVENT playlist whose init segment and ~6 s segments are slices of the growing file
+  (`dvr/init.mp4`, `dvr/<offset>-<length>.m4s`; server/vod/fmp4-index.js reads its moof/mdat pairs as they are
+  appended), so Live's DVR seeks with no second copy; `VOD_DVR_SNAPSHOT_MP4=0` then stops the per-pass copy of MP4
+  recordings. Public and unlisted recordings only (an HLS player sends no credentials).
   **Still open in F3:** the growing live/DVR playlist written as OpenRestream segments (F3.2), write-behind durability for
   live segments and its upload-lag metric, captions on the timeline, and Live's player moving to HLS. Segment-bucket
   demand (F2.4) now records reads per timeline segment; deciding placement per segment stays F5's. Renditions are F4.

@@ -335,6 +335,8 @@ class StreamRecorder {
                 [elapsed, stat.size, rec.vodId]));
         } catch {}
 
+        // An MP4's DVR is its playlist (/v/:id/dvr.m3u8): with VOD_DVR_SNAPSHOT_MP4=0 it gets no copy at all.
+        if (rec.filePath.endsWith('.mp4') && !config.vod.dvrSnapshotMp4) return;
         tools.remuxForLiveSeeking(rec.filePath).catch(() => {});
     }
 
