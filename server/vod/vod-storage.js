@@ -72,10 +72,15 @@ const KEY_PREFIX = 'vods/';
 // ── Settings (media_settings, JSON values under storage_tier.*) ──
 const DEFAULTS = {
     enabled: true,
-    // B2 cold-offload eligibility (a VOD must meet ALL of these)
-    minAgeDays: 7,
-    maxViewsForCold: 5,
-    minLastAccessDays: 3,
+    // B2 cold-offload eligibility (a VOD must meet ALL of these). The local disk is a write buffer, not a tier: it is
+    // the host's 96 GB SSD, shared with PostgreSQL and ~50 services, and a full one stops them all (2026-10-24 03:39,
+    // 0 GB free). B2 is the cheapest place to keep a recording (~$6/TB-month, its egress free up to 3x what is stored
+    // and to Cloudflare), and the R2 popularity tier below copies what people actually watch to R2 (no egress at
+    // all). So a finished recording leaves the disk after a day whatever its views; it was 7 days and at most 5 views,
+    // which kept every busy stream of the week on the disk.
+    minAgeDays: 1,
+    maxViewsForCold: 1000000,
+    minLastAccessDays: 1,
     sweepIntervalMs: 15 * 60 * 1000,
     // Disk pressure: above this % the sweep drains aggressively…
     hotDiskPressurePct: 70,
@@ -1034,11 +1039,14 @@ async function runSweep() {
         let candidates;
         if (underPressure) {
             const minAge = critical ? `-${settings.criticalMinAgeHours} hours` : '-1 day';
+            // Under pressure the bytes come first: the largest finished recordings, then the least recently watched.
+            // It was never-watched first, then oldest-watched, size last: on 2026-10-24 the drain moved 2 MB uploads one
+            // by one while a 6.3 GB recording watched once sat behind them, and the disk reached 0 GB free.
             candidates = await db.all(`
                 SELECT id, file_path, file_size FROM vods
                 WHERE ${OFFLOADABLE_WHERE}
                   AND created_at <= datetime('now', ?)
-                ORDER BY (last_accessed_at IS NOT NULL), last_accessed_at ASC, view_count ASC, file_size DESC
+                ORDER BY COALESCE(file_size, 0) DESC, (last_accessed_at IS NOT NULL), last_accessed_at ASC, view_count ASC
                 LIMIT 200
             `, [minAge]);
             // With nothing old enough to move the pass can do nothing; say so once per change, not every pass.
