@@ -46,7 +46,7 @@ fs.promises.statfs = roomy;
     assert.strictEqual(await tools.remuxForLiveSeeking(rec), false, 'a call while the pass runs does nothing');
     assert.strictEqual(spawned.length, 1, 'no second ffmpeg on the same recording');
     assert.strictEqual(spawned[0].args[spawned[0].args.length - 1], tmpOut, 'the pass writes the temp file');
-    assert.ok(spawned[0].args.includes('+faststart'), 'an MP4 snapshot is written with faststart');
+    assert.ok(!spawned[0].args.includes('+faststart') && !spawned[0].args.includes('-movflags'), 'an MP4 snapshot is written once: its moov goes last, no faststart second pass');
 
     // 2) The pass is not cut short at 30 s: its budget scales with the file, and it ends when ffmpeg ends.
     assert.strictEqual(tools.remuxBudgetMs(1e6), 180000, 'a small file gets the 3 min floor');
