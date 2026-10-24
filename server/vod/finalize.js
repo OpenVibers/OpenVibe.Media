@@ -258,6 +258,7 @@ async function _doFinalize(vodId, opts) {
     // The live seekable copy is no longer needed: drop it (and stop a live pass still writing one)
     // before the final remux, whose own copy of the recording needs that room on the disk.
     await tools.cleanupSeekableFile(filePath);
+    require('./fmp4-index').forget(filePath);   // the DVR playlist's index: the remux below rewrites the file
 
     // Remux for proper seeking support (fast copy-mode, no re-encode). Its last packet time is a
     // measurement of the file (source 'remux'); a failed remux measures nothing.

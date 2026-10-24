@@ -37,6 +37,10 @@ const config = {
         path: process.env.VOD_PATH || './data/vods',
         clipsPath: process.env.CLIPS_PATH || './data/clips',
         maxSizeMb: intEnv('MAX_VOD_SIZE_MB', 2048),
+        // While an MP4 recording is written, its DVR is the playlist over the file itself (/v/:id/dvr.m3u8,
+        // vod/fmp4-index.js). VOD_DVR_SNAPSHOT_MP4=0 also stops the periodic seekable copy of MP4 recordings (a full
+        // copy-remux each pass: twice the disk and the I/O) once every DVR player reads the playlist. WebM keeps it.
+        dvrSnapshotMp4: process.env.VOD_DVR_SNAPSHOT_MP4 !== '0',
     },
     pastes: {
         path: process.env.PASTES_PATH || './data/pastes',

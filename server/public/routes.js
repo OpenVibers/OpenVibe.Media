@@ -248,6 +248,55 @@ router.get('/v/:id', optionalIdentity, async (req, res) => {
     }
 });
 
+// ── DVR of a recording in progress (vod/fmp4-index.js; docs/media-fabric.md F3.2) ──
+// While an MP4 recording is written, /v/:id/dvr.m3u8 is an EVENT playlist over the file itself: dvr/init.mp4 (its ftyp
+// and moov) and dvr/<offset>-<length>.m4s (whole moof+mdat fragments, about 6 s a segment), so a DVR player seeks
+// anywhere in the stream without a second copy of the recording. Public and unlisted recordings only (an HLS player
+// sends no credentials), CORS-open like the other public media. The playlist is never cached; a segment's bytes never
+// change while the file grows. Not recording (finalize rewrites the file) or not an MP4: 404, and players keep /v/:id.
+const DVR_SEGMENT = /^(\d{1,15})-(\d{1,10})\.m4s$/;
+const DVR_SEGMENT_MAX_BYTES = 64 * 1024 * 1024;
+async function dvrSource(req, res) {
+    if (drill.refuseBytes(res)) return null;
+    if (!/^\d+$/.test(req.params.id)) { notFound(res); return null; }
+    const vod = await db.getVodById(parseInt(req.params.id, 10));
+    if (!vod || vod.clips_only || !vod.is_recording || recordVisibility(vod) === 'private') { notFound(res); return null; }
+    const vodStorage = require('../vod/vod-storage');
+    const filePath = [vodStorage.localPathForVod(vod), vod.file_path].find((p) => p && p.endsWith('.mp4') && fs.existsSync(p));
+    if (!filePath) { notFound(res); return null; }
+    const index = await require('../vod/fmp4-index').refresh(filePath);
+    if (index.broken || !index.initEnd) { notFound(res); return null; }
+    res.set({ 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin', 'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex' });
+    return { vod, filePath, index };
+}
+const dvrRoute = (fn) => async (req, res) => {
+    try {
+        const s = await dvrSource(req, res);
+        if (s) await fn(req, res, s);
+    } catch (err) {
+        console.error('[Public] DVR error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to serve the DVR' });
+    }
+};
+router.get('/v/:id/dvr.m3u8', dvrRoute(async (req, res, { index }) => {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.type('application/vnd.apple.mpegurl').send(require('../vod/fmp4-index').playlist(index));
+}));
+router.get('/v/:id/dvr/init.mp4', dvrRoute(async (req, res, { filePath, index }) => {
+    res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': index.initEnd, 'Cache-Control': 'public, max-age=3600' });
+    sendFileStream(res, filePath, { start: 0, end: index.initEnd - 1 });
+}));
+router.get('/v/:id/dvr/:segment', dvrRoute(async (req, res, { filePath, index }) => {
+    const m = DVR_SEGMENT.exec(String(req.params.segment || ''));
+    const last = index.fragments[index.fragments.length - 1];
+    const offset = m ? Number(m[1]) : NaN;
+    const length = m ? Number(m[2]) : NaN;
+    // Only bytes already indexed (whole fragments after the init segment): never a part still being written.
+    if (!m || !last || length <= 0 || length > DVR_SEGMENT_MAX_BYTES || offset < index.initEnd || offset + length > last.offset + last.length) return notFound(res);
+    res.writeHead(200, { 'Content-Type': 'video/iso.segment', 'Content-Length': length, 'Cache-Control': 'public, max-age=3600' });
+    sendFileStream(res, filePath, { start: offset, end: offset + length - 1 });
+}));
+
 // ── Clip playback ────────────────────────────────────────────
 router.get('/c/:id', optionalIdentity, async (req, res) => {
     try {
