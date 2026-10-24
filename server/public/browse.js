@@ -236,8 +236,10 @@ nav.tabs a:hover{color:var(--text)}nav.tabs a.on{color:var(--on-accent-strong,#f
 nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{opacity:1}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(250px,100%),1fr));gap:1rem}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
-.card .thumb{position:relative;display:block;aspect-ratio:16/9;background:#0b0f18}
-.card .thumb img{width:100%;height:100%;object-fit:cover;display:block}
+/* The preview keeps its 16:9 box whatever the picture's shape: a portrait recording's thumbnail used to set the box's
+   minimum height (an aspect-ratio box grows to fit its content), stretching its card and its whole row to ~640 px. */
+.card .thumb{position:relative;display:block;aspect-ratio:16/9;background:#0b0f18;overflow:hidden}
+.card .thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 .card .thumb .ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:2.2rem;opacity:.5}
 .card .thumb .dur{position:absolute;right:.5rem;bottom:.5rem;background:rgba(0,0,0,.75);color:#fff;padding:.1rem .45rem;border-radius:6px;font-size:.75rem}
 .card .thumb .kind{position:absolute;left:.5rem;top:.5rem;background:rgba(var(--accent-rgb,59,130,246),.85);color:var(--on-accent,#fff);padding:.1rem .5rem;border-radius:6px;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em}
@@ -250,7 +252,8 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 .pg{color:var(--acc);text-decoration:none;padding:.35rem .8rem;border:1px solid var(--line);border-radius:8px}
 .pg.dis{color:var(--muted);opacity:.4}
 .empty{padding:3rem;text-align:center;color:var(--muted)}
-.sec-h{font-size:1.3rem;margin:2rem 0 .6rem}
+/* The list's heading takes the showcase sections' face and size (openvibe-shared/showcase.css), like the rest of the home. */
+.sec-h{font-family:var(--ov-font,'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif);font-size:clamp(22px,2.6vw,30px);letter-spacing:-.02em;margin:56px 0 .6rem}
 .hero-stats{margin:0;display:grid;gap:10px}
 .hero-stats div{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
 .hero-stats dt{font-size:1.25rem;font-weight:700}.hero-stats dd{margin:2px 0 0;color:var(--muted);font-size:.92rem}
