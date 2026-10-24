@@ -21,7 +21,7 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
         // 2026-10-13 (T11): the index is composed by openvibe-shared/shell like the watch pages, which adds the
         // shared web-runtime.js; the showcase stylesheet (same-origin) replaces Font Awesome (cross-origin).
         jsRawKB: 243,   // 241 with openvibe-shared 4.9.0 (status text twins in every theme, 2026-10-23); 230.9 (was 197.7)
-        jsBrotliKB: 56,   // 53.7 (was 45.6)
+        jsBrotliKB: 58,   // 56.1 with openvibe-shared 4.10.0 (Report a problem in the footer, 2026-10-24); 53.7 (was 45.6)
         cssFiles: 2,   // 1 (showcase.css)
         cssRawKB: 13,   // 11.6 same-origin (showcase.css; was 0)
         externalFiles: 3,   // 2
