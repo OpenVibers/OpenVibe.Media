@@ -254,6 +254,7 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 .empty{padding:3rem;text-align:center;color:var(--muted)}
 /* The list's heading takes the showcase sections' face and size (openvibe-shared/showcase.css), like the rest of the home. */
 .sec-h{font-family:var(--ov-font,'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif);font-size:clamp(22px,2.6vw,30px);letter-spacing:-.02em;margin:56px 0 .6rem}
+.sc-media .sec-h{margin-top:0}   /* on the home the list is a showcase section, whose own margin spaces it */
 .hero-stats{margin:0;display:grid;gap:10px}
 .hero-stats div{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
 .hero-stats dt{font-size:1.25rem;font-weight:700}.hero-stats dd{margin:2px 0 0;color:var(--muted);font-size:.92rem}
@@ -341,11 +342,14 @@ function renderPage(tab, page, data, counts) {
         ],
         html: stats.length ? `<dl class="hero-stats">${stats.map(([n, d]) => `<div><dt>${Number(n).toLocaleString('en-US')}</dt><dd>${d}</dd></div>`).join('')}</dl>` : undefined,
     }) + '<section class="sc-sec sc-part-of"><p class="sc-note">Part of <a href="https://openvibe.services/">OpenVibe Services</a>: the building blocks every OpenVibe product runs on, with one console, one account and one SDK.</p></section>' : '<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>';
-    const body = `${heading}
-${first ? `<h2 id="media" class="sec-h">Latest public media</h2>` : ''}
-<nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
+    // On the home the list is a section like the ones around it (the same inset, so its heading, tabs and grid line up
+    // with the hero and the developer sections); later pages and tabs keep the plain index layout.
+    const list = `<nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
-<div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>
+<div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>`;
+    const body = `${heading}
+${first ? `<section class="sc-sec sc-media" aria-labelledby="media"><h2 id="media" class="sec-h">Latest public media</h2>
+${list}</section>` : list}
 ${first ? developerSections() : ''}
 ${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' }) : ''}`;
     return pageFrame.page({
