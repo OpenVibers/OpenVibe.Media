@@ -330,7 +330,7 @@ function renderPage(tab, page, data, counts) {
         [counts.emotes + counts.sounds, 'emotes and sounds'], [counts.thumbnails, 'thumbnails in six sizes'],
     ].filter(([n]) => n > 0);
     const heading = first ? showcase.hero({
-        eyebrow: 'OpenVibe.Media',
+        eyebrow: 'OpenVibe.Media · part of OpenVibe Services',
         title: 'Open media and object storage',
         accent: 'for OpenVibe and your apps.',
         lede: 'Every video, clip, picture and file on the OpenVibe sites lives here, and your apps get the same API: objects and S3, thumbnails in any size, streaming playback and live frames. Public media plays and downloads without an account.',
@@ -340,7 +340,7 @@ function renderPage(tab, page, data, counts) {
             { label: 'Use it from your app', href: '#api' },
         ],
         html: stats.length ? `<dl class="hero-stats">${stats.map(([n, d]) => `<div><dt>${Number(n).toLocaleString('en-US')}</dt><dd>${d}</dd></div>`).join('')}</dl>` : undefined,
-    }) : '<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>';
+    }) + '<section class="sc-sec sc-part-of"><p class="sc-note">Part of <a href="https://openvibe.services/">OpenVibe Services</a>: the building blocks every OpenVibe product runs on, with one console, one account and one SDK.</p></section>' : '<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>';
     const body = `${heading}
 ${first ? `<h2 id="media" class="sec-h">Latest public media</h2>` : ''}
 <nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
