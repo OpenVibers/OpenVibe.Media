@@ -23,7 +23,7 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
         jsRawKB: 253,   // 248.9 Shared 4.12.0: the light/dark switch, the seasonal mark and the theme pairs; 241 with openvibe-shared 4.9.0 (status text twins in every theme, 2026-10-23); 230.9 (was 197.7)
         jsBrotliKB: 63,   // 61.5 Shared 4.12.0: the light/dark switch, the seasonal mark and the theme pairs; 56.1 with openvibe-shared 4.10.0 (Report a problem in the footer, 2026-10-24); 53.7 (was 45.6)
         cssFiles: 2,   // 1 (showcase.css)
-        cssRawKB: 13,   // 11.6 same-origin (showcase.css; was 0)
+        cssRawKB: 22,   // 17.8 with Shared 4.13.0 (2026-10-26); 11.6 same-origin (showcase.css; was 0)
         externalFiles: 3,   // 2
     };
 
