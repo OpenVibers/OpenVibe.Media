@@ -454,6 +454,14 @@ recorded, still processing, not available), is `noindex`, and a clip still being
 instead of a 404. The sitemap lists only playable watch pages. The byte routes (`?raw=1`, `<video>`
 requests, `/o/:id`) are unchanged: Live's DVR player reads a recording while it is being written.
 
+**Downloads.** `?download` on `/v/:id` and `/c/:id` answers the bytes as an attachment, so a browser saves them
+instead of playing them; `?name` names the file (control, quote and path characters dropped, at most 150 characters,
+the real extension added; `vod-<id>`/`clip-<id>` without it). A file on disk carries the header; a copy in B2/R2 is a
+presigned URL asking the store for it (`ResponseContentDisposition`, never the shield); a virtual clip is its playlist
+remuxed by ffmpeg (stream copy, fragmented MP4) as it is sent, two at once at most (503 with `Retry-After` beyond).
+Private items need the usual owner credentials or a signed URL (Live's `GET /api/vods/:id/download-url` hands one out).
+OpenVibe.Video's Download menu links here.
+
 ## Retention holds
 
 `media_holds(object_id, kind, reason, created_by, created_at, released_at, released_by, note)`: one

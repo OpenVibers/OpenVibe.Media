@@ -127,6 +127,75 @@ function streamFileWithRange(req, res, filePath, extraHeaders = {}) {
     }
 }
 
+// ── Downloads (?download) ────────────────────────────────────
+// `?download` asks for a recording's or clip's bytes as an attachment, so a browser saves them instead of playing them
+// (OpenVibe.Video's Download menu, through Live's /api/vods/:id/download-url). `?name` names the file; the real extension
+// is added. A file on disk is sent with the header, a copy in B2/R2 is a presigned URL the store answers with it, and a
+// virtual clip (no file of its own, F3.5) is its playlist remuxed into one MP4 as it is sent.
+const REMUX_MAX = 2;               // virtual clips remuxed at once; more wait (503, Retry-After)
+const REMUX_KILL_MS = 120000;      // a clip is at most a minute or two: a remux that runs longer is stuck
+let _remuxing = 0;
+
+/** The file name ?name asks for: no control, quote or path characters, at most 150 characters. '' when none. */
+function downloadBase(name) {
+    return String(name || '').replace(/[\u0000-\u001f\u007f"\\/:*?<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150);
+}
+
+/** The Content-Disposition of a ?download request (null otherwise): attachment, an ASCII name and the UTF-8 one. */
+function downloadDisposition(req, kind, record, ext) {
+    if (!req.query || req.query.download == null) return null;
+    const file = `${downloadBase(req.query.name) || `${kind}-${record.id}`}${ext || ''}`;
+    const ascii = file.replace(/[^\x20-\x7e]/g, '_');
+    const utf8 = encodeURIComponent(file).replace(/['()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    return `attachment; filename="${ascii}"; filename*=UTF-8''${utf8}`;
+}
+
+/**
+ * A virtual clip as one MP4: ffmpeg copies its own playlist (/o/<object>/source/index.m3u8 over loopback, signed when
+ * the clip is closed) into a fragmented MP4 piped to the reader, so it starts at once and no file is kept. The headers
+ * go out with the first bytes: a remux that fails before them is a 502 the caller can show.
+ */
+function sendVirtualClipFile(req, res, record, closed, disposition) {
+    if (_remuxing >= REMUX_MAX) {
+        res.set('Retry-After', '5');
+        return res.status(503).json({ error: 'Other downloads are being prepared: try again in a few seconds' });
+    }
+    let query = '';
+    if (closed) {
+        const signed = new URL(require('../objects/signing').signedPlaylistUrl(record.object_id).url);
+        query = `?exp=${encodeURIComponent(signed.searchParams.get('exp'))}&sig=${encodeURIComponent(signed.searchParams.get('sig'))}`;
+    }
+    const src = `http://127.0.0.1:${config.port}/o/${encodeURIComponent(record.object_id)}/source/index.m3u8${query}`;
+    _remuxing++;
+    let released = false;
+    const release = () => { if (!released) { released = true; _remuxing--; } };
+    const ff = require('child_process').spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-i', src,
+        '-map', '0:v:0?', '-map', '0:a:0?', '-c', 'copy', '-movflags', '+frag_keyframe+empty_moov+default_base_moof', '-f', 'mp4', 'pipe:1'],
+    { stdio: ['ignore', 'pipe', 'pipe'] });
+    let started = false;
+    let lastErr = '';
+    const timer = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* */ } }, REMUX_KILL_MS);
+    ff.stderr.on('data', (d) => { lastErr = String(d).trim().split('\n').pop().slice(0, 200) || lastErr; });
+    ff.stdout.on('data', (chunk) => {
+        if (!started) {
+            started = true;
+            res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Disposition': disposition, 'Cache-Control': 'private, max-age=0',
+                'X-Robots-Tag': 'noindex', 'X-Content-Type-Options': 'nosniff' });
+        }
+        if (!res.write(chunk)) { ff.stdout.pause(); res.once('drain', () => ff.stdout.resume()); }
+    });
+    const end = (code) => {
+        clearTimeout(timer);
+        release();
+        if (started) return res.end();
+        if (code !== 0) console.warn(`[Public] clip ${record.id} download remux failed: ${lastErr || `exit ${code}`}`);
+        if (!res.headersSent) res.status(502).json({ error: 'The clip could not be prepared for download' });
+    };
+    ff.on('close', end);
+    ff.on('error', () => end(-1));
+    res.on('close', () => { if (ff.exitCode == null) { try { ff.kill('SIGKILL'); } catch { /* */ } } });
+}
+
 /**
  * Serve a vods/clips row: local file (Range + live-DVR sidecar) or 302
  * presigned B2/R2 — the inherited playback logic.
@@ -145,11 +214,12 @@ async function serveMediaRecord(kind, record, req, res) {
     // to the master playlist, signed for a closed clip with the clip's own 'hls' token, which reaches only the segments
     // inside the clip's window. Before the watch page: its player and download link name ?raw=1 bytes it does not have.
     if (kind === 'clip' && !record.file_path && record.storage_provider === 'timeline') {
-        const config = require('../config');
         if (drill.refuseBytes(res)) return;
         if (!config.hls.enabled || !record.object_id || record.status !== 'ready') return res.status(404).json({ error: 'Media file unavailable' });
         await trackUniqueView(kind, record.id, req, record.user_id);
         const closed = visibility === 'private' || await db.isSandboxTenant(record.app_id);
+        const asFile = downloadDisposition(req, kind, record, '.mp4');
+        if (asFile) return sendVirtualClipFile(req, res, record, closed, asFile);
         res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
         return res.redirect(302, closed ? require('../objects/signing').signedPlaylistUrl(record.object_id).url : `${config.publicUrl}/o/${record.object_id}/master.m3u8`);
     }
@@ -195,6 +265,13 @@ async function serveMediaRecord(kind, record, req, res) {
         // The shield could not fetch this read (nginx handed it back): another copy, and no shield for this one.
         const shieldFailed = require('../placement/shield').failedOf(req);
         const plan = await vodStorage.resolvePlayback(record, { session: router.sessionFor(req, `${kind}:${record.id}`), exclude: shieldFailed ? [shieldFailed] : [] });
+        // A download: the store's own presigned URL, answered as an attachment (the shield's cache keeps no such header).
+        const key = plan?.kind === 'redirect' ? vodStorage.keyForVod(record) : null;
+        const asFile = key && downloadDisposition(req, kind, record, path.extname(key) || path.extname(record.file_path || ''));
+        if (asFile) {
+            const url = await vodStorage.presignGet(plan.provider, key, 900, { contentDisposition: asFile }).catch(() => null);
+            if (url) { res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' }); return res.redirect(302, url); }
+        }
         if (plan?.kind === 'redirect') {
             // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through
             // its slice cache with a long internal presign (only on the DNS-only edge host); everything else keeps the
@@ -229,8 +306,9 @@ async function serveMediaRecord(kind, record, req, res) {
     const cacheHeaders = (isLiveSeekable || isLiveMp4)
         ? { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' }
         : {};
+    const asFile = downloadDisposition(req, kind, record, path.extname(filePath));
 
-    streamFileWithRange(req, res, filePath, { ...cacheHeaders, ...noindex });
+    streamFileWithRange(req, res, filePath, { ...cacheHeaders, ...noindex, ...(asFile ? { 'Content-Disposition': asFile } : {}) });
 }
 
 // ── VOD playback ─────────────────────────────────────────────
