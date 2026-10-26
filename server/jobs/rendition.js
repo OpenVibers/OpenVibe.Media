@@ -14,6 +14,9 @@
  *   result { …, skipped: true, reason }   when the source is already this rendition's height or smaller (a still is not
  *                                        upscaled), or the rows already exist (skipped: false, already: true)
  *
+ * A source whose picture changes shape (jobs/shapes.js) is cut as its source timeline is: one period per shape, each on
+ * its own canvas scaled to the rung's height, with its own init segment.
+ *
  * Refused: MEDIA_HLS_ENABLED or MEDIA_RENDITIONS off, a source that is not ready or not media (permanent), an object
  * under a hold (retried), a source with no video stream (permanent), less free disk than the source size plus
  * MEDIA_UPLOAD_MIN_FREE_MB (retried later). Idempotent: a re-run whose bytes match reuses the rows and locations, and
@@ -31,6 +34,7 @@ const config = require('../config');
 const timeline = require('../objects/timeline');
 const derive = require('./derive');
 const segments = require('./segments');
+const shapes = require('./shapes');
 const { JobError } = require('./queue');
 
 const DEFAULT_SEGMENT_SECONDS = 4;
@@ -95,11 +99,22 @@ async function run(job, ctx) {
     const info = await require('../vod/media-tools').probeVodInfo(source.input);
     const video = (info.streams || []).find((s) => s.codec_type === 'video');
     if (!video) throw new JobError('no_video', 'The source has no video stream to rendition', { permanent: true });
-    const height = Number(video.height) || 0;
+    // Frames of more than one size: the periods the source timeline was cut in, each brought down to this rung.
+    let planned = null;
+    let shapeStart = 0;
+    const read = await shapes.probe(source, { signal: ctx.signal, timeoutMs: derive.budgetMs(src.size_bytes) }).catch(() => null);
+    segments.aborted(ctx);
+    if (read && shapes.varies(read.changes)) {
+        planned = shapes.plan(read.changes, { end: read.start + (Number(info.duration) || 0) });
+        shapeStart = read.start;
+    }
+    const height = planned ? Math.max(...planned.map((p) => p.height)) : Number(video.height) || 0;
     // A source already this rendition's height or smaller is not upscaled (a re-encode would only cost bytes).
     if (height > 0 && height <= targetHeight) {
         return { source_id: src.id, rendition, target_height: targetHeight, skipped: true, reason: `the source is ${height}p, not above ${rendition}`, segments: 0, duration_ms: 0, bytes: 0 };
     }
+    const periods = planned && planned.map((p) => (p.height <= targetHeight ? p
+        : { ...p, width: Math.max(2, Math.round(p.width * targetHeight / p.height / 2) * 2), height: targetHeight }));
     segments.checkDisk(Number(src.size_bytes) || 0);
     const srcRows = await timeline.segments(src.id, timeline.SOURCE);
     const segSec = segmentSeconds(job, srcRows);
@@ -108,9 +123,33 @@ async function run(job, ctx) {
     // and a source that long is packed long before it is re-encoded.
     const boundaries = srcRows.length && srcRows.length <= 2000 ? srcRows.map((r) => (Number(r.start_ms) / 1000).toFixed(3)) : [];
     const dir = derive.workDir(job.id);
+    const publish = async (list) => {
+        const published = await segments.publishRendition({ job, ctx, src, rendition, out: path.join(dir, 'out'), list, label: 'Rendition' });
+        return {
+            source_id: src.id, rendition, target_height: targetHeight, skipped: false, already: false,
+            segments: published.segments, duration_ms: published.duration_ms, bytes: published.bytes,
+            durable: published.durable, local_only: published.local_only, rows: published.rows, uploaded: published.uploaded,
+            master_path: `/o/${src.id}/master.m3u8`, source_unchanged: true, shapes: periods ? periods.length : 1,
+        };
+    };
     try {
         const out = path.join(dir, 'out');
         fs.mkdirSync(out, { recursive: true });
+        if (periods) {
+            // Each period's keyframes at the source boundaries inside it, in the period's own time (its output starts at 0).
+            const axis = (p, i) => (i === 0 ? 0 : p.start - shapeStart);
+            const list = await shapes.cut({ source, periods, start: shapeStart, out, segmentSeconds: segSec,
+                audio: (info.streams || []).some((st) => st.codec_type === 'audio'),
+                encode: (p, i) => {
+                    const from = axis(p, i);
+                    const to = i + 1 < periods.length ? axis(periods[i + 1], i + 1) : Infinity;
+                    const own = boundaries.map(Number).filter((b) => b >= from && b < to).map((b) => (b - from).toFixed(3));
+                    return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
+                        '-c:a', 'aac', '-b:a', '128k', '-ac', '2', ...(own.length ? ['-force_key_frames', own.join(',')] : [])];
+                },
+                signal: ctx.signal, timeoutMs: encodeBudgetMs(src.size_bytes), niceness: 0 });
+            return await publish(list);
+        }
         const r = await derive.ffmpeg(['-y', '-nostdin', '-v', 'error', ...derive.inputArgs(source), '-i', source.input,
             '-map', '0:v:0', '-map', '0:a:0?',
             '-vf', `scale=-2:${targetHeight}`, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-profile:v', 'main', '-pix_fmt', 'yuv420p',
@@ -130,13 +169,7 @@ async function run(job, ctx) {
         const list = derive.existing(path.join(out, 'index.m3u8')) ? segments.parsePlaylist(fs.readFileSync(path.join(out, 'index.m3u8'), 'utf8')) : [];
         if (!list.length || !derive.existing(path.join(out, timeline.INIT_NAME))) throw new JobError('ffmpeg_failed', `ffmpeg wrote no segments: ${tail}`);
 
-        const published = await segments.publishRendition({ job, ctx, src, rendition, out, list, label: 'Rendition' });
-        return {
-            source_id: src.id, rendition, target_height: targetHeight, skipped: false, already: false,
-            segments: published.segments, duration_ms: published.duration_ms, bytes: published.bytes,
-            durable: published.durable, local_only: published.local_only, rows: published.rows, uploaded: published.uploaded,
-            master_path: `/o/${src.id}/master.m3u8`, source_unchanged: true,
-        };
+        return await publish(list);
     } finally {
         derive.cleanupWork(job.id);
     }

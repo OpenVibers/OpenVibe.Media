@@ -6,8 +6,10 @@
  * turns that output into media_timeline rows and publishes them:
  *
  *   parsePlaylist    ffmpeg's index.m3u8 → [{ name, seconds }], in order.
- *   producedFiles    those plus the init segment → [{ seq, name, file, start_ms, end_ms, keyframe_ms }], times on the
- *                    object's own axis (cumulative EXTINF, so each segment ends where the next starts).
+ *   producedFiles    those plus the init segment(s) → [{ seq, name, file, start_ms, end_ms, keyframe_ms, init_name }],
+ *                    times on the object's own axis (cumulative EXTINF, so each segment ends where the next starts). A
+ *                    video cut in shape periods (jobs/shapes.js) has one init per period: the later ones are rows with
+ *                    negative seq that their segments name in init_name.
  *   publishRendition hash each file, place it content-addressed on this node (timeline.localPathFor/keyFor, versioned
  *                    by the sha prefix) and — through the placement router's durable provider (timeline.durableProvider,
  *                    purpose `durable`) — on B2/R2, then commit every row of the rendition in ONE transaction
@@ -45,16 +47,27 @@ function parsePlaylist(text) {
     return out;
 }
 
-/** The produced files as timeline rows in the making: the init segment (seq 0) then each media segment, in order. */
+/**
+ * The produced files as timeline rows in the making: the init segment (seq 0), the init of each later shape period
+ * (a list entry's `init`, jobs/shapes.js: negative seq, named in its segments' init_name), then each media segment, in
+ * order.
+ */
 function producedFiles(list) {
     const files = [{ seq: 0, name: timeline.INIT_NAME, start_ms: 0, end_ms: 0, keyframe_ms: null }];
+    const media = [];
     let cum = 0;
     list.forEach((s, i) => {
         const start = Math.round(cum * 1000);
         cum += s.seconds;
-        files.push({ seq: i + 1, name: timeline.segmentName(i + 1), file: s.name, start_ms: start, end_ms: Math.round(cum * 1000), keyframe_ms: start });
+        const init = s.init && s.init !== timeline.INIT_NAME ? s.init : null;
+        if (init && !files.some((f) => f.name === init)) {
+            const seq = timeline.shapeInitSeq(init);
+            if (seq == null) throw new JobError('ffmpeg_failed', `${init} is not a shape period's init`);
+            files.push({ seq, name: init, start_ms: 0, end_ms: 0, keyframe_ms: null });
+        }
+        media.push({ seq: i + 1, name: timeline.segmentName(i + 1), file: s.name, start_ms: start, end_ms: Math.round(cum * 1000), keyframe_ms: start, init_name: init });
     });
-    return files;
+    return files.concat(media);
 }
 
 function checkDisk(needBytes) {
@@ -122,7 +135,7 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
             const match = !!old && old.sha256 === sha;
             if (match && old.packed_object_id) {
                 // Already packed into a chunk (object.pack): the same bytes, so the row and its chunk stay as they are.
-                rows.push(Object.fromEntries(['seq', ...timeline.FIELDS].map((k) => [k, k === 'seq' ? f.seq : old[k]])));
+                rows.push(Object.fromEntries(['seq', ...timeline.FIELDS].map((k) => [k, k === 'seq' ? f.seq : k === 'init_name' ? f.init_name || null : old[k]])));
                 continue;
             }
             // Content-addressed: the same bytes always land at the same versioned location, so a rerun rewrites
@@ -143,7 +156,7 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
             if (!durable && target) {
                 try {
                     if (!vodStorage.providerAvailable(target)) throw new Error(`${target} is unavailable`);
-                    await vodStorage.uploadFile(target, key, localPath, f.seq === 0 ? 'video/mp4' : 'video/iso.segment', { signal: ctx.signal });
+                    await vodStorage.uploadFile(target, key, localPath, f.seq <= 0 ? 'video/mp4' : 'video/iso.segment', { signal: ctx.signal });
                     stagedRemote.push({ provider: target, key });
                     const back = await vodStorage.sha256Object(target, key);
                     if (!back || back.sha256 !== sha || Number(back.size) !== size) throw new Error(`${target}:${key} failed size/sha256 readback`);
@@ -161,7 +174,7 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
             rows.push({
                 seq: f.seq, name: f.name, start_ms: f.start_ms, end_ms: f.end_ms, keyframe_ms: f.keyframe_ms, key, local_path: localPath,
                 durable_provider: durable, packed_object_id: null, byte_offset: null, byte_length: size, sha256: sha,
-                durability: durable ? 'durable' : 'local',
+                durability: durable ? 'durable' : 'local', init_name: f.init_name || null,
             });
         }
         aborted(ctx);

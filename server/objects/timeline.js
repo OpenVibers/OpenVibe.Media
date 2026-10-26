@@ -45,6 +45,16 @@ const INIT_NAME = 'init.mp4';
 // negative seq (-1 head, -2 tail) so they never collide with the media segments or the rendition's seq 0 init.
 const HEAD_INIT = 'init-head.mp4';
 const TAIL_INIT = 'init-tail.mp4';
+// A video whose picture changes shape (a phone turned, a resolution lowered mid-stream) is cut in periods, one init each
+// (jobs/shapes.js): the first period's is init.mp4 (seq 0), period n >= 2's init-<n>.mp4 at seq -(100 + n), clear of a
+// materialized clip's -1/-2 edges. Its media rows name it in init_name.
+const SHAPE_INIT = /^init-(\d{1,4})\.mp4$/;
+function shapeInitName(n) { return `init-${n}.mp4`; }
+/** The seq of a shape period's init row, or null for any other name. */
+function shapeInitSeq(name) {
+    const m = SHAPE_INIT.exec(String(name || ''));
+    return m && Number(m[1]) >= 2 ? -(100 + Number(m[1])) : null;
+}
 const FIELDS = ['name', 'start_ms', 'end_ms', 'keyframe_ms', 'key', 'local_path', 'durable_provider', 'packed_object_id', 'byte_offset', 'byte_length', 'sha256', 'durability', 'init_name'];
 
 function localRoot() { return path.join(path.resolve(config.objects.path), '.timeline'); }
@@ -406,21 +416,25 @@ function masterPlaylist(renditions, { query = '' } = {}) {
  * A materialized clip's rows carry negative-seq edge inits and per-segment init_name: a virtual clip over it would
  * decode its edges with the wrong init, so building one is refused (the simplest correct answer, §Schema of
  * docs/materialized-clips.md). Rows made only of copies of source rows (a clip whose window sits on boundaries) carry
- * no edge init and still work.
+ * no edge init and still work. A source cut in shape periods (shapeInitName) is not refused: the clip carries the
+ * period inits its segments name, as they are, and each segment keeps its init_name.
  */
 function clipRows(rows, startMs, endMs) {
-    if (rows.some((r) => Number(r.seq) < 0 || (r.init_name && r.init_name !== INIT_NAME))) return [];
+    const edge = (name) => name === HEAD_INIT || name === TAIL_INIT;
+    if (rows.some((r) => (Number(r.seq) < 0 && shapeInitSeq(r.name) == null) || edge(r.init_name))) return [];
     const init = rows.find((r) => Number(r.seq) === 0);
     const segs = rows
         .filter((r) => Number(r.seq) > 0 && Number(r.end_ms) > startMs && Number(r.start_ms) < endMs)
         .map((r) => ({ ...r, start_ms: Math.max(Number(r.start_ms), startMs) - startMs, end_ms: Math.min(Number(r.end_ms), endMs) - startMs }))
         .filter((r) => r.end_ms > r.start_ms)
         .map((r, i) => ({ ...r, seq: i + 1 }));
-    return segs.length && init ? [{ ...init, seq: 0, start_ms: 0, end_ms: 0 }, ...segs] : segs;
+    const named = new Set(segs.map((r) => r.init_name).filter((n) => n && n !== INIT_NAME));
+    const shapeInits = rows.filter((r) => Number(r.seq) < 0 && named.has(r.name)).map((r) => ({ ...r, start_ms: 0, end_ms: 0 }));
+    return segs.length && init ? [{ ...init, seq: 0, start_ms: 0, end_ms: 0 }, ...shapeInits, ...segs] : segs;
 }
 
 module.exports = {
-    SOURCE, INIT_NAME, HEAD_INIT, TAIL_INIT, FIELDS, localRoot, localPathFor, keyFor, segmentName,
+    SOURCE, INIT_NAME, HEAD_INIT, TAIL_INIT, FIELDS, localRoot, localPathFor, keyFor, segmentName, shapeInitName, shapeInitSeq,
     list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, namedElsewhere, deleteBytes, removeObject, sweepPendingRemovals, markPacked, durableProvider, locationsOf,
     mediaPlaylist, masterPlaylist, clipRows,
 };
