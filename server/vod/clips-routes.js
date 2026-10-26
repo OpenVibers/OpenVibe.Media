@@ -148,6 +148,22 @@ const flag = (v) => (['1', 'true'].includes(String(v)) ? 1 : ['0', 'false'].incl
 // With `materialize: true`, or a source without a timeline, it is cut into its own file (202, background clip.cut event).
 // Multipart `video`: direct upload of an already-cut blob (201, ready) —
 // inherited browser-MediaRecorder clip path.
+/**
+ * How much of a recording in progress is in its file: the end of its last whole fragment (vod/fmp4-index.js, exact and
+ * a few small reads) for the recorder's fragmented MP4, else ffprobe's duration.
+ */
+async function recordedSeconds(filePath) {
+    if (/\.mp4$/i.test(filePath)) {
+        try {
+            const index = await require('./fmp4-index').refresh(filePath);
+            const first = !index.broken && index.fragments[0];
+            const last = first && index.fragments[index.fragments.length - 1];
+            if (last) return last.start + last.duration - first.start;   // like ffprobe's duration: from the first frame
+        } catch { /* probe it */ }
+    }
+    try { return (await tools.probeVodInfo(filePath)).duration || 0; } catch { return 0; }
+}
+
 router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.single('video'), async (req, res) => {
     try {
         const body = req.body || {};
@@ -190,14 +206,17 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
         if (!win && !source) return res.status(404).json({ error: 'VOD media unavailable' });
 
         // Live recording: clamp to what's ACTUALLY on disk, not wall-clock — a
-        // seek past end-of-file emits a header-only "broken clip".
+        // seek past end-of-file emits a header-only "broken clip". The window keeps its length: it moves back to end at
+        // the recorded edge. Clip 505 (2026-10-26) asked for 30 s past a recording whose newest keyframe was 70 s old,
+        // and squeezing the start up to the edge left a 1 s window whose cut failed three times.
         if (vod.is_recording && source && source.kind === 'file') {
-            let recordedDur = 0;
-            try { const pi = await tools.probeVodInfo(source.value); recordedDur = pi.duration || 0; } catch { /* */ }
+            const recordedDur = await recordedSeconds(source.value);
             if (recordedDur > 0) {
                 const safeEdge = Math.max(0, recordedDur - 0.5);
-                endTime = Math.min(endTime, safeEdge);
-                startTime = Math.max(0, Math.min(startTime, endTime - 1));
+                if (endTime > safeEdge) {
+                    endTime = safeEdge;
+                    startTime = Math.max(0, Math.min(startTime, endTime - duration));
+                }
                 duration = endTime - startTime;
                 if (duration < 1) {
                     return res.status(422).json({ error: 'Not enough recorded footage yet — try again in a moment.' });

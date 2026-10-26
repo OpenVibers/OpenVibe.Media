@@ -243,6 +243,13 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   (`dvr/init.mp4`, `dvr/<offset>-<length>.m4s`; server/vod/fmp4-index.js reads its moof/mdat pairs as they are
   appended), so Live's DVR seeks with no second copy; `VOD_DVR_SNAPSHOT_MP4=0` then stops the per-pass copy of MP4
   recordings. Public and unlisted recordings only (an HLS player sends no credentials).
+  **Periods at a turn (2026-10-26).** The recording is a stream copy, so a phone turned mid-stream changes the frames'
+  shape at a keyframe while the moov still names the first shape, and Chrome showed every rewound landscape frame
+  squeezed into portrait (stream 2795). The index reads each H.264 fragment's first sample up to its first slice (the
+  keyframe's SPS and PPS, vod/avc-shape.js); a size of another aspect ratio starts a period, and the playlist puts
+  `#EXT-X-DISCONTINUITY` and `dvr/init-<offset>.mp4` (the moov rewritten for that SPS: avcC, sample entry size, track
+  size) before it. A lowered resolution of the same shape stays in its period: the decoder follows it in-band. A clip
+  of a recording asked for past the recorded edge (the end of the last whole fragment) keeps its length and ends there.
   **Still open in F3:** the growing live/DVR playlist written as OpenRestream segments (F3.2), write-behind durability for
   live segments and its upload-lag metric, captions on the timeline, and Live's player moving to HLS. Segment-bucket
   demand (F2.4) now records reads per timeline segment; deciding placement per segment stays F5's. Renditions are F4.

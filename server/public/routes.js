@@ -251,10 +251,12 @@ router.get('/v/:id', optionalIdentity, async (req, res) => {
 // ── DVR of a recording in progress (vod/fmp4-index.js; docs/media-fabric.md F3.2) ──
 // While an MP4 recording is written, /v/:id/dvr.m3u8 is an EVENT playlist over the file itself: dvr/init.mp4 (its ftyp
 // and moov) and dvr/<offset>-<length>.m4s (whole moof+mdat fragments, about 6 s a segment), so a DVR player seeks
-// anywhere in the stream without a second copy of the recording. Public and unlisted recordings only (an HLS player
+// anywhere in the stream without a second copy of the recording. After the picture changes shape (a phone turned),
+// dvr/init-<offset>.mp4 is the moov rewritten for the new SPS, named after a discontinuity. Public and unlisted recordings only (an HLS player
 // sends no credentials), CORS-open like the other public media. The playlist is never cached; a segment's bytes never
 // change while the file grows. Not recording (finalize rewrites the file) or not an MP4: 404, and players keep /v/:id.
 const DVR_SEGMENT = /^(\d{1,15})-(\d{1,10})\.m4s$/;
+const DVR_PERIOD_INIT = /^init-(\d{1,15})\.mp4$/;
 const DVR_SEGMENT_MAX_BYTES = 64 * 1024 * 1024;
 async function dvrSource(req, res) {
     if (drill.refuseBytes(res)) return null;
@@ -287,6 +289,18 @@ router.get('/v/:id/dvr/init.mp4', dvrRoute(async (req, res, { filePath, index })
     sendFileStream(res, filePath, { start: 0, end: index.initEnd - 1 });
 }));
 router.get('/v/:id/dvr/:segment', dvrRoute(async (req, res, { filePath, index }) => {
+    // A later period's init segment (the moov rewritten for the shape the stream turned to: vod/fmp4-index.js periods).
+    const init = DVR_PERIOD_INIT.exec(String(req.params.segment || ''));
+    if (init) {
+        const head = Buffer.alloc(index.initEnd);
+        const fh = await fs.promises.open(filePath, 'r');
+        try { await fh.read(head, 0, index.initEnd, 0); } finally { await fh.close(); }
+        let bytes = null;
+        try { bytes = require('../vod/fmp4-index').periodInit(head, index, Number(init[1])); } catch (err) { console.warn('[Public] DVR period init:', err.message); }
+        if (!bytes) return notFound(res);
+        res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': bytes.length, 'Cache-Control': 'public, max-age=3600' });
+        return res.end(bytes);
+    }
     const m = DVR_SEGMENT.exec(String(req.params.segment || ''));
     const last = index.fragments[index.fragments.length - 1];
     const offset = m ? Number(m[1]) : NaN;
