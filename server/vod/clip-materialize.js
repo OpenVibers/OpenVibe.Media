@@ -49,8 +49,9 @@ function locationOf(row) {
  * Plan a clip window over one rendition's rows.
  * → { originMs, endMs, durationMs, sourceInit, sourceRows, pieces } or null.
  * A piece is { kind: 'copy', source } or { kind: 'head'|'tail', source, start_ms, end_ms, init } (source milliseconds).
- * sourceRows are the source rows the plan copies and therefore names: the seq 0 init when an interior copy needs it
- * (init_name NULL rows decode with it), plus every copied segment. The pin compares exactly these.
+ * sourceRows are the source rows the plan copies and therefore names: each init an interior copy decodes with (the
+ * seq 0 init for init_name NULL rows; a shape period's own init, jobs/shapes.js, for the rows that name it), plus every
+ * copied segment. The pin compares exactly these. `initOf(row)` is the source init a segment decodes with.
  */
 function planWindow(rows, startMs, endMs) {
     const segs = rows.filter((r) => Number(r.seq) > 0).sort((a, b) => Number(a.seq) - Number(b.seq));
@@ -88,10 +89,15 @@ function planWindow(rows, startMs, endMs) {
     const snapEndMs = lastPiece.kind === 'copy' ? Number(lastPiece.source.end_ms) : lastPiece.end_ms;
     if (!(snapEndMs > originMs)) return null;
     const sourceInit = rows.find((r) => Number(r.seq) === 0) || null;
+    const initOf = (r) => previews.initRowFor(rows, r);
     const sourceRows = [];
-    if (pieces.some((p) => p.kind === 'copy') && sourceInit) sourceRows.push(sourceInit);
+    for (const p of pieces) {
+        if (p.kind !== 'copy') continue;
+        const init = initOf(p.source);
+        if (init && !sourceRows.includes(init)) sourceRows.push(init);
+    }
     for (const p of pieces) if (p.kind === 'copy') sourceRows.push(p.source);
-    return { originMs, endMs: snapEndMs, durationMs: snapEndMs - originMs, sourceInit, sourceRows, pieces };
+    return { originMs, endMs: snapEndMs, durationMs: snapEndMs - originMs, sourceInit, sourceRows, pieces, initOf };
 }
 
 /** A copied source segment row as the clip's own: the location, bytes and times, seq renumbered, times relative. */
@@ -102,17 +108,20 @@ function copiedRow(source, seq, originMs) {
     row.start_ms = Number(source.start_ms) - originMs;
     row.end_ms = Number(source.end_ms) - originMs;
     row.keyframe_ms = source.keyframe_ms == null ? null : Number(source.keyframe_ms) - originMs;
-    row.init_name = null;                   // decodes with the rendition's seq 0 init
+    // Decodes with the rendition's seq 0 init, or with the shape period's init it names (copied beside it, same name).
+    row.init_name = timeline.shapeInitSeq(source.init_name) != null ? source.init_name : null;
     return row;
 }
 
-/** The source's seq 0 init as the clip's own row (seq 0, times 0), or null. */
+/** A source init as the clip's own row (times 0): the seq 0 init at seq 0, a shape period's init at its own seq and name. */
 function copiedInitRow(source) {
-    const row = copiedRow(source, 0, 0);
-    row.name = timeline.INIT_NAME;
+    const shape = timeline.shapeInitSeq(source.name);
+    const row = copiedRow(source, shape != null ? shape : 0, 0);
+    row.name = shape != null ? source.name : timeline.INIT_NAME;
     row.start_ms = 0;
     row.end_ms = 0;
     row.keyframe_ms = null;
+    row.init_name = null;
     return row;
 }
 
@@ -266,7 +275,7 @@ async function materialize({ job, ctx, clip, vod }) {
             if (piece.kind === 'copy') continue;
             segments.aborted(ctx);
             const seq = i + 1;
-            const made = await encodeEdge({ ctx, piece, initRow: plan.sourceInit, dir: path.join(dir, `edge-${piece.kind}-${seq}`) });
+            const made = await encodeEdge({ ctx, piece, initRow: plan.initOf(piece.source), dir: path.join(dir, `edge-${piece.kind}-${seq}`) });
             edgeSegments.set(seq, await placeFile({ clipObj, prev, seq, name: timeline.segmentName(seq), file: made.segFile,
                 contentType: 'video/iso.segment', target, remoteConfigured, stagedLocal, stagedRemote, failed, ctx }));
             edgeInits.set(piece.init, await placeFile({ clipObj, prev, seq: piece.init === timeline.HEAD_INIT ? -1 : -2, name: piece.init, file: made.initFile,
@@ -281,7 +290,7 @@ async function materialize({ job, ctx, clip, vod }) {
         }
         if (edgeInits.has(timeline.HEAD_INIT)) rows.push({ seq: -1, name: timeline.HEAD_INIT, start_ms: 0, end_ms: 0, keyframe_ms: null, ...edgeInits.get(timeline.HEAD_INIT), init_name: null });
         if (edgeInits.has(timeline.TAIL_INIT)) rows.push({ seq: -2, name: timeline.TAIL_INIT, start_ms: 0, end_ms: 0, keyframe_ms: null, ...edgeInits.get(timeline.TAIL_INIT), init_name: null });
-        if (plan.pieces.some((p) => p.kind === 'copy') && plan.sourceInit) rows.push(copiedInitRow(plan.sourceInit));
+        for (const init of plan.sourceRows.filter((r) => Number(r.seq) <= 0)) rows.push(copiedInitRow(init));
         rows.sort((a, b) => Number(a.seq) - Number(b.seq));
         segments.aborted(ctx);
         await pinRows({ clipObjectId: clip.object_id, sourceObjectId: vod.object_id, rows, sourceRows: plan.sourceRows, jobId: job.id });

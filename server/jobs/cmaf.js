@@ -19,6 +19,9 @@
  * rendition.create (F4).
  * Idempotent: a rerun makes the same bytes (bitexact), reuses a row whose sha256 matches and its location as it is, and
  * uploads only what is not durable yet. A run that aborts or fails before the commit removes its staged files and keys.
+ * A picture that changes shape mid-stream (a phone turned, a resolution lowered: jobs/shapes.js) is re-encoded with
+ * MEDIA_CMAF_TRANSCODE in one period per shape, each on its own canvas with its own init segment, so the playlist
+ * switches shape between periods instead of stretching every frame to the first size; `shapes` in the result counts them.
  * Refused: MEDIA_HLS_ENABLED off, a source that is not ready or not media (permanent), less free disk than the source
  * size plus MEDIA_UPLOAD_MIN_FREE_MB (retried later), a codec fMP4 cannot carry (permanent), a clip whose file was
  * replaced (a trim or re-cut) while it ran (permanent, media.source.changed: nothing is committed).
@@ -31,6 +34,7 @@ const config = require('../config');
 const timeline = require('../objects/timeline');
 const derive = require('./derive');
 const segments = require('./segments');
+const shapes = require('./shapes');
 const { JobError } = require('./queue');
 
 const DEFAULT_SEGMENT_SECONDS = 4;
@@ -38,6 +42,13 @@ const DEFAULT_SEGMENT_SECONDS = 4;
 function transcodeBudgetMs(duration) {
     return Math.min(13 * 3600 * 1000, Math.max(10 * 60000, Math.round(duration * 3000 + 10 * 60000)));
 }
+
+/** The H.264 re-encode: a keyframe at every segment boundary, frame times as they are. */
+function x264Args(segmentSeconds) {
+    return ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-threads', String(config.hls.transcodeThreads),
+        '-force_key_frames', `expr:gte(t,n_forced*${segmentSeconds})`, '-sc_threshold', '0', '-fps_mode', 'passthrough'];
+}
+const AAC_ARGS = ['-c:a', 'aac', '-b:a', '128k', '-ac', '2'];
 
 function disabled() {
     return new JobError('media.hls.disabled', 'Segment-native video is off on this server (MEDIA_HLS_ENABLED)', { permanent: true, status: 409 });
@@ -54,6 +65,25 @@ function validate({ obj, params }) {
         p.segment_seconds = s;
     }
     return p;
+}
+
+/** The whole input as one HLS fMP4 rendition (one shape): → the produced segments, [{ name, seconds }]. */
+async function cutWhole({ source, out, codecArgs, segmentSeconds, ctx, timeoutMs, niceness }) {
+    const r = await derive.ffmpeg(['-y', '-nostdin', '-v', 'error', ...derive.inputArgs(source), '-i', source.input,
+        '-map', '0:v:0?', '-map', '0:a:0?', ...codecArgs, '-map_metadata', '-1', '-fflags', '+bitexact', '-flags', '+bitexact',
+        '-f', 'hls', '-hls_time', String(segmentSeconds), '-hls_list_size', '0',
+        '-hls_playlist_type', 'vod', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', timeline.INIT_NAME,
+        '-start_number', '1', '-hls_segment_filename', path.join(out, '%06d.m4s'), path.join(out, 'index.m3u8')],
+    { signal: ctx.signal, timeoutMs, niceness });
+    segments.aborted(ctx);
+    const tail = String(r.stderr).trim().split('\n').slice(-2).join(' ').slice(0, 300);
+    if (!r.ok) {
+        const unsupported = /not currently supported in container|could not find tag for codec|codec not supported/i.test(r.stderr);
+        throw new JobError(unsupported ? 'codec_unsupported' : 'ffmpeg_failed', `ffmpeg exited ${r.code}: ${tail}`, { permanent: unsupported });
+    }
+    const list = derive.existing(path.join(out, 'index.m3u8')) ? segments.parsePlaylist(fs.readFileSync(path.join(out, 'index.m3u8'), 'utf8')) : [];
+    if (!list.length || !derive.existing(path.join(out, timeline.INIT_NAME))) throw new JobError('ffmpeg_failed', `ffmpeg wrote no segments: ${tail}`);
+    return list;
 }
 
 async function run(job, ctx) {
@@ -88,11 +118,28 @@ async function run(job, ctx) {
                 throw new JobError('too_long_to_transcode', `Source duration ${info.duration}s exceeds MEDIA_CMAF_TRANSCODE_MAX_SECONDS`, { permanent: true });
             }
             timeoutMs = transcodeBudgetMs(info.duration);
-            codecArgs = video === 'h264'
-                ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-threads', String(config.hls.transcodeThreads),
-                    '-force_key_frames', `expr:gte(t,n_forced*${segmentSeconds})`, '-sc_threshold', '0', '-fps_mode', 'passthrough']
-                : ['-c:v', 'copy'];
-            codecArgs.push(...(audio === 'aac' ? ['-c:a', 'aac', '-b:a', '128k', '-ac', '2'] : ['-c:a', 'copy']));
+            codecArgs = video === 'h264' ? x264Args(segmentSeconds) : ['-c:v', 'copy'];
+            codecArgs.push(...(audio === 'aac' ? AAC_ARGS : ['-c:a', 'copy']));
+        }
+    }
+    // Frames of more than one size (shapes.js): one period per shape, each re-encoded on its own canvas. A copy would
+    // carry frames its init does not describe, and one encode scales every frame to the first size (a portrait part
+    // stretched into 16:9). A probe that fails leaves the cut as it was.
+    let periods = null;
+    let shapeStart = 0;
+    if (config.hls.transcode && info && info.video && info.duration > 0 && info.duration <= config.hls.transcodeMaxSeconds) {
+        let read = null;
+        try { read = await shapes.probe(source, { signal: ctx.signal, timeoutMs: derive.budgetMs(src.size_bytes) }); }
+        catch (err) { segments.aborted(ctx); console.warn(`[Cmaf] ${job.id}: shape probe failed (${err.message.slice(0, 200)}); cut as one shape`); }
+        segments.aborted(ctx);
+        if (read && shapes.varies(read.changes)) {
+            periods = shapes.plan(read.changes, { end: read.start + info.duration });
+            shapeStart = read.start;
+            video = 'h264';
+            if (audio !== 'none') audio = 'aac';
+            timeoutMs = transcodeBudgetMs(info.duration);
+            codecArgs = [...x264Args(segmentSeconds), ...(audio === 'aac' ? AAC_ARGS : [])];
+            console.log(`[Cmaf] ${job.id}: ${read.changes.length} frame sizes → ${periods.length} period(s): ${periods.map((p) => `${p.width}x${p.height}`).join(', ')}`);
         }
     }
     segments.checkDisk(Number(src.size_bytes) || 0);
@@ -101,20 +148,10 @@ async function run(job, ctx) {
     try {
         const out = path.join(dir, 'out');
         fs.mkdirSync(out, { recursive: true });
-        const r = await derive.ffmpeg(['-y', '-nostdin', '-v', 'error', ...derive.inputArgs(source), '-i', source.input,
-            '-map', '0:v:0?', '-map', '0:a:0?', ...codecArgs, '-map_metadata', '-1', '-fflags', '+bitexact', '-flags', '+bitexact',
-            '-f', 'hls', '-hls_time', String(segmentSeconds), '-hls_list_size', '0',
-            '-hls_playlist_type', 'vod', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', timeline.INIT_NAME,
-            '-start_number', '1', '-hls_segment_filename', path.join(out, '%06d.m4s'), path.join(out, 'index.m3u8')],
-        { signal: ctx.signal, timeoutMs, niceness: video === 'h264' || audio === 'aac' ? 15 : 0 });
-        segments.aborted(ctx);
-        const tail = String(r.stderr).trim().split('\n').slice(-2).join(' ').slice(0, 300);
-        if (!r.ok) {
-            const unsupported = /not currently supported in container|could not find tag for codec|codec not supported/i.test(r.stderr);
-            throw new JobError(unsupported ? 'codec_unsupported' : 'ffmpeg_failed', `ffmpeg exited ${r.code}: ${tail}`, { permanent: unsupported });
-        }
-        const list = derive.existing(path.join(out, 'index.m3u8')) ? segments.parsePlaylist(fs.readFileSync(path.join(out, 'index.m3u8'), 'utf8')) : [];
-        if (!list.length || !derive.existing(path.join(out, timeline.INIT_NAME))) throw new JobError('ffmpeg_failed', `ffmpeg wrote no segments: ${tail}`);
+        const list = periods
+            ? await shapes.cut({ source, periods, start: shapeStart, out, segmentSeconds, audio: audio !== 'none', encode: () => codecArgs,
+                signal: ctx.signal, timeoutMs, niceness: 15 })
+            : await cutWhole({ source, out, codecArgs, segmentSeconds, ctx, timeoutMs, niceness: video === 'h264' || audio === 'aac' ? 15 : 0 });
 
         const check = version == null ? null : async () => {
             if (await derive.fileVersion(src, { lock: true }) !== version) {
@@ -127,7 +164,7 @@ async function run(job, ctx) {
         return {
             source_id: src.id, rendition, segments: published.segments, duration_ms: published.duration_ms, bytes: published.bytes,
             durable: published.durable, local_only: published.local_only, rows: published.rows, uploaded: published.uploaded,
-            master_path: `/o/${src.id}/master.m3u8`, source_unchanged: true, video, audio,
+            master_path: `/o/${src.id}/master.m3u8`, source_unchanged: true, video, audio, shapes: periods ? periods.length : 1,
         };
     } finally {
         derive.cleanupWork(job.id);

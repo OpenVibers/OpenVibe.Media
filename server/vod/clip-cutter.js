@@ -26,6 +26,21 @@ const MAX_CONCURRENT = parseInt(process.env.CLIP_MAX_CONCURRENT_FFMPEG || '2', 1
 const QUEUE_WAIT_MS = parseInt(process.env.CLIP_QUEUE_WAIT_MS || '1800000', 10);
 let _active = 0;
 
+/**
+ * The -vf of a cut whose window spans a change of the picture's shape (a phone turned, a resolution lowered:
+ * jobs/shapes.js): the window's main shape on its canvas, the rest fitted with bars. One encode would otherwise scale
+ * every frame to the first size. One size in the window (or a probe that fails) → no filter, the cut as before.
+ */
+async function shapeFilter(source, ss, dur, isUrl) {
+    const shapes = require('../jobs/shapes');
+    try {
+        const read = await shapes.probe({ input: source, remote: isUrl }, { from: ss, to: ss + dur, timeoutMs: 60000 });
+        if (!shapes.varies(read.changes)) return [];
+        const main = shapes.plan(read.changes, { end: ss + dur }).reduce((a, b) => (b.end - b.start > a.end - a.start ? b : a));
+        return ['-vf', shapes.fit(main.width, main.height)];
+    } catch { return []; }
+}
+
 function _ffprobe(file) {
     return new Promise((resolve) => {
         const ff = spawn('ffprobe', ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -76,6 +91,7 @@ async function cutClipFile({ source, startTime, duration }) {
     const outPath = path.join(CLIPS_DIR, filename);
 
     _active++;
+    const vf = await shapeFilter(source, ss, dur, isUrl);
     let timedOut = false;
     let exitCode = null;
     const _stderrRef = { get: () => '' };
@@ -87,7 +103,7 @@ async function cutClipFile({ source, startTime, duration }) {
     // an opening of black/frozen frames.
     const ok = await new Promise((resolve) => {
         const args = [
-            '-y', '-ss', String(ss), '-i', source, '-t', String(dur),
+            '-y', '-ss', String(ss), '-i', source, '-t', String(dur), ...vf,
             '-c:v', 'libvpx', '-b:v', '2000k', '-crf', '18', '-deadline', 'realtime', '-cpu-used', '4',
             '-force_key_frames', 'expr:gte(t,n_forced*2)', '-c:a', 'libopus', '-b:a', '128k',
             '-avoid_negative_ts', 'make_zero', '-f', 'webm', outPath,

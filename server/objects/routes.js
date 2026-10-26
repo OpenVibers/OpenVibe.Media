@@ -806,8 +806,9 @@ const objectVariants = () => _objectVariants || (_objectVariants = require('../t
 // A segment's copy is the placement router's choice; a packed one (F3.3) is a ranged read of its ~60 s chunk.
 const HLS_TYPE = 'application/vnd.apple.mpegurl';
 // A rendition's seq 0 init plus the two edge inits of a materialized clip's source rendition (negative seq,
-// docs/materialized-clips.md F3.6); every init row (seq <= 0) is served as video/mp4, a media segment as iso.segment.
-const SEGMENT_NAME = /^(init\.mp4|init-head\.mp4|init-tail\.mp4|\d{6,9}\.m4s)$/;
+// docs/materialized-clips.md F3.6) and the init of each shape period after the first (init-<n>.mp4, jobs/shapes.js);
+// every init row (seq <= 0) is served as video/mp4, a media segment as iso.segment.
+const SEGMENT_NAME = /^(init\.mp4|init-head\.mp4|init-tail\.mp4|init-\d{1,4}\.mp4|\d{6,9}\.m4s)$/;
 const RENDITION_NAME = /^[a-z0-9_-]{1,32}$/;
 const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 // clipWindow/timelineOf (a clip's window over its source, and the rows its playlists are written from) live in

@@ -110,6 +110,23 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   honours the abort signal (which stops an upload in flight) and, before the rows commit, removes the files and keys it
   staged; the stream-copy or duration-based transcode budget is honoured and its work directory removed. The master
   playlist reads CODECS from the written init segment, so an encoded source advertises its output codecs.
+
+  **A picture that changes shape.** A recording is a stream copy of what the broadcaster sent, so when a phone turns
+  from landscape to portrait, or WebRTC lowers 720p to 360p on a weak network, its frames change size at a keyframe
+  while the file's header still names the first size. One encode scales every later frame to that first size (VOD 6017:
+  a portrait street stretched into 16:9), and a copy carries frames its init does not describe. With
+  `MEDIA_CMAF_TRANSCODE=1`, `object.cmaf` first reads each keyframe's size (`server/jobs/shapes.js`, a keyframe-only
+  decode). When there is more than one, it cuts **one period per shape**: sizes within ~4% of one aspect ratio are one
+  shape (a lowered resolution is not a new period), and each period is drawn on its shape's largest size (long side at
+  most 1920), with frames of another size fitted, never stretched. A period under 5 s joins a neighbour, and there are
+  at most 40. Each period is its own ffmpeg run on the input's own timestamps, with its own init: the first period's is
+  `init.mp4` (seq 0), period n ≥ 2's is `init-<n>.mp4`, a row at seq −(100+n) that its segments name in `init_name`
+  (migration 0014). The media playlist then puts `#EXT-X-DISCONTINUITY` + `#EXT-X-MAP` between periods, so a player
+  shows each part at its own shape, the way an adaptive stream switches renditions. Virtual and materialized clips carry
+  the period inits their segments name, `rendition.create` cuts the same periods at its rung's height, and a clip cut
+  (`server/vod/clip-cutter.js`) whose window spans a change is drawn on the window's main shape. One size throughout
+  keeps the cut exactly as before. `scripts/recut-shapes.js` finds the recordings cut before this (a dry run by default)
+  and queues their re-cut.
   Behind **`MEDIA_HLS_ENABLED`** (off by default: the job is refused with `409 media.hls.disabled` and the routes 404),
   `GET /o/:id/master.m3u8`, `/o/:id/source/index.m3u8` and `/o/:id/source/{init.mp4,NNNNNN.m4s}` serve the timeline
   under the same check as `GET /o/:id` (private and sandbox objects only with the object's `?exp&sig`, carried onto
