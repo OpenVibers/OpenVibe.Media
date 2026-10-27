@@ -53,6 +53,12 @@ async function run(job) {
     // generate_failed on 2026-09-23: ffmpeg was run on 0-byte files and Live got a 500).
     // A virtual clip has no file: its frame comes from its VOD (five such clips failed every page view as
     // generate_failed on 2026-10-17: ffmpeg was pointed at the clip row's own path, which never existed).
+    // A clip whose cut failed has no picture to take: its window could not be read (clips 495-498 of VOD 6010,
+    // 2026-10-27: their window lies in the recording's damaged end, and every page view after a Live restart ran this
+    // job again and got a 500).
+    if (kind === 'clip' && row.status === 'failed' && !row.file_path) {
+        throw new JobError('media_unavailable', 'The clip was never cut, so it has no picture', { permanent: true, status: 404 });
+    }
     const virtual = kind === 'clip' && !row.file_path && row.vod_id != null;
     const recording = virtual ? await db.getVodById(row.vod_id, job.app_id) : (kind === 'vod' ? row : null);
     if (virtual && !recording) throw new JobError('media_unavailable', `The clip's recording (vod ${row.vod_id}) is gone`, { permanent: true, status: 404 });
@@ -74,6 +80,11 @@ async function run(job) {
     const url = kind === 'vod'
         ? await thumbService.generateVodThumbnail(id, source.value)
         : await thumbService.generateClipThumbnail(id, source.value, virtual ? { seekSeconds: (Number(row.start_time) || 0) + 0.5 } : {});
+    // A recording the health scan flagged for review that gives no frame is damaged where the frame was taken (VOD 6013,
+    // 2026-10-27: no duration, VP9 data ffmpeg cannot decode): that is not going to change by asking again.
+    if (!url && recording && recording.health_status === 'needs_review') {
+        throw new JobError('media_unavailable', 'The recording is damaged where a frame would be taken (its health scan flagged it for review)', { permanent: true, status: 404 });
+    }
     if (!url) throw new JobError('generate_failed', 'Failed to generate thumbnail');
     return { url, kind, id };
 }

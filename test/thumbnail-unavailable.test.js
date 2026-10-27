@@ -67,12 +67,41 @@ const express = require('express');
             const job = await queue.get(r.body.job_id);
             assert.deepStrictEqual([job.status, job.error_code, job.attempts], ['failed', 'no_video', 1]);
         } else console.log('audio-only case skipped (ffmpeg not found)');
+        // A clip whose cut failed (clips 495-498 of VOD 6010, 2026-10-27): 404 at once, and no job is made for it.
+        const jobsBefore = (await db.all('SELECT COUNT(*) AS n FROM media_jobs'))[0].n;
+        await db.run("INSERT INTO clips (id, app_id, vod_id, title, status) OVERRIDING SYSTEM VALUE VALUES (495, 'live', ?, 'never cut', 'failed')", [missing]);
+        const notCut = await post('/api/v1/live/thumbnails/clip/495');
+        assert.deepStrictEqual([notCut.status, notCut.body.code], [404, 'media.clip_not_cut'], JSON.stringify(notCut.body));
+        assert.strictEqual((await db.all('SELECT COUNT(*) AS n FROM media_jobs'))[0].n, jobsBefore, 'no job for a clip that was never cut');
+        const notCutJob = await queue.enqueue({ appId: 'live', type: 'thumbnail.regenerate', params: { kind: 'clip', id: 495 }, maxAttempts: 1, createdBy: 'test' });
+        await require('../server/jobs/worker').runNow(notCutJob.job.id);
+        const ran = await queue.get(notCutJob.job.id);
+        assert.deepStrictEqual([ran.status, ran.error_code], ['failed', 'media_unavailable'], 'the job says the same when it runs anyway');
+        // A recording whose data cannot be decoded where the frame is taken (VOD 6013, 2026-10-27): media_unavailable
+        // (404) once its health scan flagged it for review; a recording not flagged still fails as retryable.
+        if (require('child_process').spawnSync('ffmpeg', ['-version']).status === 0) {
+            const full = path.join(V, 'full.webm');
+            const mk = require('child_process').spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=10:duration=4',
+                '-c:v', 'libvpx-vp9', '-b:v', '400k', full]);
+            assert.strictEqual(mk.status, 0, String(mk.stderr));
+            const damaged = path.join(V, 'damaged.webm');
+            fs.writeFileSync(damaged, fs.readFileSync(full).subarray(0, 1500));   // the header and a broken first frame
+            const insDamaged = async (health) => Number((await db.run(`INSERT INTO vods (app_id, title, file_path, file_size, is_public, visibility, health_status)
+                VALUES ('live', 't', ?, 1500, 1, 'public', ?) RETURNING id`, [damaged, health])).lastInsertRowid);
+            const flagged = await post(`/api/v1/live/thumbnails/vod/${await insDamaged('needs_review')}`);
+            assert.strictEqual(flagged.status, 404, JSON.stringify(flagged.body));
+            assert.strictEqual((await queue.get(flagged.body.job_id)).error_code, 'media_unavailable');
+            const unflagged = await post(`/api/v1/live/thumbnails/vod/${await insDamaged('ok')}`);
+            assert.strictEqual(unflagged.status, 500, JSON.stringify(unflagged.body));
+            assert.strictEqual((await queue.get(unflagged.body.job_id)).error_code, 'generate_failed');
+            await db.run("DELETE FROM media_jobs WHERE error_code = 'generate_failed'");   // the check below is about the others
+        } else console.log('damaged-recording case skipped (ffmpeg not found)');
         assert.ok(/empty \(0 bytes\)/.test((await queue.list('live', { type: 'thumbnail.regenerate' })).jobs.find(j => JSON.parse(j.params).id === marked).error));
         assert.strictEqual((await db.all("SELECT COUNT(*) AS n FROM media_jobs WHERE error_code = 'generate_failed'"))[0].n, 0, 'none of them is a generate failure any more');
         server.close();
         await db.close();
         fs.rmSync(tmp, { recursive: true, force: true });
-        console.log('✅ thumbnail.regenerate on an empty or missing recording: media_unavailable at once; on an audio-only one: no_video; 404 from the v1 route');
+        console.log('✅ thumbnail.regenerate on an empty or missing recording, a clip never cut or a damaged recording under review: media_unavailable; on an audio-only one: no_video; 404 from the v1 route');
         process.exit(0);
     })().catch((err) => { console.error(err); server.close(); process.exit(1); });
 })().catch((err) => { console.error(err); process.exit(1); });
