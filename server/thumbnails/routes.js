@@ -90,6 +90,12 @@ router.post('/:kind/:id', tenantAuth({ verb: 'write', allowUser: true }), upload
             return res.status(404).json({ error: 'The recording has no video', code: 'media.no_video' });
         }
 
+        // A clip whose cut failed has no picture to take, and that does not change by asking: no job (thumbnail.js says
+        // the same if one runs anyway).
+        if (kind === 'clip' && row.status === 'failed' && !row.file_path) {
+            return res.status(404).json({ error: 'Media file unavailable', code: 'media.clip_not_cut' });
+        }
+
         // Generate from the media file (local or presigned remote) as a thumbnail.regenerate job.
         const queue = require('../jobs/queue');
         const worker = require('../jobs/worker');
