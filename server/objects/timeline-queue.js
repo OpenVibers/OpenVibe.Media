@@ -111,7 +111,10 @@ function renditionNames() { return require('../jobs/rendition').renditionNames()
  * without file_path), so neither one can ever be cut a rendition.
  */
 function isVirtualClip(obj) {
-    return !!obj && obj.kind === 'clip' && require('./model').parseJson(obj.metadata, {}).virtual === true;
+    if (!obj) return false;
+    const md = require('./model').parseJson(obj.metadata, {});
+    // A recording (docs/recordings.md) is virtual the same way: its parts are cut, renditioned and moved, never it.
+    return md.virtual === true && (obj.kind === 'clip' || md.recording === true);
 }
 
 /**

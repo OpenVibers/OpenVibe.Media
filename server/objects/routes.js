@@ -808,7 +808,8 @@ const HLS_TYPE = 'application/vnd.apple.mpegurl';
 // A rendition's seq 0 init plus the two edge inits of a materialized clip's source rendition (negative seq,
 // docs/materialized-clips.md F3.6) and the init of each shape period after the first (init-<n>.mp4, jobs/shapes.js);
 // every init row (seq <= 0) is served as video/mp4, a media segment as iso.segment.
-const SEGMENT_NAME = /^(init\.mp4|init-head\.mp4|init-tail\.mp4|init-\d{1,4}\.mp4|\d{6,9}\.m4s)$/;
+// A recording's joined rows (docs/recordings.md) name part k's segments and inits `p<k>-<name>`.
+const SEGMENT_NAME = /^(p\d{1,4}-)?(init\.mp4|init-head\.mp4|init-tail\.mp4|init-\d{1,4}\.mp4|\d{6,9}\.m4s)$/;
 const RENDITION_NAME = /^[a-z0-9_-]{1,32}$/;
 const SLICE_FETCH_MS = 15000;   // a ranged read of one packed segment from B2/R2
 // clipWindow/timelineOf (a clip's window over its source, and the rows its playlists are written from) live in
@@ -950,7 +951,10 @@ publicRouter.get('/:id/source/:name', hlsRoute(async (req, res, h) => {
     let row = SEGMENT_NAME.test(name) ? await timeline.byName(h.obj.id, timeline.SOURCE, name) : null;
     // A virtual clip serves only the source segments inside its window (timelineOf): any other name is a 404, whatever
     // the signature, so a clip's token never reaches the rest of its source.
-    if (!row && SEGMENT_NAME.test(name) && h.obj.kind === 'clip') row = (await hls.timelineOf(h.obj)).rows.find((r) => r.name === name) || null;
+    // A recording serves its parts' segments the same way, through its joined rows (and a clip over it, its window).
+    if (!row && SEGMENT_NAME.test(name) && (h.obj.kind === 'clip' || require('../vod/recordings').isRecording(h.obj))) {
+        row = (await hls.timelineOf(h.obj)).rows.find((r) => r.name === name) || null;
+    }
     if (!row) return res.status(404).json({ error: 'Not found' });
     return sendSegmentRow(req, res, h, row, timeline.SOURCE);
 }));

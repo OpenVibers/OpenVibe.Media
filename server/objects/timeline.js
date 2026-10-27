@@ -50,6 +50,10 @@ const TAIL_INIT = 'init-tail.mp4';
 // materialized clip's -1/-2 edges. Its media rows name it in init_name.
 const SHAPE_INIT = /^init-(\d{1,4})\.mp4$/;
 function shapeInitName(n) { return `init-${n}.mp4`; }
+// A recording's joined timeline (docs/recordings.md, joinRows): part k's names are prefixed `p<k>-`, its init
+// `p<k>-init.mp4` (k >= 2; part 1's is the rendition's seq 0) and its shape periods' `p<k>-init-<n>.mp4`. Never stored:
+// the rows are built from the parts' own rows on every read.
+const PART_INIT = /^p\d{1,4}-init(-\d{1,4})?\.mp4$/;
 /** The seq of a shape period's init row, or null for any other name. */
 function shapeInitSeq(name) {
     const m = SHAPE_INIT.exec(String(name || ''));
@@ -421,7 +425,7 @@ function masterPlaylist(renditions, { query = '' } = {}) {
  */
 function clipRows(rows, startMs, endMs) {
     const edge = (name) => name === HEAD_INIT || name === TAIL_INIT;
-    if (rows.some((r) => (Number(r.seq) < 0 && shapeInitSeq(r.name) == null) || edge(r.init_name))) return [];
+    if (rows.some((r) => (Number(r.seq) < 0 && shapeInitSeq(r.name) == null && !PART_INIT.test(r.name)) || edge(r.init_name))) return [];
     const init = rows.find((r) => Number(r.seq) === 0);
     const segs = rows
         .filter((r) => Number(r.seq) > 0 && Number(r.end_ms) > startMs && Number(r.start_ms) < endMs)
@@ -433,8 +437,49 @@ function clipRows(rows, startMs, endMs) {
     return segs.length && init ? [{ ...init, seq: 0, start_ms: 0, end_ms: 0 }, ...shapeInits, ...segs] : segs;
 }
 
+// ── Recordings (docs/recordings.md) ─────────────────────────
+/**
+ * A recording's timeline: its parts' source rows end to end, each part shifted by the length of the parts before it
+ * (the time between parts is not played). Every row keeps its bytes (key, local_path, durable_provider, packed chunk and
+ * byte range, sha256), so nothing is copied; what changes is its name and its init:
+ *   - part 1's seq 0 init stays the rendition's seq 0 init (`p1-init.mp4`), so a recording plays from its first frame;
+ *   - part k >= 2's seq 0 init becomes a named init `p<k>-init.mp4` (seq -(10000 k)), and its media rows name it;
+ *   - a part's shape-period init `init-<n>.mp4` becomes `p<k>-init-<n>.mp4` (seq -(10000 k + n)), and its rows name it;
+ *   - media rows are named `p<k>-<name>` and renumbered 1..N.
+ * mediaPlaylist() then writes #EXT-X-DISCONTINUITY + #EXT-X-MAP at each join, exactly as at a change of shape.
+ * `parts` is [rows of part 1, rows of part 2, …]. A part with no media row, or one with a materialized clip's edge inits
+ * (parts are recordings, never clips), makes the whole join empty: a recording plays whole or not at all.
+ */
+function joinRows(parts) {
+    const out = [];
+    let offset = 0;
+    let seq = 0;
+    for (const [i, rows] of parts.entries()) {
+        const k = i + 1;
+        const media = (rows || []).filter((r) => Number(r.seq) > 0);
+        const init = (rows || []).find((r) => Number(r.seq) === 0);
+        if (!media.length || !init) return [];
+        if ((rows || []).some((r) => (Number(r.seq) < 0 && shapeInitSeq(r.name) == null) || r.init_name === HEAD_INIT || r.init_name === TAIL_INIT)) return [];
+        const base = `p${k}-init.mp4`;
+        const renamedInit = (name) => (!name || name === INIT_NAME ? (k === 1 ? null : base) : `p${k}-${name}`);
+        out.push({ ...init, seq: k === 1 ? 0 : -(10000 * k), name: base, start_ms: 0, end_ms: 0, init_name: null });
+        for (const r of rows.filter((x) => Number(x.seq) < 0)) {
+            out.push({ ...r, seq: -(10000 * k + Number(SHAPE_INIT.exec(r.name)[1])), name: `p${k}-${r.name}`, start_ms: 0, end_ms: 0, init_name: null });
+        }
+        const start = Math.min(...media.map((r) => Number(r.start_ms)));
+        let end = start;
+        for (const r of media.sort((a, b) => Number(a.seq) - Number(b.seq))) {
+            seq += 1;
+            out.push({ ...r, seq, name: `p${k}-${r.name}`, start_ms: Number(r.start_ms) - start + offset, end_ms: Number(r.end_ms) - start + offset, init_name: renamedInit(r.init_name) });
+            end = Math.max(end, Number(r.end_ms));
+        }
+        offset += end - start;
+    }
+    return out;
+}
+
 module.exports = {
-    SOURCE, INIT_NAME, HEAD_INIT, TAIL_INIT, FIELDS, localRoot, localPathFor, keyFor, segmentName, shapeInitName, shapeInitSeq,
+    SOURCE, INIT_NAME, HEAD_INIT, TAIL_INIT, FIELDS, PART_INIT, localRoot, localPathFor, keyFor, segmentName, shapeInitName, shapeInitSeq,
     list, segments, byName, has, segmentAt, replace, TimelineChanged, isNamed, namedElsewhere, deleteBytes, removeObject, sweepPendingRemovals, markPacked, durableProvider, locationsOf,
-    mediaPlaylist, masterPlaylist, clipRows,
+    mediaPlaylist, masterPlaylist, clipRows, joinRows,
 };

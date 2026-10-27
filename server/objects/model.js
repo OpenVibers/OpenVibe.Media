@@ -384,7 +384,10 @@ async function syncClip(idOrRow) {
     const p = clipProjection(row);
     const r = await project(p);
     await linkRow('clips', 'id', row.id, r.id);
-    if (row.vod_id) {
+    if (row.recording_object_id) {
+        // A clip over a recording (docs/recordings.md): its window is in recording time, over the recording's object.
+        await setRelationship(r.id, 'clip_of', row.recording_object_id, { start_time: row.start_time, end_time: row.end_time, recording: true });
+    } else if (row.vod_id) {
         const vod = await db.get('SELECT object_id FROM vods WHERE id = ?', [row.vod_id]);
         if (vod && vod.object_id) await setRelationship(r.id, 'clip_of', vod.object_id, { start_time: row.start_time, end_time: row.end_time });
     }

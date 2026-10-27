@@ -289,11 +289,15 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
             order: req.query.order || req.query.sort,   // `sort` = inherited alias
             // Created at or after (ISO 8601 or 'YYYY-MM-DD HH:MM:SS', UTC): "top this week".
             since: req.query.since || null,
+            // A recording's parts after its first (docs/recordings.md) are listed only when asked for.
+            includeParts: ['1', 'true'].includes(String(req.query.include_parts || '')),
         };
         const vods = await db.listVods(req.appId, filters);
         const total = await db.countVods(req.appId, filters);
         const hls = await require('../objects/hls').discoveryMany(vods);
-        res.json({ vods: (await Promise.all(vods.map(async v => await vodPublic(v, { readiness: true, hls: hls.get(String(v.object_id)) || null })))), total, limit, offset, hasMore: offset + vods.length < total });
+        const recs = await require('./recordings').summaries(vods.map((v) => v.id));
+        res.json({ vods: (await Promise.all(vods.map(async v => ({ ...await vodPublic(v, { readiness: true, hls: hls.get(String(v.object_id)) || null }),
+            ...(recs.has(Number(v.id)) && { recording: recs.get(Number(v.id)) }) })))), total, limit, offset, hasMore: offset + vods.length < total });
     } catch (err) {
         console.error('[VOD] List error:', err.message);
         res.status(500).json({ error: 'Failed to list VODs' });
@@ -349,7 +353,10 @@ router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, re
 
         // Bare object per CONTRACTS.md: { id, title, status, duration, … }
         // Detail responses carry the transcript too (lists stay light).
-        res.json({ ...await vodPublic(vod, { readiness: true }), ai_transcript: vod.ai_transcript || null });
+        // A part of a recording (docs/recordings.md) names it: the whole video's id, length, parts and playlist.
+        const rec = await require('./recordings').forVod(req.appId, vod.id);
+        res.json({ ...await vodPublic(vod, { readiness: true }), ai_transcript: vod.ai_transcript || null,
+            ...(rec && { recording: { ...rec.recording, this_part: rec.part } }) });
     } catch (err) {
         console.error('[VOD] Get error:', err.message);
         res.status(500).json({ error: 'Failed to get VOD' });
@@ -374,6 +381,9 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
             }
             if (visibility !== undefined) await db.setVodVisibility(vod.id, visibility);
         });
+        // A part of a recording (docs/recordings.md): who may see it is the whole video's, and the first part's title is
+        // the recording's.
+        if (visibility !== undefined || title !== undefined) await require('./recordings').syncPart(vod.id, { visibility, title });
         // Made public (or already public): its watch page and the sitemap are indexable now.
         if (visibility !== undefined) await require('../indexnow-notify').pingWatch('vod', await db.getVodById(vod.id));
         res.json({ vod: await vodPublic(await db.getVodById(vod.id, req.appId), { readiness: true }) });
