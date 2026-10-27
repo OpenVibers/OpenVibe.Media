@@ -8,7 +8,7 @@
   "domain": "openvibe.media",
   "contracts": "openvibe-contracts v0.222.0",
   "sdk": "openvibe-sdk v0.67.0",
-  "shared": "openvibe-shared v4.15.2",
+  "shared": "openvibe-shared v4.17.0",
   "capabilities": [
     "media.object.upload",
     "media.object.read",
