@@ -324,11 +324,17 @@ async function latestVodThumbsByManagedStreams(appId, managedStreamIds) {
 /** Aggregate per-app media stats for the owning app's dashboards/heroes. */
 async function getAppStats(appId) {
     const c = async (sql, p = []) => { try { return (await get(sql, p))?.n || 0; } catch { return 0; } };
-    const win = async (sql, extraParams = []) => ({
-        d: await c(sql, [...extraParams, '-1 day']),
-        w: await c(sql, [...extraParams, '-7 days']),
-        m: await c(sql, [...extraParams, '-30 days']),
-    });
+    // Rolling day/week/month figures, and `pw`: the seven days before the last seven, so a reader can say whether
+    // this week beat the last one.
+    const win = async (agg, base, scale = 1) => {
+        const q = async (where, params) => Math.round((await c(`SELECT ${agg} n ${base} AND ${where}`, [appId, ...params])) / scale);
+        return {
+            d: await q("created_at >= datetime('now', ?)", ['-1 day']),
+            w: await q("created_at >= datetime('now', ?)", ['-7 days']),
+            m: await q("created_at >= datetime('now', ?)", ['-30 days']),
+            pw: await q("created_at >= datetime('now', ?) AND created_at < datetime('now', ?)", ['-14 days', '-7 days']),
+        };
+    };
     const vodBase = "FROM vods WHERE app_id = ? AND is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0";
     const clipBase = "FROM clips WHERE app_id = ? AND COALESCE(is_public,1) = 1";
     return {
@@ -336,12 +342,10 @@ async function getAppStats(appId) {
         clips: await c(`SELECT COUNT(*) n ${clipBase}`, [appId]),
         durationSeconds: await c(`SELECT COALESCE(SUM(duration_seconds),0) n ${vodBase}`, [appId]),
         recent: {
-            vods: await win(`SELECT COUNT(*) n ${vodBase} AND created_at >= datetime('now', ?)`, [appId]),
-            clips: await win(`SELECT COUNT(*) n ${clipBase} AND created_at >= datetime('now', ?)`, [appId]),
-            hours: (async () => {
-                const w = await win(`SELECT COALESCE(SUM(duration_seconds),0) n ${vodBase} AND created_at >= datetime('now', ?)`, [appId]);
-                return { d: Math.round(w.d / 3600), w: Math.round(w.w / 3600), m: Math.round(w.m / 3600) };
-            })(),
+            vods: await win('COUNT(*)', vodBase),
+            clips: await win('COUNT(*)', clipBase),
+            // Hours archived. This was an un-awaited async function, so the stats answered `hours: {}`.
+            hours: await win('COALESCE(SUM(duration_seconds),0)', vodBase, 3600),
         },
     };
 }
