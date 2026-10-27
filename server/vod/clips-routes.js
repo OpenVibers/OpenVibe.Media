@@ -66,6 +66,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
         id: clip.id,
         app_id: clip.app_id,
         vod_id: clip.vod_id,
+        // A clip over a recording (docs/recordings.md): start_time/end_time are in the recording's time.
+        ...(clip.recording_object_id && { recording_id: clip.recording_object_id, time_base: 'recording' }),
         stream_id: clip.stream_id,
         channel_user_id: clip.channel_user_id || null,
         user_id: clip.user_id,
@@ -168,9 +170,9 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
     try {
         const body = req.body || {};
         if (req.file) return await _createUploadedClip(req, res);
-        const vodId = parseInt(body.vod_id, 10);
+        let vodId = parseInt(body.vod_id, 10);
         if (!Number.isFinite(vodId)) return res.status(400).json({ error: 'vod_id is required' });
-        const vod = await db.getVodById(vodId, req.appId);
+        let vod = await db.getVodById(vodId, req.appId);
         if (!vod) return res.status(404).json({ error: 'VOD not found' });
         // An acting user cannot cut someone else's private VOD, and is not told it exists.
         if (req.authType === 'user' && _isPrivate(vod) && !(vod.user_id != null && String(vod.user_id) === String(req.userId))) {
@@ -188,6 +190,19 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
         const maxClipDuration = await db.getSetting('max_clip_duration') || 60;
         if (duration < 1) return res.status(400).json({ error: 'Clip must be at least 1 second' });
         if (duration > maxClipDuration) return res.status(400).json({ error: `Clips are limited to ${maxClipDuration} seconds` });
+
+        // recording_time: the times are in the recording vod_id is part of (docs/recordings.md), the video people saw.
+        if (flag(body.recording_time) === 1) {
+            const made = await _createRecordingClip(req, res, vod, startTime, endTime, body);
+            if (made && made.part) {
+                // The joined timeline is not ready: the part the window sits in, in that part's own time.
+                vod = await db.getVodById(made.part.vod_id, req.appId);
+                vodId = vod.id;
+                startTime -= made.part.start_ms / 1000;
+                endTime -= made.part.start_ms / 1000;
+            } else if (made !== false) return made;
+            // false: not part of a recording, so the times are this VOD's own, as without the flag.
+        }
 
         // Duplicate detection — reuse a just-made clip for the same window.
         const duplicate = await db.findDuplicateClip({
@@ -273,6 +288,53 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
         res.status(500).json({ error: 'Failed to create clip' });
     }
 });
+
+/**
+ * A clip over a recording (docs/recordings.md): a virtual window in recording time over the recording's object, which
+ * may cross a join between parts. vod_id is the recording's first part (the video's public face); the row carries the
+ * recording's object, so its clip_of edge and playlists use the joined timeline. Before every part has a timeline, a
+ * window that sits inside one part is that part's ordinary clip, in its own time ({ part }: the caller moves its window
+ * there). Answers false when vod is in no recording (the caller goes on with its own times).
+ */
+async function _createRecordingClip(req, res, vod, startTime, endTime, body) {
+    const recordings = require('./recordings');
+    const found = await recordings.forVod(req.appId, vod.id);
+    if (!found) return false;
+    const rec = found.recording;
+    const total = rec.duration_ms / 1000;
+    if (startTime > total + 5) return res.status(400).json({ error: 'Start time exceeds video duration' });
+    if (endTime > total) endTime = total;
+    if (endTime - startTime < 1) return res.status(400).json({ error: 'Clip window is outside the video' });
+    const userId = body.user_id != null ? body.user_id : (req.userId ?? null);
+    const visibility = VALID_VIS.has(body.visibility) ? body.visibility : 'public';
+    const byApp = req.authType === 'app';
+    const first = await db.getVodById(rec.vod_id, req.appId) || vod;
+    const recObj = await require('../objects/model').getObject(rec.id);
+    const timeline = require('../objects/timeline');
+    const rows = config.hls.enabled ? timeline.clipRows(await recordings.rowsOf(recObj), Math.round(startTime * 1000), Math.round(endTime * 1000)) : [];
+    if (!rows.some((r) => Number(r.seq) > 0)) {
+        // The joined timeline is not ready (a part not cut yet): the part the window sits in, in its own time.
+        const part = rec.parts.find((p) => startTime * 1000 >= p.start_ms && endTime * 1000 <= p.start_ms + p.duration_ms);
+        if (!part) return res.status(409).json({ error: 'This recording is still being prepared; a clip across its parts works in a few minutes.', code: 'media.recording.not_ready' });
+        return { part };
+    }
+    const duplicate = await db.findDuplicateClip({ appId: req.appId, vodId: first.id, streamId: first.stream_id || null, startTime, endTime });
+    if (duplicate && duplicate.status !== 'failed') return res.status(200).json({ id: duplicate.id, status: duplicate.status, deduplicated: true });
+    const last = rows[rows.length - 1];
+    const result = await db.createClip({
+        app_id: req.appId, vod_id: first.id, recording_object_id: rec.id,
+        stream_id: first.stream_id || (body.stream_id != null ? parseInt(body.stream_id, 10) || null : null),
+        user_id: userId, channel_user_id: body.channel_user_id != null ? body.channel_user_id : (first.user_id ?? null),
+        title: sanitizeClipTitle(body.title, first.title ? `Clip: ${recordings.baseTitle(first.title)}`.slice(0, 200) : 'Untitled Clip'),
+        description: typeof body.description === 'string' ? body.description.replace(/<[^>]*>/g, '').trim().slice(0, 1000) : '',
+        auto_generated: byApp && flag(body.auto_generated) === 1,
+        file_path: '', start_time: startTime, end_time: endTime, duration_seconds: endTime - startTime,
+        is_public: visibility === 'public' ? 1 : 0, visibility, status: 'processing',
+    });
+    const clipId = result.lastInsertRowid;
+    await require('./clip-jobs').makeVirtual(clipId, { objectId: rec.id, endTime: startTime + Number(last.end_ms) / 1000 });
+    return res.status(201).json({ ...await clipPublic(await db.getClipById(clipId, req.appId), { readiness: true }) });
+}
 
 /**
  * Direct clip upload: the blob is already cut client-side — remux it for

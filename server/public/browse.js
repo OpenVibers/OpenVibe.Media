@@ -88,7 +88,8 @@ function thumbCard(name, mtimeMs) {
 }
 
 // ── Data per tab ─────────────────────────────────────────────
-const V_WHERE = "is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0";
+// A recording's later parts (docs/recordings.md) are not videos of their own here: its first part stands for it.
+const V_WHERE = "is_public = 1 AND COALESCE(is_recording,0) = 0 AND COALESCE(clips_only,0) = 0 AND NOT EXISTS (SELECT 1 FROM media_recording_parts rp WHERE rp.vod_id = vods.id AND rp.seq > 1)";
 const C_WHERE = "COALESCE(is_public,1) = 1";
 // Developer-project tenants' files (ADR-014) are theirs to share; the gallery lists first-party files only.
 const F_WHERE = "app_id NOT IN (SELECT app_id FROM apps WHERE project_id IS NOT NULL)";

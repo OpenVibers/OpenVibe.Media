@@ -235,6 +235,7 @@ const ready = (async () => {
     app.use('/api/v1/resources', require('./registry/resource-index').router({ guard: require('./service-guard').guard('media.resource.read') }));
     app.use('/api/v1/:app/views', require('./views/routes'));
     app.use('/api/v1/:app/vods', require('./vod/routes'));
+    app.use('/api/v1/:app/recordings', require('./vod/recordings').router);
     app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
     app.use('/api/v1/:app/files', require('./files/routes'));
     app.use('/api/v1/:app/thumbnails', require('./thumbnails/routes'));

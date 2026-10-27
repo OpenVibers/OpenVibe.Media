@@ -45,11 +45,18 @@ async function clipWindow(obj) {
  */
 async function timelineOf(obj) {
     const timeline = require('./timeline');
+    const recordings = require('../vod/recordings');
+    // A recording (docs/recordings.md): its parts' rows joined, never its own; `recording` tells the callers not to
+    // queue a cut of it (each part is cut on its own).
+    if (recordings.isRecording(obj)) return { rows: await recordings.rowsOf(obj), window: null, recording: true };
     const own = await timeline.list(obj.id, timeline.SOURCE);
     if (own.some((r) => Number(r.seq) > 0)) return { rows: own, window: null };
     const window = await clipWindow(obj);
     if (!window) return { rows: [], window: null };
-    return { rows: timeline.clipRows(await timeline.list(window.sourceId, timeline.SOURCE), window.startMs, window.endMs), window };
+    // A clip over a recording is a window in recording time over the joined rows (it may cross a join).
+    const src = await model.getObject(window.sourceId);
+    const srcRows = recordings.isRecording(src) ? await recordings.rowsOf(src) : await timeline.list(window.sourceId, timeline.SOURCE);
+    return { rows: timeline.clipRows(srcRows, window.startMs, window.endMs), window };
 }
 
 /** Whether an object is served openly: not private and not in a developer-project sandbox tenant (GET /o/:id's rule). */
@@ -127,13 +134,13 @@ async function discoveryForObject(obj) {
     try {
         const tl = await timelineOf(obj);
         if (!tl.rows.some((r) => Number(r.seq) > 0)) {
-            if (!tl.window) await queueCmafOnce(obj.app_id, obj.id);
+            if (!tl.window && !tl.recording) await queueCmafOnce(obj.app_id, obj.id);
             return null;
         }
         // The source timeline exists: queue any missing rendition (F4) so the master playlist can list it next time.
         // A clip that plays without a file of its own (a virtual or materialized one) is never queued one — the job
         // would fail with media_unavailable — so the lazy path leaves it alone, as queueRendition itself does.
-        if (!tl.window && !require('./timeline-queue').isVirtualClip(obj)) await queueRenditionsOnce(obj);
+        if (!tl.window && !tl.recording && !require('./timeline-queue').isVirtualClip(obj)) await queueRenditionsOnce(obj);
         return playlistFor(obj, await isOpen(obj));
     } catch (err) {
         console.warn(`[HLS] Discovery failed for ${obj.id}:`, err.message);
@@ -225,4 +232,4 @@ async function discoveryMany(rows) {
     return out;
 }
 
-module.exports = { timelineOf, renditionsFor, queueRenditionsOnce, discoveryForObject, discovery, discoveryMany };
+module.exports = { timelineOf, renditionsFor, queueCmafOnce, queueRenditionsOnce, discoveryForObject, discovery, discoveryMany };

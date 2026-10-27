@@ -277,9 +277,11 @@ function sinceParam(value) {
     return Number.isFinite(t) ? new Date(t).toISOString().replace('T', ' ').slice(0, 19) : null;
 }
 
-function _vodConds(appId, { user_id = null, stream_id = null, managed_stream_id = null, include_private = false, includeRecording = true, since = null } = {}) {
+function _vodConds(appId, { user_id = null, stream_id = null, managed_stream_id = null, include_private = false, includeRecording = true, since = null, includeParts = false } = {}) {
     const conds = ['app_id = ?', 'COALESCE(clips_only, 0) = 0'];
     const params = [appId];
+    // A recording's later parts (docs/recordings.md): its first part stands for the whole video in a list.
+    if (!includeParts) conds.push('NOT EXISTS (SELECT 1 FROM media_recording_parts rp WHERE rp.vod_id = vods.id AND rp.seq > 1)');
     if (!includeRecording) conds.push('COALESCE(is_recording, 0) = 0');
     if (!include_private) conds.push('is_public = 1');
     if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
@@ -445,15 +447,15 @@ function vodStatus(vod) {
 
 // The row and its media_object in one transaction. `visibility` (public | unlisted | private), when
 // given, sets both columns; otherwise is_public picks public or unlisted as before.
-async function createClip({ app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status }) {
+async function createClip({ app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status, recording_object_id }) {
     const pub = (is_public === 0 || is_public === false) ? 0 : 1;
     const vis = visibility ? _normVisibility(visibility) : (pub ? 'public' : 'unlisted');
     return await withObject('clip', (r) => r.lastInsertRowid, async () => await run(
-        `INSERT INTO clips (app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        `INSERT INTO clips (app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status, recording_object_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         [app_id, vod_id || null, stream_id || null, user_id || null, channel_user_id || null, title || 'Untitled Clip', description || '',
          file_path || '', thumbnail_url || null, start_time || 0, end_time || 0, duration_seconds || 0,
-         vis === 'public' ? 1 : 0, vis, auto_generated ? 1 : 0, status || 'ready']
+         vis === 'public' ? 1 : 0, vis, auto_generated ? 1 : 0, status || 'ready', recording_object_id || null]
     ));
 }
 
