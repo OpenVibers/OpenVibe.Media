@@ -415,7 +415,10 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
             include_private: req.authType === 'app' && ['1', 'true'].includes(String(req.query.include_private || '')),
             order: req.query.order || req.query.sort,   // `sort` = inherited alias
             auto_generated: flag(req.query.auto_generated),
-            ready_only: String(req.query.status || '') === 'ready',
+            // A public list (not the owning app's private one) shows only clips that play: a failed or unfinished cut
+            // was a broken card on Live's home (clips 493-498, 2026-10-27). status=any asks for every one.
+            ready_only: String(req.query.status || '') === 'ready'
+                || (String(req.query.status || '') !== 'any' && !(req.authType === 'app' && ['1', 'true'].includes(String(req.query.include_private || '')))),
             since: req.query.since || null,
         };
         const clips = await db.listClips(req.appId, filters);

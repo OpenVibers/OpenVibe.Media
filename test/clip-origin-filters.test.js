@@ -77,10 +77,14 @@ const http = require('http');
         };
 
         await check('auto_generated=0|1 splits the public list; private rows stay out of both', async () => {
-            assert.deepStrictEqual(ids(await call('GET', '/clips?auto_generated=0')), [10, 13, 14, 15]);
+            assert.deepStrictEqual(ids(await call('GET', '/clips?auto_generated=0')), [10, 14, 15], 'a public list shows clips that play (13 failed)');
             assert.deepStrictEqual(ids(await call('GET', '/clips?auto_generated=1')), [11]);
             assert.deepStrictEqual(ids(await call('GET', '/clips?auto_generated=true')), [11]);
-            assert.deepStrictEqual(ids(await call('GET', '/clips')), [10, 11, 13, 14, 15], 'no filter: both kinds, as before');
+            assert.deepStrictEqual(ids(await call('GET', '/clips')), [10, 11, 14, 15], 'no filter: both kinds, playable ones');
+            // A failed cut was a broken card on Live's home (clips 493-498, 2026-10-27): only status=any or the owning
+            // app's private list still names it.
+            assert.deepStrictEqual(ids(await call('GET', '/clips?status=any')), [10, 11, 13, 14, 15], 'status=any: every public clip');
+            assert.ok(ids(await call('GET', '/clips?include_private=1')).includes(13), 'the app\'s own list keeps its failed cuts');
             const r = await call('GET', '/clips?auto_generated=1');
             assert.strictEqual(r.json.total, 1, 'the total counts the same filter');
             assert.strictEqual(r.json.clips[0].auto_generated, true);
