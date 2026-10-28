@@ -42,8 +42,20 @@ function isVerifiedCopy(obj, l) {
 
 /** A ready clip object with no file of its own, played as a window of its source's timeline (model.js clipProjection). */
 function isVirtualClip(obj, md = metadataOf(obj)) {
-    return obj.kind === 'clip' && obj.lifecycle_status === 'ready' && !!md && md.virtual === true;
+    return obj.kind === 'clip' && isVirtual(obj, md);
 }
+
+/**
+ * A ready object with no bytes of its own, of any kind: a virtual clip (a window over its VOD's timeline) or a
+ * recording (an asset over its stream's parts, docs/recordings.md). Its bytes are other objects' segments, each
+ * checked as its own object, so it never has a copy to verify. virtualSql() is the same test in SQL, shared by the
+ * verification job's selection, the "no good copy" report and playableSql(): recordings were not in it, and three
+ * held /api/ready at "degraded" (2026-10-28) as the five virtual clips had (2026-10-17).
+ */
+function isVirtual(obj, md = metadataOf(obj)) {
+    return obj.lifecycle_status === 'ready' && !!md && md.virtual === true;
+}
+const virtualSql = (alias) => `(CASE WHEN json_valid(${alias}.metadata) THEN json_extract(${alias}.metadata, '$.virtual') END) IS NOT NULL`;
 
 /** Readiness of one object row (null → nothing known). `locations` may be passed when already loaded. */
 async function compute(obj, locations = null) {
@@ -51,9 +63,9 @@ async function compute(obj, locations = null) {
     const locs = locations || await db.all('SELECT provider, state, checksum, verified_at FROM media_locations WHERE object_id = ? ORDER BY id', [obj.id]);
     const md = metadataOf(obj);
     const verified = locs.filter(l => isVerifiedCopy(obj, l));
-    // A virtual clip (F3.5) has no copy of its own: its bytes are its source's timeline segments, served under the
-    // source's rules, so a ready one counts as having its bytes.
-    const bytesVerified = verified.length > 0 || isVirtualClip(obj, md);
+    // A virtual object (a clip over its VOD, a recording over its stream's parts) has no copy of its own: its bytes are
+    // its sources' timeline segments, served under their rules, so a ready one counts as having its bytes.
+    const bytesVerified = verified.length > 0 || isVirtual(obj, md);
     let reason = null;
     if (obj.lifecycle_status === 'deleted') reason = 'deleted';
     else if (!md) reason = 'metadata_unreadable';
@@ -84,7 +96,7 @@ function playableSql(ref) {
         AND ro.kind IN (${PLAYBACK_KINDS.map(k => `'${k}'`).join(', ')}) AND (CASE WHEN json_valid(ro.metadata) THEN json_type(ro.metadata) END) = 'object'
         AND (EXISTS (SELECT 1 FROM media_locations rl WHERE rl.object_id = ro.id AND rl.state = 'present' AND rl.verified_at IS NOT NULL
                     AND (rl.checksum IS NULL OR ro.content_hash IS NULL OR rl.checksum = ro.content_hash))
-             OR (ro.kind = 'clip' AND (CASE WHEN json_valid(ro.metadata) THEN json_extract(ro.metadata, '$.virtual') END) IS NOT NULL)))`;
+             OR ${virtualSql('ro')}))`;
 }
 
-module.exports = { compute, forRow, playableSql, isVerifiedCopy, isVirtualClip, PLAYBACK_KINDS, REASONS };
+module.exports = { compute, forRow, playableSql, isVerifiedCopy, isVirtualClip, isVirtual, virtualSql, PLAYBACK_KINDS, REASONS };

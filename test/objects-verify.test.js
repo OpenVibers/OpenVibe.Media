@@ -160,7 +160,10 @@ const crypto = require('crypto');
         // A virtual clip (clip-jobs makeVirtual) has no copy of its own by design: its bytes are its VOD's.
         await model.createObject({ app_id: 'live', kind: 'clip', lifecycle_status: 'ready', size_bytes: 0,
             owner_user_id: 7, owner_subject: 'usr_01JAB2C3D4E5F6G7H8J9K0MNPQ', mime_type: 'video/mp4', metadata: { virtual: true } });
-        assert.strictEqual(await copyReport.countNoGoodCopy(db), 3, 'c (remote corrupt), d (local gone), h (no locations); not the virtual clip');
+        // Nor has a recording (docs/recordings.md: an asset over its stream's parts, an HLS playlist of their segments).
+        await model.createObject({ app_id: 'live', kind: 'asset', lifecycle_status: 'ready', size_bytes: 0,
+            owner_user_id: 7, owner_subject: 'usr_01JAB2C3D4E5F6G7H8J9K0MNPQ', mime_type: 'application/vnd.apple.mpegurl', metadata: { recording: true, virtual: true, group_key: 'stream:1' } });
+        assert.strictEqual(await copyReport.countNoGoodCopy(db), 3, 'c (remote corrupt), d (local gone), h (no locations); not the virtual clip or the recording');
         const st = await job.status();
         assert.strictEqual(st.no_good_copy, 3);
         assert.strictEqual(st.verified_objects, READY);
