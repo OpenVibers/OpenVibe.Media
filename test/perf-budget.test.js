@@ -13,15 +13,15 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
 
 (async () => {
     const BUDGETS = {
-        htmlRawKB: 43,   // measured 38.8 on 2026-10-22 (fresh database): the home gained its developer half (what it does, code, limits, questions and their FAQPage data); 19.8 before
-        htmlBrotliKB: 10.7,   // 9.7 on 2026-10-22; 5.0 before
+        htmlRawKB: 48,   // 43.8 openvibe-shared 4.22.0: the navbar's magnifier search button and More dropdown (search.js and loading.js load only when used); measured 38.8 on 2026-10-22 (fresh database): the home gained its developer half (what it does, code, limits, questions and their FAQPage data); 19.8 before
+        htmlBrotliKB: 12,   // 10.8 openvibe-shared 4.22.0: the navbar's magnifier search button and More dropdown (search.js and loading.js load only when used); 9.7 on 2026-10-22; 5.0 before
         jsFiles: 4,   // 3
         // 2026-09-27: theme-loader (44.3 KB, 8.3 brotli) now comes from Media's own /shared (D42) instead of
         // openvibe.network, so it is counted here; the page itself did not grow.
         // 2026-10-13 (T11): the index is composed by openvibe-shared/shell like the watch pages, which adds the
         // shared web-runtime.js; the showcase stylesheet (same-origin) replaces Font Awesome (cross-origin).
-        jsRawKB: 279,   // 274.1 Shared 4.17.0: OpenCoins and Vibes chips (wallet: true) in the navbar; 260.1 openvibe-shared 4.15 footer: the compact footer opens into the whole one, and the pulse line; 248.9 Shared 4.12.0: the light/dark switch, the seasonal mark and the theme pairs; 241 with openvibe-shared 4.9.0 (status text twins in every theme, 2026-10-23); 230.9 (was 197.7)
-        jsBrotliKB: 68,   // 66.7 Shared 4.17.0: OpenCoins and Vibes chips (wallet: true) in the navbar; 64.1 openvibe-shared 4.15 footer: the compact footer opens into the whole one, and the pulse line; 61.5 Shared 4.12.0: the light/dark switch, the seasonal mark and the theme pairs; 56.1 with openvibe-shared 4.10.0 (Report a problem in the footer, 2026-10-24); 53.7 (was 45.6)
+        jsRawKB: 284,   // 279.9 openvibe-shared 4.22.0: the navbar's magnifier search button and More dropdown (search.js and loading.js load only when used); 274.1 Shared 4.17.0: OpenCoins and Vibes chips (wallet: true) in the navbar; 260.1 openvibe-shared 4.15 footer: the compact footer opens into the whole one, and the pulse line; 248.9 Shared 4.12.0: the light/dark switch, the seasonal mark and the theme pairs; 241 with openvibe-shared 4.9.0 (status text twins in every theme, 2026-10-23); 230.9 (was 197.7)
+        jsBrotliKB: 70,   // 68.2 openvibe-shared 4.22.0: the navbar's magnifier search button and More dropdown (search.js and loading.js load only when used); 66.7 Shared 4.17.0: OpenCoins and Vibes chips (wallet: true) in the navbar; 64.1 openvibe-shared 4.15 footer: the compact footer opens into the whole one, and the pulse line; 61.5 Shared 4.12.0: the light/dark switch, the seasonal mark and the theme pairs; 56.1 with openvibe-shared 4.10.0 (Report a problem in the footer, 2026-10-24); 53.7 (was 45.6)
         cssFiles: 2,   // 1 (showcase.css)
         cssRawKB: 22,   // 17.8 with Shared 4.13.0 (2026-10-26); 11.6 same-origin (showcase.css; was 0)
         externalFiles: 3,   // 2
