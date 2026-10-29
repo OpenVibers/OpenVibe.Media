@@ -102,6 +102,9 @@ function renderWatchPage(kind, record, readiness = null) {
     const ai = isAiClip(kind, record);
     // An AI clip is attributed to no person: the automation cut it from someone's stream.
     const by = ai ? null : creatorLine(record);
+    const ownerUrl = by && record.username ? ((record.app_id || 'live') === 'live'
+        ? `https://openvibe.video/@${encodeURIComponent(record.username)}`
+        : `${appUrl(record.app_id)}/@${encodeURIComponent(record.username)}`) : null;
     const description = snip(record.description || record.ai_overview || `${isVod ? 'A recorded live stream' : ai ? 'An AI-picked clip from a live stream' : 'A clip'}${by ? ` by ${by}` : ''} on the OpenVibe network.`, 200);
     const thumb = abs(record.thumbnail_url);
     const ownedByLive = (record.app_id || 'live') === 'live';
@@ -115,7 +118,6 @@ function renderWatchPage(kind, record, readiness = null) {
     const duration = isoDuration(record.duration_seconds);
 
     const videoObject = {
-        '@context': 'https://schema.org',
         '@type': 'VideoObject',
         name: title,
         description,
@@ -125,8 +127,8 @@ function renderWatchPage(kind, record, readiness = null) {
         ...(thumb ? { thumbnailUrl: [thumb] } : {}),
         ...(uploadDate ? { uploadDate } : {}),
         ...(duration ? { duration } : {}),
-        ...(by ? { author: { '@type': 'Person', name: by } } : {}),
-        ...(ai ? { creator: { '@type': 'Organization', name: 'OpenVibe AI', url: NETWORK_URL } } : {}),
+        author: ownerUrl ? { '@type': 'Person', name: by, url: ownerUrl } : { '@type': 'Organization', name: 'OpenVibe AI', url: NETWORK_URL },
+        creator: ownerUrl ? { '@type': 'Person', name: by, url: ownerUrl } : { '@type': 'Organization', name: 'OpenVibe AI', url: NETWORK_URL },
         ...(sourceVod ? { isBasedOn: sourceVod } : {}),
         ...(record.view_count ? { interactionStatistic: { '@type': 'InteractionCounter', interactionType: 'https://schema.org/WatchAction', userInteractionCount: record.view_count } } : {}),
         publisher: { '@type': 'Organization', name: 'OpenVibe', url: NETWORK_URL },
@@ -138,7 +140,7 @@ function renderWatchPage(kind, record, readiness = null) {
         record.duration_seconds ? fmtDuration(record.duration_seconds) : null,
         record.view_count != null ? `${Number(record.view_count).toLocaleString('en-US')} views` : null,
         fmtDate(record.created_at) || null,
-        by ? `by ${esc(by)}` : null,
+        by ? (ownerUrl ? `by <a href="${esc(ownerUrl)}">${esc(by)}</a>` : `by ${esc(by)}`) : null,
     ].filter(Boolean);
 
     const [stateTitle, stateText] = playable ? [null, null] : unavailableText(kind, readiness.reason);
@@ -184,7 +186,7 @@ function renderWatchPage(kind, record, readiness = null) {
   .h2 { font-size: 1rem; margin: 1.2rem 0 .3rem; color: var(--text); }`;
 
     // Structured data and the AI summary describe public items only; unlisted and private pages carry none.
-    const described = playable && (record.visibility || (record.is_public ? 'public' : 'private')) === 'public';
+    const described = playable && (record.visibility || (record.is_public ? 'public' : 'private')) === 'public' && (ai || !!ownerUrl);
     return pageFrame.page({
         seo: {
             title: `${title} — ${SITE_NAME}`, description, canonical, robots,
