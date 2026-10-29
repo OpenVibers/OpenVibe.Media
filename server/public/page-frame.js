@@ -14,6 +14,7 @@
 const config = require('../config');
 const ovServe = require('openvibe-shared/serve');
 const shell = require('openvibe-shared/shell');
+const seoLib = require('openvibe-shared/seo');
 const appIcon = require('openvibe-shared/app-icon');
 
 const NETWORK_URL = (config.network && config.network.url) || 'https://openvibe.network';
@@ -195,8 +196,14 @@ function defaultFooterLinks() {
  * through the shell's `head`. `summary` is the page's AI summary (openvibe-shared/seo pageSummary): a
  * string, or { summary, url, facts: [[label, value]], updated }; the url defaults to the canonical.
  */
+function oneGraph(nodes) {
+    if (!nodes || ![].concat(nodes).length) return undefined;
+    return { '@context': 'https://schema.org', '@graph': [].concat(nodes).map(({ '@context': _context, ...node }) => node) };
+}
+
 function page({ seo, css = '', body, history, footer, summary, agentLayer = false }) {
     const sum = summary == null ? null : typeof summary === 'object' ? summary : { summary };
+    const summaryData = sum ? seoLib.pageSummary({ title: seo.title, summary: sum.summary, facts: sum.facts, url: sum.url || seo.canonical, updated: sum.updated }) : null;
     const html = shell.page({
         name: SITE_NAME,
         lang: 'en',
@@ -209,10 +216,9 @@ function page({ seo, css = '', body, history, footer, summary, agentLayer = fals
         image: seo.image || DEFAULT_OG_IMAGE,
         type: seo.ogType,
         robots: seo.robots || 'index, follow',
-        jsonLd: seo.jsonLd,
-        ...(sum ? { summary: sum.summary, facts: sum.facts, url: sum.url, updated: sum.updated } : {}),
-        head: extraHead(seo, css) + footerBootScript(footer),
-        body: `<div id="navbar-mount"></div>\n<main id="main">\n${body}\n</main>`,
+        jsonLd: oneGraph([...[].concat(seo.jsonLd || []), ...(summaryData ? [summaryData.jsonLd] : [])]),
+        head: extraHead(seo, css) + (summaryData && summaryData.meta ? `<meta name="ai-summary" content="${summaryData.meta}">` : '') + footerBootScript(footer),
+        body: `${summaryData ? summaryData.body : ''}<div id="navbar-mount"></div>\n<main id="main">\n${body}\n</main>`,
         navLinks: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }],
         navbar: navOptions({ history }),
         footer: footerOptions(footer),

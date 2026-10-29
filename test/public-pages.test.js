@@ -30,7 +30,7 @@ const http = require('http');
     const vod = {
         id: 42, app_id: 'live', title: 'Late night <build>', description: 'We built a thing & it worked.',
         file_path: '/x/vod-42.mp4', thumbnail_url: '/t/vod-42-1.jpg', duration_seconds: 3725, view_count: 1234,
-        is_public: 1, visibility: 'public', created_at: '2026-09-10 20:15:00', ai_overview: 'AI says: nice.',
+        is_public: 1, visibility: 'public', created_at: '2026-09-10 20:15:00', ai_overview: 'AI says: nice.', username: 'maker',
     };
     const html = pages.renderWatchPage('vod', vod);
     assert.ok(html.includes('<title>Late night &lt;build&gt; — OpenVibe.Media</title>'));
@@ -58,12 +58,18 @@ const http = require('http');
     assert.ok(html.includes('<meta property="og:video" content="https://media.test/v/42?raw=1">'));
     assert.ok(html.includes('<meta name="twitter:card" content="summary_large_image">'));
     assert.ok(html.includes('src="https://media.test/v/42?raw=1"'), 'the player fetches the bytes with ?raw=1');
-    const ld = JSON.parse(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html)[1]);
+    const scripts = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
+    assert.strictEqual(scripts.length, 1);
+    const ld = JSON.parse(scripts[0][1])['@graph'][0];
     assert.strictEqual(ld['@type'], 'VideoObject');
     assert.strictEqual(ld.duration, 'PT1H2M5S');
     assert.strictEqual(ld.uploadDate, '2026-09-10T20:15:00.000Z');
     assert.deepStrictEqual(ld.thumbnailUrl, ['https://media.test/t/vod-42-1.jpg']);
     assert.strictEqual(ld.url, 'https://openvibe.video/v/42');
+    assert.deepStrictEqual(ld.creator, { '@type': 'Person', name: 'maker', url: 'https://openvibe.video/@maker' });
+    assert.deepStrictEqual(ld.author, ld.creator);
+    assert.strictEqual(ld.isLiveBroadcast, undefined);
+    assert.ok(!pages.renderWatchPage('vod', { ...vod, username: null }).includes('application/ld+json'), 'unknown maker has no invented attribution');
     assert.ok(!html.includes('</script>"'), 'no script-closing sequence smuggled through JSON');
 
     const other = pages.renderWatchPage('clip', { ...vod, id: 7, app_id: 'games', title: 'Frag' });
@@ -145,7 +151,7 @@ const http = require('http');
         assert.deepStrictEqual([r.status, r.headers.location], [301, 'https://openvibe.community/p/slug1'], 'the paste page is a redirect, no row needed');
         r = await get('/', nav);
         assert.strictEqual(r.status, 200);
-        const ld = [...r.body.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => JSON.parse(m[1]));
+        const ld = [...r.body.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].flatMap((m) => JSON.parse(m[1])['@graph'] || []);
         assert.ok(ld.some((x) => x['@type'] === 'WebSite'), 'the index names the site');
         const list = ld.find((x) => x['@type'] === 'ItemList');
         assert.ok(list && list.itemListElement.length >= 1 && list.itemListElement.every((it) => /^https?:\/\//.test(it.url)), 'the listed cards, with absolute URLs');
