@@ -142,14 +142,16 @@ const express = require('express');
         console.log('✅ /llms-full.txt: the full text of the index and every indexable watch page, and only those');
 
         // ── Watch pages: VideoObject on public pages; AI clips noindex, no Person, based on the VOD ──
-        const ldOf = (html) => { const m = /<script type="application\/ld\+json">([\s\S]*?)<\/script>/.exec(html); return m ? JSON.parse(m[1]) : null; };
+        const ldOf = (html) => { const scripts = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)]; assert.ok(scripts.length <= 1); return scripts.length ? JSON.parse(scripts[0][1])['@graph'][0] : null; };
         const pub = pages.renderWatchPage('vod', { ...await byId('vods', 1), username: 'gamer' });
         assert.strictEqual(ldOf(pub)['@type'], 'VideoObject');
-        assert.deepStrictEqual(ldOf(pub).author, { '@type': 'Person', name: 'gamer' });
+        assert.deepStrictEqual(ldOf(pub).author, { '@type': 'Person', name: 'gamer', url: 'https://openvibe.games/@gamer' });
+        assert.deepStrictEqual(ldOf(pub).creator, ldOf(pub).author);
+        assert.strictEqual(ldOf(pub).isLiveBroadcast, undefined);
         const aiHtml = pages.renderWatchPage('clip', { ...await byId('clips', 12), username: 'gamer' });
         assert.ok(aiHtml.includes('content="noindex, follow"'), 'AI clips never index');
         const aiLd = ldOf(aiHtml);
-        assert.strictEqual(aiLd.author, undefined, 'no Person attribution for an AI clip');
+        assert.deepStrictEqual(aiLd.author, aiLd.creator, 'automation is credited to an organization');
         assert.deepStrictEqual(aiLd.creator, { '@type': 'Organization', name: 'OpenVibe AI', url: 'https://openvibe.network' });
         assert.strictEqual(aiLd.isBasedOn, 'https://media.test/v/1');
         assert.ok(aiHtml.includes('<span>AI clip</span>') && !aiHtml.includes('by gamer'));
