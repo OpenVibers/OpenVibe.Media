@@ -163,8 +163,15 @@ const http = require('http');
         assert.ok(ld.some((x) => x['@type'] === 'WebPage'), 'the summary\'s WebPage');
         assert.strictEqual(h1s(r.body), 1, 'exactly one <h1>');
         assert.strictEqual((r.body.match(/<!doctype/gi) || []).length, 1, 'one document');
-        for (const k of ['all', 'videos', 'clips', 'emotes', 'sounds', 'thumbnails', 'files']) assert.ok(r.body.includes(`href="/?tab=${k}"`), `tab ${k}`);
-        assert.ok(r.body.includes('class="pager"') && r.body.includes('Page 1 /'), 'the pager');
+        // The front page is a taste and a door: the newest items as a rail, the kinds that have items as filters, and
+        // See all → the index (/?tab=all), which keeps every tab and the pager.
+        assert.ok(r.body.includes('class="ovk-rail') && r.body.includes('class="ovk-card'), 'the newest items as a rail of cards');
+        assert.ok(r.body.includes('href="/?tab=all"') && /See all [0-9,]+/.test(r.body), 'See all opens the index');
+        assert.ok(/\/shared\/room\.css\?v=/.test(r.body) && !/\/shared\/kit\.css\?v=/.test(r.body) && !/\/shared\/kit-web\.js/.test(r.body), 'only the cards\' and rails\' look (room.css), no kit.css or kit-web.js');
+        assert.ok(!r.body.includes('class="pager"'), 'no pager on the front page');
+        const index = await get('/?tab=all', nav);
+        for (const k of ['all', 'videos', 'clips', 'emotes', 'sounds', 'thumbnails', 'files']) assert.ok(index.body.includes(`href="/?tab=${k}"`), `tab ${k}`);
+        assert.ok(index.body.includes('class="pager"') && index.body.includes('Page 1 /') && !index.body.includes('sc-hero'), 'the index: every tab, the pager, no hero');
         assert.ok(r.body.includes('<meta name="robots" content="index, follow">'));
         // The front page is also Media's public home for developers: what it does, how an app uses it, the limits it
         // enforces (limitsOf, the same numbers as /limits.json) and the questions, which are FAQPage data too.

@@ -82,7 +82,7 @@ function fmtDate(dt) {
  * `shell.page`'s `head`, so the shell still owns title, description, canonical, robots, og/twitter
  * mirroring and JSON-LD.
  */
-function extraHead(seo, css) {
+function extraHead(seo, css, kit = false) {
     const image = seo.image || DEFAULT_OG_IMAGE;
     const videoTags = seo.video && seo.video.url ? [
         `<meta property="og:video" content="${esc(seo.video.url)}">`,
@@ -93,6 +93,9 @@ function extraHead(seo, css) {
         appIcon.headTags({ site: 'media', iconBase: '/assets' }),
         // openvibe-shared/showcase's stylesheet (the index's hero; the kit's sections on any page).
         `<link rel="stylesheet" href="${ovServe.url('showcase.css')}">`,
+        // A page with the kit's cards and rails (the front page's latest media) carries room.css, their look; it needs
+        // neither kit.css nor kit-web.js (no menus on these cards, and wide screens wrap the rail instead of scrolling it).
+        kit ? `<link rel="stylesheet" href="${ovServe.url('room.css')}">` : '',
         // A page with a video plays it in the network's player (openvibe-shared player.js/css on video[data-ov-player]).
         seo.video ? `<link rel="stylesheet" href="${ovServe.url('player.css')}">\n<script src="${ovServe.url('player.js')}" defer></script>` : '',
         `<style>${baseCss()}${css}</style>`,
@@ -201,7 +204,7 @@ function oneGraph(nodes) {
     return { '@context': 'https://schema.org', '@graph': [].concat(nodes).map(({ '@context': _context, ...node }) => node) };
 }
 
-function page({ seo, css = '', body, history, footer, summary, agentLayer = false }) {
+function page({ seo, css = '', body, history, footer, summary, agentLayer = false, kit = false }) {
     const sum = summary == null ? null : typeof summary === 'object' ? summary : { summary };
     const summaryData = sum ? seoLib.pageSummary({ title: seo.title, summary: sum.summary, facts: sum.facts, url: sum.url || seo.canonical, updated: sum.updated }) : null;
     const html = shell.page({
@@ -217,7 +220,7 @@ function page({ seo, css = '', body, history, footer, summary, agentLayer = fals
         type: seo.ogType,
         robots: seo.robots || 'index, follow',
         jsonLd: oneGraph([...[].concat(seo.jsonLd || []), ...(summaryData ? [summaryData.jsonLd] : [])]),
-        head: extraHead(seo, css) + (summaryData && summaryData.meta ? `<meta name="ai-summary" content="${summaryData.meta}">` : '') + footerBootScript(footer),
+        head: extraHead(seo, css, kit) + (summaryData && summaryData.meta ? `<meta name="ai-summary" content="${summaryData.meta}">` : '') + footerBootScript(footer),
         body: `${summaryData ? summaryData.body : ''}<div id="navbar-mount"></div>\n<main id="main">\n${body}\n</main>`,
         navLinks: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }],
         navbar: navOptions({ history }),
