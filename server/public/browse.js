@@ -23,6 +23,7 @@ const { appUrl, watchPageUrl, isoDate } = pageFrame;
 const cache = require('openvibe-shared/cache-policy');
 const frame = require('openvibe-shared/frame');
 const showcase = require('openvibe-shared/showcase');
+const kit = require('openvibe-shared/kit');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`));
@@ -228,6 +229,10 @@ const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['emotes
 // The index's own rules; page-frame's baseCss supplies the palette (--panel, --line, --muted, --acc …) and the reset.
 // Card rules are scoped to .card: baseCss styles .meta and .desc for the watch pages.
 const BROWSE_CSS = `
+.sc-kinds{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 0}
+.sc-kinds .ovk-btn{display:inline-flex;align-items:center;min-height:36px;padding:6px 13px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:inherit;font-weight:700;font-size:.88rem;text-decoration:none}.sc-kinds .ovk-btn:hover{border-color:var(--acc)}
+.sc-media .ovk-i{width:1.15em;height:1.15em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-.2em}
+@media (min-width:760px){.sc-media .ovk-rail-track{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));grid-auto-columns:auto;overflow:visible;margin:0;padding:2px 0 10px}.sc-media .ovk-rail-btn{display:none}}
 header.intro{display:flex;align-items:baseline;gap:.2rem .8rem;flex-wrap:wrap;padding:0 0 .4rem}
 header.intro h1{font-size:1.15rem;margin:0}
 header.intro .sub{color:var(--muted);font-size:.85rem}
@@ -256,9 +261,6 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 /* The list's heading takes the showcase sections' face and size (openvibe-shared/showcase.css), like the rest of the home. */
 .sec-h{font-family:var(--ov-font,'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif);font-size:clamp(22px,2.6vw,30px);letter-spacing:-.02em;margin:56px 0 .6rem}
 .sc-media .sec-h{margin-top:0}   /* on the home the list is a showcase section, whose own margin spaces it */
-.hero-stats{margin:0;display:grid;gap:10px}
-.hero-stats div{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px}
-.hero-stats dt{font-size:1.25rem;font-weight:700}.hero-stats dd{margin:2px 0 0;color:var(--muted);font-size:.92rem}
 .faq{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px 16px;margin:8px 0}
 .faq[open]{padding-bottom:12px}.faq summary{cursor:pointer;font-weight:600;padding:8px 0}.faq p{margin:4px 0 0;color:var(--muted)}
 `;
@@ -321,10 +323,15 @@ const { url } = await objects.signedUrl(obj.id, { ttl: 300 });` },
     }) + `<section class="sc-sec" id="questions" aria-labelledby="faq-h"><h2 id="faq-h">Questions</h2>${HOME_FAQ.map((f) => `<details class="faq"><summary>${esc(f.q)}</summary><p>${esc(f.a)}</p></details>`).join('')}</section>`;
 }
 
-function renderPage(tab, page, data, counts) {
+// The kit card's type by media kind (its shape and its icon when there is no picture).
+const CARD_TYPE = { video: 'video', vod: 'vod', clip: 'clip', emote: 'meme', sound: 'post', thumbnail: 'video', file: 'post' };
+const asCard = (c) => kit.card({ href: c.view, title: c.title || c.kind, type: CARD_TYPE[c.kind] || 'post', image: c.thumb || '', ratio: '16/9', corner: c.duration ? fmtDur(c.duration) : '', badge: c.kind && c.kind !== 'video' ? String(c.kind).toUpperCase() : '', when: c.date || null, share: false });
+
+function renderPage(tab, page, data, counts, { home = false } = {}) {
     const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
     const nav = (p, label, dis) => dis ? `<span class="pg dis" aria-disabled="true">${label}</span>` : `<a class="pg" href="/?tab=${tab}&page=${p}">${label}</a>`;
-    const first = tab === 'all' && page === 1;
+    // The front page is "/" itself; "/?tab=all" (and every other tab and page) is the index.
+    const first = home;
     const canonical = `${config.publicUrl}/${first ? '' : `?tab=${tab}${page > 1 ? `&page=${page}` : ''}`}`;
     // The one <h1> on the page: the showcase hero on the index's front page, the plain intro elsewhere.
     const stats = [
@@ -337,20 +344,20 @@ function renderPage(tab, page, data, counts) {
         accent: 'for OpenVibe and your apps.',
         lede: 'Every video, clip, picture and file on the OpenVibe sites lives here, and your apps get the same API: objects and S3, thumbnails in any size, streaming playback and live frames. Public media plays and downloads without an account.',
         actions: [
+            // Two, so they sit side by side on a phone; watching lives on OpenVibe.Video, one tap from every card.
             { label: 'Browse public media', href: '#media', primary: true },
-            { label: 'Watch on OpenVibe.Video', href: 'https://openvibe.video/' },
             { label: 'Use it from your app', href: '#api' },
         ],
-        html: stats.length ? `<dl class="hero-stats">${stats.map(([n, d]) => `<div><dt>${Number(n).toLocaleString('en-US')}</dt><dd>${d}</dd></div>`).join('')}</dl>` : undefined,
-    }) + '<section class="sc-sec sc-part-of"><p class="sc-note">Part of <a href="https://openvibe.services/">OpenVibe Services</a>: the building blocks every OpenVibe product runs on, with one console, one account and one SDK.</p></section>' : '<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>';
+        // One strip of numbers (it scrolls sideways on a phone instead of stacking four tiles).
+        html: stats.length ? kit.stats(stats, { label: 'OpenVibe.Media in numbers' }) : undefined,
+    }) : '<header class="intro"><h1>Every public file on the network</h1><span class="sub">videos, clips, files &amp; thumbnails from all OpenVibe sites</span></header>';
     // On the home the list is a section like the ones around it (the same inset, so its heading, tabs and grid line up
     // with the hero and the developer sections); later pages and tabs keep the plain index layout.
     const list = `<nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>`;
     const body = `${heading}
-${first ? `<section class="sc-sec sc-media" aria-labelledby="media"><h2 id="media" class="sec-h">Latest public media</h2>
-${list}</section>` : list}
+${first ? `<section class="sc-sec sc-media">${kit.rail({ id: 'media', title: 'Latest public media', more: { href: '/?tab=all', label: `See all ${data.total.toLocaleString('en-US')}` }, items: data.cards.slice(0, 12).map(asCard) })}<p class="sc-kinds" aria-label="Browse by kind">${TABS.filter(([k]) => k !== 'all' && (counts[k] ?? 0) > 0).map(([k, label]) => kit.button({ href: `/?tab=${k}`, label: `${label} ${(counts[k] ?? 0).toLocaleString('en-US')}`, kind: 'quiet', small: true })).join(' ')}</p></section>` : list}
 ${first ? developerSections() : ''}
 ${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' }) : ''}`;
     return pageFrame.page({
@@ -360,6 +367,7 @@ ${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe
             jsonLd: page === 1 ? [...browseJsonLd(tab, data.cards), ...(first ? [homeFaqJsonLd()] : [])] : [],
         },
         css: BROWSE_CSS,
+        kit: first,
         body,
         // Later pages are noindex and carry no structured data, the summary's WebPage included.
         summary: page === 1 ? {
@@ -382,11 +390,11 @@ async function handle(req, res) {
         // The listing names media that can become private at any moment: no stale serving, or a cache
         // could still hand out the old listing afterwards.
         res.set({ 'Cache-Control': cache.htmlHeaders({ maxAge: 30, swr: 0 }), 'Content-Type': 'text/html; charset=utf-8' });
-        res.send(renderPage(tab, page, data, await tabCounts()));
+        res.send(renderPage(tab, page, data, await tabCounts(), { home: req.query.tab == null && page === 1 }));
     } catch (err) {
         console.error('[Browse] render error:', err.message);
         res.status(500).send('Failed to render media index');
     }
 }
 
-module.exports = { handle };
+module.exports = { handle, renderPage };
