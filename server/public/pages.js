@@ -206,6 +206,8 @@ function renderWatchPage(kind, record, readiness = null) {
         } : undefined,
         history: { type: isVod ? 'vod' : 'clip', title },
         footer: { variant: 'compact' },
+        // A public or unlisted item has a Markdown twin; a private one is a person's own and has none.
+        agentLayer: (record.visibility || (record.is_public ? 'public' : 'private')) !== 'private',
     });
 }
 

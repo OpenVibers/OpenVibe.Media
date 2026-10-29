@@ -201,7 +201,7 @@ function oneGraph(nodes) {
     return { '@context': 'https://schema.org', '@graph': [].concat(nodes).map(({ '@context': _context, ...node }) => node) };
 }
 
-function page({ seo, css = '', body, history, footer, summary }) {
+function page({ seo, css = '', body, history, footer, summary, agentLayer = false }) {
     const sum = summary == null ? null : typeof summary === 'object' ? summary : { summary };
     const summaryData = sum ? seoLib.pageSummary({ title: seo.title, summary: sum.summary, facts: sum.facts, url: sum.url || seo.canonical, updated: sum.updated }) : null;
     const html = shell.page({
@@ -211,6 +211,8 @@ function page({ seo, css = '', body, history, footer, summary }) {
         siteName: SITE_NAME,
         description: seo.description,
         canonical: seo.canonical,
+        // The page names its Markdown twin (openvibe-shared/agent-layer) when it has one.
+        ...(agentLayer ? { agentLayer: true, llms: '/llms.txt' } : {}),
         image: seo.image || DEFAULT_OG_IMAGE,
         type: seo.ogType,
         robots: seo.robots || 'index, follow',
