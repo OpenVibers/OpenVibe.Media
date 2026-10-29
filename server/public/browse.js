@@ -231,8 +231,11 @@ const TABS = [['all', 'All'], ['videos', 'Videos'], ['clips', 'Clips'], ['emotes
 const BROWSE_CSS = `
 .sc-kinds{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 0}
 .sc-kinds .ovk-btn{display:inline-flex;align-items:center;min-height:36px;padding:6px 13px;border:1px solid var(--line);border-radius:999px;background:var(--panel);color:inherit;font-weight:700;font-size:.88rem;text-decoration:none}.sc-kinds .ovk-btn:hover{border-color:var(--acc)}
-.sc-media .ovk-i{width:1.15em;height:1.15em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-.2em}
-@media (min-width:760px){.sc-media .ovk-rail-track{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));grid-auto-columns:auto;overflow:visible;margin:0;padding:2px 0 10px}.sc-media .ovk-rail-btn{display:none}}
+/* :where(): the inline icons' size, without beating the kit's own (a card's fallback icon is 30% of its media). */
+:where(.sc-media) .ovk-i{width:1.15em;height:1.15em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;vertical-align:-.2em}
+@media (pointer:coarse),(max-width:759px){.sc-kinds .ovk-btn{min-height:44px}}
+/* The hero's four numbers sit two by two beside the title, never three and one. */
+@media (min-width:600px){.sc-hero-aside .ovk-stats,.sc-hero-vis .ovk-stats{grid-template-columns:repeat(2,minmax(0,1fr))}}
 header.intro{display:flex;align-items:baseline;gap:.2rem .8rem;flex-wrap:wrap;padding:0 0 .4rem}
 header.intro h1{font-size:1.15rem;margin:0}
 header.intro .sub{color:var(--muted);font-size:.85rem}
@@ -357,7 +360,7 @@ function renderPage(tab, page, data, counts, { home = false } = {}) {
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>`;
     const body = `${heading}
-${first ? `<section class="sc-sec sc-media">${kit.rail({ id: 'media', title: 'Latest public media', more: { href: '/?tab=all', label: `See all ${data.total.toLocaleString('en-US')}` }, items: data.cards.slice(0, 12).map(asCard) })}<p class="sc-kinds" aria-label="Browse by kind">${TABS.filter(([k]) => k !== 'all' && (counts[k] ?? 0) > 0).map(([k, label]) => kit.button({ href: `/?tab=${k}`, label: `${label} ${(counts[k] ?? 0).toLocaleString('en-US')}`, kind: 'quiet', small: true })).join(' ')}</p></section>` : list}
+${first ? `<section class="sc-sec sc-media">${kit.rail({ id: 'media', wrap: true, title: 'Latest public media', more: { href: '/?tab=all', label: `See all ${data.total.toLocaleString('en-US')}` }, items: data.cards.slice(0, 12).map(asCard) })}<p class="sc-kinds" aria-label="Browse by kind">${TABS.filter(([k]) => k !== 'all' && (counts[k] ?? 0) > 0).map(([k, label]) => kit.button({ href: `/?tab=${k}`, label: `${label} ${(counts[k] ?? 0).toLocaleString('en-US')}`, kind: 'quiet', small: true })).join(' ')}</p></section>` : list}
 ${first ? developerSections() : ''}
 ${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' }) : ''}`;
     return pageFrame.page({
