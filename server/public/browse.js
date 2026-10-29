@@ -370,6 +370,7 @@ ${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe
         } : undefined,
         history: { type: 'page', title: 'OpenVibe.Media' },
         footer: { variant: 'full' },
+        agentLayer: true,
     });
 }
 

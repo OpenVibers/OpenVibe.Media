@@ -245,7 +245,28 @@ const ready = (async () => {
     app.use('/api/v2/:app/jobs', require('./jobs/routes'));         // media jobs: thumbnails, split/remux, invariant scans
     app.use('/api/v2/:app/namespaces', require('./objects/namespace-routes'));   // a tenant's namespaces: policy, quotas, usage
     app.use('/o', require('./objects/routes').publicRouter);        // object bytes (public, or signed)
-    app.use('/', require('./public/routes'));   // /v /c /p /t /f
+    // The agent layer (openvibe-shared/agent-layer): /.well-known/agent.json, and the Markdown twins of the public
+    // pages (the media index and a watch page). Entered only for the manifest and a twin request — a `.md` path,
+    // ?format=markdown or an explicit text/markdown preference — because the layer renders every page signed out, and a
+    // watch page is not one page (the owner's Manage panel, a signed-in person's playlist form); /v/x.md would also be
+    // read as an item id ending in .md. The app's own page names its twin in the head (server/public/page-frame.js).
+    {
+        const publicRoutes = require('./public/routes');
+        const agentRouter = express.Router();
+        require('openvibe-shared/agent-layer').mount(agentRouter, {
+            descriptor: require('./agent-descriptor'),
+            render: require('./agent-pages').createAgentPages({ router: publicRoutes, host: new URL(config.publicUrl).hostname, app }).renderPublicPage,
+        });
+        app.use((req, res, next) => {
+            // The manifest exactly: the rest of /.well-known/ belongs to the app.
+            if (req.path === '/.well-known/agent.json') return agentRouter(req, res, next);
+            const p = String(req.path || '');
+            if (p.endsWith('.md') || (req.query && req.query.format === 'markdown')
+                || req.accepts(['html', 'text/markdown']) === 'text/markdown') return agentRouter(req, res, next);
+            return next();
+        });
+        app.use(publicRoutes);   // /v /c /p /t /f, and the media index at /
+    }
     app.use(require('./not-found').notFound);   // nothing matched: 404 with Media's CSP (Cloudflare's beacon allowed)
 
     // eslint-disable-next-line no-unused-vars

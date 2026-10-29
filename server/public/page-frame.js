@@ -195,7 +195,7 @@ function defaultFooterLinks() {
  * through the shell's `head`. `summary` is the page's AI summary (openvibe-shared/seo pageSummary): a
  * string, or { summary, url, facts: [[label, value]], updated }; the url defaults to the canonical.
  */
-function page({ seo, css = '', body, history, footer, summary }) {
+function page({ seo, css = '', body, history, footer, summary, agentLayer = false }) {
     const sum = summary == null ? null : typeof summary === 'object' ? summary : { summary };
     const html = shell.page({
         name: SITE_NAME,
@@ -204,6 +204,8 @@ function page({ seo, css = '', body, history, footer, summary }) {
         siteName: SITE_NAME,
         description: seo.description,
         canonical: seo.canonical,
+        // The page names its Markdown twin (openvibe-shared/agent-layer) when it has one.
+        ...(agentLayer ? { agentLayer: true, llms: '/llms.txt' } : {}),
         image: seo.image || DEFAULT_OG_IMAGE,
         type: seo.ogType,
         robots: seo.robots || 'index, follow',
