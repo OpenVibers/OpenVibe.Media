@@ -3,9 +3,9 @@
  *
  * 1. The declared type must suit the kind: vod -> video/* or audio/*, clip -> video/*, thumbnail /
  *    screenshot / avatar -> image/* (not SVG). file and asset take any well-formed type.
- * 2. Bytes that /o/:id serves inline (image/*, video/*, audio/*, application/pdf) must look like what
- *    their type says: the first bytes are checked against the container signatures below at
- *    complete. A kind with a rule is always checked.
+ * 2. Bytes that /o/:id serves inline (image/* except SVG, video/*, audio/*, application/pdf) must look like
+ *    what their type says: the first bytes are checked against the container signatures below at
+ *    complete. A kind with a rule is always checked. An SVG is served as an attachment (routes.js INLINE).
  * Anything else is served as an attachment with nosniff, so its declared type is taken as given.
  */
 'use strict';
@@ -63,9 +63,13 @@ function sniff(head) {
     return null;
 }
 
-/** Is `type` served inline (so its bytes must match it)? */
+/**
+ * Is `type` served inline (so its bytes must match it)? An SVG is served as an attachment on this origin (it is
+ * never inline, INLINE in routes.js), so its text bytes are taken as given, like any other downloaded file.
+ */
 function servedInline(type) {
-    return /^(image\/|video\/|audio\/)/.test(type || '') || type === 'application/pdf';
+    const t = String(type || '').toLowerCase();
+    return /^(image\/(?!svg)|video\/|audio\/)/.test(t) || t === 'application/pdf';
 }
 
 /** null when the bytes fit the declared type (or need no check), else the reason. */
