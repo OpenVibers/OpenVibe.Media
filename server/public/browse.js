@@ -284,8 +284,8 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
   .pick-row input:checked+label{color:var(--text);border-color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,transparent)}
   .pick-row input:focus-visible+label{outline:2px solid var(--acc);outline-offset:2px}
   .pick-pane{display:none}
-  /* The chip names the block, so the block's own heading gives way to it. */
-  .md-pick-sec>h2{display:none}
+  /* The section's own heading stays (its text comes before it otherwise); the pick block's second heading gives way. */
+  .md-pick-sec .pick-head h2{display:none}
 }}
 /* The fold (the owner's short-pages rule): closed on a phone, and where there is room it looks like the section it
    replaces: a heading and its content, with no card around it. */
