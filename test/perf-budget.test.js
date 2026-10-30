@@ -13,7 +13,7 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
 
 (async () => {
     const BUDGETS = {
-        htmlRawKB: 48,   // 43.8 openvibe-shared 4.22.0: the navbar's magnifier search button and More dropdown (search.js and loading.js load only when used); measured 38.8 on 2026-10-22 (fresh database): the home gained its developer half (what it does, code, limits, questions and their FAQPage data); 19.8 before
+        htmlRawKB: 50,   // 48.6 with the phone pick block and folds (2026-10-30; a fresh database measures a little larger); 43.8 openvibe-shared 4.22.0: the navbar's magnifier search button and More dropdown (search.js and loading.js load only when used); measured 38.8 on 2026-10-22 (fresh database): the home gained its developer half (what it does, code, limits, questions and their FAQPage data); 19.8 before
         htmlBrotliKB: 12,   // 10.8 openvibe-shared 4.22.0: the navbar's magnifier search button and More dropdown (search.js and loading.js load only when used); 9.7 on 2026-10-22; 5.0 before
         jsFiles: 4,   // 3
         // 2026-09-27: theme-loader (44.3 KB, 8.3 brotli) now comes from Media's own /shared (D42) instead of
