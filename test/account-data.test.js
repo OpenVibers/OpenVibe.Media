@@ -18,7 +18,26 @@ const path = require('path');
     console.warn = () => {};
     const { validate } = require('openvibe-contracts');
     const accountData = require('../server/account-data');
+    const { uncovered } = require('openvibe-sdk/account-data');
     const db = require('../server/db/database').getDb();
+    {
+        const missing = await uncovered(db, {
+            taskKeyed: ['vods', 'clips', 'files'],
+            exempt: {
+                account_data_events: 'the ledger of requests itself: which export and deletion Media applied',
+                assets: 'legacy rows keyed by Live\'s numeric user id, not a Network subject',
+                media_access_keys: 'project-scoped S3 keys; the project owns them and created_by is the issuer audit trail',
+                config_snapshots: 'the configuration audit trail, attributed to the staff member who changed it',
+                media_holds: 'a moderation, DMCA or legal hold is kept until it is released',
+                media_jobs: 'operational job history, without the person\'s content',
+                media_namespaces: 'a namespace belongs to an app or project, not a person',
+                pastes: 'a frozen table Community owns and erases itself',
+                paste_comments: 'a frozen table Community owns and erases itself',
+                paste_likes: 'a frozen table Community owns and erases itself',
+            },
+        });
+        assert.deepStrictEqual(missing, [], `a table with a person column is neither covered nor exempted: ${missing.join(', ')}`);
+    }
 
     const DANA = 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2A3', OLD = 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2B4', XENA = 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2C5';
     const obj = db.prepare("INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject, visibility, lifecycle_status, legacy_ref) VALUES (?, 'live', 'live', ?, ?, 'public', 'ready', ?)");
