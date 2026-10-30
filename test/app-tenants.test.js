@@ -36,7 +36,7 @@ const crypto = require('crypto');
     await auth.ensureTokenOnlyApps();
     // C-71: every first-party tenant exists without seeding, and one boot created carries no app key. An existing row
     // (live, written with a test key just above) is left exactly as it was.
-    for (const id of ['community', 'tools', 'games', 'wiki', 'blog', 'inventory', 'media-hub']) {
+    for (const id of ['community', 'tools', 'games', 'wiki', 'blog', 'inventory', 'media-hub', 'codes']) {
         const row = await db.getApp(id);
         assert.ok(row, `${id} exists without seeding`);
         assert.strictEqual(row.api_key_hash, '', `${id} has no app key`);
