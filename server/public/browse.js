@@ -24,6 +24,7 @@ const cache = require('openvibe-shared/cache-policy');
 const frame = require('openvibe-shared/frame');
 const showcase = require('openvibe-shared/showcase');
 const kit = require('openvibe-shared/kit');
+const { pickBlock, pickRules, foldBlock } = require('./short');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`));
@@ -267,6 +268,42 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 .faq{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px 16px;margin:8px 0}
 .faq[open]{padding-bottom:12px}.faq summary{cursor:pointer;font-weight:600;padding:8px 0}.faq p{margin:4px 0 0;color:var(--muted)}
 @media (pointer: coarse){.faq summary{min-height:44px}}
+/* Pick (the owner's short-pages rule, 2026-10-30): on a phone the home's blocks of the same kind are one at a time,
+   picked with a row of chips. Radio inputs and :has(), no script: the chips and the one-block rule live under 640 px
+   and only where :has() is understood, so a wider screen, or an older browser, shows every block and no chips. */
+.pick-head{display:none}
+.pick-row{display:none}
+.pick-pane{min-width:0}
+@supports selector(:has(*)){@media (max-width:640px){
+  .pick-head{display:block}
+  .pick-head h2{margin:0 0 4px;font-size:1.25rem}
+  .pick-row{display:flex;gap:8px;overflow-x:auto;margin:10px -16px 0;padding:2px 16px 4px;scrollbar-width:none;overscroll-behavior-x:contain}
+  .pick-row::-webkit-scrollbar{display:none}
+  .pick-row input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+  .pick-row label{display:inline-flex;align-items:center;flex:none;min-height:44px;padding:0 15px;border-radius:999px;border:1px solid var(--line);color:var(--muted);font-size:.9rem;font-weight:700;white-space:nowrap;cursor:pointer}
+  .pick-row input:checked+label{color:var(--text);border-color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,transparent)}
+  .pick-row input:focus-visible+label{outline:2px solid var(--acc);outline-offset:2px}
+  .pick-pane{display:none}
+  /* The section's own heading stays (its text comes before it otherwise); the pick block's second heading gives way. */
+  .md-pick-sec .pick-head h2{display:none}
+}}
+/* The fold (the owner's short-pages rule): closed on a phone, and where there is room it looks like the section it
+   replaces: a heading and its content, with no card around it. */
+.md-fold-block{margin:32px 0}
+.md-fold-block>summary{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:48px;padding:0 16px;cursor:pointer;color:var(--text);font-weight:700;list-style:none;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
+.md-fold-block>summary::-webkit-details-marker{display:none}
+.md-fold-block>summary h2{margin:0;padding:0;border:0;font-size:1.05rem}
+.md-fold-block>summary span{color:var(--muted);font-weight:600;font-size:.86rem;text-align:right}
+.md-fold-block>summary:focus-visible{outline:2px solid var(--acc);outline-offset:-2px;border-radius:14px}
+.md-fold-block .sc-sec{margin:8px 0 0}
+.md-fold-block .sc-sec>h2{display:none}
+.md-fold-block .ov-shipped-home{margin:8px 0 0 !important;padding:0 !important}
+@media (min-width:641px){
+  .md-fold-block{border:0;background:none;margin-top:40px}
+  .md-fold-block>summary{display:block;min-height:0;padding:0;border:0;background:none}
+  .md-fold-block>summary h2{margin:0 0 6px;font-size:1.25rem;border-bottom:1px solid var(--line);padding-bottom:.2em}
+  .md-fold-block>summary span{display:none}
+}
 `;
 
 const DESCRIPTION = 'Videos, clips, pictures and files for every OpenVibe site, and the same API for your apps: objects, S3, thumbnails in any size and HLS.';
@@ -286,12 +323,14 @@ function homeFaqJsonLd() {
 }
 const bytes = (n) => { const v = Number(n) || 0; return v >= 1024 ** 3 ? `${+(v / 1024 ** 3).toFixed(1)} GB` : `${Math.round(v / 1024 ** 2)} MB`; };
 
-/** The first page's developer half: what Media is for, how an app uses it, the limits it enforces, the questions. */
-function developerSections() {
+/** The first page's developer half: what Media is for, how an app uses it, the limits it enforces, the questions.
+ *  On a phone the parts read once are folds and the code samples are chips (the owner's short-pages rule, 2026-10-30);
+ *  every part stays in the page, and a wider screen shows them all. */
+function developerSections(rules) {
     const L = require('../limits').limitsOf(config).limits;
     const rows = L.filter((l) => ['storage_bytes', 'single_upload_bytes', 'multipart_bytes', 'part_bytes', 'unfinished_upload_hours', 'deleted_retention_days'].includes(l.id))
         .map((l) => ({ label: l.label, values: [l.unit === 'bytes' ? bytes(l.production) : `${l.production} ${l.unit}`, l.unit === 'bytes' ? bytes(l.sandbox) : `${l.sandbox} ${l.unit}`] }));
-    return showcase.features({
+    const what = showcase.features({
         id: 'what',
         title: 'What it does',
         lede: 'The media layer under every OpenVibe site, open to your apps through the same API.',
@@ -303,28 +342,41 @@ function developerSections() {
             { icon: 'ov:camera', title: 'Live frames', text: '/live/@<name>/frame.jpg: a near-real-time picture of a live stream, for embeds and bots.' },
             { icon: 'ov:check', title: 'Limits in public', text: 'Every limit Media enforces is published at /limits.json, the same numbers OpenVibe.Services and Zone show.', href: '/limits.json' },
         ],
-    }) + showcase.code({
-        id: 'api',
-        title: 'From your app',
-        lede: 'Public media needs no key. Your own objects take a project token or a Zone key.',
-        samples: [
-            { label: 'Thumbnail', lang: 'html', code: `<img src="${config.publicUrl}/t/<thumbnail>?w=320&fmt=webp" width="320" loading="lazy" alt="">
+    });
+    // The code samples are blocks of the same kind: on a phone a row of chips picks one and the chip names it.
+    const samples = [
+        { id: 'thumbnail', label: 'Thumbnail', lang: 'html', code: `<img src="${config.publicUrl}/t/<thumbnail>?w=320&fmt=webp" width="320" loading="lazy" alt="">
 <img src="${config.publicUrl}/live/@goosely/frame.jpg?w=640" alt="goosely, live now">` },
-            { label: 'Node (openvibe-sdk)', lang: 'js', code: `const { createObjectsClient } = require('openvibe-sdk/media');
+        { id: 'node', label: 'Node (openvibe-sdk)', lang: 'js', code: `const { createObjectsClient } = require('openvibe-sdk/media');
 
 // tokens: createServiceTokenClient() for your developer app; app is your project id
 const objects = createObjectsClient({ app: 'prj_…', tokenClient: tokens });
 const obj = await objects.upload(fs.readFileSync('q3.pdf'), { kind: 'file', mimeType: 'application/pdf', filename: 'q3.pdf' });
 const { url } = await objects.signedUrl(obj.id, { ttl: 300 });` },
-            { label: 'S3 (any tool)', lang: 'bash', code: `aws --endpoint-url https://s3.openvibe.media s3 cp ./site s3://assets/ --recursive   # a Zone key and zone` },
-        ],
-    }) + showcase.limits({
+        { id: 's3', label: 'S3 (any tool)', lang: 'bash', code: `aws --endpoint-url https://s3.openvibe.media s3 cp ./site s3://assets/ --recursive   # a Zone key and zone` },
+    ];
+    const panes = samples.map((c) => ({
+        id: c.id,
+        label: c.label,
+        html: `<figure><figcaption>${esc(c.label)}</figcaption><pre tabindex="0" aria-label="${esc(c.label)}"><code class="language-${esc(c.lang)}">${esc(c.code)}</code></pre></figure>`,
+    }));
+    if (rules) rules.push(pickRules('api', panes.map((p) => p.id)));
+    const api = `<section class="sc-sec md-pick-sec" id="api" aria-labelledby="api-h"><h2 id="api-h">From your app</h2>
+<p class="sc-lede">Public media needs no key. Your own objects take a project token or a Zone key.</p>
+${pickBlock({ key: 'api', label: 'The ways to call Media', head: 'From your app', bodyClass: 'sc-code', panes })}
+</section>`;
+    const limits = showcase.limits({
         title: 'Limits',
         lede: 'What one project gets in each environment.',
         columns: ['Production', 'Sandbox'],
         rows,
         source: `${config.publicUrl}/limits.json`,
-    }) + `<section class="sc-sec" id="questions" aria-labelledby="faq-h"><h2 id="faq-h">Questions</h2>${HOME_FAQ.map((f) => `<details class="faq"><summary>${esc(f.q)}</summary><p>${esc(f.a)}</p></details>`).join('')}</section>`;
+    });
+    const questions = `<section class="sc-sec" id="questions" aria-labelledby="faq-h"><h2>Questions</h2>${HOME_FAQ.map((f) => `<details class="faq"><summary>${esc(f.q)}</summary><p>${esc(f.a)}</p></details>`).join('')}</section>`;
+    return foldBlock({ id: 'what', head: '<h2 id="what-h">What it does</h2>', html: what })
+        + api
+        + foldBlock({ id: 'limits', head: '<h2 id="limits-h">Limits</h2>', html: limits })
+        + foldBlock({ id: 'questions', head: '<h2 id="faq-h">Questions</h2>', html: questions });
 }
 
 // The kit card's type by media kind (its shape and its icon when there is no picture).
@@ -333,6 +385,8 @@ const asCard = (c) => kit.card({ href: c.view, title: c.title || c.kind, type: C
 
 function renderPage(tab, page, data, counts, { home = false } = {}) {
     const pages = Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+    // The rules that show the picked block of the pick block are written for this page.
+    const rules = [];
     const nav = (p, label, dis) => dis ? `<span class="pg dis" aria-disabled="true">${label}</span>` : `<a class="pg" href="/?tab=${tab}&page=${p}">${label}</a>`;
     // The front page is "/" itself; "/?tab=all" (and every other tab and page) is the index.
     const first = home;
@@ -362,15 +416,15 @@ ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}<
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>`;
     const body = `${heading}
 ${first ? `<section class="sc-sec sc-media">${kit.rail({ id: 'media', wrap: true, title: 'Latest public media', more: { href: '/?tab=all', label: `See all ${data.total.toLocaleString('en-US')}` }, items: data.cards.slice(0, 12).map(asCard) })}<p class="sc-kinds" aria-label="Browse by kind">${TABS.filter(([k]) => k !== 'all' && (counts[k] ?? 0) > 0).map(([k, label]) => kit.button({ href: `/?tab=${k}`, label: `${label} ${(counts[k] ?? 0).toLocaleString('en-US')}`, kind: 'quiet', small: true })).join(' ')}</p></section>` : list}
-${first ? developerSections() : ''}
-${first ? frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' }) : ''}`;
+${first ? developerSections(rules) : ''}
+${first ? foldBlock({ id: 'shipped', head: '<h2 id="shipped-h">Recently shipped on OpenVibe.Media</h2>', html: frame.shipped({ service: 'media', title: 'Recently shipped on OpenVibe.Media' }) }) : ''}`;
     return pageFrame.page({
         seo: {
             title: TITLE, description: DESCRIPTION, canonical,
             robots: page > 1 ? 'noindex, follow' : 'index, follow', ogType: 'website',
             jsonLd: page === 1 ? [...browseJsonLd(tab, data.cards), ...(first ? [homeFaqJsonLd()] : [])] : [],
         },
-        css: BROWSE_CSS,
+        css: BROWSE_CSS + (rules.length ? `@supports selector(:has(*)){@media (max-width:640px){${rules.join('')}}}` : ''),
         kit: first,
         body,
         // Later pages are noindex and carry no structured data, the summary's WebPage included.
