@@ -266,6 +266,7 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 .sc-media .sec-h{margin-top:0}   /* on the home the list is a showcase section, whose own margin spaces it */
 .faq{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px 16px;margin:8px 0}
 .faq[open]{padding-bottom:12px}.faq summary{cursor:pointer;font-weight:600;padding:8px 0}.faq p{margin:4px 0 0;color:var(--muted)}
+@media (pointer: coarse){.faq summary{min-height:44px}}
 `;
 
 const DESCRIPTION = 'Videos, clips, pictures and files for every OpenVibe site, and the same API for your apps: objects, S3, thumbnails in any size and HLS.';
