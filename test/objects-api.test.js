@@ -173,6 +173,23 @@ const crypto = require('crypto');
         r = await call('GET', `${privSigned.replace(/sig=[^&]+/, 'sig=AAAA')}&w=96&fmt=webp`, { bearer: null });
         assert.strictEqual(r.status, 404, 'a bad signature gets no variant either');
         await db.run('DELETE FROM media_objects WHERE id = ?', [privId]);   // the listing checks below count the objects
+        // An SVG is a file like any other (Actor's charts): its text bytes are taken as given, and it is served as a
+        // download on this origin, never inline. An image kind that must be raster still refuses it.
+        const svgBody = Buffer.from('<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><circle cx="5" cy="5" r="4"/></svg>');
+        r = await call('POST', O, { body: { kind: 'file', visibility: 'private', mime_type: 'image/svg+xml', filename: 'chart.svg', size_bytes: svgBody.length } });
+        assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+        const svgId = r.body.id;
+        r = await call('PUT', `${O}/${svgId}/content`, { raw: svgBody, headers: { 'content-type': 'image/svg+xml' } });
+        assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+        r = await call('POST', `${O}/${svgId}/complete`);
+        assert.deepStrictEqual([r.status, r.body.lifecycle_status], [200, 'ready'], JSON.stringify(r.body));
+        r = await call('GET', `${O}/${svgId}/download`);
+        const sv = await fetch(local(r.body.url));
+        assert.deepStrictEqual([sv.status, sv.headers.get('content-type'), /^attachment/.test(sv.headers.get('content-disposition') || ''), sv.headers.get('x-content-type-options')],
+            [200, 'image/svg+xml', true, 'nosniff'], 'the SVG downloads, never inline');
+        r = await call('POST', O, { body: { kind: 'avatar', visibility: 'public', mime_type: 'image/svg+xml' } });
+        assert.ok(r.status >= 400, 'an avatar still may not be an SVG: ' + r.status);
+        await db.run('DELETE FROM media_objects WHERE id = ?', [svgId]);
         console.log('✅ image variants: a public image in its asked size, the original otherwise; a private one only signed');
 
         // ── Service tokens ──
