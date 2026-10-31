@@ -338,7 +338,7 @@ const ready = (async () => {
             try { const r = await require('./objects/timeline').sweepPendingRemovals(); if (r.objects) console.log(`[Objects] Timeline retry: ${r.removed} row(s) of ${r.objects} gone object(s) removed, ${r.pending} still pending`); } catch (err) { console.warn('[Objects] timeline retry:', err.message); }
             try {
                 const r = await require('./objects/timeline-cache').sweep();
-                if (r.removed) console.log(`[Objects] Timeline cache: evicted ${r.removed} local file(s)`);
+                if (r.removed) console.log(`[Objects] Timeline cache: evicted ${r.removed} local file(s)${r.draining ? ' for the disk drain (durable copies serve them)' : ''}`);
                 if (r.orphans) console.log(`[Objects] Timeline cache: removed ${r.orphans} file(s) no row names (a cut that died before its commit)`);
             } catch (err) { console.warn('[Objects] timeline cache:', err.message); }
             // Incomplete multipart uploads past MEDIA_MULTIPART_TTL_HOURS: their parts are deleted (the objects stay uploading).

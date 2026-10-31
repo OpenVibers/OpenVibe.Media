@@ -107,6 +107,22 @@ async function sweepOrphans(entries, now) {
     return keep;
 }
 
+// One drain for the whole disk (2026-10-31). Under disk pressure the VOD sweep drains to its targets (≤60% and ≥40 GB
+// free), but this cache kept only its own budget (MEDIA_TIMELINE_LOCAL_MAX_BYTES / _MIN_FREE_BYTES). On 2026-10-31 the
+// disk sat at 80% with 10 GB of segments here, all with verified durable copies, while the VOD sweep found nothing it
+// may move (recordings stay local for a day). Now, while the VOD storage says the disk needs a drain, the cache gives
+// way too: durable segments go, least recently served first, until the drain is satisfied. A segment served in the
+// last hour stays (someone is watching it); a segment with no verified durable copy never goes.
+const HOT_MS = 3600 * 1000;
+function diskPressure() {
+    try {
+        const vs = require('../vod/vod-storage');
+        const settings = vs.getSettings();
+        const disk = () => vs.diskUsage(config.objects.path);
+        return { draining: vs.needsDrain(disk(), settings), satisfied: () => vs.drainSatisfied(disk(), settings) };
+    } catch { return { draining: false, satisfied: () => true }; }   // no pressure reading: the budget alone decides
+}
+
 async function sweep({ now = Date.now() } = {}) {
     if (sweeping) return { skipped: true };
     sweeping = true;
@@ -117,8 +133,13 @@ async function sweep({ now = Date.now() } = {}) {
         let bytes = entries.reduce((n, f) => n + f.size, 0);
         let free = freeBytes();
         let removed = 0;
+        const pressure = diskPressure();
         for (const file of entries) {
-            if (bytes <= config.hls.localMaxBytes && free >= config.hls.localMinFreeBytes) break;
+            if (bytes <= config.hls.localMaxBytes && free >= config.hls.localMinFreeBytes) {
+                // Within the cache's own budget: only the disk's drain can still ask for room, and only from files
+                // nobody has watched in the last hour (the list is oldest first, so the rest are newer still).
+                if (!pressure.draining || pressure.satisfied() || now - file.servedAt < HOT_MS) break;
+            }
             // A path can be shared by source, clip and multiple packed rows. All must name a verified durable
             // provider before the path can go. The row's durable state is set only after size+sha readback.
             const rows = await db.all('SELECT durability, durable_provider, key, sha256, packed_object_id, byte_offset, byte_length FROM media_timeline WHERE local_path = ?', [file.path]);
@@ -148,7 +169,7 @@ async function sweep({ now = Date.now() } = {}) {
             free = freeBytes();
         }
         memo = { at: Date.now(), bytes };   // what is left, counted by this walk
-        return { removed, orphans, ...status() };
+        return { removed, orphans, draining: pressure.draining, ...status() };
     } finally { sweeping = false; }
 }
 
