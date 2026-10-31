@@ -19,6 +19,7 @@ const { spawn } = require('child_process');
 const db = require('../db/database');
 const config = require('../config');
 const tools = require('./media-tools');
+const labels = require('../labels');
 const { announce } = require('../announce');
 const objects = () => require('../objects/model');
 
@@ -78,6 +79,8 @@ async function vodPublic(vod, { readiness = false, hls } = {}) {
         ai_analyzed_at: vod.ai_analyzed_at || null,
         view_count: vod.view_count || 0,
         created_at: vod.created_at,
+        // L1 content labels: `{ labels, suggested }`, the shape common.content-labels@1. A suggestion is not applied.
+        content_labels: labels.labelsOf(vod),
         meta: (() => { try { return JSON.parse(vod.meta_json || '{}'); } catch { return {}; } })(),
     };
     // The HLS master playlist of the VOD's object, when it has one (objects/hls.js): the same field and access rules as

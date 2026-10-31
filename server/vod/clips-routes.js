@@ -24,6 +24,7 @@ const tools = require('./media-tools');
 const { tenantAuth, tenantCors } = require('../auth');
 const cache = require('openvibe-shared/cache-policy');
 const objects = require('../objects/model');
+const labels = require('../labels');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
@@ -91,6 +92,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
         is_public: (clip.visibility || (clip.is_public ? 'public' : 'private')) === 'public',
         storage_provider: clip.storage_provider || 'local',
         auto_generated: !!clip.auto_generated,
+        // L1 content labels: `{ labels, suggested }`, the shape common.content-labels@1. A suggestion is not applied.
+        content_labels: labels.labelsOf(clip),
         ai_overview: clip.ai_overview || null,
         ai_analyzed_at: clip.ai_analyzed_at || null,
         view_count: clip.view_count || 0,
@@ -576,6 +579,9 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
         const clip = await _getClipForWrite(req, res);
         if (!clip) return;
         const { title, description, visibility, auto_generated: autoGen } = req.body || {};
+        // L1: the creator sets the labels (a confirmed suggestion leaves `suggested`); labels never hide the clip.
+        const nextLabels = req.body && req.body.labels !== undefined ? labels.parseLabels(req.body.labels) : undefined;
+        if (nextLabels === null) return res.status(400).json({ error: 'labels must be a list of known labels' });
         if (title !== undefined) {
             const t = sanitizeClipTitle(title, '');
             if (!t) return res.status(400).json({ error: 'Title must be 1-200 characters' });
@@ -591,6 +597,9 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
         if (autoGen !== undefined && flag(autoGen) !== null) {
             if (req.authType !== 'app') return res.status(403).json({ error: 'auto_generated is set by the app only' });
             await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET auto_generated = ? WHERE id = ?', [flag(autoGen), clip.id]));
+        }
+        if (nextLabels !== undefined) {
+            await objects.withObject('clip', clip.id, async () => await db.run('UPDATE clips SET content_labels = ? WHERE id = ?', [JSON.stringify(labels.confirmed(clip.content_labels, nextLabels)), clip.id]));
         }
         if (visibility !== undefined) {
             await db.setClipVisibility(clip.id, visibility);
