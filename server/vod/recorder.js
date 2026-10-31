@@ -257,7 +257,10 @@ class StreamRecorder {
         // so even if the object cannot be written with it: withObjectOrRow then writes the row alone
         // and re-projects after it (the finalize that follows re-projects every outcome as well).
         await require('../objects/model').withObjectOrRow('vod', vod.id, async () => {
-            await db.run('UPDATE vods SET is_recording = 1, file_path = ? WHERE id = ?', [filePath, vod.id]);
+            // The recorder knows an RTP broadcast has no video before any probe: store it once, so the public shape can
+            // say so while the recording is still growing (the finalize probe confirms it).
+            await db.run('UPDATE vods SET is_recording = 1, file_path = ?, audio_only = CASE WHEN ? THEN true ELSE audio_only END WHERE id = ?',
+                [filePath, extra.audioOnly ? 1 : 0, vod.id]);
             if (masterPath) await db.run('UPDATE vods SET master_file_path = ? WHERE id = ?', [masterPath, vod.id]);
         });
         return recording;
@@ -548,6 +551,7 @@ class StreamRecorder {
 
         const persisted = this._registerCommon(vod, proc, filePath, masterPath, {
             protocol: 'rtp',
+            audioOnly,
             sdpPath,
             rtpVideoPort: videoPort,
             rtpAudioPort: audioPort,

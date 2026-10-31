@@ -74,8 +74,15 @@ async function run(job) {
         try { size = require('fs').statSync(source.value).size; } catch { size = 0; }
         if (!size) throw new JobError('media_unavailable', 'The media file is empty (0 bytes)', { permanent: true, status: 404 });
     }
+    // An audio-only source (a browser broadcast with no camera, Media#240) has no frame to take. Its picture is the
+    // streamer's avatar card, made once here and stored like any thumbnail, and the row is marked audio_only. This used
+    // to be a permanent `no_video` failure, which every page then asked about again (Live backed off to once a day).
     if (await thumbService.hasVideoStream(source.value) === false) {
-        throw new JobError('no_video', 'The recording has no video (audio only), so there is no frame to take', { permanent: true, status: 404 });
+        const url = kind === 'vod'
+            ? await thumbService.generateVodThumbnail(id, source.value, { audioOnly: true })
+            : await thumbService.generateClipThumbnail(id, source.value, { audioOnly: true, ...(virtual ? { seekSeconds: (Number(row.start_time) || 0) + 0.5 } : {}) });
+        if (!url) throw new JobError('generate_failed', 'Failed to make the audio-only picture');
+        return { url, kind, id, audio_only: true };
     }
     const url = kind === 'vod'
         ? await thumbService.generateVodThumbnail(id, source.value)

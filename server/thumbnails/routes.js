@@ -83,12 +83,9 @@ router.post('/:kind/:id', tenantAuth({ verb: 'write', allowUser: true }), upload
             return res.json({ url });
         }
 
-        // A recording already found to have no video (audio only) has no frame to take, and its file never changes after
-        // it is finished: answer that at once instead of running the same failing job again (every visitor's page asked,
-        // 56 failed jobs in two days, 2026-10-15). Uses idx_media_jobs_object.
-        if (row.object_id && !row.is_recording && await db.get("SELECT 1 AS x FROM media_jobs WHERE object_id = ? AND job_type = 'thumbnail.regenerate' AND status = 'failed' AND error_code = 'no_video' LIMIT 1", [row.object_id])) {
-            return res.status(404).json({ error: 'The recording has no video', code: 'media.no_video' });
-        }
+        // An audio-only recording is not refused here any more: the job makes the streamer's avatar card and marks the
+        // row audio_only (Media#240 / R4). The old shortcut answered 404 media.no_video for every later ask, so a
+        // recording that got one before this release can still be given a picture now.
 
         // A clip whose cut failed has no picture to take, and that does not change by asking: no job (thumbnail.js says
         // the same if one runs anyway).

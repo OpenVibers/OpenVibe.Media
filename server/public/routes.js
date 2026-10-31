@@ -307,8 +307,11 @@ async function serveMediaRecord(kind, record, req, res) {
         ? { 'Cache-Control': 'no-cache, no-store, must-revalidate', 'Pragma': 'no-cache' }
         : {};
     const asFile = downloadDisposition(req, kind, record, path.extname(filePath));
+    // A public/unlisted recording is readable from another origin (openvibe.video's player, and the Web Audio
+    // analyser that draws an audio-only item's level ring: createMediaElementSource needs an untainted CORS load).
+    const corsHeaders = visibility === 'private' ? {} : { 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin' };
 
-    streamFileWithRange(req, res, filePath, { ...cacheHeaders, ...noindex, ...(asFile ? { 'Content-Disposition': asFile } : {}) });
+    streamFileWithRange(req, res, filePath, { ...cacheHeaders, ...noindex, ...corsHeaders, ...(asFile ? { 'Content-Disposition': asFile } : {}) });
 }
 
 // ── VOD playback ─────────────────────────────────────────────

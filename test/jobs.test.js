@@ -263,8 +263,7 @@ const http = require('http');
         r = await call('POST', '/api/v1/live/thumbnails/vod/2');
         assert.deepStrictEqual([r.status, r.body.error], [404, 'Media file unavailable'], 'no media is still a 404');
         assert.strictEqual((await queue.get(r.body.job_id)).error_code, 'media_unavailable');
-        // An audio-only recording failed once with no_video: later asks answer at once, with no new job (every visitor's
-        // page asked again before, 2026-10-15).
+        // A legacy no_video failure does not block the new avatar card (R4): the route asks again and makes one.
         await conn.prepare("INSERT INTO vods (id, app_id, user_id, title, file_path, is_public, duration_seconds) OVERRIDING SYSTEM VALUE VALUES (3, 'live', 5, 'C', ?, 1, 60) RETURNING id").run(path.join(process.env.VOD_PATH, 'rec-1.webm'));
         await require('../server/objects/model').sync('vod', 3);
         const audioObj = (await db.get('SELECT object_id FROM vods WHERE id = 3')).object_id;
@@ -272,8 +271,8 @@ const http = require('http');
         await db.run("UPDATE media_jobs SET status = 'failed', error_code = 'no_video', error = 'The recording has no video (audio only)' WHERE id = ?", [failed.job.id]);
         const jobsBefore = (await db.get("SELECT COUNT(*) AS n FROM media_jobs WHERE object_id = ?", [audioObj])).n;
         r = await call('POST', '/api/v1/live/thumbnails/vod/3');
-        assert.deepStrictEqual([r.status, r.body.code], [404, 'media.no_video'], 'a known audio-only recording answers no_video');
-        assert.strictEqual((await db.get("SELECT COUNT(*) AS n FROM media_jobs WHERE object_id = ?", [audioObj])).n, jobsBefore, 'and runs no new job');
+        assert.deepStrictEqual([r.status, r.body.url], [200, '/t/vod-3-1.jpg'], 'the card is made despite the old no_video job');
+        assert.strictEqual((await db.get("SELECT COUNT(*) AS n FROM media_jobs WHERE object_id = ?", [audioObj])).n, jobsBefore + 1, 'one new job');
         r = await call('POST', '/api/v1/live/thumbnails/vod/1?async=1');
         assert.strictEqual(r.status, 202);
         assert.ok(await waitFor(() => false, 50) || true);

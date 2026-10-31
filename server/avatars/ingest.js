@@ -104,7 +104,7 @@ async function toAvatar(buf) {
  * Store one avatar's bytes as a native object; returns its id. Throws (with nothing left behind) when the tenant,
  * the namespace or the quota refuses it.
  */
-async function storeAvatar({ db, pic, subject = null, username = null, sourceHost = null }) {
+async function storeAvatar({ db, pic, subject = null, username = null, sourceHost = null, userId = null }) {
     const model = require('../objects/model');
     const namespaces = require('../objects/namespaces');
     const invariant = require('../objects/invariant');
@@ -123,6 +123,9 @@ async function storeAvatar({ db, pic, subject = null, username = null, sourceHos
         return {
             id: await model.createObject({
                 app_id: AVATAR_APP, namespace, kind: 'avatar', owner_subject: SUBJECT_RE.test(String(subject || '')) ? subject : null,
+                // The app-local owner too: the avatar card (thumbnails/audio-card.js) finds an audio-only streamer's
+                // picture by the same Live user id its VOD carries, without a Network round trip on a thumbnail request.
+                owner_app: userId != null ? AVATAR_APP : null, owner_user_id: userId != null ? Number(userId) : null,
                 visibility: 'unlisted', lifecycle_status: 'uploading', mime_type: 'image/webp', size_bytes: bytes, content_hash: sha256,
                 metadata: { filename: 'avatar.webp', title: `Avatar${username ? ' of ' + String(username).slice(0, 40) : ''}`, source: 'avatar.ingest', source_host: sourceHost },
             }),
@@ -159,7 +162,7 @@ function createIngestHandler({ db, config, log = console }) {
             const raw = await safeFetchImage(url);
             const pic = await toAvatar(raw);
             const sourceHost = (() => { try { return new URL(url).hostname; } catch { return null; } })();
-            const id = await storeAvatar({ db, pic, subject, username, sourceHost });
+            const id = await storeAvatar({ db, pic, subject, username, sourceHost, userId: user_id });
             res.json({ ok: true, object_id: id, url: `${config.publicUrl}/o/${id}`, width: pic.width, height: pic.height, bytes: pic.buffer.length });
         } catch (err) {
             log.warn('[Avatar ingest]', err.message);
