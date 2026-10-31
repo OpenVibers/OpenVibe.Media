@@ -134,23 +134,26 @@ function buildRtpSdp(video, audio, videoPort, videoRtcpPort, audioPort, audioRtc
         't=0 0',
     ];
 
-    const vPT = video.payloadType;
-    const vCodecName = String(video.codec || 'VP8').split('/').pop();
-    const vFeedback = Array.isArray(video.rtcpFeedback) ? video.rtcpFeedback : [];
-    const videoProtocol = vFeedback.length > 0 ? 'RTP/AVPF' : 'RTP/AVP';
-    lines.push(`m=video ${videoPort} ${videoProtocol} ${vPT}`);
-    lines.push(`a=rtpmap:${vPT} ${vCodecName}/${video.clockRate || 90000}`);
-    if (videoRtcpPort) lines.push(`a=rtcp:${videoRtcpPort} IN IP4 127.0.0.1`);
-    if (video.ssrc) lines.push(`a=ssrc:${video.ssrc} cname:record-video`);
-    if (video.parameters) {
-        const fmtp = _formatFmtpParameters(video.parameters);
-        if (fmtp) lines.push(`a=fmtp:${vPT} ${fmtp}`);
+    // An audio-only broadcast (a browser with no camera) has no video section (2026-10-31).
+    if (video && videoPort) {
+        const vPT = video.payloadType;
+        const vCodecName = String(video.codec || 'VP8').split('/').pop();
+        const vFeedback = Array.isArray(video.rtcpFeedback) ? video.rtcpFeedback : [];
+        const videoProtocol = vFeedback.length > 0 ? 'RTP/AVPF' : 'RTP/AVP';
+        lines.push(`m=video ${videoPort} ${videoProtocol} ${vPT}`);
+        lines.push(`a=rtpmap:${vPT} ${vCodecName}/${video.clockRate || 90000}`);
+        if (videoRtcpPort) lines.push(`a=rtcp:${videoRtcpPort} IN IP4 127.0.0.1`);
+        if (video.ssrc) lines.push(`a=ssrc:${video.ssrc} cname:record-video`);
+        if (video.parameters) {
+            const fmtp = _formatFmtpParameters(video.parameters);
+            if (fmtp) lines.push(`a=fmtp:${vPT} ${fmtp}`);
+        }
+        for (const fb of vFeedback) {
+            if (!fb || !fb.type) continue;
+            lines.push(`a=rtcp-fb:${vPT} ${fb.type}${fb.parameter ? ` ${fb.parameter}` : ''}`);
+        }
+        lines.push('a=recvonly');
     }
-    for (const fb of vFeedback) {
-        if (!fb || !fb.type) continue;
-        lines.push(`a=rtcp-fb:${vPT} ${fb.type}${fb.parameter ? ` ${fb.parameter}` : ''}`);
-    }
-    lines.push('a=recvonly');
 
     if (audio && audioPort) {
         const aPT = audio.payloadType;
@@ -405,13 +408,19 @@ class StreamRecorder {
     async startRtp(vod, video, audio) {
         const guard = this._guardCanRecord(vod);
         if (!guard.ok) return guard;
-        if (!video || video.payloadType == null || !video.codec) {
-            return { ok: false, error: 'video { payloadType, codec, clockRate } required' };
+        // A browser broadcast with no camera sends only audio (stream 2827, 2026-10-30: moosely's stream had no VOD at
+        // all because this refused it). Audio alone records to an Opus WebM; the thumbnail, preview and rendition jobs
+        // already answer an audio-only source with a permanent `no_video`.
+        const hasVideo = Boolean(video && video.payloadType != null && video.codec);
+        const hasAudio = Boolean(audio && audio.payloadType != null);
+        if (!hasVideo && !hasAudio) {
+            return { ok: false, error: 'video { payloadType, codec, clockRate } or audio { payloadType, codec, clockRate } required' };
         }
+        if (!hasVideo) video = null;
 
-        const videoPort = allocatePortPair();
-        if (videoPort == null) return { ok: false, error: 'RTP port pool exhausted' };
-        const videoRtcpPort = videoPort + 1;
+        const videoPort = hasVideo ? allocatePortPair() : null;
+        if (hasVideo && videoPort == null) return { ok: false, error: 'RTP port pool exhausted' };
+        const videoRtcpPort = videoPort ? videoPort + 1 : null;
         let audioPort = null;
         let audioRtcpPort = null;
         if (audio && audio.payloadType != null) {
@@ -458,10 +467,11 @@ class StreamRecorder {
         // browser support since Opus-in-MP4 is patchy); VP8/VP9 → .webm (video +
         // Opus copied, both native to WebM). Anything exotic falls back to the
         // legacy libvpx re-encode (+ lossless master when H.264/Opus).
-        const vCodec = String(video.codec || '').toLowerCase();
+        const vCodec = String((video && video.codec) || '').toLowerCase();
         const isH264 = vCodec.includes('h264');
         const isVpx = vCodec.includes('vp8') || vCodec.includes('vp9');
         const passthrough = isH264 || isVpx;
+        const audioOnly = !video;
 
         const ext = isH264 ? '.mp4' : '.webm';
         const filename = `vod-${vod.app_id}-${vod.id}-${Date.now()}${ext}`;
@@ -471,7 +481,11 @@ class StreamRecorder {
         const normalizeVod = process.env.VOD_NO_NORMALIZE !== '1';
         const VOD_SCALE_VF = 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1';
 
-        if (passthrough) {
+        if (audioOnly) {
+            // Audio only: Opus copied into WebM as it arrives; another codec is encoded to Opus.
+            const aCodec = String((audio && audio.codec) || '').toLowerCase();
+            ffmpegArgs.push('-map', '0:a:0', ...(aCodec.includes('opus') ? ['-c:a', 'copy'] : ['-c:a', 'libopus', '-b:a', '128k']), '-f', 'webm', filePath);
+        } else if (passthrough) {
             ffmpegArgs.push('-map', '0:v:0', '-c:v', 'copy');
             if (audioPort) {
                 ffmpegArgs.push('-map', '0:a?');
@@ -541,8 +555,8 @@ class StreamRecorder {
         this._wireProcess(this.activeRecordings.get(vod.id), 'rtp');   // before the row write (see startRtmp)
         await persisted;
 
-        const recMode = passthrough ? `passthrough ${isH264 ? 'H.264→mp4' : 'VP8/9→webm'} copy` : 'libvpx re-encode';
-        console.log(`[VOD] RTP recording started: vod ${vod.id} → ${filename} [${recMode}] (video:${videoPort}${audioPort ? ` audio:${audioPort}` : ''})`);
+        const recMode = audioOnly ? 'audio only → Opus webm' : passthrough ? `passthrough ${isH264 ? 'H.264→mp4' : 'VP8/9→webm'} copy` : 'libvpx re-encode';
+        console.log(`[VOD] RTP recording started: vod ${vod.id} → ${filename} [${recMode}] (${videoPort ? `video:${videoPort}` : 'no video'}${audioPort ? ` audio:${audioPort}` : ''})`);
         return { ok: true, videoPort, audioPort, filePath };
     }
 
