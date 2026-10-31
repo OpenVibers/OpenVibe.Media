@@ -87,6 +87,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
         // Absolute URLs — cross-origin consumers render these directly.
         playback_url: `${config.publicUrl}/c/${clip.id}`,
         thumbnail_url: require('./finalize')._absUrl(clip.thumbnail_url),
+        // No picture in the source (an audio-only recording's clip): the player shows the avatar card, not a black box.
+        audio_only: !!clip.audio_only,
         visibility: clip.visibility || 'public',
         is_public: (clip.visibility || (clip.is_public ? 'public' : 'private')) === 'public',
         storage_provider: clip.storage_provider || 'local',
@@ -266,6 +268,7 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
             is_public: visibility === 'public' ? 1 : 0,
             visibility,
             status: 'processing',
+            audio_only: !!vod.audio_only,
         });   // the row and its object (uploading) in one transaction
         const clipId = result.lastInsertRowid;
         const appId = req.appId;
@@ -329,7 +332,7 @@ async function _createRecordingClip(req, res, vod, startTime, endTime, body) {
         description: typeof body.description === 'string' ? body.description.replace(/<[^>]*>/g, '').trim().slice(0, 1000) : '',
         auto_generated: byApp && flag(body.auto_generated) === 1,
         file_path: '', start_time: startTime, end_time: endTime, duration_seconds: endTime - startTime,
-        is_public: visibility === 'public' ? 1 : 0, visibility, status: 'processing',
+        is_public: visibility === 'public' ? 1 : 0, visibility, status: 'processing', audio_only: !!first.audio_only,
     });
     const clipId = result.lastInsertRowid;
     await require('./clip-jobs').makeVirtual(clipId, { objectId: rec.id, endTime: startTime + Number(last.end_ms) / 1000 });
@@ -347,8 +350,12 @@ async function _createUploadedClip(req, res) {
     try {
         await tools.remuxForSeeking(clipPath);
 
-        let duration = 0;
-        try { duration = (await tools.probeVodInfo(clipPath)).duration || 0; } catch { /* */ }
+        let duration = 0, audioOnly = false;
+        try {
+            const info = await tools.probeVodInfo(clipPath);
+            duration = info.duration || 0;
+            audioOnly = Array.isArray(info.streams) && info.streams.length > 0 && !info.streams.some((st) => st.codec_type === 'video');
+        } catch { /* */ }
         if (!duration || tools.getFileSizeSafe(clipPath) === 0) {
             tools.cleanupTempFile(clipPath);
             return res.status(422).json({ error: 'Clip upload was corrupt or empty. Please try again.' });
@@ -377,6 +384,7 @@ async function _createUploadedClip(req, res) {
             is_public: visibility === 'public' ? 1 : 0,
             visibility,
             status: 'ready',
+            audio_only: audioOnly,
         });   // the row and its object (ready, local copy present) in one transaction
         const clipId = result.lastInsertRowid;
 
