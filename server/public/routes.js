@@ -33,6 +33,7 @@ const tools = require('../vod/media-tools');
 const { optionalIdentity } = require('../auth');
 const pages = require('./pages');
 const sourceVod = require('./source-vod');
+const notFoundPage = require('./not-found-page');
 // A restore drill (MEDIA_DRILL) serves no stored bytes: every byte route answers 503 before it looks
 // at a file path (the database's paths are production's files). Watch pages still render.
 const drill = require('../drill');
@@ -59,8 +60,21 @@ function recordVisibility(record) {
     return record.visibility || (record.is_public ? 'public' : 'private');
 }
 
-/** The single "no such thing" answer for every id-addressed route, used for private items too. */
-function notFound(res) {
+/**
+ * The single "no such thing" answer for every id-addressed route, used for private items too. A browser that
+ * navigates there (or a link-preview crawler) gets the site's own 404 page; an API client or a player keeps the
+ * JSON answer. The page never says what was asked for: a private item looks exactly like a missing one.
+ */
+function notFound(req, res) {
+    if (pages.wantsHtmlPage(req)) {
+        res.set('Cache-Control', 'no-store');
+        return res.status(404).type('html').send(notFoundPage.renderNotFound());
+    }
+    return notFoundBytes(res);
+}
+
+/** The JSON answer for a byte route (a player, an API client): never a page. */
+function notFoundBytes(res) {
     return res.status(404).json({ error: 'Not found' });
 }
 
@@ -208,7 +222,7 @@ async function serveMediaRecord(kind, record, req, res) {
     const visibility = recordVisibility(record);
     // Exactly the answer a missing id gets: a 403 here told anyone probing ids which private
     // recordings exist (and, through the basename form of /v, which file names are real).
-    if (visibility === 'private' && !canAccessPrivate(record, req, kind)) return notFound(res);
+    if (visibility === 'private' && !canAccessPrivate(record, req, kind)) return notFound(req, res);
 
     // A virtual clip (F3.5) has no file: its bytes are its HLS playlist over the source's timeline. Every reader allowed
     // here (public, the owner, or a 'getc' URL from GET /api/clips/:id/signed-url), a browser navigation included, is sent
@@ -317,9 +331,9 @@ async function serveMediaRecord(kind, record, req, res) {
 // was retired with compatibility register C-75 once Live asked by id).
 router.get('/v/:id', optionalIdentity, async (req, res) => {
     try {
-        if (!/^\d+$/.test(req.params.id)) return notFound(res);
+        if (!/^\d+$/.test(req.params.id)) return notFound(req, res);
         const vod = await db.getVodById(parseInt(req.params.id, 10));
-        if (!vod || vod.clips_only) return notFound(res);
+        if (!vod || vod.clips_only) return notFound(req, res);
         return await serveMediaRecord('vod', vod, req, res);
     } catch (err) {
         console.error('[Public] /v error:', err.message);
@@ -339,14 +353,14 @@ const DVR_PERIOD_INIT = /^init-(\d{1,15})\.mp4$/;
 const DVR_SEGMENT_MAX_BYTES = 64 * 1024 * 1024;
 async function dvrSource(req, res) {
     if (drill.refuseBytes(res)) return null;
-    if (!/^\d+$/.test(req.params.id)) { notFound(res); return null; }
+    if (!/^\d+$/.test(req.params.id)) { notFoundBytes(res); return null; }
     const vod = await db.getVodById(parseInt(req.params.id, 10));
-    if (!vod || vod.clips_only || !vod.is_recording || recordVisibility(vod) === 'private') { notFound(res); return null; }
+    if (!vod || vod.clips_only || !vod.is_recording || recordVisibility(vod) === 'private') { notFoundBytes(res); return null; }
     const vodStorage = require('../vod/vod-storage');
     const filePath = [vodStorage.localPathForVod(vod), vod.file_path].find((p) => p && p.endsWith('.mp4') && fs.existsSync(p));
-    if (!filePath) { notFound(res); return null; }
+    if (!filePath) { notFoundBytes(res); return null; }
     const index = await require('../vod/fmp4-index').refresh(filePath);
-    if (index.broken || !index.initEnd) { notFound(res); return null; }
+    if (index.broken || !index.initEnd) { notFoundBytes(res); return null; }
     res.set({ 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin', 'X-Content-Type-Options': 'nosniff', 'X-Robots-Tag': 'noindex' });
     return { vod, filePath, index };
 }
@@ -376,7 +390,7 @@ router.get('/v/:id/dvr/:segment', dvrRoute(async (req, res, { filePath, index })
         try { await fh.read(head, 0, index.initEnd, 0); } finally { await fh.close(); }
         let bytes = null;
         try { bytes = require('../vod/fmp4-index').periodInit(head, index, Number(init[1])); } catch (err) { console.warn('[Public] DVR period init:', err.message); }
-        if (!bytes) return notFound(res);
+        if (!bytes) return notFoundBytes(res);
         res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Length': bytes.length, 'Cache-Control': 'public, max-age=3600' });
         return res.end(bytes);
     }
@@ -385,7 +399,7 @@ router.get('/v/:id/dvr/:segment', dvrRoute(async (req, res, { filePath, index })
     const offset = m ? Number(m[1]) : NaN;
     const length = m ? Number(m[2]) : NaN;
     // Only bytes already indexed (whole fragments after the init segment): never a part still being written.
-    if (!m || !last || length <= 0 || length > DVR_SEGMENT_MAX_BYTES || offset < index.initEnd || offset + length > last.offset + last.length) return notFound(res);
+    if (!m || !last || length <= 0 || length > DVR_SEGMENT_MAX_BYTES || offset < index.initEnd || offset + length > last.offset + last.length) return notFoundBytes(res);
     res.writeHead(200, { 'Content-Type': 'video/iso.segment', 'Content-Length': length, 'Cache-Control': 'public, max-age=3600' });
     sendFileStream(res, filePath, { start: offset, end: offset + length - 1 });
 }));
@@ -393,7 +407,7 @@ router.get('/v/:id/dvr/:segment', dvrRoute(async (req, res, { filePath, index })
 // ── Clip playback ────────────────────────────────────────────
 router.get('/c/:id', optionalIdentity, async (req, res) => {
     try {
-        if (!/^\d+$/.test(req.params.id)) return notFound(res);
+        if (!/^\d+$/.test(req.params.id)) return notFound(req, res);
         const wantsPage = pages.wantsHtmlPage(req);
         // The page needs its source VOD's state beside the clip; the bytes path keeps the plain read.
         const clip = wantsPage
@@ -401,7 +415,7 @@ router.get('/c/:id', optionalIdentity, async (req, res) => {
             : await db.getClipById(parseInt(req.params.id, 10));
         // A clip still being cut (or whose cut failed) has no file yet: its bytes are a 404, and a
         // browser navigation gets the watch page saying so (private clips still look missing).
-        if (!clip || (!clip.file_path && clip.storage_provider !== 'timeline' && !wantsPage)) return notFound(res);
+        if (!clip || (!clip.file_path && clip.storage_provider !== 'timeline' && !wantsPage)) return notFound(req, res);
         await serveMediaRecord('clip', clip, req, res);
     } catch (err) {
         console.error('[Public] /c error:', err.message);
