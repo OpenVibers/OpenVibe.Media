@@ -211,14 +211,28 @@ async function serveMediaRecord(kind, record, req, res) {
     if (visibility === 'private' && !canAccessPrivate(record, req, kind)) return notFound(res);
 
     // A virtual clip (F3.5) has no file: its bytes are its HLS playlist over the source's timeline. Every reader allowed
-    // here (public, the owner, or a 'getc' URL from GET /api/clips/:id/signed-url), a browser navigation included, is sent
-    // to the master playlist, signed for a closed clip with the clip's own 'hls' token, which reaches only the segments
-    // inside the clip's window. Before the watch page: its player and download link name ?raw=1 bytes it does not have.
+    // here (public, the owner, or a 'getc' URL from GET /api/clips/:id/signed-url) is sent to the master playlist,
+    // signed for a closed clip with the clip's own 'hls' token, which reaches only the segments inside the clip's
+    // window. A browser navigating to an open clip gets the canonical watch page instead (it has the player and
+    // the SEO; this site's own watch page cannot: it has no bytes for the ?raw=1 its player asks for).
     if (kind === 'clip' && !record.file_path && record.storage_provider === 'timeline') {
+        // A closed clip (private, or a sandbox tenant's) plays through a signed playlist: only a reader
+        // holding a signed link can open it, and the canonical page cannot show it to them.
+        const closed = visibility === 'private' || await db.isSandboxTenant(record.app_id);
+        // A browser NAVIGATING to a shared virtual clip gets the canonical watch page (OpenVibe.Video for
+        // Live's items, the owning app's page otherwise): a virtual clip has no bytes for a watch page of
+        // its own — its player and download link name ?raw=1 bytes it does not have — and that page plays it.
+        // No view is counted for it (a view is for bytes); every other reader keeps the playlist below.
+        if (!closed && pages.wantsHtmlPage(req)) {
+            const canonical = pages.canonicalPageUrl(kind, record);
+            if (canonical) {
+                res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
+                return res.redirect(302, canonical);
+            }
+        }
         if (drill.refuseBytes(res)) return;
         if (!config.hls.enabled || !record.object_id || record.status !== 'ready') return res.status(404).json({ error: 'Media file unavailable' });
         await trackUniqueView(kind, record.id, req, record.user_id);
-        const closed = visibility === 'private' || await db.isSandboxTenant(record.app_id);
         const asFile = downloadDisposition(req, kind, record, '.mp4');
         if (asFile) return sendVirtualClipFile(req, res, record, closed, asFile);
         res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' });

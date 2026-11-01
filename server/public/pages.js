@@ -50,6 +50,22 @@ function sourcePage(kind, record) {
     return watchPageUrl(kind, record.app_id, record.id);
 }
 
+/**
+ * The canonical watch page of an item when it lives on another site: an absolute https URL
+ * (OpenVibe.Video for Live's items, the owning app's own page otherwise). Null when this site
+ * IS the canonical home (the same host), or when the URL is not an absolute https URL: the
+ * caller then keeps serving what it serves today instead of redirecting nowhere.
+ */
+function canonicalPageUrl(kind, record) {
+    const url = sourcePage(kind, record);
+    if (!url) return null;
+    let target, self;
+    try { target = new URL(url); self = new URL(config.publicUrl); } catch { return null; }
+    if (target.protocol !== 'https:') return null;
+    if (target.hostname === self.hostname) return null;   // this site is the canonical home
+    return target.toString();
+}
+
 /** A clip the owning app's automation cut (AI moments), not a person. */
 function isAiClip(kind, record) {
     return kind === 'clip' && !!Number(record.auto_generated || 0);
@@ -228,4 +244,4 @@ function renderWatchPage(kind, record, readiness = null) {
     });
 }
 
-module.exports = { wantsHtmlPage, renderWatchPage, sourcePage, watchIndexable, isAiClip };
+module.exports = { wantsHtmlPage, renderWatchPage, sourcePage, canonicalPageUrl, watchIndexable, isAiClip };
