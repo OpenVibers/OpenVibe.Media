@@ -106,11 +106,24 @@ const http = require('http');
     assert.deepStrictEqual(checkCards(pages.renderWatchPage('clip', { ...vod, id: 9 }), 'Live clip'),
         ['https://openvibe.video/c/9?ov_from=media', 'https://openvibe.live/?ov_from=media', 'https://media.test/?ov_from=media']);
     // An AI clip with a source VOD: every card applies, and four is the most that render.
-    const aiClip = pages.renderWatchPage('clip', { ...vod, id: 10, auto_generated: 1, vod_id: 42 });
+    const sourceVod = (fields = {}) => ({ id: 42, visibility: 'public', is_public: 1, clips_only: 0, is_recording: 0, playable: true, ...fields });
+    const aiClip = pages.renderWatchPage('clip', { ...vod, id: 10, auto_generated: 1, vod_id: 42, source_vod: sourceVod() });
     assert.deepStrictEqual(checkCards(aiClip, 'AI clip'), ['https://openvibe.video/c/10?ov_from=media', 'https://media.test/v/42?ov_from=media',
         'https://openvibe.live/?ov_from=media', 'https://media.test/?ov_from=media'], 'a clip with a source VOD shows the VOD card');
     assert.ok(aiClip.includes('See the VOD this clip came from'));
     assert.strictEqual((aiClip.match(/class="sc-next-item"/g) || []).length, 4, 'at most four cards');
+    // A source VOD that /v/:id would not answer 200 for: no link card and no isBasedOn.
+    const noSource = (source) => pages.renderWatchPage('clip', { ...vod, id: 12, auto_generated: 1, vod_id: 42, ...(source === undefined ? {} : { source_vod: source }) });
+    for (const [label, page] of [
+        ['private', noSource(sourceVod({ visibility: 'private', is_public: 0 }))],
+        ['missing', noSource(undefined)],
+        ['still recording', noSource(sourceVod({ is_recording: 1 }))],
+        ['not playable', noSource(sourceVod({ playable: false }))],
+    ]) {
+        assert.ok(!page.includes('See the VOD this clip came from'), `${label} source VOD shows no link card`);
+        assert.ok(!page.includes('"isBasedOn"'), `${label} source VOD is not isBasedOn`);
+        assert.ok(!checkCards(page, label).some((href) => /\/v\/42/.test(href)), `${label} source VOD adds no card`);
+    }
     // A clip without a player offers no clip-cutting card.
     const pending = pages.renderWatchPage('clip', { ...vod, id: 11 }, { playable: false, reason: 'processing' });
     assert.ok(!cards(pending).includes('https://openvibe.live/?ov_from=media'), 'no "go live" card without a player');

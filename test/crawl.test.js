@@ -28,6 +28,7 @@ const express = require('express');
 
     const db = require('../server/db/database');
     const pages = require('../server/public/pages');
+    const sourceVod = require('../server/public/source-vod');
 
     await db.upsertApp({ app_id: 'live', api_key: 'k1-live-crawl' });
     await db.upsertApp({ app_id: 'games', api_key: 'k2-games-crawl' });
@@ -49,6 +50,11 @@ const express = require('express');
     await clip.run(13, 'games', 1, 'Cutting', 1, 'public', 0, 'processing', '2026-09-22 12:00:00');
     await clip.run(14, 'games', 1, 'Unlisted clip', 0, 'unlisted', 0, 'ready', '2026-09-22 13:00:00');
     await clip.run(15, 'live', 4, 'Live clip', 1, 'public', 0, 'ready', '2026-09-22 14:00:00');
+    // AI clips whose source VOD is private, missing, or public and playable (the page links only the last).
+    await clip.run(16, 'games', 3, 'AI private source', 1, 'public', 1, 'ready', '2026-09-22 15:00:00');
+    await clip.run(17, 'games', 999, 'AI missing source', 1, 'public', 1, 'ready', '2026-09-22 16:00:00');
+    await clip.run(18, 'games', 1, 'AI public source', 1, 'public', 1, 'ready', '2026-09-22 17:00:00');
+    await clip.run(19, 'games', 8, 'AI unverified source', 1, 'public', 1, 'ready', '2026-09-22 18:00:00');
     // Public and finished, but its only copy (B2) has never been checked: not playable, never listed.
     await raw.prepare(`INSERT INTO vods (id, app_id, title, file_path, is_public, visibility, health_status, storage_provider, created_at, duration_seconds) OVERRIDING SYSTEM VALUE
         VALUES (8, 'games', 'Games unverified', '/gone.mp4', 1, 'public', 'ok', 'b2', '2026-09-21 14:00:00', 60) RETURNING id`).run();
@@ -60,7 +66,7 @@ const express = require('express');
     const model = require('../server/objects/model');
     const readiness = require('../server/objects/readiness');
     for (const id of [1, 2, 3, 4, 5, 6, 7, 8]) await model.sync('vod', id);
-    for (const id of [11, 12, 13, 14, 15]) await model.sync('clip', id);
+    for (const id of [11, 12, 13, 14, 15, 16, 17, 18, 19]) await model.sync('clip', id);
 
     const app = express();
     app.use('/', require('../server/public/routes'));
@@ -148,13 +154,24 @@ const express = require('express');
         assert.deepStrictEqual(ldOf(pub).author, { '@type': 'Person', name: 'gamer', url: 'https://openvibe.games/@gamer' });
         assert.deepStrictEqual(ldOf(pub).creator, ldOf(pub).author);
         assert.strictEqual(ldOf(pub).isLiveBroadcast, undefined);
-        const aiHtml = pages.renderWatchPage('clip', { ...await byId('clips', 12), username: 'gamer' });
+        const aiHtml = pages.renderWatchPage('clip', { ...await sourceVod.clipForPage(12), username: 'gamer' });
         assert.ok(aiHtml.includes('content="noindex, follow"'), 'AI clips never index');
         const aiLd = ldOf(aiHtml);
         assert.deepStrictEqual(aiLd.author, aiLd.creator, 'automation is credited to an organization');
         assert.deepStrictEqual(aiLd.creator, { '@type': 'Organization', name: 'OpenVibe AI', url: 'https://openvibe.network' });
         assert.strictEqual(aiLd.isBasedOn, 'https://media.test/v/1');
         assert.ok(aiHtml.includes('<span>AI clip</span>') && !aiHtml.includes('by gamer'));
+        // The source VOD is linked only while /v/:id can answer 200 for it: private, missing and
+        // unverified (no playable copy) ones are not.
+        const nav = { accept: 'text/html', 'sec-fetch-dest': 'document' };
+        for (const [id, linked] of [[16, false], [17, false], [18, true], [19, false]]) {
+            r = await get(`/c/${id}`, nav);
+            assert.strictEqual(r.status, 200);
+            assert.strictEqual(r.body.includes('See the VOD this clip came from'), linked, `clip ${id}: source VOD card`);
+            assert.strictEqual(r.body.includes('"isBasedOn"'), linked, `clip ${id}: source VOD isBasedOn`);
+        }
+        assert.ok(!(await sourceVod.clipForPage(19)).source_vod.playable, 'the joined source VOD is not playable');
+        assert.ok((await get('/c/18', nav)).body.includes('https://media.test/v/1'), 'a public source VOD keeps its URL');
         assert.strictEqual(ldOf(pages.renderWatchPage('vod', await byId('vods', 2))), null, 'unlisted pages carry no structured data');
         assert.ok(pages.renderWatchPage('clip', await byId('clips', 15)).includes('content="noindex, follow"'), 'Live-owned: canonical on Live');
         r = await get('/c/12', { accept: 'text/html', 'sec-fetch-dest': 'document' });
