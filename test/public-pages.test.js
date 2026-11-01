@@ -166,6 +166,8 @@ const http = require('http');
         assert.strictEqual(r.status, 200);
         const ld = [...r.body.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].flatMap((m) => JSON.parse(m[1])['@graph'] || []);
         assert.ok(ld.some((x) => x['@type'] === 'WebSite'), 'the index names the site');
+        const org = ld.find((x) => x['@type'] === 'Organization');
+        assert.ok(org && Array.isArray(org.sameAs) && org.sameAs.includes('https://github.com/OpenVibers'), 'the index names the OpenVibe Organization');
         const list = ld.find((x) => x['@type'] === 'ItemList');
         assert.ok(list && list.itemListElement.length >= 1 && list.itemListElement.every((it) => /^https?:\/\//.test(it.url)), 'the listed cards, with absolute URLs');
         const h1s = (html) => (html.match(/<h1[\s>]/g) || []).length;
