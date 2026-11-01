@@ -202,6 +202,7 @@ function browseJsonLd(tab, cards) {
     const items = cards.map((c) => ({ name: c.title || 'Untitled', url: abs(c.view) })).filter((it) => it.url);
     return [
         tab === 'all' ? seo.jsonLd.website({ name: 'OpenVibe.Media', url: `${config.publicUrl}/`, description: 'Every public file on the OpenVibe network: videos, clips, files and thumbnails.' }) : null,
+        tab === 'all' ? seo.jsonLd.organization() : null,
         items.length ? seo.jsonLd.itemList(tab === 'all' ? 'Latest public media' : `Latest public ${tab}`, items, { url: `${config.publicUrl}/${tab === 'all' ? '' : `?tab=${tab}`}` }) : null,
     ].filter(Boolean);
 }
