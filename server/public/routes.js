@@ -32,6 +32,7 @@ const db = require('../db/database');
 const tools = require('../vod/media-tools');
 const { optionalIdentity } = require('../auth');
 const pages = require('./pages');
+const sourceVod = require('./source-vod');
 // A restore drill (MEDIA_DRILL) serves no stored bytes: every byte route answers 503 before it looks
 // at a file path (the database's paths are production's files). Watch pages still render.
 const drill = require('../drill');
@@ -393,10 +394,14 @@ router.get('/v/:id/dvr/:segment', dvrRoute(async (req, res, { filePath, index })
 router.get('/c/:id', optionalIdentity, async (req, res) => {
     try {
         if (!/^\d+$/.test(req.params.id)) return notFound(res);
-        const clip = await db.getClipById(parseInt(req.params.id, 10));
+        const wantsPage = pages.wantsHtmlPage(req);
+        // The page needs its source VOD's state beside the clip; the bytes path keeps the plain read.
+        const clip = wantsPage
+            ? await sourceVod.clipForPage(parseInt(req.params.id, 10))
+            : await db.getClipById(parseInt(req.params.id, 10));
         // A clip still being cut (or whose cut failed) has no file yet: its bytes are a 404, and a
         // browser navigation gets the watch page saying so (private clips still look missing).
-        if (!clip || (!clip.file_path && clip.storage_provider !== 'timeline' && !pages.wantsHtmlPage(req))) return notFound(res);
+        if (!clip || (!clip.file_path && clip.storage_provider !== 'timeline' && !wantsPage)) return notFound(res);
         await serveMediaRecord('clip', clip, req, res);
     } catch (err) {
         console.error('[Public] /c error:', err.message);

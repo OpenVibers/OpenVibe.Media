@@ -67,6 +67,23 @@ function watchIndexable(kind, record) {
 }
 
 /**
+ * The source VOD link for an AI clip, or null. `record.source_vod` is read with the clip
+ * (server/public/source-vod.js): it must be a row /v/:id answers 200 for — not private, not a
+ * clips-only shell, finished and playable — and not missing. Without that evidence no link is shown:
+ * a private or unread VOD used to be linked anyway and answered 404.
+ */
+function sourceVodHref(record) {
+    const source = record && record.source_vod;
+    if (!source) return null;
+    const visibility = source.visibility || (Number(source.is_public) ? 'public' : 'private');
+    if (visibility === 'private') return null;
+    if (Number(source.clips_only || 0) || Number(source.is_recording || 0)) return null;
+    if (!source.playable) return null;
+    const id = source.id != null ? source.id : record.vod_id;
+    return id != null ? `${config.publicUrl}/v/${id}` : null;
+}
+
+/**
  * What the watch page says instead of a player when the item is not playable (readiness.reason,
  * server/objects/readiness.js): [heading, detail].
  */
@@ -112,7 +129,7 @@ function renderWatchPage(kind, record, readiness = null) {
     const playable = !readiness || !!readiness.playable;
     // The owning app has the canonical page; unlisted items, AI clips and pages without a player never index.
     const robots = playable && watchIndexable(kind, record) ? 'index, follow' : 'noindex, follow';
-    const sourceVod = ai && record.vod_id ? `${config.publicUrl}/v/${record.vod_id}` : null;
+    const sourceVod = ai && record.vod_id ? sourceVodHref(record) : null;
     const mime = VIDEO_MIME[path.extname(record.file_path || '').toLowerCase()] || 'video/mp4';
     const uploadDate = isoDate(record.created_at);
     const duration = isoDuration(record.duration_seconds);
