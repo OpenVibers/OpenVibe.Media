@@ -108,6 +108,17 @@ const http = require('http');
             assert.strictEqual(junk.json.total, 3, 'an unreadable since is ignored, not a 500');
         });
 
+        await check('before= and unvisited=1 (the owning app only) find the stale clips no person ever opened', async () => {
+            const month = new Date(Date.now() - 30 * 86400_000).toISOString();
+            assert.deepStrictEqual(ids(await call('GET', `/clips?before=${encodeURIComponent(month)}`)), [14], 'cut before 30 days ago');
+            await raw.prepare(`INSERT INTO content_visits (content_type, content_id, visitor) VALUES ('clip', 10, 'v1'), ('clip', 15, 'v2')`).run();
+            assert.deepStrictEqual(ids(await call('GET', '/clips?unvisited=1')), [11, 14], 'no visitor row: 11 and 14 (10 and 15 were opened)');
+            assert.strictEqual((await call('GET', '/clips?unvisited=1')).json.total, 2, 'the total counts the same filter');
+            assert.deepStrictEqual(ids(await call('GET', `/clips?unvisited=1&before=${encodeURIComponent(month)}`)), [14]);
+            assert.deepStrictEqual(ids(await call('GET', '/clips?unvisited=1', { user: 5 })), [10, 11, 14, 15], 'a user\'s call: ignored');
+            assert.strictEqual((await call('GET', '/clips?before=not-a-date')).json.total, 4, 'an unreadable before is ignored');
+        });
+
         await check('POST /clips keeps auto_generated and the description for the app itself', async () => {
             const r = await call('POST', '/clips', { body: { vod_id: 1, start_s: 10, end_s: 30, title: 'AI pick', auto_generated: true, description: 'A <b>big</b> moment' } });
             assert.strictEqual(r.status, 202, JSON.stringify(r.json));

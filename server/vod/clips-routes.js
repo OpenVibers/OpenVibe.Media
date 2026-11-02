@@ -431,6 +431,9 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
             ready_only: String(req.query.status || '') === 'ready'
                 || (String(req.query.status || '') !== 'any' && !(req.authType === 'app' && ['1', 'true'].includes(String(req.query.include_private || '')))),
             since: req.query.since || null,
+            before: req.query.before || null,
+            // Whether any person ever opened a clip is the owning app's to ask (Live hides its stale auto-clips).
+            unvisited: req.authType === 'app' && ['1', 'true'].includes(String(req.query.unvisited || '')),
         };
         const clips = await db.listClips(req.appId, filters);
         const total = await db.countClips(req.appId, filters);
