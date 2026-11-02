@@ -1,6 +1,5 @@
 'use strict';
 // The home on a phone (the owner's short-pages rule, 2026-10-30): the code samples are one pick block, a row of chips
-// picks one of them, and the parts a reader rarely needs are folds. Radio inputs and :has(), no script for the chips;
 // every block stays in the page for crawlers; a wider screen shows them all and no chips.
 const assert = require('assert');
 const fs = require('fs');
@@ -37,17 +36,15 @@ const path = require('path');
 
         // The code samples: one pick block, a chip per sample, the first one picked.
         assert.ok(text.includes('<div class="pick" id="pick-api">'), 'the code samples are one pick block');
-        assert.match(text, /<div class="pick-row" role="radiogroup" aria-label="The ways to call Media">/);
-        const chips = [...text.matchAll(/<input type="radio" name="pick-api" id="pk-api-([a-z0-9-]+)" value="\1"( checked)?><label for="pk-api-\1">([^<]+)<\/label>/g)];
+        assert.match(text, /<nav class="pick-row" aria-label="The ways to call Media">/);
+        const chips = [...text.matchAll(/<a class="pick-chip" href="#(?:pp-api-)?([a-z0-9-]+)">()([^<]+)<\/a>/g)];
         assert.deepStrictEqual(chips.map((m) => m[1]), ['thumbnail', 'node', 's3'], 'a chip per sample');
-        assert.deepStrictEqual(chips.filter((m) => m[2]).map((m) => m[1]), ['thumbnail'], 'the first sample is picked');
+        assert.ok(!/type="radio"/.test(text), 'no chip is a radio: nothing is picked, every pane shows');
         assert.strictEqual((text.match(/class="pick-pane"/g) || []).length, chips.length, 'one pane per chip');
         // Every sample stays in the page for the crawlers.
         for (const label of ['Thumbnail', 'Node (openvibe-sdk)', 'S3 (any tool)']) {
             assert.ok(text.includes(`<figcaption>${label}</figcaption>`), `${label} is in the page`);
         }
-        // The rule that shows the picked sample is written for this page.
-        assert.ok(text.includes('.pick:has(#pk-api-thumbnail:checked) #pp-api-thumbnail{display:block}'), 'the picked sample shows');
 
         // The folds: open in the page, closed on a phone, and their content stays in the page.
         for (const id of ['what', 'limits', 'questions', 'shipped']) {
@@ -65,12 +62,10 @@ const path = require('path');
         assert.ok(text.includes('class="sc-sec sc-media"'), 'the newest media rail is still there');
         assert.ok(text.includes('id="api"'), 'the code samples are still there, under their own anchor');
 
-        // The CSS guard: the chips are hidden and the blocks all show until 640 px and where :has() is understood.
         const css = fs.readFileSync(path.join(__dirname, '..', 'server', 'public', 'browse.js'), 'utf8');
-        assert.match(css, /\.pick-row\{display:none\}/, 'the chips are hidden by default');
-        assert.match(css, /@supports selector\(:has\(\*\)\)\{@media \(max-width:640px\)\{/, 'the phone rules are under :has() and 640 px');
-        assert.match(css, /\.pick-row label\{[^}]*min-height:44px/, 'a chip is a 44 px target');
-        assert.match(css, /\.pick-pane\{display:none\}/, 'the blocks are hidden on a phone');
+        assert.match(css, /\.pick-head,\.pick-row\{display:none\}/, 'no chips where there is room');
+        assert.doesNotMatch(css, /\.pick-pane\{display:none\}/, 'no pane is ever hidden (the owner, 2026-10-31)');
+        assert.match(css, /\.pick-chip\{/, 'the chips are links');
 
         console.log('home short: all checks passed');
     } finally {

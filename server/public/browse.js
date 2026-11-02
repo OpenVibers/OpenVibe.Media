@@ -24,7 +24,7 @@ const cache = require('openvibe-shared/cache-policy');
 const frame = require('openvibe-shared/frame');
 const showcase = require('openvibe-shared/showcase');
 const kit = require('openvibe-shared/kit');
-const { pickBlock, pickRules, foldBlock } = require('./short');
+const { pickBlock, foldBlock } = require('./short');
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicUrl}${u.startsWith('/') ? '' : '/'}${u}`));
@@ -269,25 +269,19 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 .faq{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px 16px;margin:8px 0}
 .faq[open]{padding-bottom:12px}.faq summary{cursor:pointer;font-weight:600;padding:8px 0}.faq p{margin:4px 0 0;color:var(--muted)}
 @media (pointer: coarse){.faq summary{min-height:44px}}
-/* Pick (the owner's short-pages rule, 2026-10-30): on a phone the home's blocks of the same kind are one at a time,
-   picked with a row of chips. Radio inputs and :has(), no script: the chips and the one-block rule live under 640 px
-   and only where :has() is understood, so a wider screen, or an older browser, shows every block and no chips. */
-.pick-head{display:none}
-.pick-row{display:none}
+/* Pick: on a phone every pane is shown, stacked; the chips are a row of links that jump to a pane (the owner's rule,
+   2026-10-31: never hide content to shorten). A wide screen shows the panes as before, with no chips. */
+.pick-head,.pick-row{display:none}
 .pick-pane{min-width:0}
-@supports selector(:has(*)){@media (max-width:640px){
-  .pick-head{display:block}
-  .pick-head h2{margin:0 0 4px;font-size:1.25rem}
+@media (max-width:640px){
   .pick-row{display:flex;gap:8px;overflow-x:auto;margin:10px -16px 0;padding:2px 16px 4px;scrollbar-width:none;overscroll-behavior-x:contain}
   .pick-row::-webkit-scrollbar{display:none}
-  .pick-row input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
-  .pick-row label{display:inline-flex;align-items:center;flex:none;min-height:44px;padding:0 15px;border-radius:999px;border:1px solid var(--line);color:var(--muted);font-size:.9rem;font-weight:700;white-space:nowrap;cursor:pointer}
-  .pick-row input:checked+label{color:var(--text);border-color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,transparent)}
-  .pick-row input:focus-visible+label{outline:2px solid var(--acc);outline-offset:2px}
-  .pick-pane{display:none}
-  /* The section's own heading stays (its text comes before it otherwise); the pick block's second heading gives way. */
-  .md-pick-sec .pick-head h2{display:none}
-}}
+  .pick-chip{display:inline-flex;align-items:center;flex:none;min-height:44px;padding:0 15px;border-radius:999px;border:1px solid var(--line);color:var(--muted);font-size:.9rem;font-weight:700;white-space:nowrap;text-decoration:none}
+  .pick-chip:hover,.pick-chip:focus-visible{color:var(--text);border-color:var(--acc)}
+  .pick-chip:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+  .pick .pick-pane{scroll-margin-top:72px}
+  .pick .pick-pane+.pick-pane{margin-top:18px}
+}
 /* The fold (the owner's short-pages rule): closed on a phone, and where there is room it looks like the section it
    replaces: a heading and its content, with no card around it. */
 .md-fold-block{margin:32px 0}
@@ -361,7 +355,6 @@ const { url } = await objects.signedUrl(obj.id, { ttl: 300 });` },
         label: c.label,
         html: `<figure><figcaption>${esc(c.label)}</figcaption><pre tabindex="0" aria-label="${esc(c.label)}"><code class="language-${esc(c.lang)}">${esc(c.code)}</code></pre></figure>`,
     }));
-    if (rules) rules.push(pickRules('api', panes.map((p) => p.id)));
     const api = `<section class="sc-sec md-pick-sec" id="api" aria-labelledby="api-h"><h2 id="api-h">From your app</h2>
 <p class="sc-lede">Public media needs no key. Your own objects take a project token or a Zone key.</p>
 ${pickBlock({ key: 'api', label: 'The ways to call Media', head: 'From your app', bodyClass: 'sc-code', panes })}

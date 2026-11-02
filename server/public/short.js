@@ -22,16 +22,13 @@ const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</
  */
 function pickBlock({ key, label, head = '', headId = '', bodyClass = '', panes }) {
     if (!panes || !panes.length) return '';
-    const chips = panes.map((p, i) => `<input type="radio" name="pick-${esc(key)}" id="pk-${esc(key)}-${esc(p.id)}" value="${esc(p.id)}"${i === 0 ? ' checked' : ''}><label for="pk-${esc(key)}-${esc(p.id)}">${esc(p.label)}</label>`).join('');
+    const chips = panes.map((p) => `<a class="pick-chip" href="#pp-${esc(key)}-${esc(p.id)}">${esc(p.label)}</a>`).join('');
     const body = panes.map((p) => `<div class="pick-pane" id="pp-${esc(key)}-${esc(p.id)}">${p.html}</div>`).join('');
     const heading = `<h2${headId ? ` id="${esc(headId)}"` : ''}>${esc(head || label)}</h2>`;
-    return `<div class="pick" id="pick-${esc(key)}"><div class="pick-bar"><div class="pick-head">${heading}</div><div class="pick-row" role="radiogroup" aria-label="${esc(label)}">${chips}</div></div><div class="pick-body${bodyClass ? ` ${bodyClass}` : ''}">${body}</div></div>`;
+    return `<div class="pick" id="pick-${esc(key)}"><div class="pick-bar"><div class="pick-head">${heading}</div><nav class="pick-row" aria-label="${esc(label)}">${chips}</nav></div><div class="pick-body${bodyClass ? ` ${bodyClass}` : ''}">${body}</div></div>`;
 }
 
 /** The rules for every pane of a pick block, in the order they appear: one rule per pane, so the CSS is written for the page. */
-function pickRules(key, ids) {
-    return ids.map((id) => `.pick:has(#pk-${key}-${id}:checked) #pp-${key}-${id}{display:block}`).join('');
-}
 
 /**
  * A fold. The head is the heading the block had; the html is what it holds.
@@ -47,4 +44,4 @@ function foldScript(id) {
     return `<script>(function(){var d=document.getElementById(${JSON.stringify(id)});if(!d)return;var k='ov_fold_'+${JSON.stringify(id)};var s=null;try{s=localStorage.getItem(k)}catch(e){}if(s==='open'){d.open=true;return}if(s==='closed'){d.open=false;return}var t=0;if(window.matchMedia&&window.matchMedia('(max-width:640px)').matches){t=Date.now();d.open=false}d.addEventListener('toggle',function(){if(Date.now()-t<300)return;try{localStorage.setItem(k,d.open?'open':'closed')}catch(e){}})})();</script>`;
 }
 
-module.exports = { pickBlock, pickRules, foldBlock, foldScript };
+module.exports = { pickBlock, foldBlock, foldScript };
