@@ -139,9 +139,11 @@ async function scanVod(vod, options = {}) {
     let stat;
     try {
         stat = fs.statSync(filePath);
-        if (stat.size <= 0) {
+        // Under 1 KB is a container header at most: nothing to play or to take a picture from (VOD 1803: 526 bytes for
+        // "51 seconds", rated ok, the #1 VOD on its channel and blank, 2026-11-02). It is as empty as 0 bytes.
+        if (stat.size < 1024) {
             result.status = 'zero_byte';
-            result.issues.push('zero_byte');
+            result.issues.push(stat.size <= 0 ? 'zero_byte' : 'too_small');
             return result;
         }
     } catch (err) {
