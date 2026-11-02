@@ -126,7 +126,7 @@ function colourOf(file) {
 }
 
 /** The colour a thumbnail's name carries ("…-1a2b3c.jpg" → "#1a2b3c"), or null. */
-const COLOUR_NAME_RE = /-([0-9a-f]{6})\.(?:jpe?g|webp|avif|png)(?:[?#].*)?$/i;
+const COLOUR_NAME_RE = /-\d{10,}-([0-9a-f]{6})\.(?:jpe?g|webp|avif|png)(?:[?#].*)?$/i;
 function colourFromName(name) {
     const m = COLOUR_NAME_RE.exec(String(name || ''));
     return m ? `#${m[1].toLowerCase()}` : null;

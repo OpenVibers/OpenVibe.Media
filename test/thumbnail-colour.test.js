@@ -21,6 +21,7 @@ process.env.THUMBNAILS_PATH = dir;
     assert.strictEqual(thumbs.colourFromName('https://openvibe.media/t/clip-9-1730000000000-ABCDEF.jpg?w=640'), '#abcdef');
     assert.strictEqual(thumbs.colourFromName('vod-3-1730000000000.jpg'), null, 'an older name has no colour');
     assert.strictEqual(thumbs.colourFromName('stream-live-12.jpg'), null);
+    assert.strictEqual(thumbs.colourFromName('stream-live-100234.jpg'), null, 'a stream\'s stable name: its id is not a colour');
 
     let ffmpeg = true;
     try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); } catch { ffmpeg = false; }
