@@ -416,13 +416,15 @@ ${first ? foldBlock({ id: 'shipped', head: '<h2 id="shipped-h">Recently shipped 
         seo: {
             title: TITLE, description: DESCRIPTION, canonical,
             robots: page > 1 ? 'noindex, follow' : 'index, follow', ogType: 'website',
-            jsonLd: page === 1 ? [...browseJsonLd(tab, data.cards), ...(first ? [homeFaqJsonLd()] : [])] : [],
+            // The home's list names only the cards its rail draws (12); the release check needs a list's names on the page.
+            jsonLd: page === 1 ? [...browseJsonLd(tab, first ? data.cards.slice(0, 12) : data.cards), ...(first ? [homeFaqJsonLd()] : [])] : [],
         },
         css: BROWSE_CSS + (rules.length ? `@supports selector(:has(*)){@media (max-width:640px){${rules.join('')}}}` : ''),
         kit: first,
         body,
         // Later pages are noindex and carry no structured data, the summary's WebPage included.
         summary: page === 1 ? {
+            ...(first ? { name: 'Open media and object storage for OpenVibe and your apps' } : {}),
             summary: 'Index of all public media on the OpenVibe network: videos, clips, emotes, sounds, files and thumbnails, browsable and playable without an account.',
             url: canonical,
             facts: [['Items', data.total.toLocaleString('en-US')]],
