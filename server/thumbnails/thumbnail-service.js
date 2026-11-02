@@ -104,6 +104,43 @@ function hasVideoStream(videoPath) {
 }
 
 /**
+ * A picture's average colour, as six hex digits ("1a2b3c"), or null. ffmpeg scales the JPEG to one pixel (area
+ * averaging) and prints its RGB bytes. Used to name a new thumbnail <prefix>-<id>-<time>-<colour>.jpg, so every page
+ * that shows it can paint that colour behind the image before it arrives (plan L52: "a fake thumbnail… so it is not
+ * jarring"), with no field to carry and nothing to migrate.
+ */
+function colourOf(file) {
+    return new Promise((resolve) => {
+        let out = Buffer.alloc(0);
+        let ff;
+        try { ff = spawn('ffmpeg', ['-v', 'error', '-i', file, '-vf', 'scale=1:1:flags=area', '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return resolve(null); }
+        const timer = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* gone */ } }, 5000);
+        ff.stdout.on('data', (d) => { out = Buffer.concat([out, d]); });
+        ff.on('error', () => { clearTimeout(timer); resolve(null); });
+        ff.on('close', (code) => {
+            clearTimeout(timer);
+            if (code !== 0 || out.length < 3) return resolve(null);
+            resolve([out[0], out[1], out[2]].map((v) => v.toString(16).padStart(2, '0')).join(''));
+        });
+    });
+}
+
+/** The colour a thumbnail's name carries ("…-1a2b3c.jpg" → "#1a2b3c"), or null. */
+const COLOUR_NAME_RE = /-\d{10,}-([0-9a-f]{6})\.(?:jpe?g|webp|avif|png)(?:[?#].*)?$/i;
+function colourFromName(name) {
+    const m = COLOUR_NAME_RE.exec(String(name || ''));
+    return m ? `#${m[1].toLowerCase()}` : null;
+}
+
+/** Rename a just-written thumbnail to carry its colour; the name it ends up with (the same one when that fails). */
+async function nameWithColour(outPath, outFilename) {
+    const hex = await colourOf(outPath);
+    if (!hex) return outFilename;
+    const named = outFilename.replace(/\.jpg$/, `-${hex}.jpg`);
+    try { fs.renameSync(outPath, path.join(THUMB_DIR, named)); return named; } catch { return outFilename; }
+}
+
+/**
  * Extract a thumbnail frame from a video file using ffmpeg.
  * @param {string} videoPath  – Absolute path (or presigned URL) of the video
  * @param {string} prefix     – Filename prefix ('vod' or 'clip')
@@ -188,7 +225,7 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
             ff.on('close', (code) => {
                 clearTimeout(killTimer);
                 if (code === 0 && fs.existsSync(outPath)) {
-                    resolve(`/t/${outFilename}`);
+                    nameWithColour(outPath, outFilename).then((name) => resolve(`/t/${name}`), () => resolve(`/t/${outFilename}`));
                 } else {
                     resolve(null);
                 }
@@ -449,6 +486,9 @@ function extractFrameToFile(source, seekSeconds, outAbsPath) {
 
 module.exports = {
     generateFromVideo,
+    colourOf,
+    colourFromName,
+    nameWithColour,
     hasVideoStream,
     generateVodThumbnail,
     generateClipThumbnail,
