@@ -17,6 +17,7 @@ const seo = require('openvibe-shared/seo');
 const releaseLastmod = require('../sitemap-lastmod');
 const cache = require('openvibe-shared/cache-policy');
 const pages = require('./pages');
+const sourceVod = require('./source-vod');
 const readiness = require('../objects/readiness');
 
 const MAX_URLS = 45000;          // under the 50,000-URL sitemap limit
@@ -40,11 +41,11 @@ const abs = (u) => (!u ? null : (/^https?:\/\//i.test(u) ? u : `${config.publicU
  * use it; pages.watchIndexable and the sandbox check still apply to each row.
  */
 const WATCH_WHERE = {
-    vod: `COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0 AND is_public = 1 AND COALESCE(visibility, 'public') = 'public'
-          AND quarantined_at IS NULL AND COALESCE(health_status, 'ok') NOT IN ('corrupt', 'zero_byte', 'missing_file', 'needs_review')
-          AND file_path IS NOT NULL AND app_id != 'live' AND ${readiness.playableSql('vods.object_id')}`,
-    clip: `COALESCE(status, 'ready') = 'ready' AND COALESCE(is_public, 1) = 1 AND COALESCE(visibility, 'public') = 'public'
-          AND COALESCE(auto_generated, 0) = 0 AND COALESCE(file_path, '') != '' AND app_id != 'live' AND ${readiness.playableSql('clips.object_id')}`,
+    vod: `COALESCE(vods.is_recording, 0) = 0 AND COALESCE(vods.clips_only, 0) = 0 AND vods.is_public = 1 AND COALESCE(vods.visibility, 'public') = 'public'
+          AND vods.quarantined_at IS NULL AND COALESCE(vods.health_status, 'ok') NOT IN ('corrupt', 'zero_byte', 'missing_file', 'needs_review')
+          AND vods.file_path IS NOT NULL AND vods.app_id != 'live' AND ${readiness.playableSql('vods.object_id')}`,
+    clip: `COALESCE(clips.status, 'ready') = 'ready' AND COALESCE(clips.is_public, 1) = 1 AND COALESCE(clips.visibility, 'public') = 'public'
+          AND COALESCE(clips.auto_generated, 0) = 0 AND COALESCE(clips.file_path, '') != '' AND clips.app_id != 'live' AND ${readiness.playableSql('clips.object_id')}`,
 };
 
 async function sandboxApps() {
@@ -118,13 +119,20 @@ function llmsTxt() {
 async function indexableWatchRows(limit = MAX_URLS) {
     const sandbox = await sandboxApps();
     const out = [];
-    const base = 'id, app_id, visibility, is_public, title, description, ai_overview, thumbnail_url, file_path, duration_seconds, view_count, created_at';
+    const base = ['id', 'app_id', 'visibility', 'is_public', 'title', 'description', 'ai_overview', 'thumbnail_url', 'file_path', 'duration_seconds', 'view_count', 'created_at'];
+    // Qualify the clip columns: its LEFT JOIN adds the source VOD's own id, app_id and visibility.
+    const cols = (alias, extra = []) => [...base, ...extra].map((c) => `${alias}.${c}`).join(', ');
     for (const kind of ['vod', 'clip']) {
         const table = kind === 'vod' ? 'vods' : 'clips';
         // vods has no auto_generated column (only clips do); pages.watchIndexable reads it for clips.
-        const cols = kind === 'clip' ? `${base}, auto_generated` : base;
-        const rows = await db.all(`SELECT ${cols} FROM ${table} WHERE ${WATCH_WHERE[kind]} ORDER BY created_at DESC LIMIT ?`, [limit]);
+        // The clip page's source VOD comes from the same read, so rendering a list stays one query.
+        const select = kind === 'clip'
+            ? `${cols('clips', ['auto_generated'])}, ${sourceVod.COLUMNS}`
+            : cols('vods');
+        const from = kind === 'clip' ? 'clips LEFT JOIN vods sv ON sv.id = clips.vod_id' : table;
+        const rows = await db.all(`SELECT ${select} FROM ${from} WHERE ${WATCH_WHERE[kind]} ORDER BY ${table}.created_at DESC LIMIT ?`, [limit]);
         for (const row of rows) {
+            if (kind === 'clip') sourceVod.attach(row);
             if (sandbox.has(row.app_id) || !pages.watchIndexable(kind, row)) continue;
             out.push({ kind, row });
         }

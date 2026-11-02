@@ -50,6 +50,22 @@ function sourcePage(kind, record) {
     return watchPageUrl(kind, record.app_id, record.id);
 }
 
+/**
+ * The canonical watch page of an item when it lives on another site: an absolute https URL
+ * (OpenVibe.Video for Live's items, the owning app's own page otherwise). Null when this site
+ * IS the canonical home (the same host), or when the URL is not an absolute https URL: the
+ * caller then keeps serving what it serves today instead of redirecting nowhere.
+ */
+function canonicalPageUrl(kind, record) {
+    const url = sourcePage(kind, record);
+    if (!url) return null;
+    let target, self;
+    try { target = new URL(url); self = new URL(config.publicUrl); } catch { return null; }
+    if (target.protocol !== 'https:') return null;
+    if (target.hostname === self.hostname) return null;   // this site is the canonical home
+    return target.toString();
+}
+
 /** A clip the owning app's automation cut (AI moments), not a person. */
 function isAiClip(kind, record) {
     return kind === 'clip' && !!Number(record.auto_generated || 0);
@@ -64,6 +80,23 @@ function watchIndexable(kind, record) {
     const visibility = record.visibility || (record.is_public ? 'public' : 'private');
     const ownedByLive = (record.app_id || 'live') === 'live';
     return visibility === 'public' && !ownedByLive && !isAiClip(kind, record);
+}
+
+/**
+ * The source VOD link for an AI clip, or null. `record.source_vod` is read with the clip
+ * (server/public/source-vod.js): it must be a row /v/:id answers 200 for — not private, not a
+ * clips-only shell, finished and playable — and not missing. Without that evidence no link is shown:
+ * a private or unread VOD used to be linked anyway and answered 404.
+ */
+function sourceVodHref(record) {
+    const source = record && record.source_vod;
+    if (!source) return null;
+    const visibility = source.visibility || (Number(source.is_public) ? 'public' : 'private');
+    if (visibility === 'private') return null;
+    if (Number(source.clips_only || 0) || Number(source.is_recording || 0)) return null;
+    if (!source.playable) return null;
+    const id = source.id != null ? source.id : record.vod_id;
+    return id != null ? `${config.publicUrl}/v/${id}` : null;
 }
 
 /**
@@ -112,7 +145,7 @@ function renderWatchPage(kind, record, readiness = null) {
     const playable = !readiness || !!readiness.playable;
     // The owning app has the canonical page; unlisted items, AI clips and pages without a player never index.
     const robots = playable && watchIndexable(kind, record) ? 'index, follow' : 'noindex, follow';
-    const sourceVod = ai && record.vod_id ? `${config.publicUrl}/v/${record.vod_id}` : null;
+    const sourceVod = ai && record.vod_id ? sourceVodHref(record) : null;
     const mime = VIDEO_MIME[path.extname(record.file_path || '').toLowerCase()] || 'video/mp4';
     const uploadDate = isoDate(record.created_at);
     const duration = isoDuration(record.duration_seconds);
@@ -211,4 +244,4 @@ function renderWatchPage(kind, record, readiness = null) {
     });
 }
 
-module.exports = { wantsHtmlPage, renderWatchPage, sourcePage, watchIndexable, isAiClip };
+module.exports = { wantsHtmlPage, renderWatchPage, sourcePage, canonicalPageUrl, watchIndexable, isAiClip };
