@@ -246,7 +246,8 @@ const http = require('http');
         const thumbs = require('../server/thumbnails/thumbnail-service');
         let gens = 0;
         thumbs.generateVodThumbnail = async (id) => { gens++; await sleep(150); await db.run('UPDATE vods SET thumbnail_url = ? WHERE id = ?', [`/t/vod-${id}-1.jpg`, id]); return `/t/vod-${id}-1.jpg`; };
-        fs.writeFileSync(path.join(process.env.VOD_PATH, 'rec-1.webm'), 'not really a video');
+        // A stand-in recording of a real size: under 1 KB a file has no picture to take and the job fails for good.
+        fs.writeFileSync(path.join(process.env.VOD_PATH, 'rec-1.webm'), Buffer.alloc(4096, 'not really a video '));
         await conn.prepare("INSERT INTO vods (id, app_id, user_id, title, file_path, is_public, duration_seconds) OVERRIDING SYSTEM VALUE VALUES (1, 'live', 5, 'A', ?, 1, 60) RETURNING id").run(path.join(process.env.VOD_PATH, 'rec-1.webm'));
         await conn.prepare("INSERT INTO vods (id, app_id, user_id, title, file_path, is_public, duration_seconds) OVERRIDING SYSTEM VALUE VALUES (2, 'live', 5, 'B', ?, 1, 60) RETURNING id").run(path.join(process.env.VOD_PATH, 'gone.webm'));
         await require('../server/objects/model').sync('vod', 1);
