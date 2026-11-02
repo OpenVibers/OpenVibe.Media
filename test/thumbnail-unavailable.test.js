@@ -54,7 +54,8 @@ const express = require('express');
             assert.deepStrictEqual([job.status, job.error_code, job.attempts], ['failed', 'media_unavailable', 1], `vod ${id}`);
             assert.ok(Date.now() - t0 < 5000, 'refused before any ffmpeg run');
         }
-        // An audio-only recording (a browser broadcast with no camera; VODs 5718 and 5721 on 2026-10-12): no_video, 404.
+        // An audio-only recording (a browser broadcast with no camera; VODs 5718 and 5721 on 2026-10-12) has no frame,
+        // but it is not a failure any more: the job makes the streamer's avatar card and marks the row audio_only (R4).
         if (require('child_process').spawnSync('ffmpeg', ['-version']).status === 0) {
             const audio = path.join(V, 'audio-only.webm');
             const mk = require('child_process').spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-c:a', 'libopus', audio]);
@@ -62,10 +63,11 @@ const express = require('express');
             const id = Number((await db.run(`INSERT INTO vods (app_id, title, file_path, file_size, is_public, visibility, health_status)
                 VALUES ('live', 't', ?, ?, 1, 'public', 'ok') RETURNING id`, [audio, fs.statSync(audio).size])).lastInsertRowid);
             const r = await post(`/api/v1/live/thumbnails/vod/${id}`);
-            assert.strictEqual(r.status, 404, JSON.stringify(r.body));
-            assert.strictEqual(r.body.code, 'media.no_video');
+            assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+            assert.match(r.body.url, new RegExp(`^/t/vod-${id}-\\d+\\.jpg$`), 'the avatar card, not a 404');
             const job = await queue.get(r.body.job_id);
-            assert.deepStrictEqual([job.status, job.error_code, job.attempts], ['failed', 'no_video', 1]);
+            assert.deepStrictEqual([job.status, job.error_code, job.attempts], ['succeeded', null, 1]);
+            assert.strictEqual((await db.get('SELECT audio_only FROM vods WHERE id = ?', [id])).audio_only, true);
         } else console.log('audio-only case skipped (ffmpeg not found)');
         // A clip whose cut failed (clips 495-498 of VOD 6010, 2026-10-27): 404 at once, and no job is made for it.
         const jobsBefore = (await db.all('SELECT COUNT(*) AS n FROM media_jobs'))[0].n;
@@ -101,7 +103,7 @@ const express = require('express');
         server.close();
         await db.close();
         fs.rmSync(tmp, { recursive: true, force: true });
-        console.log('✅ thumbnail.regenerate on an empty or missing recording, a clip never cut or a damaged recording under review: media_unavailable; on an audio-only one: no_video; 404 from the v1 route');
+        console.log('✅ thumbnail.regenerate on an empty or missing recording, a clip never cut or a damaged recording under review: media_unavailable; on an audio-only one: an avatar card and 200');
         process.exit(0);
     })().catch((err) => { console.error(err); server.close(); process.exit(1); });
 })().catch((err) => { console.error(err); process.exit(1); });

@@ -209,13 +209,13 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
 // produced the identical 1-second frame and the card looked frozen for the whole
 // broadcast. An in-progress recording therefore grabs the live edge instead.
 async function generateVodThumbnail(vodId, filePath, opts = {}) {
-    const isRecording = opts.liveEdge != null
-        ? !!opts.liveEdge
-        : !!(await db.get('SELECT is_recording FROM vods WHERE id = ?', [vodId]))?.is_recording;
+    const row = await db.get('SELECT is_recording, audio_only, thumbnail_url, title, user_id, object_id FROM vods WHERE id = ?', [vodId]);
+    if (opts.audioOnly || (row && row.audio_only)) return await generateAudioThumbnail('vod', vodId, row);
+    const isRecording = opts.liveEdge != null ? !!opts.liveEdge : !!(row && row.is_recording);
     const thumbUrl = await generateFromVideo(filePath, 'vod', vodId,
         isRecording ? { liveEdge: true } : { seekPercent: 10 });
     if (thumbUrl) {
-        const old = (await db.get('SELECT thumbnail_url FROM vods WHERE id = ?', [vodId]))?.thumbnail_url;
+        const old = row && row.thumbnail_url;
         // The row and its objects (the VOD's, and the thumbnail object that follows the picture) together.
         await db.withObject('vod', vodId, async () => await db.run('UPDATE vods SET thumbnail_url = ? WHERE id = ?', [thumbUrl, vodId]));
         _removeOldThumb(old, thumbUrl);   // the previous picture goes once nothing names it
@@ -223,12 +223,33 @@ async function generateVodThumbnail(vodId, filePath, opts = {}) {
     return thumbUrl;
 }
 
+// An audio-only recording has no frame to take (Media#240): its picture is the streamer's avatar card, made once and
+// stored like any thumbnail. The row is marked audio_only, so no page asks again and the player knows there is no video.
+async function generateAudioThumbnail(kind, id, row = null) {
+    const table = kind === 'vod' ? 'vods' : 'clips';
+    const r = row || await db.get(`SELECT thumbnail_url, title, user_id, channel_user_id, object_id, audio_only FROM ${table} WHERE id = ?`, [id]);
+    if (!r) return null;
+    const thumbUrl = await require('./audio-card').writeAudioCard({
+        kind, id, title: r.title,
+        userId: kind === 'clip' ? (r.channel_user_id != null ? r.channel_user_id : r.user_id) : r.user_id,
+        objectId: r.object_id || null,
+    });
+    if (!thumbUrl) return null;
+    const old = r.thumbnail_url;
+    await db.withObject(kind, id, async () => await db.run(`UPDATE ${table} SET thumbnail_url = ?, audio_only = true WHERE id = ?`, [thumbUrl, id]));
+    _removeOldThumb(old, thumbUrl);
+    return thumbUrl;
+}
+
 // ── Generate Clip Thumbnail (first frames) ───────────────────
 // opts.seekSeconds: where the clip starts in filePath (a virtual clip's picture comes from its VOD).
+// opts.audioOnly: the clip has no picture (an audio-only recording's clip); the avatar card is its picture.
 async function generateClipThumbnail(clipId, filePath, opts = {}) {
+    const row = await db.get('SELECT audio_only, thumbnail_url, title, user_id, channel_user_id, object_id FROM clips WHERE id = ?', [clipId]);
+    if (opts.audioOnly || (row && row.audio_only)) return await generateAudioThumbnail('clip', clipId, row);
     const thumbUrl = await generateFromVideo(filePath, 'clip', clipId, { seekSeconds: opts.seekSeconds || 0.5 });
     if (thumbUrl) {
-        const old = (await db.get('SELECT thumbnail_url FROM clips WHERE id = ?', [clipId]))?.thumbnail_url;
+        const old = row && row.thumbnail_url;
         await db.withObject('clip', clipId, async () => await db.run('UPDATE clips SET thumbnail_url = ? WHERE id = ?', [thumbUrl, clipId]));
         _removeOldThumb(old, thumbUrl);
     }
@@ -431,6 +452,7 @@ module.exports = {
     hasVideoStream,
     generateVodThumbnail,
     generateClipThumbnail,
+    generateAudioThumbnail,
     saveLiveThumbnail,
     serveThumbnail,
     cleanupOldThumbnails,

@@ -65,6 +65,8 @@ async function vodPublic(vod, { readiness = false, hls } = {}) {
         // directly; relative paths resolved against the app's origin and broke.
         playback_url: `${config.publicUrl}/v/${vod.id}`,
         thumbnail_url: _absUrl(vod.thumbnail_url),
+        // No picture in the source (an audio-only browser broadcast, Media#240): one probe at finalize says so once.
+        audio_only: !!vod.audio_only,
         storage_provider: vod.storage_provider || 'local',
         visibility: vod.visibility || 'public',
         // Kept alongside visibility — inherited SPA surfaces (manager badges,
@@ -370,11 +372,14 @@ async function _doFinalize(vodId, opts) {
         }
     }
 
+    // The streams ffprobe saw: an audio-only recording has no video stream and gets an avatar card, not a frame.
+    const audioOnly = !!(probe.ok && Array.isArray(probe.streams) && probe.streams.length > 0
+        && !probe.streams.some((s) => s.codec_type === 'video'));
     // Thumbnail BEFORE the ready commit, so the vod.ready payload has it (failure is non-fatal).
     // The row is still is_recording = 1 here, so ask for the 10%-in frame, not the live edge.
     try {
         const thumbService = require('../thumbnails/thumbnail-service');
-        await thumbService.generateVodThumbnail(vodId, filePath, { liveEdge: false });
+        await thumbService.generateVodThumbnail(vodId, filePath, { liveEdge: false, audioOnly });
     } catch (err) {
         console.warn(`[VOD] Thumbnail generation failed for vod ${vodId}:`, err.message);
     }
@@ -386,8 +391,8 @@ async function _doFinalize(vodId, opts) {
     // The ready transition, the VOD's object and the vod.ready event commit together.
     // A failed commit throws, as the plain UPDATE did before.
     await announce(vod.app_id, 'vod.ready', {
-        change: async () => await objects().withObject('vod', vodId, async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
-            [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), vodId])),
+        change: async () => await objects().withObject('vod', vodId, async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, file_size = ?, probe_duration_seconds = ?, probe_format_json = ?, health_status = ?, health_issues_json = ?, audio_only = ?${lift ? ", quarantined_at = NULL, is_public = CASE WHEN COALESCE(visibility, 'public') = 'public' THEN 1 ELSE 0 END" : ''} WHERE id = ?`,
+            [stored, durationSource, stat.size, measured, probeFormatJson, 'ok', JSON.stringify(issues), audioOnly ? 1 : 0, vodId])),
         payload: async () => await vodPublic(await db.getVodById(vodId), { hls: false }),
     });
     const ready = await db.getVodById(vodId);
