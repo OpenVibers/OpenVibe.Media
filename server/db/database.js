@@ -417,13 +417,15 @@ async function repairVodDuration(vodId, duration, fileSize, source = 'probe') {
 }
 
 // VODs the periodic health job should scan: finished (not recording), and either never
-// scanned or last scanned longer ago than `staleDays`. Never-scanned + oldest-scanned first.
+// scanned, last scanned longer ago than `staleDays`, or rated ok while under 1 KB (too small to hold a frame: the
+// scanner calls it empty now). Never-scanned, then those tiny ones, then oldest-scanned first.
 async function getVodsNeedingHealthScan({ staleDays = 30, limit = 3 } = {}) {
     return await all(`SELECT * FROM vods
         WHERE COALESCE(is_recording, 0) = 0
           AND (health_status IS NULL OR health_status NOT IN ('corrupt','zero_byte','missing_file'))
-          AND (last_health_scan_at IS NULL OR last_health_scan_at <= datetime('now', ?))
-        ORDER BY (last_health_scan_at IS NULL) DESC, last_health_scan_at ASC
+          AND (last_health_scan_at IS NULL OR last_health_scan_at <= datetime('now', ?)
+               OR (COALESCE(file_size, 0) BETWEEN 1 AND 1023 AND COALESCE(health_status, 'ok') = 'ok'))
+        ORDER BY (last_health_scan_at IS NULL) DESC, (COALESCE(file_size, 0) BETWEEN 1 AND 1023) DESC, last_health_scan_at ASC
         LIMIT ?`, [`-${Math.max(1, staleDays)} days`, limit]);
 }
 
