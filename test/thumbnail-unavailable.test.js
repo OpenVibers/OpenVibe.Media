@@ -31,6 +31,8 @@ const express = require('express');
     const marked = await insVod(path.join(V, 'zero-marked.mp4'), 'zero_byte');          // as on production
     const unscanned = await insVod(path.join(V, 'zero-unscanned.mp4'), 'unknown');      // empty, not scanned yet
     const missing = await insVod(path.join(V, 'gone.mp4'), 'ok');                        // no file, not offloaded
+    fs.writeFileSync(path.join(V, 'tiny.mp4'), Buffer.alloc(526, 1));
+    const tiny = await insVod(path.join(V, 'tiny.mp4'), 'ok');                           // 526 bytes, health ok (VOD 1803)
 
     const app = express();
     app.use(express.json());
@@ -45,7 +47,7 @@ const express = require('express');
 
     (async () => {
         await new Promise((r) => (server.listening ? r() : server.once('listening', r)));
-        for (const id of [marked, unscanned, missing]) {
+        for (const id of [marked, unscanned, missing, tiny]) {
             const t0 = Date.now();
             const r = await post(`/api/v1/live/thumbnails/vod/${id}`);
             assert.strictEqual(r.status, 404, `vod ${id}: ${JSON.stringify(r.body)}`);
