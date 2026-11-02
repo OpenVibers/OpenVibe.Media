@@ -102,6 +102,31 @@ const express = require('express');
         } else console.log('damaged-recording case skipped (ffmpeg not found)');
         assert.ok(/empty \(0 bytes\)/.test((await queue.list('live', { type: 'thumbnail.regenerate' })).jobs.find(j => JSON.parse(j.params).id === marked).error));
         assert.strictEqual((await db.all("SELECT COUNT(*) AS n FROM media_jobs WHERE error_code = 'generate_failed'"))[0].n, 0, 'none of them is a generate failure any more');
+        // VOD 1803 for real (2026-11-02): 526 bytes, but on R2, so no local file to measure. The size the row recorded is
+        // enough: media_unavailable (404) before any download or ffmpeg run.
+        const remoteTiny = Number((await db.run(`INSERT INTO vods (app_id, title, file_path, file_size, is_public, visibility, health_status, storage_provider, storage_key)
+            VALUES ('live', 't', ?, 526, 1, 'public', 'ok', 'r2', 'vods/tiny-remote.webm') RETURNING id`, [path.join(V, 'offloaded-away.webm')])).lastInsertRowid);
+        const rt = await post(`/api/v1/live/thumbnails/vod/${remoteTiny}`);
+        assert.strictEqual(rt.status, 404, JSON.stringify(rt.body));
+        assert.match((await queue.get(rt.body.job_id)).error, /too small to hold a picture \(526 bytes\)/);
+        // VOD 6030 (2026-11-02: 907 KB on B2, health ok, 47 failed jobs in two days): after three failed draws this week
+        // the job stops trying and answers unavailable (404), which its callers keep for a long while.
+        fs.writeFileSync(path.join(V, 'stubborn.webm'), Buffer.alloc(4096, 7));
+        const stubborn = Number((await db.run(`INSERT INTO vods (app_id, title, file_path, file_size, is_public, visibility, health_status)
+            VALUES ('live', 't', ?, 4096, 1, 'public', 'ok') RETURNING id`, [path.join(V, 'stubborn.webm')])).lastInsertRowid);
+        const { failedBefore, GIVE_UP_AFTER } = require('../server/jobs/thumbnail');
+        for (let i = 0; i < GIVE_UP_AFTER; i++) {
+            await db.run(`INSERT INTO media_jobs (id, app_id, job_type, status, params, error_code, error, attempts, max_attempts)
+                VALUES (?, 'live', 'thumbnail.regenerate', 'failed', ?, 'generate_failed', 'Failed to generate thumbnail', 1, 1)`, [`mjob_test_stubborn_${i}`, JSON.stringify({ kind: 'vod', id: stubborn })]);
+        }
+        assert.strictEqual(await failedBefore('live', 'vod', stubborn), GIVE_UP_AFTER);
+        assert.strictEqual(await failedBefore('live', 'vod', remoteTiny), 0, 'counted per recording');
+        const t1 = Date.now();
+        const gaveUp = await post(`/api/v1/live/thumbnails/vod/${stubborn}`);
+        assert.strictEqual(gaveUp.status, 404, JSON.stringify(gaveUp.body));
+        const gaveUpJob = await queue.get(gaveUp.body.job_id);
+        assert.deepStrictEqual([gaveUpJob.error_code, /No frame could be drawn from this vod \(3 tries this week\)/.test(gaveUpJob.error)], ['media_unavailable', true]);
+        assert.ok(Date.now() - t1 < 5000, 'refused before any ffmpeg run');
         server.close();
         await db.close();
         fs.rmSync(tmp, { recursive: true, force: true });
