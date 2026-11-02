@@ -197,7 +197,8 @@ function defaultFooterLinks() {
  * the no-JavaScript nav and the shared footer; `history` and `footer` become the navbar init options
  * and the server-rendered footer. The site's app icon, palette and Open Graph video tags ride in
  * through the shell's `head`. `summary` is the page's AI summary (openvibe-shared/seo pageSummary): a
- * string, or { summary, url, facts: [[label, value]], updated }; the url defaults to the canonical.
+ * string, or { summary, url, facts: [[label, value]], updated, name }; the url defaults to the canonical, and name (the
+ * WebPage's name) to the title: give the page's visible heading when the title differs, as the release check reads it.
  */
 function oneGraph(nodes) {
     if (!nodes || ![].concat(nodes).length) return undefined;
@@ -206,7 +207,7 @@ function oneGraph(nodes) {
 
 function page({ seo, css = '', body, history, footer, summary, agentLayer = false, kit = false }) {
     const sum = summary == null ? null : typeof summary === 'object' ? summary : { summary };
-    const summaryData = sum ? seoLib.pageSummary({ title: seo.title, summary: sum.summary, facts: sum.facts, url: sum.url || seo.canonical, updated: sum.updated }) : null;
+    const summaryData = sum ? seoLib.pageSummary({ title: seo.title, summary: sum.summary, facts: sum.facts, url: sum.url || seo.canonical, updated: sum.updated, ...(sum.name ? { title: sum.name } : {}) }) : null;
     const html = shell.page({
         name: SITE_NAME,
         lang: 'en',
