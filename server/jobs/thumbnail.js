@@ -73,6 +73,9 @@ async function run(job) {
         let size = 0;
         try { size = require('fs').statSync(source.value).size; } catch { size = 0; }
         if (!size) throw new JobError('media_unavailable', 'The media file is empty (0 bytes)', { permanent: true, status: 404 });
+        // A few hundred bytes hold a container header and no frame (VOD 1803: 526 bytes for "51 seconds", health "ok"):
+        // ffmpeg fails every time, and a retryable failure had every page that shows it ask again (2026-11-02).
+        if (size < TOO_SMALL_FOR_A_FRAME) throw new JobError('media_unavailable', `The media file is too small to hold a picture (${size} bytes)`, { permanent: true, status: 404 });
     }
     // An audio-only source (a browser broadcast with no camera, Media#240) has no frame to take. Its picture is the
     // streamer's avatar card, made once here and stored like any thumbnail, and the row is marked audio_only. This used
@@ -95,6 +98,9 @@ async function run(job) {
     if (!url) throw new JobError('generate_failed', 'Failed to generate thumbnail');
     return { url, kind, id };
 }
+
+// Under 1 KB is a container header at most, with no frame in it: no picture to take.
+const TOO_SMALL_FOR_A_FRAME = 1024;
 
 module.exports = {
     spec: { lane: 'light', maxAttempts: 2, timeoutMs: 2 * 60 * 1000, needsObject: false, backoffS: () => 20, validate, run },
