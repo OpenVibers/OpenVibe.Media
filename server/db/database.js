@@ -471,7 +471,7 @@ async function getClipById(id, appId = null) {
     return await get(`SELECT * FROM clips WHERE id = ?${clause}`, params);
 }
 
-function _clipConds(appId, { vod_id = null, stream_id = null, user_id = null, channel_user_id = null, include_private = false, hide_self = false, auto_generated = null, ready_only = false, since = null } = {}) {
+function _clipConds(appId, { vod_id = null, stream_id = null, user_id = null, channel_user_id = null, include_private = false, hide_self = false, auto_generated = null, ready_only = false, since = null, before = null, unvisited = false } = {}) {
     const conds = ['app_id = ?'];
     const params = [appId];
     if (!include_private) conds.push('is_public = 1');
@@ -481,6 +481,12 @@ function _clipConds(appId, { vod_id = null, stream_id = null, user_id = null, ch
     if (ready_only) conds.push("COALESCE(status, 'ready') = 'ready'");
     const after = sinceParam(since);
     if (after) { conds.push('datetime(created_at) >= datetime(?)'); params.push(after); }
+    // Cut before a time (Live's stale auto-clip sweep: "older than 30 days").
+    const until = sinceParam(before);
+    if (until) { conds.push('datetime(created_at) < datetime(?)'); params.push(until); }
+    // No person has ever visited it: content_visits counts visitors (never names one), so a play counter that crawlers
+    // move is not a person. The route lets only the owning app ask.
+    if (unvisited) conds.push("NOT EXISTS (SELECT 1 FROM content_visits v WHERE v.content_type = 'clip' AND v.content_id = clips.id)");
     if (vod_id != null) { conds.push('vod_id = ?'); params.push(vod_id); }
     if (stream_id != null) { conds.push('stream_id = ?'); params.push(stream_id); }
     if (user_id != null) { conds.push('user_id = ?'); params.push(user_id); }
