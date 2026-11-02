@@ -27,6 +27,7 @@ const { finalizeVod, vodPublic } = require('./finalize');
 const { tenantAuth, tenantCors } = require('../auth');
 const cache = require('openvibe-shared/cache-policy');
 const objects = require('../objects/model');
+const labels = require('../labels');
 
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
@@ -369,10 +370,14 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
         const vod = await _getVodForWrite(req, res);
         if (!vod) return;
         const { title, description, visibility } = req.body || {};
+        // L1: the creator sets the labels (a suggestion they confirm leaves `suggested`); labels never hide the VOD.
+        const nextLabels = req.body && req.body.labels !== undefined ? labels.parseLabels(req.body.labels) : undefined;
+        if (nextLabels === null) return res.status(400).json({ error: 'labels must be a list of known labels' });
         const updates = [];
         const params = [];
         if (title !== undefined) { updates.push('title = ?'); params.push(String(title).slice(0, 300)); }
         if (description !== undefined) { updates.push('description = ?'); params.push(String(description)); }
+        if (nextLabels !== undefined) { updates.push('content_labels = ?'); params.push(JSON.stringify(labels.confirmed(vod.content_labels, nextLabels))); }
         // Title, description and visibility, and the object, in one transaction.
         await objects.withObject('vod', vod.id, async () => {
             if (updates.length) {
