@@ -36,5 +36,6 @@ queue.register('vod.duration.reconcile', require('./duration-reconcile').spec);
 queue.register('object.hash', require('./content-hash').spec);
 queue.register('storage.orphans.scan', require('./storage-orphans').spec);
 queue.register('storage.move.cleanup', require('./move-cleanup').spec);
+queue.register('storage.recordings.cleanup', require('./recording-cleanup').spec);
 
 module.exports = { names: () => queue.typeNames() };
