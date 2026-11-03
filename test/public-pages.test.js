@@ -77,6 +77,11 @@ const http = require('http');
     assert.ok(other.includes('<meta name="robots" content="index, follow">'));
     const unlisted = pages.renderWatchPage('clip', { ...vod, id: 8, app_id: 'games', visibility: 'unlisted' });
     assert.ok(unlisted.includes('content="noindex, follow"'), 'unlisted never indexes');
+    // An OpenVibe.Video upload (app media-hub) has its own page there (/u/vup_…): Media's never competes with it (SEO 11-03).
+    const upload = pages.renderWatchPage('vod', { ...vod, id: 9, app_id: 'media-hub', title: 'SAGE WHEEL' });
+    assert.ok(upload.includes('<meta name="robots" content="noindex, follow">'), 'an upload is not indexed on Media');
+    assert.strictEqual(pages.watchIndexable('vod', { app_id: 'media-hub', visibility: 'public' }), false);
+    assert.strictEqual(pages.watchIndexable('vod', { app_id: 'games', visibility: 'public' }), true, 'another app\'s public item still is');
     // The AI summary (openvibe-shared/seo pageSummary) on public watch pages: description, canonical, facts.
     assert.ok(html.includes('<meta name="ai-summary" content="We built a thing &amp; it worked.">'), 'the watch page carries the AI summary');
     assert.ok(html.includes('<li>Duration: 1:02:05</li>') && html.includes('<li>Views: 1,234</li>'), 'with its facts');
