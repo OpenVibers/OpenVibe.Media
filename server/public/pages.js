@@ -71,15 +71,20 @@ function isAiClip(kind, record) {
     return kind === 'clip' && !!Number(record.auto_generated || 0);
 }
 
+// Apps whose items have their own watch page on another site: Live's recordings and clips (OpenVibe.Video's /v and
+// /c), and OpenVibe.Video's uploads (app media-hub: /u/vup_…, an id only MediaHub knows). Media's page for one of them
+// never competes with it in search (SEO audit 11-03: upload 6155 was indexable here and on openvibe.video).
+const PAGES_ELSEWHERE = new Set(['live', 'media-hub']);
+
 /**
  * May search engines index this watch page? Only when it is public, Media is its canonical home (the
- * owning app is not Live, whose items are canonical on OpenVibe.Video), and a person made it: AI clips
- * are noindex, as on Live. The sitemap lists exactly these pages (server/public/crawl.js).
+ * owning app has no watch page of its own: PAGES_ELSEWHERE), and a person made it: AI clips are noindex,
+ * as on Live. The sitemap lists exactly these pages (server/public/crawl.js).
  */
 function watchIndexable(kind, record) {
     const visibility = record.visibility || (record.is_public ? 'public' : 'private');
-    const ownedByLive = (record.app_id || 'live') === 'live';
-    return visibility === 'public' && !ownedByLive && !isAiClip(kind, record);
+    const pageElsewhere = PAGES_ELSEWHERE.has(record.app_id || 'live');
+    return visibility === 'public' && !pageElsewhere && !isAiClip(kind, record);
 }
 
 /**
