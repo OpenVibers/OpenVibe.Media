@@ -123,6 +123,18 @@ function _isPrivate(row) {
     return (row.visibility || (row.is_public ? 'public' : 'private')) === 'private';
 }
 
+/** A recording's visibility as stored ('public' | 'unlisted' | 'private'; legacy rows by is_public). */
+function _sourceVisibility(row) {
+    return VALID_VIS_ORDER[row && row.visibility] != null ? row.visibility : (row && row.is_public ? 'public' : 'private');
+}
+const VALID_VIS_ORDER = { private: 0, unlisted: 1, public: 2 };
+/** The lower of what was asked and what the source allows. */
+function capVisibility(wanted, source) {
+    const w = VALID_VIS_ORDER[wanted] != null ? wanted : 'public';
+    const c = VALID_VIS_ORDER[source] != null ? source : 'private';
+    return VALID_VIS_ORDER[w] <= VALID_VIS_ORDER[c] ? w : c;
+}
+
 async function _getClipScoped(req, res) {
     const id = parseInt(req.params.id, 10);
     if (!Number.isFinite(id)) { res.status(404).json({ error: 'Clip not found' }); return null; }
@@ -250,7 +262,10 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
         }
 
         const userId = body.user_id != null ? body.user_id : (req.userId ?? null);
-        const visibility = VALID_VIS.has(body.visibility) ? body.visibility : 'public';
+        // A new clip is never more visible than its recording (item 151, C17): a private recording's clip is private
+        // and an unlisted one's at most unlisted, whatever was asked (the default, public, included). Its owner can still
+        // open it later with PUT, on purpose.
+        const visibility = capVisibility(VALID_VIS.has(body.visibility) ? body.visibility : 'public', _sourceVisibility(vod));
         // The app's own automation (an AI auto-clip) says so with auto_generated; a call acting for
         // one of its users is a person's clip whatever it claims. The flag and the description used
         // to be dropped here, so every auto-clip was stored as if a person had made it.
@@ -661,3 +676,4 @@ router.delete('/:id', tenantAuth({ verb: 'delete' }), async (req, res) => {
 
 module.exports = router;
 module.exports.clipPublic = clipPublic;
+module.exports.capVisibility = capVisibility;
