@@ -3,6 +3,7 @@
 // Every field is something this host really serves: the public media index and the watch pages Media is the
 // canonical home of, the Media API under /api/v1, llms.txt, llms-full.txt and the sitemap. No OpenAPI document or
 // MCP endpoint is published here, so none is named.
+// 11-03 (SEO-3): this site serves /openapi.json now (the contracts' document for it), so it is named below.
 module.exports = {
     id: 'media',
     name: 'OpenVibe.Media',
@@ -10,6 +11,7 @@ module.exports = {
     home: 'https://openvibe.media',
     site: 'openvibe.media',
     api: '/api/v1',
+    openapi: '/openapi.json',
     policy: {
         auth: ['none', 'bearer', 'Network OIDC'],
         rateLimit: 'The public pages and playable bytes are not limited per address; the API answers a tenant token (or a signed-in person) and is bounded by the project\'s quotas, published at /limits.json',
