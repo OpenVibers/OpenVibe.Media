@@ -284,6 +284,7 @@ const ready = (async () => {
                 || req.accepts(['html', 'text/markdown']) === 'text/markdown') return agentRouter(req, res, next);
             return next();
         });
+        app.use(require('./link-header').linkHeader());   // SEO-24: the head's twin and llms.txt links, as a Link: header
         app.use(publicRoutes);   // /v /c /p /t /f, and the media index at /
     }
     app.use(require('./not-found').notFound);   // nothing matched: 404 with Media's CSP (Cloudflare's beacon allowed)
