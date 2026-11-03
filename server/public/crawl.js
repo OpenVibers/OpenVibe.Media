@@ -98,9 +98,8 @@ function llmsTxt() {
                 { title: 'Full text', url: `${base}/llms-full.txt`, note: 'those same pages with their full text, for language models' },
             ] },
             { title: 'URLs', links: [
-                { title: 'VOD watch page', url: `${base}/v/{id}`, note: 'a page for browsers; ?raw=1 returns the video bytes' },
-                { title: 'Clip watch page', url: `${base}/c/{id}`, note: 'as above, for clips' },
-                { title: 'VOD transcript', url: `${base}/v/{id}/transcript.json`, note: 'transcript and AI overview of a public VOD (JSON)' },
+                // Real pages, not templates (SEO-34: /v/{id} and /c/{id} as links answered 404); the shapes are in the notes.
+                { title: 'Browse public recordings and clips', url: `${base}/browse`, note: `each recording's page is ${base}/v/<id> (?raw=1 returns the video bytes), each clip's ${base}/c/<id>, and a public recording's transcript and AI overview ${base}/v/<id>/transcript.json` },
             ] },
             { title: 'The network', links: [
                 { title: 'OpenVibe.Live', url: 'https://openvibe.live/', note: 'live streams, channels, VOD and clip pages' },
