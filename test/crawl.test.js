@@ -125,6 +125,8 @@ const express = require('express');
         assert.ok(r.body.includes('](https://media.test/browse.md)'), 'a page link is not its twin');
         assert.ok(r.body.includes('\n## Optional\n'), 'no ## Optional section');
         assert.ok(!/\bfree\b/i.test(r.body), 'no cost claims');
+        // 11-03: recordings and clips are watched on OpenVibe.Video, and the map says so (it named Live's pages).
+        assert.ok(r.body.includes('https://openvibe.video/v/<id>') && !/OpenVibe\.Live, whose \/vod/.test(r.body), 'the canonical pages are on OpenVibe.Video');
         console.log('✅ /llms.txt maps the site');
 
         // ── llms-full.txt ──
@@ -135,6 +137,9 @@ const express = require('express');
         assert.ok(r.body.includes('### Games public') && r.body.includes('URL: https://media.test/v/1'), 'the full text of each indexable VOD page');
         assert.ok(r.body.includes('### Games clip') && r.body.includes('URL: https://media.test/c/11'), 'and each indexable clip page');
         assert.ok(r.body.includes('### Media index') && r.body.includes('URL: https://media.test/\n'), 'the index itself');
+        // SEO-33 (11-03): what Media is, in full, whatever pages it is the canonical home of (it was 368 characters).
+        assert.ok(r.body.includes('### What OpenVibe.Media is') && /stores and serves the network's recorded live streams/.test(r.body));
+        assert.ok(r.body.includes('/v/<id>/transcript.json') && !/\bfree\b/i.test(r.body.split('### What OpenVibe.Media is')[1].split('\n### ')[0]));
         for (const never of ['/v/2', '/v/3', '/v/4', '/v/5', '/v/6', '/v/7', '/v/8', '/c/12', '/c/13', '/c/14', '/c/15']) {
             assert.ok(!r.body.includes(`URL: https://media.test${never}`), `${never} is not in llms-full`);
         }

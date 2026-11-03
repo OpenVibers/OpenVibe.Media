@@ -81,6 +81,14 @@ function robotsTxt() {
     }) + `# Agent manifest: ${config.publicUrl}/.well-known/agent.json\n`;
 }
 
+// The facts /llms-full.txt carries about the service itself (SEO-33).
+const LLMS_ABOUT = [
+    'OpenVibe.Media is the media service of the OpenVibe network. It stores and serves the network\'s recorded live streams (VODs), clips, thumbnails, screenshots and uploaded files, and it cuts clips and records streams for the apps that ask it to, OpenVibe.Live and OpenRestream among them.',
+    'Recordings and clips are watched on OpenVibe.Video: https://openvibe.video/v/<id> for a recording and https://openvibe.video/c/<id> for a clip are their canonical pages, with chapters, captions, chat replay and the streamer\'s channel. Media\'s own /v/<id> and /c/<id> pages are noindex and name OpenVibe.Video as canonical. Asked without Accept: text/html, https://openvibe.media/v/<id> answers the video bytes (?raw=1 does the same), and a public recording\'s transcript and AI overview are at https://openvibe.media/v/<id>/transcript.json.',
+    'Clips marked "AI clip" were picked and cut automatically from a stream, not made by a person, and are credited to no one. Private and unlisted media is never listed in the index, the sitemap or this file.',
+    'Thumbnails are served from https://openvibe.media/t/<file>. The public reads above need no token; an app stores, records and cuts media through Media\'s API with its own token.',
+].join('\n\n');
+
 function llmsTxt() {
     const base = config.publicUrl;
     return seo.llmsTxt({
@@ -91,7 +99,8 @@ function llmsTxt() {
         base,
         summary: LLMS_SUMMARY,
         details: [
-            'Most media here belongs to OpenVibe.Live, whose /vod/:id and /clip/:id pages are the canonical pages for it (chat, transcript, the streamer\'s channel); the watch pages here point there.',
+            // 11-03: recordings and clips are watched on OpenVibe.Video now (Live's /vod and /clip redirect there).
+            'Recordings and clips are watched on OpenVibe.Video: https://openvibe.video/v/<id> and https://openvibe.video/c/<id> are their canonical pages (chapters, captions, chat replay, the streamer\'s channel). Media\'s own /v/<id> and /c/<id> pages are noindex and name those as canonical; asked without Accept: text/html, /v/<id> answers the video bytes. Live\'s /vod/<id> and /clip/<id> redirect to OpenVibe.Video.',
             'Clips marked "AI clip" were picked and cut automatically from a stream, not made by a person.',
             'Private and unlisted media is never listed here or in the sitemap.',
         ].join(' '),
@@ -106,9 +115,10 @@ function llmsTxt() {
         ],
         // llmstxt.org's "## Optional": what an agent may skip when it needs a shorter context.
         optional: [
-            { title: 'Sitemap', url: `${base}/sitemap.xml`, note: 'the watch pages Media is the canonical home of' },
-            { title: 'Full text', url: `${base}/llms-full.txt`, note: 'those same pages with their full text, for language models' },
-            { title: 'OpenVibe.Live', url: 'https://openvibe.live/', note: 'live streams, channels, VOD and clip pages' },
+            { title: 'Sitemap', url: `${base}/sitemap.xml`, note: 'the media index; the watch pages are in OpenVibe.Video\'s sitemap' },
+            { title: 'Full text', url: `${base}/llms-full.txt`, note: 'what Media is and serves, in full, for language models' },
+            { title: 'OpenVibe.Video', url: 'https://openvibe.video/', note: 'where recordings and clips are watched: their canonical pages' },
+            { title: 'OpenVibe.Live', url: 'https://openvibe.live/', note: 'live streams and channels' },
             { title: 'OpenVibe.Community', url: 'https://openvibe.community/', note: 'pastes and discussion' },
             { title: 'OpenVibe.Network', url: 'https://openvibe.network/', note: 'accounts and the network directory' },
         ],
@@ -180,7 +190,12 @@ async function llmsFullTxt() {
         base,
         maxBytes: LLMS_FULL_MAX_BYTES,
         sections: [
-            { title: 'Browse', pages: [{ title: 'Media index', url: `${base}/`, text: 'Every public video, clip, image and file on OpenVibe.Media, newest first, each linking to its source page in the app that made it.' }] },
+            { title: 'Browse', pages: [
+                { title: 'Media index', url: `${base}/`, text: 'Every public video, clip, image and file on OpenVibe.Media, newest first, each linking to its source page in the app that made it.' },
+                // SEO-33 (11-03): with the watch pages on OpenVibe.Video, this file was the index line alone (368
+                // characters). What Media is, serves and where its media is watched, in full.
+                { title: 'What OpenVibe.Media is', url: `${base}/browse`, text: LLMS_ABOUT },
+            ] },
             { title: 'Watch pages', pages: watchPages },
         ],
     });
