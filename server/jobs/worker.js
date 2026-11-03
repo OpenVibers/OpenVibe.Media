@@ -169,6 +169,7 @@ async function tick() {
                 try { await require('./content-hash').schedule(now); } catch (err) { console.warn('[Jobs] content hash schedule:', err.message); }
                 try { await require('./storage-orphans').schedule(now); } catch (err) { console.warn('[Jobs] storage orphan scan schedule:', err.message); }
                 try { await require('./move-cleanup').schedule(now); } catch (err) { console.warn('[Jobs] move cleanup schedule:', err.message); }
+                try { await require('./recording-cleanup').schedule(now); } catch (err) { console.warn('[Jobs] recording clean-up schedule:', err.message); }
             }
             try { await require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
             if (now - lastSweepAt > 3600 * 1000) {

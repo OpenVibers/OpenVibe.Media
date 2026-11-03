@@ -826,9 +826,25 @@ async function deleteVodObjects(vod) {
     await cleanupSidecar(local);
     const key = keyForVod(vod);
     for (const p of REMOTE_PROVIDERS) {
-        if (providerConfigured(p)) await deleteObject(p, key);
+        if (providerConfigured(p) && !await deleteObject(p, key)) retryDeleteLater(p, key);
     }
 }
+
+// A remote delete that failed is tried again a few times in the background (the owner, 2026-11-03: "retry … up to a
+// certain amount"): after 30 s, 2, 10 and 30 minutes. If all fail, the daily recording clean-up
+// (recording-cleanup.js) still removes the copy its deleted VOD left. Timers are unref'd and nothing is persisted:
+// a restart drops the retries, and the clean-up is the backstop.
+let DELETE_RETRY_MS = [30_000, 120_000, 600_000, 1_800_000];
+function retryDeleteLater(provider, key) {
+    (async () => {
+        for (const ms of DELETE_RETRY_MS) {
+            await new Promise((r) => { const t = setTimeout(r, ms); if (t.unref) t.unref(); });
+            if (await deleteObject(provider, key)) { console.log(`[VodStorage] ${provider}:${key} deleted on a retry`); return; }
+        }
+        console.warn(`[VodStorage] ${provider}:${key} still not deleted after ${DELETE_RETRY_MS.length + 1} tries; the daily recording clean-up will remove it`);
+    })().catch(() => {});
+}
+function _setDeleteRetryDelays(ms) { DELETE_RETRY_MS = ms; }
 
 // ── Disk usage ───────────────────────────────────────────────
 
@@ -1560,6 +1576,7 @@ module.exports = {
     r2Policy,
     recordTierDecision,
     deleteVodObjects,
+    _setDeleteRetryDelays,
     deleteObject,
     presignGet,
     runSweep,
