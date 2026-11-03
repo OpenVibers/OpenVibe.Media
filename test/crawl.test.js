@@ -120,6 +120,10 @@ const express = require('express');
         assert.strictEqual(r.status, 200);
         assert.ok(r.body.startsWith('# OpenVibe.Media') && r.body.includes('https://media.test/sitemap.xml') && r.body.includes('AI clip'));
         assert.ok(r.body.includes('https://media.test/llms-full.txt'), 'the map links the full-text file');
+        // AGT-5: Media's own pages are linked at their Markdown twins, and the secondary links end in Optional.
+        assert.ok(r.body.includes('](https://media.test/index.md)'), 'the home link is not its twin');
+        assert.ok(r.body.includes('](https://media.test/browse.md)'), 'a page link is not its twin');
+        assert.ok(r.body.includes('\n## Optional\n'), 'no ## Optional section');
         assert.ok(!/\bfree\b/i.test(r.body), 'no cost claims');
         console.log('✅ /llms.txt maps the site');
 

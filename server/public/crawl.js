@@ -85,6 +85,10 @@ function llmsTxt() {
     const base = config.publicUrl;
     return seo.llmsTxt({
         name: 'OpenVibe.Media',
+        // AGT-5: Media's own pages are linked at their Markdown twins (openvibe-shared 4.108.0 leaves files and other
+        // sites' links as they are). What an agent may skip for a shorter context is in `optional`, written last.
+        markdown: true,
+        base,
         summary: LLMS_SUMMARY,
         details: [
             'Most media here belongs to OpenVibe.Live, whose /vod/:id and /clip/:id pages are the canonical pages for it (chat, transcript, the streamer\'s channel); the watch pages here point there.',
@@ -94,18 +98,19 @@ function llmsTxt() {
         sections: [
             { title: 'Browse', links: [
                 { title: 'Media index', url: `${base}/`, note: 'every public video, clip, image and file, newest first, each linking to its source page' },
-                { title: 'Sitemap', url: `${base}/sitemap.xml`, note: 'the watch pages Media is the canonical home of' },
-                { title: 'Full text', url: `${base}/llms-full.txt`, note: 'those same pages with their full text, for language models' },
             ] },
             { title: 'URLs', links: [
                 // Real pages, not templates (SEO-34: /v/{id} and /c/{id} as links answered 404); the shapes are in the notes.
                 { title: 'Browse public recordings and clips', url: `${base}/browse`, note: `each recording's page is ${base}/v/<id> (?raw=1 returns the video bytes), each clip's ${base}/c/<id>, and a public recording's transcript and AI overview ${base}/v/<id>/transcript.json` },
             ] },
-            { title: 'The network', links: [
-                { title: 'OpenVibe.Live', url: 'https://openvibe.live/', note: 'live streams, channels, VOD and clip pages' },
-                { title: 'OpenVibe.Community', url: 'https://openvibe.community/', note: 'pastes and discussion' },
-                { title: 'OpenVibe.Network', url: 'https://openvibe.network/', note: 'accounts and the network directory' },
-            ] },
+        ],
+        // llmstxt.org's "## Optional": what an agent may skip when it needs a shorter context.
+        optional: [
+            { title: 'Sitemap', url: `${base}/sitemap.xml`, note: 'the watch pages Media is the canonical home of' },
+            { title: 'Full text', url: `${base}/llms-full.txt`, note: 'those same pages with their full text, for language models' },
+            { title: 'OpenVibe.Live', url: 'https://openvibe.live/', note: 'live streams, channels, VOD and clip pages' },
+            { title: 'OpenVibe.Community', url: 'https://openvibe.community/', note: 'pastes and discussion' },
+            { title: 'OpenVibe.Network', url: 'https://openvibe.network/', note: 'accounts and the network directory' },
         ],
     });
 }
