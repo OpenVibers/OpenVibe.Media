@@ -48,6 +48,9 @@ const ready = (async () => {
     // PostgreSQL first (migrations run as the owner), then what reads it before the app serves: Network's token cutoffs
     // (isRevoked() is synchronous) and the two revisioned tier policies (their get() reads memory).
     await db.initDb();
+    // D11: load the configuration store, reseal old plaintext under the KEK, then blank the legacy secret copy
+    // it holds. A restore drill writes nothing (MEDIA_DRILL).
+    await require('./admin/site-config').init({ adopt: !drill.enabled });
     // Valkey (ADR-035): per-actor limit counters shared across processes (not in a drill: it connects nowhere).
     const valkey = !drill.enabled && config.valkey.url ? require('openvibe-sdk/valkey').createValkey({ url: config.valkey.url, prefix: config.valkey.prefix }) : null;
     require('./actor-limits').useValkey(valkey);
