@@ -54,10 +54,10 @@ async function setSecret(value, { reason = 'set view hash salt' } = {}) {
  */
 async function migrateLegacySecrets(s) {
     const row = await db.get('SELECT value FROM media_settings WHERE key = ?', [KEY]);
-    if (!row || row.value == null || String(row.value) === '') return { checked: 0, blanked: 0, kept: 0, sealed: !!s.sealed };
+    if (!row || row.value == null || String(row.value) === '') return { checked: 0, blanked: 0, differs: 0, kept: 0, sealed: !!s.sealed };
     if (!s.sealed) {
         console.log('[Config] legacy media_settings: 1 secret value left (no KEK; the store is not sealed)');
-        return { checked: 1, blanked: 0, kept: 1, sealed: false };
+        return { checked: 1, blanked: 0, differs: 0, kept: 1, sealed: false };
     }
     const summary = await s.summary();
     const snap = summary.active;
@@ -67,13 +67,14 @@ async function migrateLegacySecrets(s) {
     const proven = stored !== undefined && stored !== null && String(stored) !== ''
         && marker && sealedRow && sealedRow.redacted === true
         && marker.fingerprint && marker.fingerprint === sealedRow.fingerprint;
-    if (!proven) {
-        console.log('[Config] legacy media_settings: 1 secret value left (the sealed store does not hold it)');
-        return { checked: 1, blanked: 0, kept: 1, sealed: true };
+    // Never drop a value the store does not hold: the sealed copy must be exactly this legacy value.
+    if (!proven || String(stored) !== String(row.value)) {
+        console.log('[Config] legacy media_settings: 1 secret value kept (value differs or no sealed copy)');
+        return { checked: 1, blanked: 0, differs: 1, kept: 1, sealed: true };
     }
     await db.run('UPDATE media_settings SET value = ?, updated_at = ov_now() WHERE key = ?', ['', KEY]);
-    console.log(`[Config] legacy media_settings: 1 secret value blanked after the sealed store held it; KEK ${s.kek}`);
-    return { checked: 1, blanked: 1, kept: 0, sealed: true };
+    console.log(`[Config] legacy media_settings: 1 secret value blanked (the store holds the same value); KEK ${s.kek}`);
+    return { checked: 1, blanked: 1, differs: 0, kept: 0, sealed: true };
 }
 
 let initPromise = null;
@@ -82,7 +83,7 @@ function init({ adopt = true } = {}) {
     if (initPromise) return initPromise;
     if (!adopt) {
         // A restore drill never writes (MEDIA_DRILL): load nothing here; its readers fall back without persisting.
-        return Promise.resolve({ loaded: false, checked: 0, blanked: 0, kept: 0, sealed: false });
+        return Promise.resolve({ loaded: false, checked: 0, blanked: 0, differs: 0, kept: 0, sealed: false });
     }
     initPromise = (async () => {
         const s = await getStore();

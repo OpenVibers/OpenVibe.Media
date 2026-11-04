@@ -30,6 +30,7 @@ console.error = (...a) => logs.push(a.map(String).join(' '));
     const store = await siteConfig.getStore();
     assert.strictEqual(store.sealed, true, 'the store is sealed under the KEK');
     assert.strictEqual(report.blanked, 1);
+    assert.strictEqual(report.differs, 0, 'an equal value is not counted as differing');
 
     const row = await db.get('SELECT value FROM media_settings WHERE key = ?', ['view_hash_secret']);
     assert.strictEqual(row.value, '', 'no secret-class value remains in media_settings');
@@ -47,6 +48,24 @@ console.error = (...a) => logs.push(a.map(String).join(' '));
     await siteConfig.setSecret('sentinel-rotated', { reason: 'rotate' });
     assert.strictEqual((await db.get('SELECT value FROM media_settings WHERE key = ?', ['view_hash_secret'])).value, '', 'a rotated salt is not written to the legacy row');
     assert.strictEqual(await siteConfig.secretValue(), 'sentinel-rotated');
+
+    // A legacy row newer than the store is kept, not blanked: the store does not hold this value.
+    await siteConfig.setSecret('store-side-salt', { reason: 'store side' });
+    await db.run("UPDATE media_settings SET value = ? WHERE key = 'view_hash_secret'", ['legacy-side-salt']);
+    const kept = await siteConfig.migrateLegacySecrets(store);
+    assert.strictEqual(kept.blanked, 0, 'a differing value is never blanked');
+    assert.strictEqual(kept.differs, 1, 'the unequal value is counted');
+    assert.strictEqual((await db.get('SELECT value FROM media_settings WHERE key = ?', ['view_hash_secret'])).value, 'legacy-side-salt', 'the newer legacy value is kept');
+    assert.strictEqual(await siteConfig.secretValue(), 'store-side-salt', 'the reader keeps the store value');
+
+    // An empty store value keeps the row too.
+    await store.deleteSecret('view_hash_secret', { reason: 'empty store' });
+    await db.run("UPDATE media_settings SET value = ? WHERE key = 'view_hash_secret'", ['legacy-only-salt']);
+    const empty = await siteConfig.migrateLegacySecrets(store);
+    assert.strictEqual(empty.blanked, 0, 'nothing is blanked when the store holds no value');
+    assert.strictEqual(empty.differs, 1, 'the empty-store case is counted');
+    assert.strictEqual((await db.get('SELECT value FROM media_settings WHERE key = ?', ['view_hash_secret'])).value, 'legacy-only-salt', 'the only copy is kept');
+    assert.ok(!logs.join('\n').includes('store-side-salt') && !logs.join('\n').includes('legacy-side-salt') && !logs.join('\n').includes('legacy-only-salt'), 'no log line carries either side');
 
     real.log('legacy secrets (KEK): all checks passed');
     process.exit(0);
