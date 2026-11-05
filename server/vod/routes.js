@@ -22,6 +22,7 @@ const multer = require('multer');
 const db = require('../db/database');
 const config = require('../config');
 const recorder = require('./recorder');
+const chunkSessions = require('./chunk-sessions');
 const tools = require('./media-tools');
 const { finalizeVod, vodPublic } = require('./finalize');
 const { tenantAuth, tenantCors } = require('../auth');
@@ -61,12 +62,9 @@ const chunkUpload = multer({
     },
 });
 
-/**
- * Active chunked uploads: vodId → { filePath, startTime, chunkCount,
- * currentSegmentId, currentSegmentPath }. Rebuilt from the DB row if the
- * server restarted mid-upload.
- */
-const activeChunkUploads = new Map();
+// Active chunked uploads live in ./chunk-sessions so /api/ready can count them. A session is rebuilt
+// from the DB row if the server restarted mid-upload.
+const activeChunkUploads = chunkSessions.sessions;
 
 /** Private, including legacy rows that have no visibility and is_public = 0. */
 function _isPrivate(row) {
@@ -195,6 +193,7 @@ router.post('/:id/chunks', tenantAuth({ verb: 'write', allowUser: true }), chunk
                 [filePath, fs.statSync(filePath).size, vod.id]));
 
             rec = { filePath, startTime: Date.now(), chunkCount: 1, currentSegmentId: segmentId, currentSegmentPath: filePath };
+            chunkSessions.markChunk(rec);
             activeChunkUploads.set(vod.id, rec);
 
             console.log(`[VOD] Chunked recording started: vod ${vod.id} (${req.appId})`);
@@ -220,6 +219,7 @@ router.post('/:id/chunks', tenantAuth({ verb: 'write', allowUser: true }), chunk
             tools.cleanupTempFile(req.file.path);
             rec.chunkCount++;
         }
+        chunkSessions.markChunk(rec);
 
         // Update file size and duration estimate in DB
         const size = tools.getFileSizeSafe(rec.filePath)
@@ -426,4 +426,5 @@ router.delete('/:id', tenantAuth({ verb: 'delete' }), async (req, res) => {
 });
 
 router.activeChunkUploads = activeChunkUploads;
+router.activeChunkCount = chunkSessions.countActive;
 module.exports = router;

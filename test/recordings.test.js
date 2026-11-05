@@ -95,6 +95,7 @@ const express = require('express');
         const f = new FormData();
         f.append('chunk', new Blob([Buffer.alloc(40000, 1)], { type: 'video/webm' }), 'a.webm');
         await call('POST', `/api/v1/live/vods/${r.body.id}/chunks`, f);
+        assert.strictEqual(require('../server/vod/chunk-sessions').countActive(), made.length + 1, 'a browser chunk is an open protected session');
         const objectId = (await finalizeVod(r.body.id)).object_id;
         const obj = await model.getObject(objectId);
         const bytes = {};
