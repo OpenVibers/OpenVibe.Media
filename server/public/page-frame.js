@@ -15,11 +15,13 @@ const config = require('../config');
 const ovServe = require('openvibe-shared/serve');
 const shell = require('openvibe-shared/shell');
 const seoLib = require('openvibe-shared/seo');
+const social = require('openvibe-shared/social');
 const appIcon = require('openvibe-shared/app-icon');
 
 const NETWORK_URL = (config.network && config.network.url) || 'https://openvibe.network';
 const SITE_NAME = 'OpenVibe.Media';
-const DEFAULT_OG_IMAGE = `${config.publicUrl}/og-image.png`;
+// The site's content-hashed share card (openvibe-shared/social), served from this site's own /shared copy.
+const DEFAULT_OG_IMAGE = `${config.publicUrl}${social.url('media')}`;
 
 // Public base URL per app for canonical / "source" links (env-overridable JSON map).
 const APP_PUBLIC_URLS = (() => {
