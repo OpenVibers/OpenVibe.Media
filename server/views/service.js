@@ -17,6 +17,7 @@
 'use strict';
 const crypto = require('crypto');
 const db = require('../db/database');
+const siteConfig = require('../admin/site-config');
 
 const TABLES = { vod: { table: 'vods', raw: 'view_count' }, clip: { table: 'clips', raw: 'view_count' }, file: { table: 'files', raw: 'view_count' } };
 const BOT_UA = /bot|crawl|spider|slurp|facebookexternalhit|preview|discordbot|twitterbot|whatsapp|telegram|curl\/|wget\/|python-requests|go-http-client|headless/i;
@@ -30,13 +31,27 @@ async function secret() {
         // Never the value, only the name.
         console.warn('[views] VIEW_HASH_SECRET and MEDIA_SECRET are unset in production; visitor hashes fall back to the persisted per-process secret and past hashes stop matching.');
     }
+    // D11: the salt lives in the sealed configuration store, never in media_settings. The boot has loaded it;
+    // a test that did not boot the server loads it here (the store imports the legacy row once).
     if (!_secret) {
-        // Persist a random secret so visitor hashes stay stable across restarts.
         try {
-            const row = await db.get("SELECT value FROM media_settings WHERE key = 'view_hash_secret'");
-            if (row && row.value) _secret = row.value;
-            else { _secret = crypto.randomBytes(24).toString('hex'); await db.run("INSERT INTO media_settings (key, value, description, type) VALUES ('view_hash_secret', ?, 'Internal: salt for hashed visitor ids (do not share)', 'string') ON CONFLICT (key) DO UPDATE SET value = excluded.value, description = excluded.description, type = excluded.type, updated_at = ov_now()", [_secret]); }
-        } catch { _secret = 'openvibe-media'; }
+            let stored = await siteConfig.secretValue();
+            if (stored === undefined && !require('../drill').enabled) {
+                await siteConfig.getStore();
+                stored = await siteConfig.secretValue();
+            }
+            if (stored) _secret = String(stored);
+        } catch { /* a drill without the store falls through to a per-process salt */ }
+    }
+    if (!_secret) {
+        // Persist a random secret so visitor hashes stay stable across restarts — through the write-only secret
+        // path, never the legacy row. A restore drill writes nothing: its salt is per-process.
+        const fresh = crypto.randomBytes(24).toString('hex');
+        if (require('../drill').enabled) _secret = fresh;
+        else {
+            try { await siteConfig.setSecret(fresh, { reason: 'generated view hash salt' }); _secret = fresh; }
+            catch { _secret = 'openvibe-media'; }
+        }
     }
     return _secret;
 }
@@ -122,4 +137,4 @@ async function prune(days = 30) {
     try { return (await db.run("DELETE FROM content_visits WHERE last_at < datetime('now', ?)", [`-${days} days`])).changes; } catch { return 0; }
 }
 
-module.exports = { recordView, counts, countsMany, isInitialPlaybackRequest, clientIp, prune, TABLES };
+module.exports = { recordView, counts, countsMany, isInitialPlaybackRequest, clientIp, prune, TABLES, hashSecret: secret };
