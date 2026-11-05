@@ -23,6 +23,7 @@ const metrics = require('openvibe-shared/metrics');
 const { createReadiness, skip } = require('openvibe-shared/ready');
 
 const copyReport = require('./objects/copy-report');
+const chunkSessions = require('./vod/chunk-sessions');
 
 const OUTBOX_BACKLOG_LIMIT = 1000;
 
@@ -176,7 +177,15 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
         service: 'media',
         release,
         checks,
-        details: () => ({ ...(drill ? { mode: 'drill' } : {}), recordings_in_progress: recorder.activeCount() }),
+        // ovhost's protected-session probe sums both: an ffmpeg recording (RTP/RTMP ingest) and an open
+        // browser chunk session are protected sessions alike. The second field is additive, so a Host
+        // that predates it keeps reading recordings_in_progress; a Media that predates it omits it, and
+        // the Host falls back to the first count.
+        details: () => ({
+            ...(drill ? { mode: 'drill' } : {}),
+            recordings_in_progress: recorder.activeCount(),
+            chunked_recordings_in_progress: chunkSessions.countActive(),
+        }),
     });
 }
 

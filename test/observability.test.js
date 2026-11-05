@@ -62,6 +62,15 @@ const { spawn } = require('child_process');
         assert.strictEqual(body.status, 'ready');
         assert.strictEqual(body.service, 'media');
         assert.strictEqual(body.recordings_in_progress, 1);
+        assert.strictEqual(body.chunked_recordings_in_progress, 0, 'no browser chunk session: the additive field is present at 0');
+        // A chunk session that received a chunk inside the idle window counts; one silent past it does not.
+        const chunkSessions = require('../server/vod/chunk-sessions');
+        chunkSessions.sessions.set(1, { lastChunkAt: Date.now() });
+        chunkSessions.sessions.set(2, { lastChunkAt: Date.now() - chunkSessions.CHUNK_SESSION_IDLE_MS - 1 });
+        r = await request(base, '/api/ready');
+        body = JSON.parse(r.body);
+        assert.deepStrictEqual([body.recordings_in_progress, body.chunked_recordings_in_progress], [1, 1]);
+        chunkSessions.sessions.clear();
         const names = Object.keys(body.checks).sort();
         assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'object_copies', 'remote_b2', 'remote_r2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods', 'timeline_cache', 'valkey']);
         // r2 is not configured: listed as skipped with the reason, never a pretend pass (WS-Q task 7), and an optional
