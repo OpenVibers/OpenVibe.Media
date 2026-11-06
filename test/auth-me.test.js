@@ -37,7 +37,23 @@ const express = require('express');
             const ok = await me({ cookie: 'ov_token=good' });
             assert.strictEqual(ok.status, 200);
             assert.strictEqual(ok.json.user.username, 'ana');
-            console.log('auth-me: a guest gets 200 { user: null }, a bad credential 401');
+
+            // GET /auth/health (openvibe-sdk/sso): a code that never existed is invalid_grant, so the client is fine.
+            const tokenEndpoint = require('http').createServer((_req, res) => {
+                res.writeHead(400, { 'content-type': 'application/json' });
+                res.end(JSON.stringify({ error: 'invalid_grant' }));
+            });
+            await new Promise((resolve) => tokenEndpoint.listen(0, '127.0.0.1', resolve));
+            const healthConfig = { ...config, networkUrl: `http://127.0.0.1:${tokenEndpoint.address().port}`, networkInternalUrl: `http://127.0.0.1:${tokenEndpoint.address().port}` };
+            const healthApp = express();
+            healthApp.use('/auth', createAuthRoutes(healthConfig, auth));
+            const healthServer = await new Promise((resolve) => { const s = healthApp.listen(0, '127.0.0.1', () => resolve(s)); });
+            try {
+                const r = await fetch(`http://127.0.0.1:${healthServer.address().port}/auth/health`);
+                assert.deepStrictEqual([r.status, r.headers.get('cache-control'), await r.json()], [200, 'no-store', { ok: true, client: 'ok' }]);
+            } finally { healthServer.close(); tokenEndpoint.close(); }
+
+            console.log('auth-me: a guest gets 200 { user: null }, a bad credential 401, /auth/health checks the client');
         } finally { server.close(); }
     })().catch((e) => { console.error(e); process.exit(1); });
 })().catch((err) => { console.error(err); process.exit(1); });
