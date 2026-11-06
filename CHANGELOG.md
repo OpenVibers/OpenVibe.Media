@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Operator retirement for an object with no good copy (`scripts/no-good-copy-report.js --retire <med_id> [--apply]`):
+  the dry run changes nothing; only an object in the report, not public and under 1 MiB is retired (public, good-copy,
+  1 MiB+ and held objects are refused with the reason). The delete is the ordinary soft delete (bytes kept,
+  retention, `media.object.deleted`, restorable), and a projected VOD/clip has its v1 row made private so the inherited
+  route stops serving it. Test: `test/retire-no-good-copy.test.js`.
+
 - A legacy Live paste screenshot can be retired for OpenVibe.Community (2026-11-06). The internal
   `POST /internal/community/legacy-paste-screenshots/:id/retire` route is loopback and service-token only
   (`media.object.delete`, principal `svc:community`) and soft-deletes exactly a `legacy:live:paste:<slug>`
