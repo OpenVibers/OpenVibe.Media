@@ -165,6 +165,13 @@ const ready = (async () => {
         app.post('/internal/avatar-ingest', require('./service-guard').guard('media.avatar.ingest'),
             require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config }));
     }
+    // ── Internal: retiring one legacy Live paste screenshot for OpenVibe.Community (see
+    // server/objects/legacy-paste-retire.js). Same service-token guard and loopback rule as above;
+    // the capability is media.object.delete and the handler refuses every other principal. ──
+    {
+        const retire = require('./objects/legacy-paste-retire');
+        app.post(retire.PATH, require('./service-guard').guard(retire.CAPABILITY), ...retire.handlers());
+    }
     const userAuth = require('./user-auth');
     const userAuthConfig = {
         baseUrl: config.publicUrl, networkUrl: config.network.url, networkInternalUrl: config.network.internalUrl,
