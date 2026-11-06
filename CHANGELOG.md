@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- An avatar a person's profile points at cannot be deleted out from under them (incident 2026-11-06: a cleanup of
+  public screenshot copies deleted eleven avatars). `media_avatar_refs` (migration `0020_avatar_refs.sql`) records
+  each profile slot → object; `model.softDelete` refuses an avatar with an unreleased reference and `DELETE` answers
+  409 `media.object.avatar_in_use`. The internal `POST /internal/avatar-adopt` and `/internal/avatar-release` routes
+  write it, and `/internal/avatar-ingest` records it when given `product` and `ref`. Replacing a picture releases the
+  previous reference in the same transaction; account deletion releases the person's references first. Ingest also
+  reads our own `/o/<id>` and `/p/<slug>/screenshot` sources locally instead of fetching them, reuses an avatar the
+  subject already owns, and stores a 1600×500 `shape: 'banner'` crop. Test: `test/avatar-guard.test.js`.
+
 - Operator retirement for an object with no good copy (`scripts/no-good-copy-report.js --retire <med_id> [--apply]`):
   the dry run changes nothing; only an object in the report, not public and under 1 MiB is retired (a public v1 row, a
   native public object, good-copy, 1 MiB+ and held objects are refused with the reason). For a legacy VOD/clip the v1
