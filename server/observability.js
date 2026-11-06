@@ -210,7 +210,9 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
             ...(drill ? { mode: 'drill' } : {}),
             recordings_in_progress: recorder.activeCount(),
             chunked_recordings_in_progress: chunkSessions.countActive(),
-            recordings_untracked_in_progress: await countOrUnknown(() => protectedSessions.untrackedRecordings({ db, recorder, chunkSessions })),
+            // A drill looks at no stored file (that is the drill's own rule: the copy is read, the bytes
+            // are not), so it cannot tell which recordings the database still holds: unknown, not zero.
+            recordings_untracked_in_progress: drill ? null : await countOrUnknown(() => protectedSessions.untrackedRecordings({ db, recorder, chunkSessions })),
             uploads_in_progress: uploadSessions.countActive(),
         }),
     });
