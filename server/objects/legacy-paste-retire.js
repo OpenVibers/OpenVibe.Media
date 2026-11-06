@@ -2,19 +2,24 @@
 /**
  * POST /internal/community/legacy-paste-screenshots/:id/retire   (OpenVibe.Community only)
  *
- * The narrow door for one inherited object that Community's move script cannot reach through its own
- * tenant: a screenshot paste imported from Live has its object in the `live` tenant with
- * `legacy_ref = legacy:live:paste:<slug>` (docs/object-model.md, "Ids and legacy refs"). DELETE
- * /api/v2/community/objects/<id> answers 404 for it (another tenant), and Media's direct v2 delete
- * refuses every legacy object with 409 media.object.legacy_managed. Community re-hosted three such
- * pastes privately in the 2026-11-06 pilot before that was known, so their old public objects need a
- * way to be retired without widening the v2 delete for every legacy row.
+ * The narrow door for the two inherited screenshot objects that Community's move script cannot
+ * delete through its own tenant (docs/object-model.md, "Ids and legacy refs"):
  *
- * Exactly that shape is retirable: app `live`, kind `screenshot`, legacy ref `legacy:live:paste:<slug>`.
- * VODs, clips, files, thumbnails and avatars keep their own routes and are refused here, as is a
- * native object (no legacy_ref). Only the Community service principal (`svc:community`) may call it,
- * with media.object.delete, on loopback, through the same service-token guard as Media's other
- * internal routes; another service holding the capability is refused.
+ *   - a screenshot paste imported from Live has its object in the `live` tenant with
+ *     `legacy_ref = legacy:live:paste:<slug>`. DELETE /api/v2/community/objects/<id> answers 404
+ *     for it (another tenant).
+ *   - an older paste stored its bytes through Community's v1 file store: the object is in the
+ *     `community` tenant, kind `file`, with `legacy_ref = legacy:community:file:<key>`. DELETE finds
+ *     it but the direct v2 delete refuses every legacy object with 409 media.object.legacy_managed.
+ *
+ * Community re-hosted those pastes privately in the 2026-11-06 pilot and needs to retire the old
+ * public bytes without widening the v2 delete for every legacy row.
+ *
+ * Exactly those two shapes are retirable. VODs, clips, thumbnails, avatars, other legacy file
+ * references and native objects (no legacy_ref) keep their own routes and are refused here. Only
+ * the Community service principal (`svc:community`) may call it, with media.object.delete, on
+ * loopback, through the same service-token guard as Media's other internal routes; another service
+ * holding the capability is refused.
  *
  * The delete is the ordinary soft delete (model.softDelete): /o/:id answers 410 at once, the bytes
  * stay for MEDIA_DELETE_RETENTION_DAYS (metadata.retention_until), the media_objects trigger queues
@@ -34,11 +39,17 @@ function problem(res, status, code, detail) {
     return http.sendProblem(res, status, code, { detail });
 }
 
-/** The one shape this route may retire (an imported Live screenshot paste, never an avatar or a VOD). */
+/**
+ * The two shapes this route may retire: an imported Live screenshot paste, or a Community-era v1
+ * file that held a screenshot paste's bytes (never an avatar, VOD or clip).
+ */
 function isRetirable(obj) {
-    if (!obj || obj.app_id !== 'live' || obj.kind !== 'screenshot') return false;
+    if (!obj) return false;
     const ref = model.parseLegacyRef(obj.legacy_ref);
-    return !!ref && ref.app === 'live' && ref.kind === 'paste' && !!ref.id;
+    if (!ref || !ref.id) return false;
+    if (obj.app_id === 'live' && obj.kind === 'screenshot') return ref.app === 'live' && ref.kind === 'paste';
+    if (obj.app_id === 'community' && obj.kind === 'file') return ref.app === 'community' && ref.kind === 'file';
+    return false;
 }
 
 async function retire(req, res) {
@@ -51,7 +62,7 @@ async function retire(req, res) {
     if (!obj) return problem(res, 404, 'media.object.not_found', 'No such object');
     if (!isRetirable(obj)) {
         return problem(res, 409, 'media.object.legacy_managed',
-            'Only a legacy Live paste screenshot is retired here; VODs, clips, files, thumbnails and avatars keep their own routes');
+            'Only a legacy Live paste screenshot or a legacy Community file is retired here; VODs, clips, thumbnails, avatars and native objects keep their own routes');
     }
     if (obj.lifecycle_status === 'deleted') {
         const md = model.parseJson(obj.metadata, {});
