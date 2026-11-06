@@ -60,9 +60,10 @@ the transitional `media.media-ref@1` legacy form in `legacy_ref`, which is uniqu
 Legacy screenshot and avatar objects cannot be deleted through the direct v2 delete route
 (`DELETE` answers 409 `media.object.legacy_managed`). Account deletion removes them. One narrow
 exception is the internal `POST /internal/community/legacy-paste-screenshots/:id/retire` route: it
-soft-deletes only a `legacy:live:paste:<slug>` screenshot for the Community service principal
-(`svc:community`, capability `media.object.delete`), so Community can retire the old public object
-of a screenshot paste it has re-hosted privately (`server/objects/legacy-paste-retire.js`).
+soft-deletes a `legacy:live:paste:<slug>` screenshot or a `legacy:community:file:<key>` file for the
+Community service principal (`svc:community`, capability `media.object.delete`), so Community can
+retire the old public object of a screenshot paste it has re-hosted privately
+(`server/objects/legacy-paste-retire.js`).
 
 Every v2 route that takes `:id` accepts either form. Native v2 objects have `legacy_ref = NULL`.
 

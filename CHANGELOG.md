@@ -13,6 +13,12 @@
   (`media.object.delete`, principal `svc:community`) and soft-deletes exactly a `legacy:live:paste:<slug>`
   screenshot: 410 at `/o/:id`, the ordinary retention window and `media.object.deleted` event, and a repeat
   is a no-op. VODs, clips, files, thumbnails, avatars and native objects are refused, and so is any other principal.
+
+- The legacy retire route also accepts a Community-era v1 file object (`app_id community`, kind `file`,
+  `legacy_ref legacy:community:file:<key>`), for the same `svc:community` principal and with the same ordinary soft
+  delete, retention, hold refusal and idempotence. Community's screenshot move calls it for old pastes whose bytes were
+  stored before the Object API v2, after checking no other paste, post or attachment still references the id.
+  Test: `test/legacy-paste-retire.test.js`.
 - Review follow-up: a category-3 result places an `evidence` hold in the quarantine transaction, so owner delete and
   retention purge answer 409 held; an operator's overruling category releases it with who and when. Adds Vision's
   logged 60-second `operator-view` and service-only `review-decision` routes, a separate operator signature purpose,

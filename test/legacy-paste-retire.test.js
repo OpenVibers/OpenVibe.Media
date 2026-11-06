@@ -109,6 +109,24 @@ const crypto = require('crypto');
         assert.strictEqual(await stagedOf(paste), 0, 'nothing left staged');
         console.log('✅ a second call is a no-op (changed:false, no event)');
 
+        // ── A Community-era v1 file (a screenshot paste's old bytes) is retired too ──
+        const file = await insert({ appId: 'community', kind: 'file', ref: 'legacy:community:file:old-shot.jpg' });
+        r = await call(file, community);
+        assert.deepStrictEqual([r.status, r.body.changed, r.body.lifecycle_status], [200, true, 'deleted'], JSON.stringify(r.body));
+        assert.ok(Date.parse(r.body.retention_until) > Date.now(), 'the ordinary retention window is set');
+        const goneFile = await row(file);
+        assert.strictEqual(goneFile.lifecycle_status, 'deleted');
+        assert.strictEqual(JSON.parse(goneFile.metadata).deleted_by, 'svc:community');
+        const servedFile = await fetch(`${base}/o/${file}`);
+        assert.strictEqual(servedFile.status, 410, '/o/:id answers 410 at once');
+        const fileEvs = await eventsOf(file);
+        assert.strictEqual(fileEvs.length, 1, 'one media.object.deleted event, like any other delete');
+        assert.deepStrictEqual([fileEvs[0].payload.kind, fileEvs[0].payload.legacy_ref], ['file', 'legacy:community:file:old-shot.jpg']);
+        r = await call(file, community);
+        assert.deepStrictEqual([r.status, r.body.changed], [200, false], 'a second call is a no-op');
+        assert.strictEqual((await eventsOf(file)).length, 1, 'no second event');
+        console.log('✅ a legacy Community file is soft-deleted: 410, retention, one event, idempotent');
+
         // ── Another kind is refused, never touched ──
         for (const [kind, ref] of [['avatar', 'legacy:live:avatar:old-avatar'], ['vod', 'legacy:live:vod:7'], ['clip', 'legacy:live:clip:9'], ['file', 'legacy:live:file:k']]) {
             const other = await insert({ kind, ref });
@@ -130,18 +148,23 @@ const crypto = require('crypto');
         assert.strictEqual((await row(second)).lifecycle_status, 'ready');
         console.log('✅ only svc:community with media.object.delete may retire');
 
-        // ── Unknown id, another tenant's paste, and a hold ──
+        // ── Unknown id, a legacy shape this route does not own, and a hold ──
         r = await call(ids.newId('media'), community);
         assert.deepStrictEqual([r.status, r.body.code], [404, 'media.object.not_found']);
         const foreign = await insert({ appId: 'community', ref: 'legacy:community:paste:foreign' });
         r = await call(foreign, community);
-        assert.deepStrictEqual([r.status, r.body.code], [409, 'media.object.legacy_managed'], 'only the live tenant');
+        assert.deepStrictEqual([r.status, r.body.code], [409, 'media.object.legacy_managed'], 'only the two retirable shapes');
         const held = await insert({ ref: 'legacy:live:paste:held' });
         await db.run("INSERT INTO media_holds (object_id, kind, reason, created_by) VALUES (?, 'dmca', 'test', 'staff:test')", [held]);
         r = await call(held, community);
         assert.deepStrictEqual([r.status, r.body.code], [409, 'media.object.held'], JSON.stringify(r.body));
         assert.strictEqual((await row(held)).lifecycle_status, 'ready');
-        console.log('✅ unknown ids 404, another tenant is refused, a hold refuses the retire');
+        const heldFile = await insert({ appId: 'community', kind: 'file', ref: 'legacy:community:file:held' });
+        await db.run("INSERT INTO media_holds (object_id, kind, reason, created_by) VALUES (?, 'dmca', 'test', 'staff:test')", [heldFile]);
+        r = await call(heldFile, community);
+        assert.deepStrictEqual([r.status, r.body.code], [409, 'media.object.held'], JSON.stringify(r.body));
+        assert.strictEqual((await row(heldFile)).lifecycle_status, 'ready');
+        console.log('✅ unknown ids 404, other legacy shapes are refused, a hold refuses either retire');
 
         // ── Rate-limited like DELETE /:id ──
         const limit = actorLimits.registered().find((l) => l.id === 'media.object.legacy_paste.retire');
