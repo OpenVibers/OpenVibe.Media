@@ -71,6 +71,16 @@ const { spawn } = require('child_process');
         body = JSON.parse(r.body);
         assert.deepStrictEqual([body.recordings_in_progress, body.chunked_recordings_in_progress], [1, 1]);
         chunkSessions.sessions.clear();
+        // The other two protected counts: a recording the database still holds (no session in memory
+        // knows it, its file still grows) and an upload whose bytes are moving.
+        assert.strictEqual(body.recordings_untracked_in_progress, 0, 'no recording is left open without a session');
+        assert.strictEqual(body.uploads_in_progress, 0, 'no upload is in flight: the additive field is present at 0');
+        const uploadSessions = require('../server/objects/upload-sessions');
+        uploadSessions.begin('obj-ready', 'object');
+        r = await request(base, '/api/ready');
+        body = JSON.parse(r.body);
+        assert.strictEqual(body.uploads_in_progress, 1, 'an upload whose bytes are moving is a protected session');
+        uploadSessions.end('obj-ready');
         const names = Object.keys(body.checks).sort();
         assert.deepStrictEqual(names, ['db', 'events_outbox', 'network_jwks', 'object_copies', 'remote_b2', 'remote_r2', 'storage_clips', 'storage_files', 'storage_objects', 'storage_pastes', 'storage_thumbnails', 'storage_vods', 'timeline_cache', 'valkey']);
         // r2 is not configured: listed as skipped with the reason, never a pretend pass (WS-Q task 7), and an optional

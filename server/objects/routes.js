@@ -56,6 +56,7 @@ const hls = require('./hls');
 const ctypes = require('./content-type');
 const multipart = require('./multipart');
 const namespaces = require('./namespaces');
+const uploadSessions = require('./upload-sessions');
 const { contentDisposition } = require('./disposition');
 const { tenantAuth, tenantCors, tenantPath, namespaceGrant } = require('../auth');
 const { announce } = require('../announce');
@@ -214,7 +215,7 @@ async function reserveAgain(req, res, obj, bytes) {
 // ── Content upload (mounted ahead of the JSON body parser — see index.js) ──
 
 /** Stream the request body to `tmp`, hashing as it goes; stop past `cap` bytes. */
-function receive(req, tmp, cap) {
+function receive(req, tmp, cap, onProgress) {
     return new Promise((resolve) => {
         const hash = crypto.createHash('sha256');
         const out = fs.createWriteStream(tmp);
@@ -227,6 +228,7 @@ function receive(req, tmp, cap) {
             n += chunk.length;
             if (n > cap) { req.unpipe(out); req.resume(); return fail({ error: 'too_large' }); }
             hash.update(chunk);
+            if (onProgress) onProgress();   // the bytes are moving: the upload is a protected session
         });
         req.on('aborted', () => fail({ error: 'aborted' }));
         req.on('error', () => fail({ error: 'aborted' }));
@@ -266,7 +268,14 @@ async function putContent(req, res) {
     fs.mkdirSync(tmpDir, { recursive: true });
     const tmp = path.join(tmpDir, `${obj.id}-${crypto.randomBytes(4).toString('hex')}`);
     await namespaces.touch(obj.id);   // the upload is active: its reservation does not expire under it
-    const got = await receive(req, tmp, cap);
+    // The bytes are moving: a restart of Media would cut this upload (server/protected-sessions.js).
+    uploadSessions.begin(obj.id, 'object');
+    let got;
+    try {
+        got = await receive(req, tmp, cap, () => uploadSessions.touch(obj.id));
+    } finally {
+        uploadSessions.end(obj.id);
+    }
     const drop = () => { try { fs.unlinkSync(tmp); } catch { /* not written */ } };
     if (got.error) {
         drop();
@@ -547,7 +556,14 @@ router.post('/:id/multipart/:uploadId/complete', mpWrite, tenantCors, limits('me
         if (!await multipart.beginComplete(session)) return problem(res, 409, 'media.upload.not_active', 'The upload is being completed already');
         const b = req.body || {};
         const dest = model.objectFilePath(obj);
-        const got = await multipart.assemble(session, dest, Array.isArray(b.parts) ? b.parts : null);
+        // The assembly is a long copy: a restart of Media would cut it (server/protected-sessions.js).
+        uploadSessions.begin(`${session.id}:complete`, 'complete', { idleMs: uploadSessions.ASSEMBLY_IDLE_MS });
+        let got;
+        try {
+            got = await multipart.assemble(session, dest, Array.isArray(b.parts) ? b.parts : null);
+        } finally {
+            uploadSessions.end(`${session.id}:complete`);
+        }
         if (got.error) {
             await multipart.reopen(session);
             return problem(res, got.status, got.code, got.error, got.missing ? { missing: got.missing } : undefined);

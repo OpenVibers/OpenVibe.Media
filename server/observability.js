@@ -24,8 +24,31 @@ const { createReadiness, skip } = require('openvibe-shared/ready');
 
 const copyReport = require('./objects/copy-report');
 const chunkSessions = require('./vod/chunk-sessions');
+const uploadSessions = require('./objects/upload-sessions');
+const protectedSessions = require('./protected-sessions');
 
 const OUTBOX_BACKLOG_LIMIT = 1000;
+
+/**
+ * A count that cannot be answered is unknown (null), never zero: ovhost reads null as unknown and
+ * holds the restart. The count is bounded, so a slow database cannot make the whole /api/ready
+ * answer late (its own timeout is 2 s) and lose every field.
+ */
+async function countOrUnknown(fn, timeoutMs = 1500) {
+    let timer;
+    try {
+        const n = Number(await Promise.race([
+            Promise.resolve().then(() => fn()),
+            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${timeoutMs} ms`)), timeoutMs); }),
+        ]));
+        return Number.isFinite(n) ? n : null;
+    } catch (err) {
+        console.warn('[Ready] protected-session count failed:', err.message);
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
 
 function instrument(app, { release }) {
     return metrics.instrument(app, {
@@ -177,14 +200,18 @@ function createMediaReadiness({ release, db, config, auth, recorder, events, rem
         service: 'media',
         release,
         checks,
-        // ovhost's protected-session probe sums both: an ffmpeg recording (RTP/RTMP ingest) and an open
-        // browser chunk session are protected sessions alike. The second field is additive, so a Host
-        // that predates it keeps reading recordings_in_progress; a Media that predates it omits it, and
-        // the Host falls back to the first count.
-        details: () => ({
+        // ovhost's protected-session probe sums these: an ffmpeg recording (RTP/RTMP ingest), an open
+        // browser chunk session, a recording the database still holds (a chunked upload that resumed
+        // after a restart) and an object upload whose bytes are moving are protected sessions alike.
+        // Every field but the first is additive, so a Host that predates one keeps reading the others;
+        // a Media that predates one omits it, and the Host counts what it does report. A count that
+        // cannot be answered is null (unknown), never zero: the Host treats unknown as active.
+        details: async () => ({
             ...(drill ? { mode: 'drill' } : {}),
             recordings_in_progress: recorder.activeCount(),
             chunked_recordings_in_progress: chunkSessions.countActive(),
+            recordings_untracked_in_progress: await countOrUnknown(() => protectedSessions.untrackedRecordings({ db, recorder, chunkSessions })),
+            uploads_in_progress: uploadSessions.countActive(),
         }),
     });
 }
