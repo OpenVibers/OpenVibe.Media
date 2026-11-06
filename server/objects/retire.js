@@ -7,7 +7,9 @@
  * "scheduled verification"):
  *
  *   - it is in the no-good-copy report (listNoGoodCopy: ready, not virtual, no present/pending copy);
- *   - it is not public (a public object, or a public v1 row, is refused);
+ *   - it is not public (a native public object, or a public v1 row, is refused); a legacy VOD/clip object whose
+ *     v1 row is private counts as not public even when its media_objects envelope still says public, because that
+ *     row is what /v/:id and /c/:id serve;
  *   - it is under 1 MiB: a stub or a broken small upload, never a real recording;
  *   - no retention hold applies.
  *
@@ -62,17 +64,20 @@ async function assess(id, { q = null } = {}) {
     const reads = q || query();
     const inReport = (await copyReport.listNoGoodCopy(reads, { appId: obj.app_id })).some((o) => o.id === obj.id);
     if (!inReport) return { ok: false, id, obj, reason: 'not in the no-good-copy report (it has a good copy, is virtual, or is not ready)' };
-    if (obj.visibility === 'public') return { ok: false, id, obj, reason: 'it is public' };
-    const size = Number(obj.size_bytes) || 0;
-    if (size >= MAX_BYTES) return { ok: false, id, obj, reason: `${humanBytes(size)} is not under 1 MiB` };
-    if (await model.isHeld(obj.id)) return { ok: false, id, obj, reason: 'it is under a retention hold' };
-
     const refs = await copyReport.references(reads, obj);
-    if (refs.files.length) return { ok: false, id, obj, reason: `its files/${refs.files[0].key} row is served publicly by /f/:key` };
     const publicVod = refs.vods.find((r) => rowVisibility(r) === 'public');
     if (publicVod) return { ok: false, id, obj, reason: `its vods#${publicVod.id} row is public` };
     const publicClip = refs.clips.find((r) => rowVisibility(r) === 'public');
     if (publicClip) return { ok: false, id, obj, reason: `its clips#${publicClip.id} row is public` };
+    // The v1 row decides for a projected VOD/clip: an older write can leave the envelope at public after the row is
+    // private, and the row is what /v/:id and /c/:id serve. A native object has no row, so its own visibility stands.
+    if (obj.visibility === 'public' && !refs.vods.length && !refs.clips.length) {
+        return { ok: false, id, obj, reason: 'it is public' };
+    }
+    const size = Number(obj.size_bytes) || 0;
+    if (size >= MAX_BYTES) return { ok: false, id, obj, reason: `${humanBytes(size)} is not under 1 MiB` };
+    if (await model.isHeld(obj.id)) return { ok: false, id, obj, reason: 'it is under a retention hold' };
+    if (refs.files.length) return { ok: false, id, obj, reason: `its files/${refs.files[0].key} row is served publicly by /f/:key` };
 
     return {
         ok: true, id, obj, size,
