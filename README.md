@@ -45,7 +45,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.289.1, `openvibe-sdk` v0.82.0 (tokens, events outbox, usage readings, per-actor limits),
+- `openvibe-contracts` v0.294.0, `openvibe-sdk` v0.82.0 (tokens, events outbox, usage readings, per-actor limits),
   `openvibe-shared` v4.114.0, pinned by release tarball
 
 ## Capabilities
