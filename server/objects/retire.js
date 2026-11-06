@@ -7,9 +7,9 @@
  * "scheduled verification"):
  *
  *   - it is in the no-good-copy report (listNoGoodCopy: ready, not virtual, no present/pending copy);
- *   - it is not public (a native public object, or a public v1 row, is refused); a legacy VOD/clip object whose
- *     v1 row is private counts as not public even when its media_objects envelope still says public, because that
- *     row is what /v/:id and /c/:id serve;
+ *   - it is not public (a native public object, or a v1 row that is public, is refused); a legacy VOD/clip object
+ *     counts as not public when its v1 row is not public (is_public 0, even if visibility still says public — the
+ *     health quarantine's shape), even when its media_objects envelope still says public;
  *   - it is under 1 MiB: a stub or a broken small upload, never a real recording;
  *   - no retention hold applies.
  *
@@ -45,6 +45,15 @@ function rowVisibility(row) {
     return row.visibility || (row.is_public ? 'public' : 'private');
 }
 
+/**
+ * Whether a v1 row is public for retirement purposes: the route would show it, and it is not delisted. The health
+ * quarantine sets is_public = 0 and leaves visibility = 'public'; such a row is not listed anywhere, so it is not
+ * public here and its object can be retired.
+ */
+function rowPublic(row) {
+    return rowVisibility(row) === 'public' && (row.is_public == null || Number(row.is_public) !== 0);
+}
+
 function humanBytes(n) {
     n = Number(n) || 0;
     if (n < 1024) return `${n} B`;
@@ -65,12 +74,13 @@ async function assess(id, { q = null } = {}) {
     const inReport = (await copyReport.listNoGoodCopy(reads, { appId: obj.app_id })).some((o) => o.id === obj.id);
     if (!inReport) return { ok: false, id, obj, reason: 'not in the no-good-copy report (it has a good copy, is virtual, or is not ready)' };
     const refs = await copyReport.references(reads, obj);
-    const publicVod = refs.vods.find((r) => rowVisibility(r) === 'public');
+    const publicVod = refs.vods.find(rowPublic);
     if (publicVod) return { ok: false, id, obj, reason: `its vods#${publicVod.id} row is public` };
-    const publicClip = refs.clips.find((r) => rowVisibility(r) === 'public');
+    const publicClip = refs.clips.find(rowPublic);
     if (publicClip) return { ok: false, id, obj, reason: `its clips#${publicClip.id} row is public` };
-    // The v1 row decides for a projected VOD/clip: an older write can leave the envelope at public after the row is
-    // private, and the row is what /v/:id and /c/:id serve. A native object has no row, so its own visibility stands.
+    // The v1 row decides for a projected VOD/clip: an older write or the health quarantine (is_public 0, visibility
+    // still public) can leave the envelope at public after the row is delisted. A native object has no row, so its
+    // own visibility stands.
     if (obj.visibility === 'public' && !refs.vods.length && !refs.clips.length) {
         return { ok: false, id, obj, reason: 'it is public' };
     }

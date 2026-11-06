@@ -5,8 +5,9 @@
 - Operator retirement for an object with no good copy (`scripts/no-good-copy-report.js --retire <med_id> [--apply]`):
   the dry run changes nothing; only an object in the report, not public and under 1 MiB is retired (a public v1 row, a
   native public object, good-copy, 1 MiB+ and held objects are refused with the reason). For a legacy VOD/clip the v1
-  row decides: a private or unlisted row makes the object not public even when its `media_objects` row still says
-  public. The delete is the ordinary soft delete (bytes kept, retention, `media.object.deleted`, restorable), and a
+  row decides: a delisted row (`is_public` 0, even with `visibility` still public after the health quarantine), or a
+  private/unlisted one, makes the object not public even when its `media_objects` row still says public. The delete is
+  the ordinary soft delete (bytes kept, retention, `media.object.deleted`, restorable), and a
   projected VOD/clip has its v1 row made private so the inherited route stops serving it. Test:
   `test/retire-no-good-copy.test.js`.
 
