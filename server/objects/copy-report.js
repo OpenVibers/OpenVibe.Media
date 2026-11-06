@@ -105,4 +105,4 @@ function formatReport(report) {
     return out.join('\n');
 }
 
-module.exports = { NO_GOOD_COPY_WHERE, countNoGoodCopy, listNoGoodCopy, buildReport, formatReport };
+module.exports = { NO_GOOD_COPY_WHERE, countNoGoodCopy, listNoGoodCopy, references, buildReport, formatReport };

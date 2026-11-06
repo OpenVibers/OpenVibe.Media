@@ -610,6 +610,14 @@ that only moved to B2/R2 keeps it. Test: `test/content-hash.test.js`.
 
   For each object it prints the owner (app, `owner_user_id`, `owner_subject`), `legacy_ref`, the `vods`/`clips`/`files` rows that point at it, its relationships, variants and holds, every location with its state and `verified_at`, and the last verification. The report opens the database read-only. It exits 1 when there are any.
 
+  Retire one of those objects instead of only listing it:
+
+  ```
+  node scripts/no-good-copy-report.js --retire <med_id> [--retire <med_id> ...] [--apply]
+  ```
+
+  The dry run (no `--apply`) prints what it would do and writes nothing. Only an object that is in the report (no present or pending copy), is not public and is under 1 MiB is retired; anything else — a public object, one with a good copy, one of 1 MiB or more, one under a retention hold — is refused with the reason and nothing is changed. The delete is the ordinary soft delete (`model.softDelete`): the bytes stay, `metadata.retention_until` is set, the same `media.object.deleted` event is queued as for any other delete, and `POST /:id/restore` brings the object back inside the retention period. A projected VOD or clip also has its v1 row made private (`visibility private`, `is_public 0`) so `/v/:id` and `/c/:id` stop serving it; the row is kept, not removed, so the retirement stays reversible. A file object is refused because `/f/:key` serves every file without auth. Test: `test/retire-no-good-copy.test.js`.
+
 ## Public object-size invariant
 
 This is roadmap W4 deliverable 5, stated as **policy** rather than a copied constant:
