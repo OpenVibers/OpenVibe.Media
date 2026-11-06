@@ -8,19 +8,66 @@
  *
  *   node scripts/no-good-copy-report.js [--app live] [--json] [--out report.json]
  *
- * Exit code 0 when there are none, 1 when some were found, 2 on error.
+ * Retire one or more of those objects instead (scripts/no-good-copy-report.js --retire):
+ *
+ *   node scripts/no-good-copy-report.js --retire <med_id> [--retire <med_id> ...] [--apply]
+ *
+ * The dry run (no --apply) prints what it would do and changes nothing. Only an object that is in the
+ * report, not public and under 1 MiB is retired, through the ordinary soft delete (bytes kept for the
+ * retention period, media.object.deleted queued, restorable) with its v1 VOD/clip row hidden. Anything
+ * else is refused with the reason and nothing is changed.
+ *
+ * Exit code: 0 when the report found none (or every named object can be / was retired), 1 when the
+ * report found some (or one named object was refused), 2 on error.
  */
 const fs = require('fs');
-const path = require('path');
 
 (async () => {
     await require('../server/db/database').initDb();   // PostgreSQL (DATABASE_URL), as the service
     const args = process.argv.slice(2);
     const has = (name) => args.includes(`--${name}`);
     const arg = (name, dflt) => { const i = args.indexOf(`--${name}`); return i >= 0 ? args[i + 1] : dflt; };
+    const retireIds = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] !== '--retire') continue;
+        const value = args[i + 1];
+        if (!value || value.startsWith('--')) { retireIds.push(''); continue; }
+        retireIds.push(...String(value).split(','));
+    }
 
     try {
-        // Read-only: the report runs in a READ ONLY transaction (PostgreSQL refuses any write inside it).
+        // ── Retire named objects (the one write path of this script) ──
+        if (retireIds.length) {
+            const { assess, describe, retire } = require('../server/objects/retire');
+            const ids = [...new Set(retireIds.map((s) => s.trim()).filter(Boolean))];
+            if (!ids.length) {
+                console.error('--retire needs one or more med_… object ids');
+                process.exit(2);
+            }
+            const plans = [];
+            for (const id of ids) plans.push(await assess(id));
+            const refused = plans.filter((p) => !p.ok);
+            if (refused.length) {
+                for (const p of refused) console.log(`${p.id} — refused: ${p.reason}`);
+                console.log('Nothing was changed.');
+                process.exit(1);
+            }
+            if (!has('apply')) {
+                for (const p of plans) console.log(`${describe(p)}\n  dry run: nothing was changed; re-run with --apply to retire it\n`);
+                process.exit(0);
+            }
+            const done = await retire(plans);
+            for (const d of done) {
+                console.log(`${d.id}  retired: ${d.lifecycle_status}; retention until ${d.retention_until || `the end of the ${require('../server/config').objects.retentionDays}-day period`}; restorable`);
+            }
+            process.exit(0);
+        }
+        if (has('apply')) {
+            console.error('--apply only goes with --retire <med_id>');
+            process.exit(2);
+        }
+
+        // ── Report (read-only: the report runs in a READ ONLY transaction, PostgreSQL refuses any write) ──
         const { buildReport, formatReport } = require('../server/objects/copy-report');
         const d = require('../server/db/database').getDb();
         const q = {
