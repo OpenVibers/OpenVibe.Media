@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A legacy Live paste screenshot can be retired for OpenVibe.Community (2026-11-06). The internal
+  `POST /internal/community/legacy-paste-screenshots/:id/retire` route is loopback and service-token only
+  (`media.object.delete`, principal `svc:community`) and soft-deletes exactly a `legacy:live:paste:<slug>`
+  screenshot: 410 at `/o/:id`, the ordinary retention window and `media.object.deleted` event, and a repeat
+  is a no-op. VODs, clips, files, thumbnails, avatars and native objects are refused, and so is any other principal.
+
 - A tenant for the screenshot pass (plan L9, devblog §3.3): OpenVibe.Host stores the PNGs it captures (ovhost shots) in its own
   tenant, `host`, through the Object API v2. The tenant is created at boot like the other first-party ones, and reached only
   with a Network service token that holds the media.object.* verbs for the host namespace.
