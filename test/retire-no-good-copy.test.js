@@ -2,7 +2,7 @@
 // Operator retirement of a no-good-copy object (scripts/no-good-copy-report.js --retire): the dry run prints and
 // changes nothing; a stub is soft-deleted (retention metadata, restorable, media.object.deleted staged) with its v1
 // VOD row hidden, and the readiness count (the same count /api/ready's object_copies check reads) goes to 0; a legacy
-// object whose envelope says public but whose v1 row is private is still retired (the row decides); native public
+// object whose envelope says public but whose v1 row is delisted (is_public 0) is still retired (the row decides); native public
 // objects, public v1 rows, objects with a good copy, objects of 1 MiB or more and held objects are refused.
 const assert = require('assert');
 const fs = require('fs');
@@ -80,10 +80,14 @@ const path = require('path');
     assert.strictEqual((await verifyJob.status()).no_good_copy, 0);
     console.log('✅ retires the stub: soft delete, retention, hidden v1 row, media.object.deleted, readiness count 0');
 
-    // ── A legacy envelope still saying public, whose v1 row is private (the production drift): the row decides ──
+    // ── The production drift: the media_objects row says public and the v1 row's health quarantine left visibility
+    //    public but is_public 0. The delisted row decides, so the object can be retired ──
     const stale = await vod({ title: 'stale envelope' });
+    await d.prepare("UPDATE vods SET visibility = 'public', is_public = 0 WHERE id = ?").run(stale.id);
     await d.prepare("UPDATE media_objects SET visibility = 'public' WHERE id = ?").run(stale.objectId);
     assert.strictEqual((await model.getObject(stale.objectId)).visibility, 'public', 'the legacy object row still says public');
+    const staleBefore = await d.prepare('SELECT visibility, is_public FROM vods WHERE id = ?').get(stale.id);
+    assert.deepStrictEqual([staleBefore.visibility, Number(staleBefore.is_public)], ['public', 0], 'the v1 row is delisted but still says visibility public');
     assert.strictEqual(await copyReport.countNoGoodCopy(db), 1);
     const staleDry = await run(['--retire', stale.objectId]);
     assert.strictEqual(staleDry.code, 0, staleDry.err);
@@ -95,7 +99,7 @@ const path = require('path');
     const staleRow = await d.prepare('SELECT visibility, is_public FROM vods WHERE object_id = ?').get(stale.objectId);
     assert.deepStrictEqual([staleRow.visibility, Number(staleRow.is_public)], ['private', 0], 'the private v1 row stays private');
     assert.strictEqual(await copyReport.countNoGoodCopy(db), 0);
-    console.log('✅ retires a legacy VOD whose object row says public while its v1 row is private');
+    console.log('✅ retires a legacy VOD whose object row says public while its v1 row is is_public 0');
 
     // ── Refusals: nothing is changed, the reason says why ──
     const good = await vod({ title: 'good', size: 100, bytes: 100 });
