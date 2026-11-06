@@ -593,6 +593,25 @@ without a signature is a 404 like any other private one). A native object in the
 R2 popularity cache redirects to its verified R2 copy; a GET of a native object
 counts its viewer for the day, identifying no one (see Storage tiering).
 
+## Unsafe-image review (VIS-6)
+
+A visible upload is marked `review_status = 'pending'` and is not served until OpenVibe.Vision (configured by
+`VISION_URL` or `OV_VISION_URL`, plus Media's Network service principal) answers. The reviewer sorts it into exactly
+three categories:
+
+| Category | Media's action |
+|---|---|
+| `fine` | `clear`: the object serves as before |
+| `sex_acts` | `hidden`: `visibility = private`; `/o/:id`, its HLS playlists, `public_url` and every public surface close; a signed download still reaches it for its owner |
+| `minor_sexual` | `quarantined`: private and 404 even with a signature; the Vision operator report id is kept in `review_report_id` |
+
+If Vision is unreachable, the object stays `pending` (closed), never public. `POST /api/v2/:app/objects/:id/review`
+re-runs the review, or applies `{ category: "fine" | "sex_acts" | "minor_sexual" }` directly (the same three; an
+operator or a consumer that already has Vision's label uses it). `GET /:id` includes
+`review: { category, status, report_id, reviewed_at }`, and `objectPublic`'s `public_url` is null for a hidden,
+quarantined or pending object. Rows uploaded before this migration have NULL review fields and keep serving as they
+did. Tests: `test/object-review.test.js`.
+
 ## S3 surface and zones
 
 Media answers a subset of S3 at `https://s3.openvibe.media` (ADR-031; DNS-only since 2026-10-21, so an object may be larger than Cloudflare's 100 MB; `https://s3.openvibe.network` is the same surface behind Cloudflare). Each bucket is a zone of a project environment, and zones are managed by OpenVibe.Zone. Media issues and verifies the `ovk_` access keys, and every object stays an ordinary Media object.
@@ -614,7 +633,7 @@ model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
   (302 for public, HMAC-signed short-lived URL for private —
   `MEDIA_SIGNING_SECRET`). App key, or a Network service token with
   `media.object.upload` / `media.object.read` for namespace `:app`;
-  `X-OV-Subject` sets the owner.
+  `X-OV-Subject` sets the owner. `POST /:id/review` applies a review (see Unsafe-image review).
 - **Retention holds** — `media_holds` (`moderation`, `dmca`, `creator_pin`,
   `admin`, `evidence`; reason, placed by/at, released by/at, note; `/:id/holds`
   and the staff routes `/api/v1/:app/admin/storage/holds`, app key only): a held

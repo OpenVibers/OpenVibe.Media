@@ -60,6 +60,7 @@ const { contentDisposition } = require('./disposition');
 const { tenantAuth, tenantCors, tenantPath, namespaceGrant } = require('../auth');
 const { announce } = require('../announce');
 const { limits } = require('../actor-limits');
+const review = require('./review');
 
 const MB = 1024 * 1024;
 // Each route checks its verb for the namespace it works in (the object's, or the one init names).
@@ -378,6 +379,12 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res)
         if (made.problem) return problem(res, made.problem.status, made.problem.code, made.problem.detail, made.problem.extra);
         const id = made.id;
         const obj = await model.getObject(id);
+        // A visible upload is pending until Vision reviews it (objects/review.js). Private objects are not
+        // reviewed and keep serving to their owner as before.
+        if (visibility !== 'private' && review.enabled()) {
+            await db.run("UPDATE media_objects SET review_status = 'pending' WHERE id = ?", [id]);
+            obj.review_status = 'pending';
+        }
         let session = null;
         if (wantParts) {
             session = await multipart.initiate(obj, { partSize: b.part_size });
@@ -433,6 +440,11 @@ async function completeUpload(req, res, obj, { expectedHash = null } = {}) {
         payload: async () => await model.objectPublic(await model.getObject(obj.id)),
     });
     await namespaces.reconcileChain(req.appRow, obj.namespace);
+    const current = await model.getObject(obj.id);
+    if (current.review_status === 'pending') {
+        const reviewed = await review.reviewObject(current);
+        return res.json(await model.objectPublic(reviewed));
+    }
     return res.json(body);
 }
 
@@ -580,6 +592,32 @@ router.delete('/:id/multipart/:uploadId', mpWrite, limits('media.object.multipar
     res.json(await multipart.sessionPublic(await multipart.getSession(session.id), { parts: false }));
 });
 
+// An operator re-run, and the direct category a caller already decided (the same three Vision stores). This is
+// also how a consumer can enforce a label it got from Vision: the action is Media's, not the caller's.
+router.post('/:id/review', upload, limits('media.object.review', { minute: 60, hour: 1200 }), async (req, res) => {
+    try {
+        const obj = await load(req, res, 'write');
+        if (!obj) return;
+        if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
+        const b = req.body && typeof req.body === 'object' ? req.body : {};
+        let out;
+        if (b.category != null) {
+            const category = String(b.category);
+            if (!['fine', 'sex_acts', 'minor_sexual'].includes(category)) return problem(res, 400, 'media.object.invalid', 'category must be fine, sex_acts or minor_sexual');
+            const reportId = b.report_id == null ? null : String(b.report_id);
+            if (reportId && !/^vor_[0-9A-HJKMNP-TV-Z]{26}$/.test(reportId)) return problem(res, 400, 'media.object.invalid', 'report_id must be an operator report id');
+            out = await review.applyCategory(obj, category, reportId);
+            if (category === 'minor_sexual') console.error(`[Objects] ${obj.id} quarantined by ${req.principal && req.principal.sub ? req.principal.sub : 'an operator'}; report ${reportId || '(none)'}`);
+        } else {
+            out = await review.reviewObject(obj);
+        }
+        return res.json(await model.objectPublic(out));
+    } catch (err) {
+        console.error('[Objects] review error:', err.message);
+        return problem(res, 500, 'media.object.review_failed', 'The review could not be applied');
+    }
+});
+
 router.get('/', list, limits('media.object.list'), async (req, res) => {
     try {
         const q = req.query;
@@ -674,6 +712,7 @@ router.get('/:id/download', read, limits('media.object.download'), async (req, r
     if (!obj) return;
     if (obj.lifecycle_status === 'deleted') return problem(res, 410, 'media.object.deleted', 'Object was deleted');
     if (obj.lifecycle_status !== 'ready') return problem(res, 409, 'media.object.not_ready', `Object is ${obj.lifecycle_status}`);
+    if (obj.review_status === 'pending' || obj.review_category === 'minor_sexual') return problem(res, 404, 'media.object.not_found', 'No such object');
     res.set('Cache-Control', cache.htmlHeaders({ private: true }));
     if (req.query.format === 'mp4') return await downloadMp4(req, res, obj);
     const json = req.query.format === 'json';
@@ -684,7 +723,7 @@ router.get('/:id/download', read, limits('media.object.download'), async (req, r
     // A clip without its own timeline plays its window of the source's (F3.5) and is never cut a CMAF timeline here.
     // The same answer shapes the v1 VOD and clip (objects/hls.js discovery; vodPublic/clipPublic).
     const hlsInfo = json ? await hls.discoveryForObject(obj) : null;
-    if (obj.visibility !== 'private' && !await db.isSandboxTenant(obj.app_id)) {
+    if (obj.review_category !== 'sex_acts' && obj.visibility !== 'private' && !await db.isSandboxTenant(obj.app_id)) {
         const url = model.legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`;
         return json ? res.json({ url, expires_at: null, public: true, ...(hlsInfo || {}) }) : res.redirect(302, url);
     }
@@ -823,7 +862,9 @@ async function hlsObject(req, res, next) {
     if (!obj) { res.status(404).json({ error: 'Not found' }); return null; }
     // A playlist token (purpose 'hls', from /download's hls_url) or, as before, the object's download signature.
     const signed = !!req.query.sig && (signing.verifyPlaylist(obj.id, req.query.exp, req.query.sig) || signing.verifyDownload(obj.id, req.query.exp, req.query.sig));
-    const closed = obj.visibility === 'private' || await db.isSandboxTenant(obj.app_id);
+    if (review.publicBlocked(obj, signed)) { res.status(404).json({ error: 'Not found' }); return null; }
+    const closed = obj.visibility === 'private' || obj.review_category === 'sex_acts' || obj.review_category === 'minor_sexual'
+        || obj.review_status === 'pending' || await db.isSandboxTenant(obj.app_id);
     if (closed && !signed) { res.status(404).json({ error: 'Not found' }); return null; }
     if (obj.lifecycle_status === 'deleted') { res.status(410).json({ error: 'Gone' }); return null; }
     if (obj.lifecycle_status !== 'ready') { res.status(404).json({ error: 'Not found' }); return null; }
@@ -986,6 +1027,10 @@ publicRouter.get('/:id', async (req, res) => {
         const obj = await model.getObject(String(req.params.id || ''));
         if (!obj) return res.status(404).json({ error: 'Not found' });
         const signed = !!req.query.sig && signing.verifyDownload(obj.id, req.query.exp, req.query.sig);
+        // A pending review, a quarantine and a hidden sex-act object are indistinguishable from missing,
+        // exactly like a private object. A signed read opens a sex-act object for its owner; nothing opens a
+        // quarantine or a pending review.
+        if (review.publicBlocked(obj, signed)) return res.status(404).json({ error: 'Not found' });
         // Private objects (and every developer-project sandbox object) are indistinguishable from
         // missing ones without a valid signature — checked before the lifecycle answers, or a 410
         // for a deleted private object would still say it existed.
