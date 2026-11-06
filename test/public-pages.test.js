@@ -58,6 +58,10 @@ const http = require('http');
     assert.ok(html.includes('<meta property="og:video" content="https://media.test/v/42?raw=1">'));
     assert.ok(html.includes('<meta name="twitter:card" content="summary_large_image">'));
     assert.ok(html.includes('src="https://media.test/v/42?raw=1"'), 'the player fetches the bytes with ?raw=1');
+    // A long fragmented recording can report no duration, so a metadata preload never finishes and the window load
+    // event waits on it (v/6170). The poster is the first frame; the bytes are fetched on play.
+    assert.ok(/<video[^>]*\bpreload="none"/.test(html), 'the player does not preload the video and block the page load');
+    assert.ok(!html.includes('preload="metadata"'), 'no metadata preload on the watch page');
     const scripts = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
     assert.strictEqual(scripts.length, 1);
     const ld = JSON.parse(scripts[0][1])['@graph'][0];
