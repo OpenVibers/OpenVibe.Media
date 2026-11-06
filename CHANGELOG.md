@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A legacy Live paste screenshot can be retired for OpenVibe.Community (2026-11-06). The internal
+  `POST /internal/community/legacy-paste-screenshots/:id/retire` route is loopback and service-token only
+  (`media.object.delete`, principal `svc:community`) and soft-deletes exactly a `legacy:live:paste:<slug>`
+  screenshot: 410 at `/o/:id`, the ordinary retention window and `media.object.deleted` event, and a repeat
+  is a no-op. VODs, clips, files, thumbnails, avatars and native objects are refused, and so is any other principal.
 - Review follow-up: a category-3 result places an `evidence` hold in the quarantine transaction, so owner delete and
   retention purge answer 409 held; an operator's overruling category releases it with who and when. Adds Vision's
   logged 60-second `operator-view` and service-only `review-decision` routes, a separate operator signature purpose,

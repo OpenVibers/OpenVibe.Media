@@ -23,6 +23,7 @@ const { once } = require('events');
 const { ids } = require('openvibe-contracts');
 const db = require('../db/database');
 const config = require('../config');
+const uploadSessions = require('./upload-sessions');
 
 const MB = 1024 * 1024;
 const MAX_PARTS = 10000;
@@ -101,12 +102,16 @@ function receivePart(req, session, n, { expectSha256 = null } = {}) {
     const want = partSize(session, n);
     const tmp = `${partFile(session.id, n)}.${crypto.randomBytes(4).toString('hex')}.tmp`;
     fs.mkdirSync(sessionDir(session.id), { recursive: true });
+    // The bytes are moving: a restart of Media would cut this part (server/protected-sessions.js).
+    const key = `${session.id}:${n}`;
+    uploadSessions.begin(key, 'part');
+    const release = () => uploadSessions.end(key);
     return new Promise((resolve) => {
         const hash = crypto.createHash('sha256');
         const out = fs.createWriteStream(tmp);
         let got = 0, done = false;
         const drop = () => { try { fs.unlinkSync(tmp); } catch { /* not written */ } };
-        const finish = (r) => { if (done) return; done = true; resolve(r); };
+        const finish = (r) => { if (done) return; done = true; release(); resolve(r); };
         const fail = async (r) => {
             if (done) return;
             const end = async () => { drop(); await finish(r); };
@@ -117,6 +122,7 @@ function receivePart(req, session, n, { expectSha256 = null } = {}) {
             got += c.length;
             if (got > want) { req.unpipe(out); req.resume(); return await fail({ status: 413, code: 'media.upload.part_too_large', error: `Part ${n} is ${want} bytes` }); }
             hash.update(c);
+            uploadSessions.touch(key);
         });
         req.on('aborted', async () => await fail({ status: 400, code: 'media.object.upload_interrupted', error: 'Upload did not complete' }));
         req.on('error', async () => await fail({ status: 400, code: 'media.object.upload_interrupted', error: 'Upload did not complete' }));
