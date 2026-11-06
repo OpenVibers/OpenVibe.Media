@@ -69,6 +69,8 @@ const read = tenantAuth({ verb: 'read', namespaced: true, project: true });
 const list = tenantAuth({ verb: 'list', namespaced: true, project: true });
 const remove = tenantAuth({ verb: 'delete', namespaced: true, project: true });
 const appOnly = tenantAuth();
+const reviewView = tenantAuth({ capability: 'media.object.review.view', namespaced: true, project: true });
+const reviewDecide = tenantAuth({ capability: 'media.object.review.decide', namespaced: true, project: true });
 // Per-actor limits (server/actor-limits.js), after the credential and before the work. Reads take the
 // defaults (MEDIA_LIMITS_MINUTE / _HOUR). An init reserves quota and makes a row, and each upload step
 // writes or hashes bytes, so the upload routes allow a steady app a new object every two seconds at most.
@@ -594,27 +596,61 @@ router.delete('/:id/multipart/:uploadId', mpWrite, limits('media.object.multipar
 
 // An operator re-run, and the direct category a caller already decided (the same three Vision stores). This is
 // also how a consumer can enforce a label it got from Vision: the action is Media's, not the caller's.
+// Re-run Vision on an object (no category body). A category decision is the operator route below, never
+// an owner's write: releasing an evidence hold must not be something the object's owner can do.
 router.post('/:id/review', upload, limits('media.object.review', { minute: 60, hour: 1200 }), async (req, res) => {
     try {
         const obj = await load(req, res, 'write');
         if (!obj) return;
         if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
-        const b = req.body && typeof req.body === 'object' ? req.body : {};
-        let out;
-        if (b.category != null) {
-            const category = String(b.category);
-            if (!['fine', 'sex_acts', 'minor_sexual'].includes(category)) return problem(res, 400, 'media.object.invalid', 'category must be fine, sex_acts or minor_sexual');
-            const reportId = b.report_id == null ? null : String(b.report_id);
-            if (reportId && !/^vor_[0-9A-HJKMNP-TV-Z]{26}$/.test(reportId)) return problem(res, 400, 'media.object.invalid', 'report_id must be an operator report id');
-            out = await review.applyCategory(obj, category, reportId);
-            if (category === 'minor_sexual') console.error(`[Objects] ${obj.id} quarantined by ${req.principal && req.principal.sub ? req.principal.sub : 'an operator'}; report ${reportId || '(none)'}`);
-        } else {
-            out = await review.reviewObject(obj);
-        }
+        if (req.body && req.body.category != null) return problem(res, 403, 'capability.denied', 'a category is an operator decision; use POST /review-decision');
+        const out = await review.reviewObject(obj);
         return res.json(await model.objectPublic(out));
     } catch (err) {
         console.error('[Objects] review error:', err.message);
         return problem(res, 500, 'media.object.review_failed', 'The review could not be applied');
+    }
+});
+
+// An operator's overruling category (fine or sex_acts releases the evidence hold; minor_sexual places it).
+// Service principal only: the capability is Vision's, and an app key never sets req.principal.
+router.post('/:id/review-decision', reviewDecide, async (req, res) => {
+    try {
+        if (!req.principal || !req.principal.sub) return problem(res, 403, 'capability.denied', 'an operator service token is required');
+        const obj = await model.getObject(String(req.params.id || ''));
+        if (!obj || obj.app_id !== req.appId) return problem(res, 404, 'media.object.not_found', 'No such object in this namespace');
+        const b = req.body && typeof req.body === 'object' ? req.body : {};
+        const category = String(b.category || '');
+        if (!['fine', 'sex_acts', 'minor_sexual'].includes(category)) return problem(res, 400, 'media.object.invalid', 'category must be fine, sex_acts or minor_sexual');
+        const reportId = b.report_id == null ? null : String(b.report_id);
+        if (reportId && !/^vor_[0-9A-HJKMNP-TV-Z]{26}$/.test(reportId)) return problem(res, 400, 'media.object.invalid', 'report_id must be an operator report id');
+        const decidedBy = b.decided_by == null ? req.principal.sub : String(b.decided_by).slice(0, 200);
+        const out = await review.applyCategory(obj, category, reportId, { by: decidedBy });
+        if (category === 'minor_sexual') console.error(`[Objects] ${obj.id} quarantined by ${decidedBy}; report ${reportId || '(none)'}`);
+        return res.json(await model.objectPublic(out));
+    } catch (err) {
+        console.error('[Objects] review decision error:', err.message);
+        return problem(res, 500, 'media.object.review_failed', 'The decision could not be applied');
+    }
+});
+
+// A 60-second operator evidence view of a hidden or quarantined object. Only Vision's service token holds
+// media.object.review.view; the view is logged (media_review_views plus a moderation event) before the URL
+// is answered, and the URL's purpose is separate from every normal download signature.
+router.post('/:id/operator-view', reviewView, async (req, res) => {
+    try {
+        if (!req.principal || !req.principal.sub) return problem(res, 403, 'capability.denied', 'an operator service token is required');
+        const obj = await model.getObject(String(req.params.id || ''));
+        if (!obj || obj.app_id !== req.appId) return problem(res, 404, 'media.object.not_found', 'No such object in this namespace');
+        if (!['sex_acts', 'minor_sexual'].includes(obj.review_category) && !['hidden', 'quarantined'].includes(obj.review_status)) {
+            return problem(res, 409, 'media.object.not_reviewed', 'only a hidden or quarantined object has an operator view');
+        }
+        const signed = signing.signedOperatorUrl(obj.id, 60);
+        await review.logOperatorView({ obj, viewerSub: req.principal.sub, expiresAt: signed.expires_at });
+        return res.json({ object_id: obj.id, review_category: obj.review_category, review_status: obj.review_status, expires_at: signed.expires_at, url: signed.url });
+    } catch (err) {
+        console.error('[Objects] operator view error:', err.message);
+        return problem(res, 500, 'media.object.review_view_failed', 'The operator view could not be made');
     }
 });
 
@@ -1027,15 +1063,16 @@ publicRouter.get('/:id', async (req, res) => {
         const obj = await model.getObject(String(req.params.id || ''));
         if (!obj) return res.status(404).json({ error: 'Not found' });
         const signed = !!req.query.sig && signing.verifyDownload(obj.id, req.query.exp, req.query.sig);
+        const operator = !!req.query.sig && signing.verifyOperator(obj.id, req.query.exp, req.query.sig);
         // A pending review, a quarantine and a hidden sex-act object are indistinguishable from missing,
-        // exactly like a private object. A signed read opens a sex-act object for its owner; nothing opens a
-        // quarantine or a pending review.
-        if (review.publicBlocked(obj, signed)) return res.status(404).json({ error: 'Not found' });
+        // exactly like a private object. A signed read opens a sex-act object for its owner; a separate,
+        // 60-second operator signature opens either hidden category for the review page (and is logged).
+        if (review.publicBlocked(obj, signed, operator)) return res.status(404).json({ error: 'Not found' });
         // Private objects (and every developer-project sandbox object) are indistinguishable from
         // missing ones without a valid signature — checked before the lifecycle answers, or a 410
         // for a deleted private object would still say it existed.
         const sandbox = await db.isSandboxTenant(obj.app_id);
-        if ((obj.visibility === 'private' || sandbox) && !signed) return res.status(404).json({ error: 'Not found' });
+        if ((obj.visibility === 'private' || sandbox) && !signed && !operator) return res.status(404).json({ error: 'Not found' });
         if (obj.lifecycle_status === 'deleted') return res.status(410).json({ error: 'Gone' });
         if (obj.lifecycle_status !== 'ready') return res.status(404).json({ error: 'Not found' });
 

@@ -42,6 +42,9 @@ function visionClient({ fetchImpl = globalThis.fetch } = {}) {
             body: JSON.stringify({
                 object_type: 'media.object',
                 object_id: obj.id,
+                object_app: obj.app_id,
+                media_object_id: obj.id,
+                media_app: obj.app_id,
                 owner_subject: obj.owner_subject || null,
                 image_url: model.legacyPublicUrl(obj) || `${require('../config').publicUrl}/o/${obj.id}`,
             }),
@@ -78,13 +81,51 @@ function columns(category, reportId = null) {
     return { category, status: 'quarantined', visibility: 'private', reportId };
 }
 
-async function applyCategory(obj, category, reportId = null) {
+/**
+ * Write one category. A category-3 result places an `evidence` hold in the same transaction: the owner's
+ * delete and retention purge both see the hold and the owner gets the usual neutral 409 held. An operator's
+ * overruling category (fine or sex_acts, with `by`) releases that hold, with who and when on the hold row.
+ */
+async function applyCategory(obj, category, reportId = null, { by = null } = {}) {
     const c = columns(category, reportId);
-    const sets = ['review_category = ?', 'review_status = ?', 'review_report_id = ?', 'reviewed_at = now()'];
-    const args = [c.category, c.status, c.reportId];
-    if (c.visibility) { sets.push('visibility = ?'); args.push(c.visibility); }
-    args.push(obj.id);
-    await db.run(`UPDATE media_objects SET ${sets.join(', ')} WHERE id = ?`, args);
+    await db.getDb().tx(async () => {
+        const sets = ['review_category = ?', 'review_status = ?', 'review_report_id = ?', 'reviewed_at = now()'];
+        const args = [c.category, c.status, c.reportId];
+        if (c.visibility) { sets.push('visibility = ?'); args.push(c.visibility); }
+        args.push(obj.id);
+        await db.run(`UPDATE media_objects SET ${sets.join(', ')} WHERE id = ?`, args);
+        if (category === 'minor_sexual') {
+            let hold = await db.get("SELECT id FROM media_holds WHERE object_id = ? AND kind = 'evidence' AND released_at IS NULL ORDER BY id DESC LIMIT 1", [obj.id]);
+            if (!hold) {
+                const inserted = await db.run("INSERT INTO media_holds (object_id, kind, reason, created_by, note) VALUES (?, 'evidence', ?, ?, ?) RETURNING id", [
+                    obj.id, 'unsafe-image review: sexual content involving a minor', by || 'svc:vision',
+                    reportId ? `operator report ${reportId}` : null,
+                ]);
+                hold = { id: inserted.lastInsertRowid };
+                await require('../events').recordModeration(obj.app_id, {
+                    action: 'review.hold_placed',
+                    target: { type: obj.kind, id: obj.id, ...(obj.owner_subject ? { owner_subject: obj.owner_subject } : {}) },
+                    actor_subject: /^usr_[0-9A-HJKMNP-TV-Z]{26}$/.test(String(by)) ? by : null,
+                    reason: 'unsafe-image review: sexual content involving a minor',
+                    details: { hold_id: hold.id, review_category: category, app: obj.app_id, ...(by ? { by: String(by).slice(0, 200) } : {}) },
+                });
+            }
+            await db.run('UPDATE media_objects SET review_hold_id = ? WHERE id = ?', [hold.id, obj.id]);
+        } else if (by) {
+            const hold = await db.get("SELECT id FROM media_holds WHERE object_id = ? AND kind = 'evidence' AND released_at IS NULL ORDER BY id DESC LIMIT 1", [obj.id]);
+            if (hold) {
+                await db.run('UPDATE media_holds SET released_at = ov_now(), released_by = ? WHERE id = ? AND released_at IS NULL', [by, hold.id]);
+                await db.run('UPDATE media_objects SET review_hold_id = NULL WHERE id = ?', [obj.id]);
+                await require('../events').recordModeration(obj.app_id, {
+                    action: 'review.hold_released',
+                    target: { type: obj.kind, id: obj.id, ...(obj.owner_subject ? { owner_subject: obj.owner_subject } : {}) },
+                    actor_subject: /^usr_[0-9A-HJKMNP-TV-Z]{26}$/.test(String(by)) ? by : null,
+                    reason: `operator overruled the review to ${category}`,
+                    details: { hold_id: hold.id, review_category: category, app: obj.app_id, ...(/^usr_/.test(String(by)) ? {} : { by: String(by).slice(0, 200) }) },
+                });
+            }
+        }
+    });
     return await model.getObject(obj.id);
 }
 
@@ -114,12 +155,27 @@ async function reviewObject(obj, { log = console } = {}) {
 }
 
 /** True when a public reader must not be served this object (a signature does not open a quarantine). */
-function publicBlocked(obj, signed = false) {
+function publicBlocked(obj, signed = false, operator = false) {
     if (!obj) return true;
+    if (operator) return false;                         // a logged 60-second operator evidence view
     if (obj.review_status === 'pending') return true;
     if (obj.review_category === 'minor_sexual') return true;
     if (obj.review_category === 'sex_acts' && !signed) return true;
     return false;
 }
 
-module.exports = { ACTIONS, visionClient, setReviewClient, enabled, reviewRequired, columns, applyCategory, reviewObject, publicBlocked };
+/** Log one operator evidence view; the event goes through the same moderation audit as a hold. */
+async function logOperatorView({ obj, viewerSub, expiresAt }) {
+    await db.getDb().tx(async () => {
+        await db.run('INSERT INTO media_review_views (object_id, app_id, viewer_sub, expires_at) VALUES (?, ?, ?, ?)', [obj.id, obj.app_id, viewerSub, expiresAt || null]);
+        await require('../events').recordModeration(obj.app_id, {
+            action: 'review.viewed',
+            target: { type: obj.kind, id: obj.id, ...(obj.owner_subject ? { owner_subject: obj.owner_subject } : {}) },
+            actor_subject: /^usr_[0-9A-HJKMNP-TV-Z]{26}$/.test(String(viewerSub)) ? viewerSub : null,
+            reason: 'operator evidence view',
+            details: { review_category: obj.review_category, app: obj.app_id, expires_at: expiresAt || null, ...(/^usr_/.test(String(viewerSub)) ? {} : { by: String(viewerSub).slice(0, 200) }) },
+        });
+    });
+}
+
+module.exports = { ACTIONS, visionClient, setReviewClient, enabled, reviewRequired, columns, applyCategory, reviewObject, publicBlocked, logOperatorView };

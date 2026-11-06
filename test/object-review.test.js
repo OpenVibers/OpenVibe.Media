@@ -10,7 +10,7 @@ const os = require('os');
 const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
-const { ids } = require('openvibe-contracts');
+const { ids, serviceAuth } = require('openvibe-contracts');
 
 (async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ov-media-review-'));
@@ -51,8 +51,13 @@ const { ids } = require('openvibe-contracts');
     process.env.OV_NETWORK_INTERNAL_URL = visionBase;
 
     const db = require('../server/db/database');
+    const auth = require('../server/auth');
     const objectRoutes = require('../server/objects/routes');
     const express = require('express');
+    const keys = crypto.generateKeyPairSync('rsa', { modulusLength: 2048, publicKeyEncoding: { type: 'spki', format: 'pem' }, privateKeyEncoding: { type: 'pkcs8', format: 'pem' } });
+    auth._setNetworkPublicKeyForTests(keys.publicKey);
+    const nowS = Math.floor(Date.now() / 1000);
+    const svc = (cap) => serviceAuth.signServiceToken({ iss: 'https://openvibe.network', sub: 'svc:vision', actor_type: 'service', aud: ['openvibe.media'], cap, ns: ['live'], iat: nowS, exp: nowS + 300, jti: `tok_${crypto.randomBytes(6).toString('hex')}` }, keys.privateKey);
 
     await db.upsertApp({ app_id: 'live', api_key: 'live-key' });
     const app = express();
@@ -67,8 +72,8 @@ const { ids } = require('openvibe-contracts');
     const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
     const png = await require('sharp')({ create: { width: 80, height: 60, channels: 3, background: '#3355aa' } }).png().toBuffer();
     const O = '/api/v2/live/objects';
-    const call = async (method, p, { body, raw, headers = {} } = {}) => {
-        const h = { authorization: 'Bearer live-key', ...headers };
+    const call = async (method, p, { body, raw, headers = {}, bearer = 'live-key' } = {}) => {
+        const h = { authorization: `Bearer ${bearer}`, ...headers };
         let payload;
         if (raw !== undefined) payload = raw;
         else if (body !== undefined) { h['content-type'] = 'application/json'; payload = JSON.stringify(body); }
@@ -94,6 +99,7 @@ const { ids } = require('openvibe-contracts');
     await check('fine: the image serves publicly, and the row says clear', async () => {
         state.category = 'fine';
         const { id, complete } = await upload();
+        globalThis.__fineId = id;
         assert.strictEqual(complete.review.category, 'fine');
         assert.strictEqual(complete.review.status, 'clear');
         assert.strictEqual(complete.public_url, `https://media.test/o/${id}`);
@@ -148,15 +154,68 @@ const { ids } = require('openvibe-contracts');
         assert.deepStrictEqual([complete.review.status, complete.public_url !== null], ['clear', true]);
     });
 
-    await check('an operator can apply a category directly; the same enforcement follows', async () => {
+    await check('an operator decision needs the service capability; the same enforcement follows', async () => {
         state.category = 'fine';
         const { id } = await upload();
-        const r = await call('POST', `${O}/${id}/review`, { body: { category: 'sex_acts' } });
+        const no = await call('POST', `${O}/${id}/review-decision`, { body: { category: 'sex_acts' } });
+        assert.deepStrictEqual([no.status, no.body.code], [403, 'capability.denied']);
+        const r = await call('POST', `${O}/${id}/review-decision`, { body: { category: 'sex_acts' }, bearer: svc(['media.object.review.decide']) });
         assert.strictEqual(r.status, 200, r.text);
         assert.deepStrictEqual([r.body.review.category, r.body.review.status, r.body.visibility], ['sex_acts', 'hidden', 'private']);
         assert.strictEqual((await fetch(`${base}/o/${id}`)).status, 404);
-        const bad = await call('POST', `${O}/${id}/review`, { body: { category: 'nudity' } });
+        const bad = await call('POST', `${O}/${id}/review-decision`, { body: { category: 'nudity' }, bearer: svc(['media.object.review.decide']) });
         assert.deepStrictEqual([bad.status, bad.body.code], [400, 'media.object.invalid']);
+    });
+
+    await check('minor_sexual places an evidence hold; the owner delete is the usual neutral 409', async () => {
+        state.category = 'minor_sexual';
+        const { id } = await upload();
+        const hold = await db.get("SELECT id, kind, released_at, released_by FROM media_holds WHERE object_id = ? AND kind = 'evidence' AND released_at IS NULL", [id]);
+        assert.ok(hold && hold.id, 'an open evidence hold exists');
+        const del = await call('DELETE', `${O}/${id}`);
+        assert.deepStrictEqual([del.status, del.body.code], [409, 'media.object.held']);
+        // A second category-3 decision does not duplicate the hold.
+        await call('POST', `${O}/${id}/review-decision`, { body: { category: 'minor_sexual', report_id: 'vor_01JAB2C3D4E5F6G7H8J9K0MNPQ' }, bearer: svc(['media.object.review.decide']) });
+        const count = await db.get("SELECT COUNT(*)::int AS n FROM media_holds WHERE object_id = ? AND kind = 'evidence'", [id]);
+        assert.strictEqual(Number(count.n), 1);
+    });
+
+    await check('operator view: only the review.view capability, only hidden/quarantined, and it opens a 60-second URL', async () => {
+        state.category = 'minor_sexual';
+        const { id } = await upload();
+        const no = await call('POST', `${O}/${id}/operator-view`, { body: {} });
+        assert.deepStrictEqual([no.status, no.body.code], [403, 'capability.denied'], 'an app key is not an operator');
+        const wrong = await call('POST', `${O}/${id}/operator-view`, { body: {}, bearer: svc(['media.object.review.decide']) });
+        assert.strictEqual(wrong.status, 403, 'another capability is not view');
+        const r = await call('POST', `${O}/${id}/operator-view`, { body: {}, bearer: svc(['media.object.review.view']) });
+        assert.strictEqual(r.status, 200, r.text);
+        assert.match(r.body.url, /\?exp=\d+&sig=/);
+        const ttl = Math.round((Date.parse(r.body.expires_at) - Date.now()) / 1000);
+        assert.ok(ttl >= 30 && ttl <= 60, `a 60-second view, got ${ttl}s`);
+        const bytes = await fetch(local(r.body.url));
+        assert.strictEqual(bytes.status, 200, 'the operator URL opens a quarantined object');
+        const fine = await call('POST', `${O}/${globalThis.__fineId}/operator-view`, { body: {}, bearer: svc(['media.object.review.view']) });
+        assert.deepStrictEqual([fine.status, fine.body.code], [409, 'media.object.not_reviewed']);
+        // A past operator signature does not open it.
+        const past = nowS - 10;
+        const sig = crypto.createHmac('sha256', 'test-signing-secret').update(`operator\n${id}\n${past}`).digest('base64url');
+        assert.strictEqual((await fetch(`${base}/o/${id}?exp=${past}&sig=${sig}`)).status, 404);
+        const viewed = await db.get('SELECT viewer_sub, expires_at FROM media_review_views WHERE object_id = ? ORDER BY id DESC LIMIT 1', [id]);
+        assert.strictEqual(viewed.viewer_sub, 'svc:vision');
+    });
+
+    await check('an operator overruling to fine releases the evidence hold with who and when', async () => {
+        state.category = 'minor_sexual';
+        const { id } = await upload();
+        const open = await db.get("SELECT id FROM media_holds WHERE object_id = ? AND kind = 'evidence' AND released_at IS NULL", [id]);
+        assert.ok(open);
+        const r = await call('POST', `${O}/${id}/review-decision`, { body: { category: 'fine', report_id: 'vor_01JAB2C3D4E5F6G7H8J9K0MNPQ', decided_by: 'usr_01JAB2C3D4E5F6G7H8J9K0MNPQ' }, bearer: svc(['media.object.review.decide']) });
+        assert.strictEqual(r.status, 200, r.text);
+        const released = await db.get('SELECT released_at, released_by FROM media_holds WHERE id = ?', [open.id]);
+        assert.ok(released.released_at);
+        assert.strictEqual(released.released_by, 'usr_01JAB2C3D4E5F6G7H8J9K0MNPQ');
+        const del = await call('DELETE', `${O}/${id}`);
+        assert.strictEqual(del.status, 200, del.text);
     });
 
     console.log(`object review: ${passed} checks passed`);

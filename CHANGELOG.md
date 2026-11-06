@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Review follow-up: a category-3 result places an `evidence` hold in the quarantine transaction, so owner delete and
+  retention purge answer 409 held; an operator's overruling category releases it with who and when. Adds Vision's
+  logged 60-second `operator-view` and service-only `review-decision` routes, a separate operator signature purpose,
+  `media_review_views`, migration `0019_review_evidence.sql`, and Contracts v0.294.0.
 - Unsafe-image review enforcement (VIS-6): a visible upload is pending until OpenVibe.Vision (`VISION_URL` plus
   Media's service principal) sorts it into `fine`, `sex_acts` or `minor_sexual`. Sex acts become private and leave
   every public surface; sexual content involving a minor is quarantined even from a signed read and keeps Vision's

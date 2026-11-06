@@ -603,14 +603,18 @@ three categories:
 |---|---|
 | `fine` | `clear`: the object serves as before |
 | `sex_acts` | `hidden`: `visibility = private`; `/o/:id`, its HLS playlists, `public_url` and every public surface close; a signed download still reaches it for its owner |
-| `minor_sexual` | `quarantined`: private and 404 even with a signature; the Vision operator report id is kept in `review_report_id` |
+| `minor_sexual` | `quarantined`: private and 404 even with a signature; Vision's operator report id is kept in `review_report_id`, and an `evidence` hold is placed in the same transaction so the owner's delete or retention purge cannot destroy it |
 
 If Vision is unreachable, the object stays `pending` (closed), never public. `POST /api/v2/:app/objects/:id/review`
-re-runs the review, or applies `{ category: "fine" | "sex_acts" | "minor_sexual" }` directly (the same three; an
-operator or a consumer that already has Vision's label uses it). `GET /:id` includes
-`review: { category, status, report_id, reviewed_at }`, and `objectPublic`'s `public_url` is null for a hidden,
-quarantined or pending object. Rows uploaded before this migration have NULL review fields and keep serving as they
-did. Tests: `test/object-review.test.js`.
+re-runs the review. A category is an operator decision:
+`POST /api/v2/:app/objects/:id/review-decision` needs the service capability `media.object.review.decide` (Vision's),
+takes `fine | sex_acts | minor_sexual`, and releases the evidence hold only for `fine` or `sex_acts` with
+`released_by`/`released_at` on the hold row. `POST /api/v2/:app/objects/:id/operator-view` needs
+`media.object.review.view`, refuses a fine or pending object, and answers a 60-second signed URL under a separate
+`operator` signature purpose; every view is written to `media_review_views` and a `media.moderation.action` audit
+event. `GET /:id` includes `review: { category, status, report_id, hold_id, reviewed_at }`, and `objectPublic`'s
+`public_url` is null for a hidden, quarantined or pending object. Rows uploaded before this migration have NULL review
+fields and keep serving as they did. Tests: `test/object-review.test.js`.
 
 ## S3 surface and zones
 

@@ -729,6 +729,7 @@ async function objectPublic(obj, { locations = true } = {}) {
             category: obj.review_category || null,
             status: obj.review_status || null,
             report_id: obj.review_report_id || null,
+            hold_id: obj.review_hold_id || null,
             reviewed_at: obj.reviewed_at || null,
         },
         // Developer-project sandbox objects have no public URL: /download hands out signed ones.
