@@ -724,8 +724,17 @@ async function objectPublic(obj, { locations = true } = {}) {
         held: await isHeld(obj.id),
         // metadata / bytes_verified / playable, from this row and its copies' recorded checks (objects/readiness.js).
         readiness: await require('./readiness').compute(obj, locs),
+        // A review that hides or quarantines an object closes its public URL too; a pending review is not public yet.
+        review: {
+            category: obj.review_category || null,
+            status: obj.review_status || null,
+            report_id: obj.review_report_id || null,
+            hold_id: obj.review_hold_id || null,
+            reviewed_at: obj.reviewed_at || null,
+        },
         // Developer-project sandbox objects have no public URL: /download hands out signed ones.
         public_url: obj.visibility !== 'private' && obj.lifecycle_status === 'ready' && !await db.isSandboxTenant(obj.app_id)
+            && obj.review_status !== 'pending' && !['sex_acts', 'minor_sexual'].includes(obj.review_category)
             ? (legacyPublicUrl(obj) || `${config.publicUrl}/o/${obj.id}`) : null,
         created_at: obj.created_at,
         updated_at: obj.updated_at,

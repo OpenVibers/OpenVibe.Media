@@ -58,6 +58,25 @@ function verifyDownload(objectId, exp, sig) {
 }
 
 /**
+ * A 60-second operator evidence view of a hidden/quarantined object. Its own purpose ('operator') so a
+ * normal download signature never opens a quarantine and this one expires quickly; the route that mints it
+ * logs who asked. Only the public object route accepts it.
+ */
+function signedOperatorUrl(objectId, ttlS = 60) {
+    const exp = nowS() + Math.min(300, Math.max(30, Number(ttlS) || 60));
+    return {
+        url: `${config.publicUrl}/o/${encodeURIComponent(objectId)}?exp=${exp}&sig=${mac('operator', objectId, exp)}`,
+        expires_at: new Date(exp * 1000).toISOString(),
+    };
+}
+
+function verifyOperator(objectId, exp, sig) {
+    const e = Number(exp);
+    if (!Number.isInteger(e) || e < nowS() || e > nowS() + 300) return false;
+    return safeEqual(sig, mac('operator', objectId, e));
+}
+
+/**
  * Signed HLS master playlist of an object (/o/:id/master.m3u8), carried onto every playlist and segment URI under it.
  * Its own purpose ('hls'): a viewer plays a long VOD on one page load, so it lives longer than a download URL
  * (MEDIA_HLS_PLAYLIST_TTL_S, 60 s to 12 h), and only the HLS routes accept it — never GET /o/:id or any other route.
@@ -180,6 +199,6 @@ function verifyMultipartToken(token, { tenant, objectId, uploadId, totalSize }) 
 }
 
 module.exports = {
-    signedDownloadUrl, verifyDownload, signedPlaylistUrl, verifyPlaylist, signedFileUrl, verifyFile, signedMediaUrl, verifyMedia,
+    signedDownloadUrl, verifyDownload, signedOperatorUrl, verifyOperator, signedPlaylistUrl, verifyPlaylist, signedFileUrl, verifyFile, signedMediaUrl, verifyMedia,
     uploadToken, uploadTtl, checkUploadToken, verifyUploadToken, multipartToken, verifyMultipartToken,
 };

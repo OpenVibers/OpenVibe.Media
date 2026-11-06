@@ -45,7 +45,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.289.1, `openvibe-sdk` v0.82.0 (tokens, events outbox, usage readings, per-actor limits),
+- `openvibe-contracts` v0.294.0, `openvibe-sdk` v0.82.0 (tokens, events outbox, usage readings, per-actor limits),
   `openvibe-shared` v4.115.1, pinned by release tarball
 
 ## Capabilities
@@ -129,7 +129,7 @@ server/
                          storage.orphans.scan (monthly storage orphan report, service-wide, report only),
                          storage.move.cleanup (the alert for placement moves whose delete keeps failing, service-wide)
   client-ip.js           trust proxy = loopback; req.ip is the only client address
-(openvibe-shared v4.115.1, openvibe-contracts v0.289.1, openvibe-sdk v0.82.0: pinned release tarballs, installed by npm)
+(openvibe-shared v4.115.1, openvibe-contracts v0.294.0, openvibe-sdk v0.82.0: pinned release tarballs, installed by npm)
 scripts/smoke-test.sh    end-to-end smoke test (boots a temp instance)
 scripts/reconcile-objects.js / object-invariant.js / no-good-copy-report.js   object-model operator tools
 scripts/media-jobs.js     list jobs, run the size-invariant scan (dry run by default), approve/cancel proposals
@@ -593,6 +593,29 @@ without a signature is a 404 like any other private one). A native object in the
 R2 popularity cache redirects to its verified R2 copy; a GET of a native object
 counts its viewer for the day, identifying no one (see Storage tiering).
 
+## Unsafe-image review (VIS-6)
+
+A visible upload is marked `review_status = 'pending'` and is not served until OpenVibe.Vision (configured by
+`VISION_URL` or `OV_VISION_URL`, plus Media's Network service principal) answers. The reviewer sorts it into exactly
+three categories:
+
+| Category | Media's action |
+|---|---|
+| `fine` | `clear`: the object serves as before |
+| `sex_acts` | `hidden`: `visibility = private`; `/o/:id`, its HLS playlists, `public_url` and every public surface close; a signed download still reaches it for its owner |
+| `minor_sexual` | `quarantined`: private and 404 even with a signature; Vision's operator report id is kept in `review_report_id`, and an `evidence` hold is placed in the same transaction so the owner's delete or retention purge cannot destroy it |
+
+If Vision is unreachable, the object stays `pending` (closed), never public. `POST /api/v2/:app/objects/:id/review`
+re-runs the review. A category is an operator decision:
+`POST /api/v2/:app/objects/:id/review-decision` needs the service capability `media.object.review.decide` (Vision's),
+takes `fine | sex_acts | minor_sexual`, and releases the evidence hold only for `fine` or `sex_acts` with
+`released_by`/`released_at` on the hold row. `POST /api/v2/:app/objects/:id/operator-view` needs
+`media.object.review.view`, refuses a fine or pending object, and answers a 60-second signed URL under a separate
+`operator` signature purpose; every view is written to `media_review_views` and a `media.moderation.action` audit
+event. `GET /:id` includes `review: { category, status, report_id, hold_id, reviewed_at }`, and `objectPublic`'s
+`public_url` is null for a hidden, quarantined or pending object. Rows uploaded before this migration have NULL review
+fields and keep serving as they did. Tests: `test/object-review.test.js`.
+
 ## S3 surface and zones
 
 Media answers a subset of S3 at `https://s3.openvibe.media` (ADR-031; DNS-only since 2026-10-21, so an object may be larger than Cloudflare's 100 MB; `https://s3.openvibe.network` is the same surface behind Cloudflare). Each bucket is a zone of a project environment, and zones are managed by OpenVibe.Zone. Media issues and verifies the `ovk_` access keys, and every object stays an ordinary Media object.
@@ -614,7 +637,7 @@ model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
   (302 for public, HMAC-signed short-lived URL for private —
   `MEDIA_SIGNING_SECRET`). App key, or a Network service token with
   `media.object.upload` / `media.object.read` for namespace `:app`;
-  `X-OV-Subject` sets the owner.
+  `X-OV-Subject` sets the owner. `POST /:id/review` applies a review (see Unsafe-image review).
 - **Retention holds** — `media_holds` (`moderation`, `dmca`, `creator_pin`,
   `admin`, `evidence`; reason, placed by/at, released by/at, note; `/:id/holds`
   and the staff routes `/api/v1/:app/admin/storage/holds`, app key only): a held
@@ -755,7 +778,7 @@ Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not
 restart; afterwards `sudo ovhost rollback media --to <sha>`.
 
 <!-- versions:start -->
-- openvibe-contracts: v0.289.1
+- openvibe-contracts: v0.294.0
 - openvibe-sdk: v0.82.0
 - openvibe-shared: v4.115.1
 <!-- versions:end -->
