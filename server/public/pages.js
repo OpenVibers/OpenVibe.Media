@@ -182,9 +182,12 @@ function renderWatchPage(kind, record, readiness = null) {
     ].filter(Boolean);
 
     const [stateTitle, stateText] = playable ? [null, null] : unavailableText(kind, readiness.reason);
+    // No preload: a long recording is a fragmented MP4 whose moov has no duration, so Chrome keeps range-reading the
+    // whole file to find one, never reaches HAVE_METADATA, and the window's load event waits for it (v/6170: 30 s+
+    // timeout). The poster is the first frame, and pressing play still fetches the bytes; the page itself must load.
     const player = playable
         ? `<div class="player">
-    <video data-ov-player controls playsinline preload="metadata"${thumb ? ` poster="${esc(thumb)}"` : ''} src="${esc(rawUrl)}">
+    <video data-ov-player controls playsinline preload="none"${thumb ? ` poster="${esc(thumb)}"` : ''} src="${esc(rawUrl)}">
       Your browser cannot play this video. <a href="${esc(rawUrl)}">Download it</a> instead.
     </video>
   </div>`
