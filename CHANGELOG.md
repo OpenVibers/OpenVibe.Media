@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A tenant for the screenshot pass (plan L9, devblog §3.3): OpenVibe.Host stores the PNGs it captures (ovhost shots) in its own
+  tenant, `host`, through the Object API v2. The tenant is created at boot like the other first-party ones, and reached only
+  with a Network service token that holds the media.object.* verbs for the host namespace.
+
 - A deleted recording's or clip's thumbnail goes with it (2026-10-20). Migration 0013 adds a trigger that marks an
   object's derivatives (`media_variants`) deleted whenever it is, and backfills the ones left behind; restoring a native
   object brings back the derivatives deleted with it. `/t/vod-<id>-…` and `/t/clip-<id>-…` answer the empty pixel once

@@ -212,6 +212,7 @@ async function ensureTokenOnlyApps() {
         ['inventory', 'OpenVibe.Inventory', 1, []],     // Workshop badge images
         ['media-hub', 'OpenVibe.MediaHub', 100, []],    // the OpenVibe.Download drive
         ['codes', 'OpenVibe.Codes', 5, []],          // a task's screenshots, private to the person (Codes #188, 10-30)
+        ['host', 'OpenVibe.Host', 10, []],          // the screenshot baselines ovhost shots captures (plan L9, 11-06)
     ]) {
         if (!await db.getApp(appId)) {
             await db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes, allowed_origins) VALUES (?, ?, '', ?, ?)", [appId, name, quotaGb * 1024 ** 3, JSON.stringify(origins)]);
