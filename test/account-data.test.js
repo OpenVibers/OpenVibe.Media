@@ -35,6 +35,12 @@ const path = require('path');
                 pastes: 'a frozen table Community owns and erases itself',
                 paste_comments: 'a frozen table Community owns and erases itself',
                 paste_likes: 'a frozen table Community owns and erases itself',
+                share_members: 'who a recording is shared with: exported as shared_with_me.json, erased with the account',
+                share_access_requests: 'pending access requests: transient, erased with the account',
+                share_transfers: 'pending ownership transfers: transient, erased with the account',
+                share_deliveries: 'the delivery queue for share events/notifications; rows carry ids',
+                share_log: 'the append-only sharing audit trail; ids only, no titles or content',
+                shares: 'the share.v1 row of a recording: exported as shares.json, erased with its owner',
             },
         });
         assert.deepStrictEqual(missing, [], `a table with a person column is neither covered nor exempted: ${missing.join(', ')}`);

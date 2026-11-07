@@ -16,6 +16,7 @@ const path = require('path');
 const config = require('../config');
 const pageFrame = require('./page-frame');
 const showcase = require('openvibe-shared/showcase');
+const ovServe = require('openvibe-shared/serve');
 
 const { esc, abs, snip, appUrl, watchPageUrl, isoDate, isoDuration, fmtDuration, fmtDate, SITE_NAME, NETWORK_URL } = pageFrame;
 
@@ -213,6 +214,8 @@ function renderWatchPage(kind, record, readiness = null) {
     ${ownedByLive ? `<a class="btn" href="${esc(canonical)}">${isVod ? 'Watch on OpenVibe.Live' : 'Watch on OpenVibe.Live'} — chat, transcript &amp; more</a>` : ''}
     ${playable ? `<a class="btn ghost" href="${esc(rawUrl)}" download>Download ${isVod ? 'VOD' : 'clip'}</a>` : ''}
     ${isVod ? `<a class="btn ghost" href="${esc(`${self}/transcript.json`)}">Transcript (JSON)</a>` : ''}
+    <button type="button" class="btn ghost" data-ov-share-sheet data-kind="${isVod ? 'vod' : 'clip'}" data-id="${id}"
+      data-title="${esc(title)}" data-url="${self}" data-text="${esc(description)}"${thumb ? ` data-image="${esc(thumb)}"` : ''}>Share</button>
   </div>
   ${record.description ? `<p class="desc">${esc(snip(record.description, 2000))}</p>` : ''}
   ${record.ai_overview && record.ai_overview !== record.description ? `<section><h2 class="h2">Overview</h2><p class="desc">${esc(snip(record.ai_overview, 3000))}</p></section>` : ''}
@@ -252,4 +255,30 @@ function renderWatchPage(kind, record, readiness = null) {
     });
 }
 
-module.exports = { wantsHtmlPage, renderWatchPage, sourcePage, canonicalPageUrl, watchIndexable, isAiClip };
+/**
+ * The page a person who is not on a Specific-people recording's list sees: the audience, never the
+ * title, the description, the pictures or the player. OVShare.gate offers "Ask for access" to a
+ * signed-in person and "Sign in" to everybody else.
+ */
+function renderShareGate(kind, id, { signedInAs = null, signInUrl = '/auth/login' } = {}) {
+    const isVod = kind === 'vod';
+    const body = `<section class="message">
+<h1>A ${isVod ? 'recording' : 'clip'} on OpenVibe.Media</h1>
+<p>This is shared with specific people.</p>
+<div data-ov-share-gate data-kind="${isVod ? 'vod' : 'clip'}" data-id="${esc(id)}"${signedInAs ? ` data-signed-in-as="${esc(signedInAs)}"` : ''} data-sign-in-url="${esc(signInUrl)}">This ${isVod ? 'recording' : 'clip'} is shared with specific people on OpenVibe.Media.</div>
+</section>
+<script src="${ovServe.url('ov-share.js')}" defer></script>`;
+    return pageFrame.page({
+        seo: {
+            title: `A ${isVod ? 'recording' : 'clip'} on OpenVibe.Media`,
+            description: `A ${isVod ? 'recording' : 'clip'} shared with specific people on OpenVibe.Media.`,
+            canonical: `${config.publicUrl}/${isVod ? 'v' : 'c'}/${encodeURIComponent(id)}`,
+            robots: 'noindex, nofollow',
+        },
+        body,
+        css: `.message { max-width: 640px; margin: 3rem auto; padding: 0 1rem; }`,
+        footer: { variant: 'compact' },
+    });
+}
+
+module.exports = { wantsHtmlPage, renderWatchPage, renderShareGate, sourcePage, canonicalPageUrl, watchIndexable, isAiClip };

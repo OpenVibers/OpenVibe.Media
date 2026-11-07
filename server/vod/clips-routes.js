@@ -29,6 +29,14 @@ const labels = require('../labels');
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
+/** The sharing handle the app mounted (server/sharing.js), or null in a bare test app. */
+const sharingOf = (req) => (req.app && req.app.locals ? req.app.locals.sharing : null);
+/** Register a fresh clip with the sharing system at its visibility's audience. */
+async function registerClip(req, id, visibility) {
+    const sharing = sharingOf(req);
+    if (sharing) await sharing.register('clip', id, visibility).catch((err) => console.warn('[Clips] share row not registered:', err.message));
+}
+
 // ── Direct clip upload (browser MediaRecorder blob → multipart `video`) ──
 // Blobs can arrive with codec-qualified types, empty types, or
 // application/octet-stream depending on the browser/platform.
@@ -91,6 +99,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
         // No picture in the source (an audio-only recording's clip): the player shows the avatar card, not a black box.
         audio_only: !!clip.audio_only,
         visibility: clip.visibility || 'public',
+        audience: clip.audience || ({ public: 'public', unlisted: 'link', private: 'private' }[clip.visibility || (clip.is_public ? 'public' : 'private')] || 'private'),
+        ...(clip.share_members ? { members: clip.share_members } : {}),
         is_public: (clip.visibility || (clip.is_public ? 'public' : 'private')) === 'public',
         storage_provider: clip.storage_provider || 'local',
         auto_generated: !!clip.auto_generated,
@@ -290,6 +300,7 @@ router.post('/', tenantAuth({ verb: 'write', allowUser: true }), clipUpload.sing
         });   // the row and its object (uploading) in one transaction
         const clipId = result.lastInsertRowid;
         const appId = req.appId;
+        await registerClip(req, clipId, visibility);
         if (win) {
             await clipJobs.makeVirtual(clipId, win);
             return res.status(201).json({ ...await clipPublic(await db.getClipById(clipId, appId), { readiness: true }) });
@@ -353,6 +364,7 @@ async function _createRecordingClip(req, res, vod, startTime, endTime, body) {
         is_public: visibility === 'public' ? 1 : 0, visibility, status: 'processing', audio_only: !!first.audio_only,
     });
     const clipId = result.lastInsertRowid;
+    await registerClip(req, clipId, visibility);
     await require('./clip-jobs').makeVirtual(clipId, { objectId: rec.id, endTime: startTime + Number(last.end_ms) / 1000 });
     return res.status(201).json({ ...await clipPublic(await db.getClipById(clipId, req.appId), { readiness: true }) });
 }
@@ -405,6 +417,7 @@ async function _createUploadedClip(req, res) {
             audio_only: audioOnly,
         });   // the row and its object (ready, local copy present) in one transaction
         const clipId = result.lastInsertRowid;
+        await registerClip(req, clipId, visibility);
 
         require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, clipPath)
             .catch(err => console.warn(`[Clips] Thumbnail failed for clip ${clipId}:`, err.message));
@@ -474,6 +487,15 @@ router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, re
     try {
         const clip = await _getClipScoped(req, res);
         if (!clip) return;
+        const sharing = sharingOf(req);
+        if (sharing) {
+            clip.audience = await sharing.audienceOf('clip', clip.id);
+            if (clip.audience === 'people') {
+                clip.share_members = (await require('../db/database').all(
+                    `SELECT subject->>'id' AS id FROM share_members WHERE service = 'media' AND kind = 'clip' AND resource_id = ? AND (expires_at IS NULL OR expires_at > NOW())`,
+                    [String(clip.id)])).map((r) => r.id).filter(Boolean);
+            }
+        }
         // Acting for one of the app's users: another user's private clip looks missing (see GET /vods/:id).
         if (req.authType === 'user' && _isPrivate(clip) && !(clip.user_id != null && String(clip.user_id) === String(req.userId))) {
             return res.status(404).json({ error: 'Clip not found' });
@@ -629,6 +651,8 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
         }
         if (visibility !== undefined) {
             await db.setClipVisibility(clip.id, visibility);
+            const sharing = sharingOf(req);
+            if (sharing) await sharing.syncAudience('clip', clip.id, visibility).catch((err) => console.warn('[Clips] share row not synced:', err.message));
             // Made public (or already public): its watch page and the sitemap are indexable now.
             await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clip.id));
         }

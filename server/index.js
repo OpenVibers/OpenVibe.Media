@@ -266,6 +266,36 @@ const ready = (async () => {
     // ahead of /api/v1/:app/… so /api/v1/resources is never read as a tenant named "resources".
     app.use('/api/v1/resources', require('./registry/resource-control').router({ guard: require('./service-guard').guard('media.resource.control') }));
     app.use('/api/v1/resources', require('./registry/resource-index').router({ guard: require('./service-guard').guard('media.resource.read') }));
+
+    // ── /api/v1/<kind>/<id>/share — the uniform share API (openvibe-sdk/share) ────
+    // GET/PUT /api/v1/vod/:id/share (and clip), .../share/requests, .../share/transfer[/accept|decline|cancel],
+    // GET /api/v1/share/people?name=, GET /api/v1/shared-with-me. Authentication is Media's own signed-in
+    // viewer (ov_token or Bearer user JWT); an app key is never a share owner here. The router answers only
+    // its own paths, so the rest of /api/v1 keeps its own 404 and the tenant routes below are untouched.
+    {
+        const sharingLib = require('./sharing');
+        const sharing = sharingLib.createSharing({ db: db.getDb(), config });
+        app.locals.sharing = sharing;
+        const routed = Object.create(sharing.shares);
+        routed.getWithRevision = async (viewer, ref) => { await sharing.ensure(ref.kind, ref.id); return await sharing.shares.getWithRevision(viewer, ref); };
+        routed.update = async (viewer, ref, body, opts) => { await sharing.ensure(ref.kind, ref.id); return await sharing.shares.update(viewer, ref, body, opts); };
+        routed.requestAccess = async (viewer, ref) => { await sharing.ensure(ref.kind, ref.id); return await sharing.shares.requestAccess(viewer, ref); };
+        const shareApi = express.Router();
+        shareApi.use(sharingLib.attachViewer);
+        shareApi.use(sharing.shares.router({
+            service: 'media',
+            authenticate: (req) => (req.shareClaims ? sharingLib.shareViewer(req.shareClaims) : null),
+            describe: sharingLib.describeRef(db.getDb()),
+        }));
+        const SHARE_PATH = /^\/api\/v1\/(?:shared-with-me$|share\/people$|(?:vod|clip)\/[^/]+\/share(?:\/|$))/;
+        app.use((req, res, next) => (SHARE_PATH.test(req.path) ? shareApi(req, res, next) : next()));
+        if (!drill.enabled) {
+            const timer = setInterval(() => { sharing.work().catch(() => { /* logged inside */ }); }, 15_000);
+            if (timer.unref) timer.unref();
+            app.locals.sharingTimer = timer;
+        }
+    }
+
     app.use('/api/v1/:app/views', require('./views/routes'));
     app.use('/api/v1/:app/vods', require('./vod/routes'));
     app.use('/api/v1/:app/recordings', require('./vod/recordings').router);

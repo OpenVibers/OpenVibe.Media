@@ -195,6 +195,25 @@ function checkUsage(payload) {
 }
 
 /**
+ * Queue a share.* envelope from openvibe-sdk/share (server/sharing.js) as it is built: the SDK has
+ * already allow-listed its payload (ids, audiences and roles, never a title or a description), and the
+ * outbox relays it like every other media event. Off with the outbox.
+ */
+async function publish(envelope) {
+    if (!outbox) return null;
+    const env = await outbox.enqueue(inTx(), {
+        event_type: envelope.event_type,
+        actor: envelope.actor,
+        subject: envelope.subject,
+        visibility: 'internal',
+        priority: 'low',
+        payload: envelope.payload,
+    });
+    stats.queued++;
+    return env;
+}
+
+/**
  * Queue a Search document or tombstone (media.index_document.*, ./public/search-documents.js) as is:
  * no tenant field, low priority. Same rule as record(): inside the transaction that records the push.
  */
@@ -253,7 +272,9 @@ function objectChangeEvent(change, obj) {
     const base = { object_id: obj.id, app_id: obj.app_id, kind: obj.kind, legacy_ref: obj.legacy_ref || null };
     if (change.change === 'deleted') return ['media.object.deleted', { ...base, deleted_at: isoTime(change.changed_at) }];
     return ['media.object.visibility_changed', {
-        ...base, visibility: change.visibility, previous_visibility: change.previous_visibility, changed_at: isoTime(change.changed_at),
+        ...base, ...(change.audience ? { audience: change.audience } : {}),
+        ...(change.members ? { members: change.members } : {}),
+        visibility: change.visibility, previous_visibility: change.previous_visibility, changed_at: isoTime(change.changed_at),
     }];
 }
 
@@ -276,6 +297,21 @@ async function recordObjectChanges({ limit = 1000 } = {}) {
     for (const c of rows) {
         const obj = await raw.prepare('SELECT id, app_id, kind, legacy_ref FROM media_objects WHERE id = ?').get(c.object_id);
         if (obj) {
+            // The share row is the audience authority (openvibe-sdk/share): an item whose column moved to
+            // private for `people` still tells consumers which people, so Live's Rundown follows it. The
+            // payload carries subject ids only, never a title or a member's name.
+            const m = /^legacy:[^:]+:(vod|clip):(\d+)$/.exec(String(obj.legacy_ref || ''));
+            if (m) {
+                const share = await raw.prepare('SELECT audience FROM shares WHERE service = ? AND kind = ? AND resource_id = ?').get('media', m[1], m[2]);
+                if (share && share.audience !== c.visibility) {
+                    c.audience = share.audience;
+                    if (share.audience === 'people') {
+                        const list = await raw.prepare(`SELECT subject->>'id' AS id FROM share_members
+                            WHERE service = ? AND kind = ? AND resource_id = ? AND (expires_at IS NULL OR expires_at > NOW())`).all('media', m[1], m[2]);
+                        c.members = list.map((r) => r.id).filter(Boolean);
+                    }
+                }
+            }
             const [type, payload] = objectChangeEvent(c, obj);
             if (await enqueue(type, obj.app_id, { type: 'object', id: obj.id }, payload, 'important')) n++;
         }
@@ -313,4 +349,4 @@ function _reset() {
     stats.queued = 0; stats.lastError = null;
 }
 
-module.exports = { init, initWriter, record, recordPlacement, recordIndexDocument, recordModeration, recordJob, recordUsage, checkUsage, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, PLACEMENT_TYPES, JOB_TRANSITIONS, _reset };
+module.exports = { init, initWriter, record, publish, recordPlacement, recordIndexDocument, recordModeration, recordJob, recordUsage, checkUsage, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, PLACEMENT_TYPES, JOB_TRANSITIONS, _reset };
