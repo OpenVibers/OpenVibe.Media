@@ -41,10 +41,16 @@ const APP_PUBLIC_URLS = (() => {
 const appUrl = (appId) => APP_PUBLIC_URLS[appId] || APP_PUBLIC_URLS.live;
 // Live's recordings and clips are watched on OpenVibe.Video since 2026-10-19: Live's /vod/<id> and /clip/<id> 301 there.
 const VIDEO_PUBLIC_URL = String(process.env.VIDEO_PUBLIC_URL || 'https://openvibe.video').replace(/\/+$/, '');
-/** The canonical watch page of an app's VOD or clip: OpenVibe.Video's for Live's, the app's own /vod or /clip otherwise. */
-function watchPageUrl(kind, appId, id) {
+/**
+ * The canonical watch page of an app's VOD or clip: OpenVibe.Video's /watch?v=<watch id> for Live's (YouTube's shape,
+ * plan track U), the app's own /vod or /clip otherwise. A Live item with no watch id yet (a row the backfill has not
+ * reached and the caller did not fill) falls back to the numbered page Video still answers and redirects.
+ */
+function watchPageUrl(kind, appId, id, watchId = null) {
     const app = appId || 'live';
-    if (app === 'live') return `${VIDEO_PUBLIC_URL}/${kind === 'clip' ? 'c' : 'v'}/${id}`;
+    if (app === 'live') {
+        return watchId ? `${VIDEO_PUBLIC_URL}/watch?v=${watchId}` : `${VIDEO_PUBLIC_URL}/${kind === 'clip' ? 'c' : 'v'}/${id}`;
+    }
     return `${appUrl(app)}/${kind === 'clip' ? 'clip' : 'vod'}/${id}`;
 }
 

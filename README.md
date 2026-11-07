@@ -245,13 +245,25 @@ and in `scripts/smoke-test.sh`.
 | POST | `/vods/:id/chunks` | multipart `chunk` (+`segmentId`), user JWT ok — browser MediaRecorder append flow |
 | POST | `/vods/:id/complete` | finalize chunked upload (user JWT ok) |
 | POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, event |
-| GET | `/vods/:id` | `{ id, title, status, duration, playback_url, hls_url, thumbnail_url, storage_provider, readiness, … }` (`readiness`: [below](#readiness); `hls_url`, with `hls_expires_at` when signed: the object's master playlist with `MEDIA_HLS_ENABLED`, docs/media-fabric.md §3) |
+| GET | `/vods/:id` | `{ id, watch_id, title, status, duration, playback_url, hls_url, thumbnail_url, storage_provider, readiness, … }` (`watch_id`: the item's 11-character id on openvibe.video's `/watch?v=` page, [below](#watch-ids); `readiness`: [below](#readiness); `hls_url`, with `hls_expires_at` when signed: the object's master playlist with `MEDIA_HLS_ENABLED`, docs/media-fabric.md §3) |
 | GET | `/vods?limit&offset&user_id&stream_id&managed_stream_id&include_private&order&since` | list; `include_private` app-key only; `order` = newest\|oldest\|views; `since` = created at or after (ISO 8601 or `YYYY-MM-DD HH:MM:SS`, UTC) |
 | PUT | `/vods/:id` | `{ title?, description?, visibility? }` |
 | DELETE | `/vods/:id` | deletes local + B2 + R2 objects + row |
 
 `status`: `pending → recording → ready | failed` (derived; failures come from
 health quarantine: corrupt / zero-byte / missing file).
+
+<a id="watch-ids"></a>**Watch ids.** Every VOD and clip also answers to an 11-character watch id:
+8 random bytes as URL-safe base64 (`crypto.randomBytes(8).toString('base64url')`), YouTube's shape, never
+derived from the numeric id. It is what openvibe.video's `/watch?v=<watch_id>` page is addressed by, and it
+exists so a watch page cannot be found by counting. Media owns VODs and clips, so Media mints the id
+(`server/watch-ids.js`): at insert for every new row, and in idempotent batches for rows that predate it (a
+boot backfill, only where `watch_id IS NULL`). One id space across both tables: `mintUnique()` checks both
+before it answers, so a watch id has exactly one meaning.
+
+`GET /api/v1/:app/watch/:watch_id` → `{ kind: 'vod' | 'clip', id: <numeric id> }` (404 when no row holds
+it). Visibility is unchanged: a private item still resolves here, and the item's own read applies the rule it
+always did. An unlisted item stays reachable only by its watch id, never listed.
 
 <a id="readiness"></a>**Readiness.** VOD and clip answers (and v2 objects) also carry `readiness`
 `{ metadata, bytes_verified, playable, hash_verified, verified_copies, reason }`, read from the object

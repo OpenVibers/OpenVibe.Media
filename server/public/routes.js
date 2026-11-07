@@ -291,7 +291,12 @@ async function serveMediaRecord(kind, record, req, res) {
     if (pages.wantsHtmlPage(req)) {
         // A watch page names media that can become private at any moment: no stale serving, or a cache
         // could still hand out its title and description afterwards.
-        res.set('Cache-Control', cache.htmlHeaders(audience === 'public' ? { maxAge: 60, swr: 0 } : { private: true }));
+        // A Live item's canonical is Video's /watch?v=<watch id>: fill an id the backfill has not reached yet, so the
+        // canonical names the page rather than a numbered URL that only redirects to it.
+        if ((record.app_id || 'live') === 'live' && !record.watch_id) {
+            record.watch_id = await require('../watch-ids').ensure(kind, record.id);
+        }
+        res.set('Cache-Control', cache.htmlHeaders(visibility === 'public' ? { maxAge: 60, swr: 0 } : { private: true }));
         return res.type('html').send(pages.renderWatchPage(kind, record, await require('../objects/readiness').forRow(record)));
     }
     if (drill.refuseBytes(res)) return;

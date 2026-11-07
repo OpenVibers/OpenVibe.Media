@@ -297,6 +297,8 @@ const ready = (async () => {
     }
 
     app.use('/api/v1/:app/views', require('./views/routes'));
+    // GET /api/v1/:app/watch/:watch_id: which item a watch id is (server/watch-routes.js, plan track U).
+    app.use('/api/v1/:app/watch', require('./watch-routes'));
     app.use('/api/v1/:app/vods', require('./vod/routes'));
     app.use('/api/v1/:app/recordings', require('./vod/recordings').router);
     app.use('/api/v1/:app/clips', require('./vod/clips-routes'));
@@ -467,6 +469,12 @@ const ready = (async () => {
         try { require('./events').init(); } catch (err) { console.warn('[Events] not started:', err.message); }
         // Media's own watch pages in OpenVibe.Search (WS-O task 10): media.index_document.* through the same outbox.
         require('./public/search-documents').start().catch((err) => console.warn('[Search] documents not started:', err.message));
+        // Watch ids (plan track U): fill the rows that predate them, a batch at a time, until none is left. It only
+        // writes where watch_id IS NULL, so a restart resumes and a second run changes nothing; a read that needs an
+        // id sooner fills its own row (watch-ids.ensure). A drill writes nothing and skips it.
+        require('./watch-ids').backfillAll({ log: console })
+            .then((r) => console.log(`[WatchId] backfill done: ${r.filled} row(s) filled, ${r.remaining} left without an id`))
+            .catch((err) => console.warn('[WatchId] backfill stopped:', err.message));
     });
 
     // A drill whose port is taken stops instead of running unready.

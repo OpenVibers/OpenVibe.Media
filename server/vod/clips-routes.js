@@ -74,6 +74,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
 
         id: clip.id,
         app_id: clip.app_id,
+        // The id its watch page is addressed by (openvibe.video/watch?v=<watch_id>), in the same id space as a VOD's.
+        watch_id: clip.watch_id || await require('../watch-ids').ensure('clip', clip.id),
         vod_id: clip.vod_id,
         // A clip over a recording (docs/recordings.md): start_time/end_time are in the recording's time.
         ...(clip.recording_object_id && { recording_id: clip.recording_object_id, time_base: 'recording' }),
