@@ -36,6 +36,16 @@ class HeldError extends Error {
     constructor(objectId) { super('media object is under a retention hold'); this.code = 'media.object.held'; this.objectId = objectId; }
 }
 
+/** An avatar a profile still points at. The caller must release the reference (or the owner replace it) first. */
+class AvatarInUseError extends Error {
+    constructor(ref) {
+        super(`media object is in use as a profile picture (${ref.product} ${ref.ref})`);
+        this.code = 'media.object.avatar_in_use';
+        this.objectId = ref.object_id;
+        this.ref = ref;
+    }
+}
+
 // ── Small helpers ────────────────────────────────────────────
 
 function mimeFor(p, fallback = 'application/octet-stream') {
@@ -602,14 +612,60 @@ async function releaseHold(holdId, releasedBy = null) {
     });
 }
 
+// ── Avatars a profile points at (migrations/0014_avatar_refs.sql) ──
+//
+// A product's profile (Network's users.avatar_url, Live's users.avatar_url / a channel banner) records the media
+// object it points at here, through the internal avatar routes. softDelete refuses an avatar that still has an
+// unreleased reference, so a cleanup can never take the picture out from under a working profile. Replacing an
+// avatar releases the previous reference in the same transaction that records the new one.
+
+/** The active reference to this object, if any. */
+async function avatarRef(objectId) {
+    if (!objectId) return null;
+    return await db.get(`SELECT * FROM media_avatar_refs WHERE object_id = ? AND released_at IS NULL ORDER BY id DESC LIMIT 1`, [objectId]);
+}
+
+async function avatarRefsForSubject(subject) {
+    if (!subject) return [];
+    return await db.all(`SELECT * FROM media_avatar_refs WHERE subject = ? AND released_at IS NULL`, [subject]);
+}
+
+/** Point `product`'s slot `ref` at `objectId`: the previous picture for the same slot is released with it. */
+async function adoptAvatar({ objectId, subject = null, product, ref }) {
+    return await db.getDb().tx(async () => {
+        await db.run(`UPDATE media_avatar_refs SET released_at = ov_now() WHERE product = ? AND ref = ? AND released_at IS NULL`, [product, ref]);
+        await db.run(`INSERT INTO media_avatar_refs (object_id, subject, product, ref) VALUES (?, ?, ?, ?)`, [objectId, subject || null, product, ref]);
+        return await db.get(`SELECT * FROM media_avatar_refs WHERE product = ? AND ref = ? AND released_at IS NULL`, [product, ref]);
+    });
+}
+
+/** Clear a slot (the person removed the picture) or one object's references. → how many rows were released. */
+async function releaseAvatar({ product = null, ref = null, objectId = null, subject = null } = {}) {
+    const conds = ['released_at IS NULL']; const params = [];
+    if (product) { conds.push('product = ?'); params.push(product); }
+    if (ref != null) { conds.push('ref = ?'); params.push(String(ref)); }
+    if (objectId) { conds.push('object_id = ?'); params.push(objectId); }
+    if (subject) { conds.push('subject = ?'); params.push(subject); }
+    if (conds.length === 1) return 0;
+    const r = await db.run(`UPDATE media_avatar_refs SET released_at = ov_now() WHERE ${conds.join(' AND ')}`, params);
+    return r.changes || 0;
+}
+
 // ── Native objects: soft delete, restore, purge, quota ───────
 
 function objectFilePath(obj) {
     return path.join(config.objects.path, obj.app_id, obj.id);
 }
 
-async function softDelete(obj, { by = null } = {}) {
+async function softDelete(obj, { by = null, allowInUse = false } = {}) {
     if (await isHeld(obj.id)) throw new HeldError(obj.id);
+    // A profile still points at this avatar. Only the product that owns the reference (through its internal route)
+    // or an operator with a moderation reason may go on; Media cannot tell who is "the owner's own replacement"
+    // from a service token, so it refuses and the product releases the reference first.
+    if (!allowInUse && obj.kind === 'avatar') {
+        const ref = await avatarRef(obj.id);
+        if (ref) throw new AvatarInUseError(ref);
+    }
     const md = parseJson(obj.metadata, {});
     md.pre_delete_status = obj.lifecycle_status;
     md.retention_until = new Date(Date.now() + config.objects.retentionDays * 864e5).toISOString();
@@ -618,6 +674,7 @@ async function softDelete(obj, { by = null } = {}) {
     await db.getDb().tx(async () => {
         await db.run(`UPDATE media_objects SET lifecycle_status = 'deleted', deleted_at = ov_now(), metadata = ?, updated_at = ov_now()
                 WHERE id = ?`, [JSON.stringify(md), obj.id]);
+        await db.run(`UPDATE media_avatar_refs SET released_at = ov_now() WHERE object_id = ? AND released_at IS NULL`, [obj.id]);
         await require('./namespaces').settle(obj.id);   // an upload deleted before it completed holds no quota
         await events.recordObjectChanges();       // media.object.deleted commits with the delete
     });
@@ -752,9 +809,10 @@ async function objectPublic(obj, { locations = true } = {}) {
 }
 
 module.exports = {
-    KINDS, VISIBILITIES, LIFECYCLES, HOLD_KINDS, HeldError,
+    KINDS, VISIBILITIES, LIFECYCLES, HOLD_KINDS, HeldError, AvatarInUseError,
     mimeFor, parseJson, legacyRef, parseLegacyRef, thumbFileFromUrl,
     getObject, getObjectByLegacyRef, resolveObject, listLocations, listHolds, inheritedHolds, isHeld, isHeldRow,
+    avatarRef, avatarRefsForSubject, adoptAvatar, releaseAvatar,
     createObject, updateObject, upsertLocation, setLocationState, setRelationship, setVariant, getVariant,
     vodProjection, clipProjection, fileProjection, thumbnailProjection,
     syncVod, syncClip, syncFile, sync, safeSync, withObject, withObjectOrRow, afterTierMove,

@@ -65,6 +65,24 @@ Community service principal (`svc:community`, capability `media.object.delete`),
 retire the old public object of a screenshot paste it has re-hosted privately
 (`server/objects/legacy-paste-retire.js`).
 
+### Avatars a profile points at
+
+An avatar object (`kind avatar`) is a person's picture on a product. Each profile slot records the object it
+points at in `media_avatar_refs` (`product` `network` for Network's `users.avatar_url`, `live` for Live's own
+copy and a channel banner; `ref` names the slot, e.g. the person's Network id). The internal
+`POST /internal/avatar-adopt` and `/internal/avatar-release` routes write it, and `POST /internal/avatar-ingest`
+records it in the same call when it is given `product` and `ref`.
+
+`model.softDelete` refuses an avatar with an unreleased reference: `DELETE` answers 409
+`media.object.avatar_in_use` naming the product and slot, so a cleanup cannot take the picture out from under a
+working profile (incident 2026-11-06). Replacing the picture releases the previous reference in the same
+transaction, and account deletion releases the person's references before erasing their objects. An operator path
+that has to delete one anyway passes `allowInUse` to `softDelete`; no HTTP route does.
+
+`POST /internal/avatar-ingest` also answers our own objects without fetching them: an `openvibe.media/o/<id>` or
+`/p/<slug>/screenshot` source is read from local storage, and an avatar already owned by the subject is reused
+(`reused: true`) rather than copied. `shape: 'banner'` stores a 1600×500 crop instead of the 512×512 avatar.
+
 Every v2 route that takes `:id` accepts either form. Native v2 objects have `legacy_ref = NULL`.
 
 ### How a row maps to its object

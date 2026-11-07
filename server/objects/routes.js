@@ -738,6 +738,11 @@ router.delete('/:id', remove, limits('media.object.delete', { minute: 60, hour: 
         res.json(await model.objectPublic(gone));
     } catch (err) {
         if (err.code === 'media.object.held' || /retention hold/.test(err.message)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
+        if (err.code === 'media.object.avatar_in_use') {
+            return problem(res, 409, 'media.object.avatar_in_use',
+                `This avatar is still a profile picture (${err.ref.product} ${err.ref.ref}); the profile releases it first`,
+                { product: err.ref.product, ref: err.ref.ref });
+        }
         console.error('[Objects] delete error:', err.message);
         problem(res, 500, 'media.object.delete_failed', 'Failed to delete object');
     }
