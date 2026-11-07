@@ -470,6 +470,21 @@ router.get('/c/:id', optionalIdentity, sharingLib.attachViewer, async (req, res)
     }
 });
 
+// ── Audio description track (X1, consent plan 2026-10-31) ───
+// The same-origin WebVTT a watch page's <track kind="descriptions"> loads; Live builds it from its scene
+// notes and speech timeline. Public/unlisted items are cacheable; a private one needs the owning app, a
+// signed playback URL or this site's session (descriptions.js).
+const descriptionsRoute = (kind) => async (req, res) => {
+    try {
+        await require('./descriptions').handle(kind, req, res);
+    } catch (err) {
+        console.error(`[Public] ${kind} descriptions error:`, err.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Failed to load the descriptions' });
+    }
+};
+router.get('/v/:id/descriptions.vtt', optionalIdentity, descriptionsRoute('vod'));
+router.get('/c/:id/descriptions.vtt', optionalIdentity, descriptionsRoute('clip'));
+
 // ── Share card (og:image default) ────────────────────────────
 router.get('/og-image.png', (req, res) => {
     res.set('Cache-Control', 'public, max-age=86400');

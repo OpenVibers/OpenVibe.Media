@@ -182,13 +182,18 @@ function renderWatchPage(kind, record, readiness = null) {
         by ? (ownerUrl ? `by <a href="${esc(ownerUrl)}">${esc(by)}</a>` : `by ${esc(by)}`) : null,
     ].filter(Boolean);
 
+    // Live owns the scene notes behind audio description (X1): every Live watch page offers the track, same
+    // origin; a private item's track only loads for someone who can prove they may see it (descriptions.js).
+    const descriptionTrack = ownedByLive
+        ? `\n      <track kind="descriptions" srclang="en" label="Audio description" src="${esc(`${self}/descriptions.vtt`)}">`
+        : '';
     const [stateTitle, stateText] = playable ? [null, null] : unavailableText(kind, readiness.reason);
     // No preload: a long recording is a fragmented MP4 whose moov has no duration, so Chrome keeps range-reading the
     // whole file to find one, never reaches HAVE_METADATA, and the window's load event waits for it (v/6170: 30 s+
     // timeout). The poster is the first frame, and pressing play still fetches the bytes; the page itself must load.
     const player = playable
         ? `<div class="player">
-    <video data-ov-player controls playsinline preload="none"${thumb ? ` poster="${esc(thumb)}"` : ''} src="${esc(rawUrl)}">
+    <video data-ov-player controls playsinline preload="none"${thumb ? ` poster="${esc(thumb)}"` : ''} src="${esc(rawUrl)}">${descriptionTrack}
       Your browser cannot play this video. <a href="${esc(rawUrl)}">Download it</a> instead.
     </video>
   </div>`
