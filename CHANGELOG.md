@@ -5,9 +5,8 @@
 - **Audio description on a watch page (X1, consent plan 2026-10-31, "AI and data")**: the player now carries a
   `<track kind="descriptions">` for Live's VODs and clips, served same-origin at `/v/:id/descriptions.vtt` (and
   `/c/:id/descriptions.vtt`) from the WebVTT Live builds out of its scene notes and speech timeline. Public and link
-  items are cacheable; a private item's track answers the same 404 as a missing id unless the owning app, a signed
-  playback URL or the viewer's Network session can ask for it (that session is forwarded to Live, which checks the
-  owner). Other apps' media is not described: only Live has the scene-note timeline behind it. The **AD** control and
+  items are cacheable; a private item's track answers the same 404 as a missing id unless the viewer's Network
+  session asks for it (that session is forwarded to Live, which checks the owner). Other apps' media is not described: only Live has the scene-note timeline behind it. The **AD** control and
   its spoken cues are OpenVibe.Shared's player (openvibe-shared 4.125.0, a pin-round follow-up). Tests:
   `test/audio-description.test.js` (public, private-owner, other app; track markup).
 

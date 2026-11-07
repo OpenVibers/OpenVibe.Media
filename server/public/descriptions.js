@@ -7,9 +7,8 @@
  * rules, and so Media applies its own visibility rule before asking:
  *
  *   public / unlisted  anyone may read it (the page and its track are cacheable);
- *   private            only when the viewer proves who they are: the owning app's key, a signed playback URL,
- *                      or the site's own Network session cookie, which is forwarded to Live, the one service
- *                      that can check that this person owns the item. Nothing private is cached.
+ *   private            only when the viewer is signed in to this site: that Network session cookie is forwarded
+ *                      to Live, the one service that can check this person owns the item. Nothing private is cached.
  *
  * Only Live's media is described: other apps have no scene-note timeline behind them. A missing item, another
  * app's item, a private item the caller cannot prove, Live being down, or no notes to describe all answer the
@@ -32,11 +31,12 @@ function recordVisibility(record) {
     return record.visibility || (record.is_public ? 'public' : 'private');
 }
 
-/** A private item's caller: the owning app, a signed playback URL, or this site's Network session (checked by Live). */
+/**
+ * A private item's caller: the site's own Network session, forwarded to Live, which is the service that knows
+ * whether this person owns the item. An app key or a signed playback URL proves playback to Media (serveMediaRecord
+ * uses them), but it does not prove the owner to Live, so it cannot ask Live for the private description.
+ */
 function mayAskPrivate(record, req, kind) {
-    if (req.authType === 'app' && req.appId === record.app_id) return true;
-    if (req.authType === 'user' && req.userId != null && record.user_id === req.userId) return true;
-    if (req.query && req.query.exp && req.query.sig && require('../objects/signing').verifyMedia(kind, record.id, req.query.exp, String(req.query.sig))) return true;
     const token = req.cookies && req.cookies.ov_token;
     return typeof token === 'string' && token.length > 0 && token.length < 4096;
 }
