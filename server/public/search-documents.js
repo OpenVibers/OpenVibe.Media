@@ -89,6 +89,21 @@ async function sync({ now = Date.now() } = {}) {
     return n;
 }
 
+/**
+ * Bring one page in line at once (a share audience change): send its new document while it is still
+ * an indexable Everyone page, otherwise a tombstone. No-op while the outbox is off.
+ */
+async function syncOne(kind, id, { now = Date.now() } = {}) {
+    if (!(await events.status()).enabled) return 'off';
+    if (!['vod', 'clip'].includes(kind)) return 'ignored';
+    const table = kind === 'vod' ? 'vods' : 'clips';
+    const cols = `id, app_id, title, description, duration_seconds, visibility, is_public, ${kind === 'clip' ? 'auto_generated, ' : ''}created_at`;
+    const row = await db.maybe(`SELECT ${cols} FROM ${table} WHERE id = ? AND ${crawl.WATCH_WHERE[kind]}`, [Number(id)]);
+    const sandbox = await crawl.sandboxApps();
+    const qualifies = !!row && !sandbox.has(row.app_id) && pages.watchIndexable(kind, row);
+    return await send(kind, id, qualifies ? documentFor(kind, row) : null, now);
+}
+
 async function start() {
     if (timer || !(await events.status()).enabled || process.env.MEDIA_SEARCH_DOCUMENTS === 'off') return false;
     const run = async () => { try { await sync(); } catch (err) { stats.lastError = err.message; } };
@@ -102,4 +117,4 @@ async function start() {
 function stop() { if (timer) clearInterval(timer); timer = null; }
 function status() { return { ...stats }; }
 
-module.exports = { start, stop, sync, documentFor, status };
+module.exports = { start, stop, sync, syncOne, documentFor, status };

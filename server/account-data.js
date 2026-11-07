@@ -46,6 +46,14 @@ async function exportPart(db, subjects) {
     if (vods.length) files.push({ name: 'vods.json', content: vods });
     if (clips.length) files.push({ name: 'clips.json', content: clips });
     if (plain.length) files.push({ name: 'files.json', content: plain });
+    // The share.v1 rows the person owns or is on (step 5): the recording itself is above; this is who it was
+    // shared with. `people` is a list of subject ids, never a name.
+    const owned = await db.prepare(`SELECT service, kind, resource_id, audience, lock, revision FROM shares WHERE owner_subject->>'id' IN ${inList(subjects)} ORDER BY resource_id DESC LIMIT ${ROW_LIMIT}`).all(...subjects);
+    if (owned.length) files.push({ name: 'shares.json', content: owned });
+    const memberships = await db.prepare(`SELECT s.service, s.kind, s.resource_id, s.audience, m.role, m.added_at, m.expires_at
+        FROM share_members m JOIN shares s ON s.service=m.service AND s.kind=m.kind AND s.resource_id=m.resource_id
+        WHERE m.subject->>'id' IN ${inList(subjects)} ORDER BY m.added_at DESC LIMIT ${ROW_LIMIT}`).all(...subjects);
+    if (memberships.length) files.push({ name: 'shared_with_me.json', content: memberships });
     return { files, truncated: objs.length >= ROW_LIMIT ? ['objects.json'] : [], note: 'Download each file from its public_url; private ones from openvibe.media while signed in.' };
 }
 
@@ -94,6 +102,19 @@ async function erase(db, subjects) {
         } catch (e) {
             if (/retention hold/.test(e.message)) { bump(retained, 'held_media'); continue; }
             throw e;
+        }
+    }
+    // The recording's share.v1 row goes with the recording: ownership, memberships, requests and transfers.
+    // share_log is the append-only audit trail and stays (ids only, no titles or content).
+    for (const subject of subjects) {
+        for (const sql of [
+            'DELETE FROM share_members WHERE subject->>\'id\' = ?',
+            'DELETE FROM share_access_requests WHERE subject->>\'id\' = ?',
+            'DELETE FROM share_transfers WHERE from_subject->>\'id\' = ? OR to_subject->>\'id\' = ?',
+            'DELETE FROM shares WHERE owner_subject->>\'id\' = ?',
+        ]) {
+            const params = sql.includes('to_subject') ? [subject, subject] : [subject];
+            try { await db.run(sql, params); } catch { /* sharing tables absent in an old restore copy */ }
         }
     }
     try { require('./events').kick(); } catch { /* the relay polls anyway */ }

@@ -32,6 +32,7 @@ const db = require('../db/database');
 const tools = require('../vod/media-tools');
 const { optionalIdentity } = require('../auth');
 const pages = require('./pages');
+const sharingLib = require('../sharing');
 const sourceVod = require('./source-vod');
 const notFoundPage = require('./not-found-page');
 // A restore drill (MEDIA_DRILL) serves no stored bytes: every byte route answers 503 before it looks
@@ -220,9 +221,35 @@ async function serveMediaRecord(kind, record, req, res) {
     const noindex = { 'X-Robots-Tag': 'noindex' };
 
     const visibility = recordVisibility(record);
-    // Exactly the answer a missing id gets: a 403 here told anyone probing ids which private
-    // recordings exist (and, through the basename form of /v, which file names are real).
-    if (visibility === 'private' && !canAccessPrivate(record, req, kind)) return notFound(req, res);
+    const sharing = req.app && req.app.locals ? req.app.locals.sharing : null;
+    // The share row is the audience authority for an item that has one; a legacy row keeps the column.
+    let audience = visibility === 'private' ? 'private' : visibility === 'unlisted' ? 'link' : 'public';
+    let onList = false;
+    if (sharing) {
+        try {
+            const share = await sharing.shareOf(kind, record.id);
+            if (share && ['public', 'link', 'people', 'private'].includes(share.audience)) audience = share.audience;
+            if (audience === 'people' || audience === 'private') onList = await sharing.canView(kind, record.id, req.shareClaims);
+        } catch (err) { console.warn('[Public] share audience:', err.message); }
+    }
+    // A member of a Specific-people item reads it like its owner; everybody else gets exactly the answer
+    // a missing id gets — on the page as the gate, on the bytes as a 404 (never a 403 that names it).
+    if (audience === 'people' && !onList && !canAccessPrivate(record, req, kind)) {
+        if (pages.wantsHtmlPage(req)) {
+            const claims = req.shareClaims || null;
+            res.set('Cache-Control', 'no-store');
+            return res.status(404).type('html').send(pages.renderShareGate(kind, record.id, {
+                signedInAs: claims && claims.username ? `@${claims.username}` : null,
+                signInUrl: `/auth/login?next=${encodeURIComponent(req.originalUrl || req.url || '')}`,
+            }));
+        }
+        return notFound(req, res);
+    }
+    if (audience === 'private' && !onList && !canAccessPrivate(record, req, kind)) {
+        // Exactly the answer a missing id gets: a 403 here told anyone probing ids which private
+        // recordings exist (and, through the basename form of /v, which file names are real).
+        return notFound(req, res);
+    }
 
     // A virtual clip (F3.5) has no file: its bytes are its HLS playlist over the source's timeline. Every reader allowed
     // here (public, the owner, or a 'getc' URL from GET /api/clips/:id/signed-url) is sent to the master playlist,
@@ -346,7 +373,7 @@ async function serveMediaRecord(kind, record, req, res) {
 // ── VOD playback ─────────────────────────────────────────────
 // By numeric id only: a file name is not a route (the basename fallback for old /api/vods/file/<name> URLs
 // was retired with compatibility register C-75 once Live asked by id).
-router.get('/v/:id', optionalIdentity, async (req, res) => {
+router.get('/v/:id', optionalIdentity, sharingLib.attachViewer, async (req, res) => {
     try {
         if (!/^\d+$/.test(req.params.id)) return notFound(req, res);
         const vod = await db.getVodById(parseInt(req.params.id, 10));
@@ -422,7 +449,7 @@ router.get('/v/:id/dvr/:segment', dvrRoute(async (req, res, { filePath, index })
 }));
 
 // ── Clip playback ────────────────────────────────────────────
-router.get('/c/:id', optionalIdentity, async (req, res) => {
+router.get('/c/:id', optionalIdentity, sharingLib.attachViewer, async (req, res) => {
     try {
         if (!/^\d+$/.test(req.params.id)) return notFound(req, res);
         const wantsPage = pages.wantsHtmlPage(req);
@@ -447,13 +474,24 @@ router.get('/og-image.png', (req, res) => {
 });
 
 // ── Thumbnails ───────────────────────────────────────────────
-router.get('/t/:id', (req, res) => {
+router.get('/t/:id', sharingLib.attachViewer, async (req, res) => {
     if (drill.refuseBytes(res)) return;
     // Open to every origin like the other public images: Live's player samples a stream thumbnail's colours on a
     // canvas (an anonymous CORS load), which failed with a console error on every offline channel page (2026-10-23).
     // Whoever has the URL can already load the image; this lets a page read its pixels.
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    // A Specific-people recording's picture is part of it: only the owner and the people on its list may fetch
+    // it, by the same check the watch page and its bytes use. A private thumbnail keeps its old unguessable-URL
+    // behaviour (changing that is not this step).
+    try {
+        const m = /^(vod|clip)-(\d+)-/i.exec(String(req.params.id || ''));
+        const sharing = req.app && req.app.locals ? req.app.locals.sharing : null;
+        if (m && sharing) {
+            const audience = await sharing.audienceOf(m[1].toLowerCase(), Number(m[2]));
+            if (audience === 'people' && !(await sharing.canView(m[1].toLowerCase(), Number(m[2]), req.shareClaims))) return notFound(req, res);
+        }
+    } catch { /* the thumbnail service decides */ }
     require('../thumbnails/thumbnail-service').serveThumbnail(req, res);
 });
 

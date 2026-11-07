@@ -70,6 +70,10 @@ async function vodPublic(vod, { readiness = false, hls } = {}) {
         audio_only: !!vod.audio_only,
         storage_provider: vod.storage_provider || 'local',
         visibility: vod.visibility || 'public',
+        // The share.v1 audience, when the caller looked it up: `people` has no visibility column of its own
+        // and is the one Live's Rundown needs to follow a recording shared with named people.
+        audience: vod.audience || ({ public: 'public', unlisted: 'link', private: 'private' }[vod.visibility || (vod.is_public ? 'public' : 'private')] || 'private'),
+        ...(vod.share_members ? { members: vod.share_members } : {}),
         // Kept alongside visibility — inherited SPA surfaces (manager badges,
         // visibility toggles) read the boolean, and omitting it rendered every
         // VOD as "Private" in the owner's manager.

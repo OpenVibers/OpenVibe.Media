@@ -33,6 +33,18 @@ const labels = require('../labels');
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
+/** The sharing handle the app mounted (server/sharing.js), or null in a bare test app. */
+const sharingOf = (req) => (req.app && req.app.locals ? req.app.locals.sharing : null);
+/** The people on a Specific-people item's list, as canonical subject ids. */
+async function membersOf(kind, id) {
+    try {
+        const rows = await require('../db/database').all(
+            `SELECT subject->>'id' AS id FROM share_members WHERE service = 'media' AND kind = ? AND resource_id = ? AND (expires_at IS NULL OR expires_at > NOW())`,
+            [kind, String(id)]);
+        return rows.map((r) => r.id).filter(Boolean);
+    } catch { return []; }
+}
+
 // ── Chunk upload storage (browser MediaRecorder chunks) ──────
 const VOD_MIME_TO_EXT = { 'video/webm': '.webm', 'video/mp4': '.mp4', 'video/x-matroska': '.mkv', 'video/ogg': '.ogg' };
 
@@ -110,6 +122,10 @@ router.post('/', tenantAuth({ verb: 'write' }), async (req, res) => {
             clips_only: !!clips_only,
         });   // the row (visibility and clips_only included) and its object in one transaction
         const id = result.lastInsertRowid;
+        const sharing = sharingOf(req);
+        if (sharing) {
+            await sharing.register('vod', id, visibility || 'public').catch((err) => console.warn('[VOD] share row not registered:', err.message));
+        }
         res.status(201).json({ id });
     } catch (err) {
         console.error('[VOD] Create error:', err.message);
@@ -297,7 +313,9 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
         const total = await db.countVods(req.appId, filters);
         const hls = await require('../objects/hls').discoveryMany(vods);
         const recs = await require('./recordings').summaries(vods.map((v) => v.id));
-        res.json({ vods: (await Promise.all(vods.map(async v => ({ ...await vodPublic(v, { readiness: true, hls: hls.get(String(v.object_id)) || null }),
+        const sharing = sharingOf(req);
+        const audiences = sharing ? await sharing.audiencesOf('vod', vods.map((v) => v.id)) : new Map();
+        res.json({ vods: (await Promise.all(vods.map(async v => ({ ...await vodPublic({ ...v, audience: audiences.get(Number(v.id)) }, { readiness: true, hls: hls.get(String(v.object_id)) || null }),
             ...(recs.has(Number(v.id)) && { recording: recs.get(Number(v.id)) }) })))), total, limit, offset, hasMore: offset + vods.length < total });
     } catch (err) {
         console.error('[VOD] List error:', err.message);
@@ -356,6 +374,11 @@ router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, re
         // Detail responses carry the transcript too (lists stay light).
         // A part of a recording (docs/recordings.md) names it: the whole video's id, length, parts and playlist.
         const rec = await require('./recordings').forVod(req.appId, vod.id);
+        const sharing = sharingOf(req);
+        if (sharing) {
+            vod.audience = await sharing.audienceOf('vod', vod.id);
+            if (vod.audience === 'people') vod.share_members = await membersOf('vod', vod.id);
+        }
         res.json({ ...await vodPublic(vod, { readiness: true }), ai_transcript: vod.ai_transcript || null,
             ...(rec && { recording: { ...rec.recording, this_part: rec.part } }) });
     } catch (err) {
@@ -384,7 +407,11 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
                 params.push(vod.id);
                 await db.run(`UPDATE vods SET ${updates.join(', ')} WHERE id = ?`, params);
             }
-            if (visibility !== undefined) await db.setVodVisibility(vod.id, visibility);
+            if (visibility !== undefined) {
+                await db.setVodVisibility(vod.id, visibility);
+                const sharing = sharingOf(req);
+                if (sharing) await sharing.syncAudience('vod', vod.id, visibility).catch((err) => console.warn('[VOD] share row not synced:', err.message));
+            }
         });
         // A part of a recording (docs/recordings.md): who may see it is the whole video's, and the first part's title is
         // the recording's.
