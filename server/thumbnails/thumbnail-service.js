@@ -385,7 +385,7 @@ async function thumbnailItemGone(filename) {
     return !exists;
 }
 
-async function serveThumbnail(req, res) {
+async function serveThumbnail(req, res, { noStore = false } = {}) {
     if (require('../drill').refuseBytes(res)) return;   // a restore drill serves no stored file
     try {
         const filename = path.basename(req.params.id || req.params.filename || ''); // prevent traversal
@@ -418,14 +418,16 @@ async function serveThumbnail(req, res) {
         // (a regenerated thumb gets a NEW name), so those bytes never change —
         // mark them immutable so browsers stop revalidating on every render.
         const isLive = filename.startsWith('stream-');
-        const cacheControl = isLive ? 'public, max-age=30' : 'public, max-age=604800, immutable';
+        // A Specific-people recording's picture is part of the recording: its member's request must never
+        // enter a shared cache under a public header.
+        const cacheControl = noStore ? 'private, no-store' : isLive ? 'public, max-age=30' : 'public, max-age=604800, immutable';
 
         if (spec) {
             let v = null;
             try { v = await variants().get(filePath, spec); } catch { v = null; }
             if (v) return sendFile(res, v.file, v.size, v.type, cacheControl);
             // Busy or unmakeable: the original, cached briefly so the variant is made on a later request.
-            return sendFile(res, filePath, stat.size, contentType, 'public, max-age=60');
+            return sendFile(res, filePath, stat.size, contentType, noStore ? 'private, no-store' : 'public, max-age=60');
         }
         sendFile(res, filePath, stat.size, contentType, cacheControl);
     } catch (err) {

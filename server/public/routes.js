@@ -171,7 +171,7 @@ function downloadDisposition(req, kind, record, ext) {
  * the clip is closed) into a fragmented MP4 piped to the reader, so it starts at once and no file is kept. The headers
  * go out with the first bytes: a remux that fails before them is a 502 the caller can show.
  */
-function sendVirtualClipFile(req, res, record, closed, disposition) {
+function sendVirtualClipFile(req, res, record, closed, disposition, membersOnly = false) {
     if (_remuxing >= REMUX_MAX) {
         res.set('Retry-After', '5');
         return res.status(503).json({ error: 'Other downloads are being prepared: try again in a few seconds' });
@@ -195,7 +195,7 @@ function sendVirtualClipFile(req, res, record, closed, disposition) {
     ff.stdout.on('data', (chunk) => {
         if (!started) {
             started = true;
-            res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Disposition': disposition, 'Cache-Control': 'private, max-age=0',
+            res.writeHead(200, { 'Content-Type': 'video/mp4', 'Content-Disposition': disposition, 'Cache-Control': closed || membersOnly ? 'private, no-store' : 'private, max-age=0',
                 'X-Robots-Tag': 'noindex', 'X-Content-Type-Options': 'nosniff' });
         }
         if (!res.write(chunk)) { ff.stdout.pause(); res.once('drain', () => ff.stdout.resume()); }
@@ -239,11 +239,14 @@ async function serveMediaRecord(kind, record, req, res) {
             const claims = req.shareClaims || null;
             res.set('Cache-Control', 'no-store');
             return res.status(404).type('html').send(pages.renderShareGate(kind, record.id, {
-                signedInAs: claims && claims.username ? `@${claims.username}` : null,
+                signedInAs: claims && claims.username ? String(claims.username) : null,
                 signInUrl: `/auth/login?next=${encodeURIComponent(req.originalUrl || req.url || '')}`,
             }));
         }
-        return notFound(req, res);
+        // A member could cache these bytes in a browser or a shared cache; the unsigned answer is an
+        // empty 404, so nothing about the recording travels with it.
+        res.set('Cache-Control', 'private, no-store');
+        return res.status(404).end();
     }
     if (audience === 'private' && !onList && !canAccessPrivate(record, req, kind)) {
         // Exactly the answer a missing id gets: a 403 here told anyone probing ids which private
@@ -267,7 +270,7 @@ async function serveMediaRecord(kind, record, req, res) {
         if (!closed && pages.wantsHtmlPage(req)) {
             const canonical = pages.canonicalPageUrl(kind, record);
             if (canonical) {
-                res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
+                res.set({ 'Cache-Control': audience === 'people' ? 'private, no-store' : 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
                 return res.redirect(302, canonical);
             }
         }
@@ -275,8 +278,8 @@ async function serveMediaRecord(kind, record, req, res) {
         if (!config.hls.enabled || !record.object_id || record.status !== 'ready') return res.status(404).json({ error: 'Media file unavailable' });
         await trackUniqueView(kind, record.id, req, record.user_id);
         const asFile = downloadDisposition(req, kind, record, '.mp4');
-        if (asFile) return sendVirtualClipFile(req, res, record, closed, asFile);
-        res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
+        if (asFile) return sendVirtualClipFile(req, res, record, closed, asFile, audience === 'people');
+        res.set({ 'Cache-Control': audience === 'people' ? 'private, no-store' : 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
         return res.redirect(302, closed ? require('../objects/signing').signedPlaylistUrl(record.object_id).url : `${config.publicUrl}/o/${record.object_id}/master.m3u8`);
     }
 
@@ -288,7 +291,7 @@ async function serveMediaRecord(kind, record, req, res) {
     if (pages.wantsHtmlPage(req)) {
         // A watch page names media that can become private at any moment: no stale serving, or a cache
         // could still hand out its title and description afterwards.
-        res.set('Cache-Control', cache.htmlHeaders(visibility === 'public' ? { maxAge: 60, swr: 0 } : { private: true }));
+        res.set('Cache-Control', cache.htmlHeaders(audience === 'public' ? { maxAge: 60, swr: 0 } : { private: true }));
         return res.type('html').send(pages.renderWatchPage(kind, record, await require('../objects/readiness').forRow(record)));
     }
     if (drill.refuseBytes(res)) return;
@@ -326,7 +329,7 @@ async function serveMediaRecord(kind, record, req, res) {
         const asFile = key && downloadDisposition(req, kind, record, path.extname(key) || path.extname(record.file_path || ''));
         if (asFile) {
             const url = await vodStorage.presignGet(plan.provider, key, 900, { contentDisposition: asFile }).catch(() => null);
-            if (url) { res.set({ 'Cache-Control': 'private, max-age=0', 'X-Robots-Tag': 'noindex' }); return res.redirect(302, url); }
+            if (url) { res.set({ 'Cache-Control': audience === 'people' ? 'private, no-store' : 'private, max-age=0', 'X-Robots-Tag': 'noindex' }); return res.redirect(302, url); }
         }
         if (plan?.kind === 'redirect') {
             // The origin shield (placement/shield.js): a public copy on a shielded provider is served by nginx through
@@ -335,13 +338,13 @@ async function serveMediaRecord(kind, record, req, res) {
             const shield = require('../placement/shield');
             const shieldable = shield.enabled(plan.provider) && plan.provider !== shieldFailed && visibility !== 'private' && !record.is_recording;
             const edge = shieldable && shield.toEdge(req, plan.provider);
-            if (edge) { res.set('Cache-Control', 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, edge); }
+            if (edge) { res.set('Cache-Control', audience === 'people' ? 'private, no-store' : 'private, max-age=0'); res.set('X-Robots-Tag', 'noindex'); return res.redirect(302, edge); }
             if (shieldable && shield.onEdge(req)) {
                 const url = await vodStorage.presignGet(plan.provider, vodStorage.keyForVod(record), shield.SHIELD_TTL_SECONDS).catch(() => null);
                 const t = url && shield.target({ provider: plan.provider, url, visibility, edge: shield.edgeOf(req) });
-                if (t) return shield.send(res, t, { 'Cache-Control': visibility === 'public' ? 'public, max-age=300' : 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
+                if (t) return shield.send(res, t, { 'Cache-Control': audience === 'people' ? 'private, no-store' : visibility === 'public' ? 'public, max-age=300' : 'private, max-age=0', 'X-Robots-Tag': 'noindex' });
             }
-            res.set('Cache-Control', 'private, max-age=0');
+            res.set('Cache-Control', audience === 'people' ? 'private, no-store' : 'private, max-age=0');
             res.set('X-Robots-Tag', 'noindex');
             return res.redirect(302, plan.url);
         }
@@ -367,7 +370,7 @@ async function serveMediaRecord(kind, record, req, res) {
     // analyser that draws an audio-only item's level ring: createMediaElementSource needs an untainted CORS load).
     const corsHeaders = visibility === 'private' ? {} : { 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin' };
 
-    streamFileWithRange(req, res, filePath, { ...cacheHeaders, ...noindex, ...corsHeaders, ...(asFile ? { 'Content-Disposition': asFile } : {}) });
+    streamFileWithRange(req, res, filePath, { ...cacheHeaders, ...noindex, ...(audience === 'people' ? { 'Cache-Control': 'private, no-store' } : {}), ...corsHeaders, ...(asFile ? { 'Content-Disposition': asFile } : {}) });
 }
 
 // ── VOD playback ─────────────────────────────────────────────
@@ -489,7 +492,13 @@ router.get('/t/:id', sharingLib.attachViewer, async (req, res) => {
         const sharing = req.app && req.app.locals ? req.app.locals.sharing : null;
         if (m && sharing) {
             const audience = await sharing.audienceOf(m[1].toLowerCase(), Number(m[2]));
-            if (audience === 'people' && !(await sharing.canView(m[1].toLowerCase(), Number(m[2]), req.shareClaims))) return notFound(req, res);
+            if (audience === 'people') {
+                if (!(await sharing.canView(m[1].toLowerCase(), Number(m[2]), req.shareClaims))) {
+                    res.set('Cache-Control', 'private, no-store');
+                    return res.status(404).end();
+                }
+                return require('../thumbnails/thumbnail-service').serveThumbnail(req, res, { noStore: true });
+            }
         }
     } catch { /* the thumbnail service decides */ }
     require('../thumbnails/thumbnail-service').serveThumbnail(req, res);

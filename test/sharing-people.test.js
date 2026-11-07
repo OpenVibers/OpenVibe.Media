@@ -27,6 +27,8 @@ const http = require('http');
     process.env.OV_NETWORK_URL = 'https://openvibe.network';
     process.env.OV_NETWORK_INTERNAL_URL = 'https://openvibe.network';
     process.env.MEDIA_PUBLIC_URL = 'https://media.test';
+    process.env.MEDIA_HLS_ENABLED = '1';
+    process.env.MEDIA_SIGNING_SECRET = 'test-signing-secret';
     delete process.env.EVENTS_URL;
     delete process.env.OV_OAUTH_CLIENT_SECRET;
 
@@ -117,6 +119,7 @@ const http = require('http');
     }
     app.use('/api/v1/:app/vods', require('../server/vod/routes'));
     app.use('/api/v1/:app/clips', require('../server/vod/clips-routes'));
+    app.use('/o', require('../server/objects/routes').publicRouter);
     app.use('/', require('../server/public/routes'));
     const server = http.createServer(app);
     await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -151,16 +154,30 @@ const http = require('http');
         const memberPage = await get(`/v/${pubId}`, { as: FRIEND, headers: nav });
         assert.strictEqual(memberPage.status, 200, 'the named person reads the page');
         assert.ok(memberPage.text.includes('Everyone recording'));
-        assert.strictEqual((await get(`/v/${pubId}`, { as: FRIEND, headers: bytes })).status, 200, 'and its bytes');
+        assert.match(memberPage.headers.get('cache-control') || '', /private/);
+        assert.match(memberPage.headers.get('cache-control') || '', /no-store/);
+        const memberBytes = await get(`/v/${pubId}`, { as: FRIEND, headers: bytes });
+        assert.strictEqual(memberBytes.status, 200, 'and its bytes');
+        assert.match(memberBytes.headers.get('cache-control') || '', /private/);
+        assert.match(memberBytes.headers.get('cache-control') || '', /no-store/);
 
         const strangerPage = await get(`/v/${pubId}`, { as: STRANGER, headers: nav });
         assert.strictEqual(strangerPage.status, 404);
-        assert.ok(strangerPage.text.includes('shared with specific people') && strangerPage.text.includes('OVShare.gate'), 'the gate');
+        assert.ok(strangerPage.text.includes('shared with specific people') && strangerPage.text.includes('data-ov-share-gate'), 'the gate');
+        assert.ok(strangerPage.text.includes('data-kind="vod"') && strangerPage.text.includes(`data-id="${pubId}"`), 'with its kind and id');
+        assert.ok(!strangerPage.text.includes('OVShare.gate('), 'no inline script to need a CSP nonce');
         assert.ok(!strangerPage.text.includes('Everyone recording'), 'never the title');
-        assert.strictEqual((await get(`/v/${pubId}`, { headers: bytes })).status, 404, 'no bytes signed out');
+        const anonBytes = await get(`/v/${pubId}`, { headers: bytes });
+        assert.strictEqual(anonBytes.status, 404, 'no bytes signed out');
+        assert.strictEqual(anonBytes.text, '', 'and no body');
         assert.strictEqual((await get(`/v/${pubId}`, { as: STRANGER, headers: bytes })).status, 404, 'no bytes for a stranger');
-        assert.strictEqual((await get(`/t/vod-${pubId}-1.jpg`)).status, 404, 'no thumbnail signed out');
-        assert.strictEqual((await get(`/t/vod-${pubId}-1.jpg`, { as: FRIEND })).status, 200, 'the member gets the picture');
+        const anonThumb = await get(`/t/vod-${pubId}-1.jpg`);
+        assert.strictEqual(anonThumb.status, 404, 'no thumbnail signed out');
+        assert.strictEqual(anonThumb.text, '', 'and no body');
+        const memberThumb = await get(`/t/vod-${pubId}-1.jpg`, { as: FRIEND });
+        assert.strictEqual(memberThumb.status, 200, 'the member gets the picture');
+        assert.match(memberThumb.headers.get('cache-control') || '', /private/);
+        assert.match(memberThumb.headers.get('cache-control') || '', /no-store/);
 
         r = await get(`/api/v1/games/vods/${pubId}`, { headers: { authorization: 'Bearer games-key' } });
         assert.strictEqual(r.status, 200);
@@ -171,6 +188,55 @@ const http = require('http');
         assert.ok(!(await get('/sitemap.xml')).text.includes(`/v/${pubId}`), 'leaving Everyone drops the sitemap');
         assert.ok(!(await get('/')).text.includes('Everyone recording'), 'and the gathered index');
         assert.ok(!(await get('/llms.txt')).text.includes('Everyone recording'), 'and llms.txt');
+
+        // ── Every byte path answers the member with a private, no-store header ──
+        // Local: above. Thumbnail: above. B2/R2 redirect: patch the placement answer, as the provider would.
+        const vodStorage = require('../server/vod/vod-storage');
+        const saveIsRemote = vodStorage.isRemote, saveResolve = vodStorage.resolvePlayback;
+        try {
+            const remoteFile = path.join(process.env.VOD_PATH, 'not-local-b2.webm');
+            const remoteId = Number((await raw.prepare(`INSERT INTO vods (app_id, user_id, title, file_path, is_public, visibility, duration_seconds, storage_provider, storage_key)
+                VALUES ('games', 5, 'Remote recording', NULL, 1, 'public', 10, 'b2', 'b2/key') RETURNING id`).run()).rows[0].id);
+            await project(remoteId, OWNER);
+            await sharing.register('vod', remoteId, 'public');
+            await share(remoteId, { as: OWNER, method: 'PUT', json: { audience: 'people', members: [{ subject: { type: 'user', id: FRIEND }, role: 'viewer' }] } });
+            vodStorage.isRemote = () => true;
+            vodStorage.resolvePlayback = async () => ({ kind: 'redirect', provider: 'b2', url: 'https://b2.example/presigned' });
+            const remoteMember = await get(`/v/${remoteId}`, { as: FRIEND, headers: bytes });
+            assert.strictEqual(remoteMember.status, 302, 'the member gets the provider redirect');
+            assert.match(remoteMember.headers.get('cache-control') || '', /private, no-store/);
+            const remoteAnon = await get(`/v/${remoteId}`, { headers: bytes });
+            assert.strictEqual(remoteAnon.status, 404);
+            assert.strictEqual(remoteAnon.text, '');
+
+            // A virtual clip is a redirect to its signed playlist; the closed clip is only the member's.
+            const clipId = Number((await raw.prepare(`INSERT INTO clips (app_id, vod_id, user_id, title, file_path, is_public, visibility, status, storage_provider, object_id)
+                VALUES ('games', ?, 5, 'Virtual clip', NULL, 0, 'public', 'ready', 'timeline', 'med_01J0000000000000000000000A') RETURNING id`).run(pubId)).rows[0].id);
+            await db.withObject('clip', clipId, async () => {});
+            await raw.prepare('UPDATE media_objects SET owner_subject = ? WHERE legacy_ref = ?').run(OWNER, `legacy:games:clip:${clipId}`);
+            await sharing.register('clip', clipId, 'public');
+            const clipPut = await get(`/api/v1/clip/${clipId}/share`, { as: OWNER, method: 'PUT', json: { audience: 'people', members: [{ subject: { type: 'user', id: FRIEND }, role: 'viewer' }] } });
+            assert.strictEqual(clipPut.status, 200, clipPut.text);
+            const virtualMember = await get(`/c/${clipId}`, { as: FRIEND, headers: bytes });
+            assert.strictEqual(virtualMember.status, 302, 'the member is sent to the signed playlist');
+            assert.match(virtualMember.headers.get('cache-control') || '', /private, no-store/);
+            assert.ok(String(virtualMember.headers.get('location')).includes('/o/'), 'a signed object playlist');
+            const virtualAnon = await get(`/c/${clipId}`, { headers: bytes });
+            assert.strictEqual(virtualAnon.status, 404);
+            assert.strictEqual(virtualAnon.text, '');
+
+            // The object and its HLS (playlist and, by the same check, segments): unsigned is missing;
+            // a short-lived signed playlist is the member's and never enters a shared cache.
+            const objectId = (await raw.prepare('SELECT object_id FROM clips WHERE id = ?').get(clipId)).object_id;
+            await raw.prepare("UPDATE media_objects SET lifecycle_status = 'ready' WHERE id = ?").run(objectId);
+            assert.strictEqual((await get(`/o/${objectId}`)).status, 404, 'the private object is missing unsigned');
+            const playlist = require('../server/objects/signing').signedPlaylistUrl(objectId);
+            const signedPlaylist = await get(playlist.url.replace('https://media.test', ''));
+            assert.match(signedPlaylist.headers.get('cache-control') || '', /private, no-store/);
+        } finally {
+            vodStorage.isRemote = saveIsRemote;
+            vodStorage.resolvePlayback = saveResolve;
+        }
 
         // Only me: even the member loses it.
         assert.strictEqual((await share(pubId, { as: OWNER, method: 'PUT', json: { audience: 'private' } })).status, 200);

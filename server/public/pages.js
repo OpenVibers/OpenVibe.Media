@@ -265,19 +265,9 @@ function renderShareGate(kind, id, { signedInAs = null, signInUrl = '/auth/login
     const body = `<section class="message">
 <h1>A ${isVod ? 'recording' : 'clip'} on OpenVibe.Media</h1>
 <p>This is shared with specific people.</p>
-<div id="media-share-gate">
-<p>This ${isVod ? 'recording' : 'clip'} is shared with specific people on OpenVibe.Media.</p>
-<p><a class="btn" href="${esc(signInUrl)}">Sign in</a></p>
-</div>
+<div data-ov-share-gate data-kind="${isVod ? 'vod' : 'clip'}" data-id="${esc(id)}"${signedInAs ? ` data-signed-in-as="${esc(signedInAs)}"` : ''} data-sign-in-url="${esc(signInUrl)}">This ${isVod ? 'recording' : 'clip'} is shared with specific people on OpenVibe.Media.</div>
 </section>
-<script src="${ovServe.url('ov-share.js')}" defer></script>
-<script>
-window.addEventListener('DOMContentLoaded', function () {
-  var el = document.getElementById('media-share-gate');
-  if (el && window.OVShare) OVShare.gate(el, { kind: ${JSON.stringify(isVod ? 'vod' : 'clip')}, id: ${JSON.stringify(String(id))},
-    signedInAs: ${JSON.stringify(signedInAs || '')}, signInUrl: ${JSON.stringify(signInUrl)} });
-});
-</script>`;
+<script src="${ovServe.url('ov-share.js')}" defer></script>`;
     return pageFrame.page({
         seo: {
             title: `A ${isVod ? 'recording' : 'clip'} on OpenVibe.Media`,
