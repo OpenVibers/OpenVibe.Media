@@ -7,7 +7,7 @@
   `/c/:id/descriptions.vtt`) from the WebVTT Live builds out of its scene notes and speech timeline. Public and link
   items are cacheable; a private item's track answers the same 404 as a missing id unless the viewer's Network
   session asks for it (that session is forwarded to Live, which checks the owner). Other apps' media is not described: only Live has the scene-note timeline behind it. The **AD** control and
-  its spoken cues are OpenVibe.Shared's player (openvibe-shared 4.125.0, a pin-round follow-up). Tests:
+  its spoken cues are OpenVibe.Shared's player (openvibe-shared 4.126.0, a pin-round follow-up). Tests:
   `test/audio-description.test.js` (public, private-owner, other app; track markup).
 
 - An avatar a person's profile points at cannot be deleted out from under them (incident 2026-11-06: a cleanup of
