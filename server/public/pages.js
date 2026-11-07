@@ -46,9 +46,9 @@ function creatorLine(record) {
     return record.username || record.display_name || null;
 }
 
-/** Where this item is watched: OpenVibe.Video for Live's, the owning app's own page otherwise. */
+/** Where this item is watched: OpenVibe.Video for Live's (on its /watch?v=<watch id> page), the owning app's own page otherwise. */
 function sourcePage(kind, record) {
-    return watchPageUrl(kind, record.app_id, record.id);
+    return watchPageUrl(kind, record.app_id, record.id, record.watch_id || null);
 }
 
 /**

@@ -221,15 +221,17 @@ async function ensureRootNamespace(app) {
 
 // ── VOD helpers ──────────────────────────────────────────────
 
-// The row and its media_object in one transaction (a clips-only recording has no object).
+// The row and its media_object in one transaction (a clips-only recording has no object). Every new row gets its watch
+// id here (server/watch-ids.js): the id openvibe.video's /watch?v= page is addressed by.
 async function createVod({ app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, file_size, duration_seconds, thumbnail_url, master_file_path, meta, visibility, clips_only, audio_only }) {
     const vis = visibility ? _normVisibility(visibility) : 'public';
+    const watchId = await require('../watch-ids').mintUnique();
     return await withObject('vod', (r) => r.lastInsertRowid, async () => await run(
-        `INSERT INTO vods (app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, master_file_path, file_size, duration_seconds, thumbnail_url, meta_json, is_public, visibility, clips_only, audio_only)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        `INSERT INTO vods (app_id, stream_id, stream_key, managed_stream_id, user_id, title, description, file_path, master_file_path, file_size, duration_seconds, thumbnail_url, meta_json, is_public, visibility, clips_only, audio_only, watch_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         [app_id, stream_id || null, stream_key || null, managed_stream_id || null, user_id || null, title || 'Recording', description || '',
          file_path || null, master_file_path || null, file_size || 0, duration_seconds || 0, thumbnail_url || null,
-         JSON.stringify(meta || {}), vis === 'public' ? 1 : 0, vis, clips_only ? 1 : 0, audio_only ? 1 : 0]
+         JSON.stringify(meta || {}), vis === 'public' ? 1 : 0, vis, clips_only ? 1 : 0, audio_only ? 1 : 0, watchId]
     ));
 }
 
@@ -452,16 +454,17 @@ function vodStatus(vod) {
 // ── Clip helpers ─────────────────────────────────────────────
 
 // The row and its media_object in one transaction. `visibility` (public | unlisted | private), when
-// given, sets both columns; otherwise is_public picks public or unlisted as before.
+// given, sets both columns; otherwise is_public picks public or unlisted as before. A new row gets its watch id here.
 async function createClip({ app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status, recording_object_id, audio_only }) {
     const pub = (is_public === 0 || is_public === false) ? 0 : 1;
     const vis = visibility ? _normVisibility(visibility) : (pub ? 'public' : 'unlisted');
+    const watchId = await require('../watch-ids').mintUnique();
     return await withObject('clip', (r) => r.lastInsertRowid, async () => await run(
-        `INSERT INTO clips (app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status, recording_object_id, audio_only)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        `INSERT INTO clips (app_id, vod_id, stream_id, user_id, channel_user_id, title, description, file_path, thumbnail_url, start_time, end_time, duration_seconds, is_public, visibility, auto_generated, status, recording_object_id, audio_only, watch_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
         [app_id, vod_id || null, stream_id || null, user_id || null, channel_user_id || null, title || 'Untitled Clip', description || '',
          file_path || '', thumbnail_url || null, start_time || 0, end_time || 0, duration_seconds || 0,
-         vis === 'public' ? 1 : 0, vis, auto_generated ? 1 : 0, status || 'ready', recording_object_id || null, audio_only ? 1 : 0]
+         vis === 'public' ? 1 : 0, vis, auto_generated ? 1 : 0, status || 'ready', recording_object_id || null, audio_only ? 1 : 0, watchId]
     ));
 }
 

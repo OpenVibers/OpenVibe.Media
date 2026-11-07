@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Watch ids (plan track U, 2026-11-07): every VOD and clip answers to an 11-character random id.** YouTube's
+  `/watch?v=` shape, so a watch page cannot be found by counting: 8 random bytes as URL-safe base64
+  (`crypto.randomBytes(8).toString('base64url')`), never derived from the numeric id. Media owns VODs and clips, so
+  Media mints it (`server/watch-ids.js`): at insert for every new row, and in idempotent batches — only where
+  `watch_id IS NULL` — for the rows that predate it, at boot. One id space across both tables (`mintUnique()` checks
+  both), so a watch id has exactly one meaning. `watch_id` is on every VOD and clip Media serves (`vodPublic`,
+  `clipPublic`, so every API read and list), and `GET /api/v1/:app/watch/:watch_id` → `{ kind, id }` resolves one; a
+  private item still resolves, and its own read applies the visibility rule it always did. Migration
+  `0024_watch_ids.sql` (expand: a nullable column and a partial unique index per table; no table rewrite). Tests:
+  `test/watch-ids.test.js` (format, insert, the resolver, the backfill idempotent and leaving none NULL, uniqueness
+  across both tables, the route).
+
 - **Audio description on a watch page (X1, consent plan 2026-10-31, "AI and data")**: the player now carries a
   `<track kind="descriptions">` for Live's VODs and clips, served same-origin at `/v/:id/descriptions.vtt` (and
   `/c/:id/descriptions.vtt`) from the WebVTT Live builds out of its scene notes and speech timeline. Public and link

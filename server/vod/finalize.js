@@ -48,6 +48,9 @@ async function vodPublic(vod, { readiness = false, hls } = {}) {
 
         id: vod.id,
         app_id: vod.app_id,
+        // The id its watch page is addressed by (openvibe.video/watch?v=<watch_id>), minted by Media and fixed for the
+        // row's life. A row that predates the ids has one filled here if the backfill has not reached it yet.
+        watch_id: vod.watch_id || await require('../watch-ids').ensure('vod', vod.id),
         stream_id: vod.stream_id,
         managed_stream_id: vod.managed_stream_id || null,
         user_id: vod.user_id,
