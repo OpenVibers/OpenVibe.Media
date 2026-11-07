@@ -2,8 +2,15 @@
 // ═══════════════════════════════════════════════════════════════
 // Avatar ingestion — every avatar on the network is a file HERE.
 //
-//   POST /internal/avatar-ingest   { url, user_id, username, subject }   (internal key + loopback only)
-//   → { ok, object_id, url: 'https://openvibe.media/o/<id>', width, height, bytes }
+//   POST /internal/avatar-ingest   { url, user_id, username, subject, product?, ref?, shape? }   (service token + loopback only)
+//   → { ok, object_id, url: 'https://openvibe.media/o/<id>', width, height, bytes, reused? }
+//
+// Every source becomes an avatar object the person owns, so a profile never points at another product's object:
+//   • an openvibe.media address for an object or paste screenshot is read from local storage (no self-fetch)
+//   • an object that is already an avatar owned by this subject is reused, not copied again
+//   • anything else is fetched with the precautions below
+// With `product` + `ref` the profile's reference is recorded (model.adoptAvatar), which is what makes the delete
+// guard (model.softDelete) refuse a cleanup that would break a working profile. `shape: 'banner'` keeps a wide crop.
 //
 // A person may point at a picture anywhere on the web; no OpenVibe site ever serves or stores that address.
 // We fetch it once, on the server, with the precautions a server-side fetch of a user-supplied URL needs:
@@ -28,6 +35,9 @@ const crypto = require('crypto');
 const sharp = require('sharp');
 
 const MAX_BYTES = 8 * 1024 * 1024, DEADLINE_MS = 10_000, MAX_REDIRECTS = 3, SIZE = 512;
+// The house shapes: a square picture everywhere a person appears; a wide one for a channel banner.
+const SHAPES = { avatar: { width: SIZE, height: SIZE }, banner: { width: 1600, height: 500 } };
+const PRODUCT_RE = /^[a-z][a-z0-9-]{1,20}$/;
 
 // The address rule is openvibe-shared/egress's (the strictest union the network's copies drifted from):
 // it also refuses the IPv6 forms that wrap a private IPv4 address (v4-compatible, 6to4, Teredo, NAT64),
@@ -91,13 +101,57 @@ async function safeFetchImage(rawUrl, { resolver = resolvePublic, fetcher = fetc
     throw new Error('Too many redirects');
 }
 
-/** Bytes → a clean square WebP. Throws when the bytes are not a decodable picture. */
-async function toAvatar(buf) {
+/** Bytes → a clean WebP in the requested house shape. Throws when the bytes are not a decodable picture. */
+async function toAvatar(buf, { shape = 'avatar' } = {}) {
+    const size = SHAPES[shape] || SHAPES.avatar;
     const img = sharp(buf, { limitInputPixels: 40_000_000, failOn: 'error', animated: false });
     const meta = await img.metadata();
     if (!meta.width || !meta.height || meta.width < 16 || meta.height < 16) throw new Error('That picture is too small');
-    const out = await img.rotate().resize(SIZE, SIZE, { fit: 'cover', position: 'attention' }).webp({ quality: 88 }).toBuffer();
-    return { buffer: out, width: SIZE, height: SIZE };
+    const out = await img.rotate().resize(size.width, size.height, { fit: 'cover', position: 'attention' }).webp({ quality: 88 }).toBuffer();
+    return { buffer: out, width: size.width, height: size.height, shape };
+}
+
+/** The bytes of one of our own objects, from its local copy. null when there is none (a remote-only object). */
+async function localBytes(obj) {
+    if (!obj) return null;
+    const model = require('../objects/model');
+    const locs = await model.listLocations(obj.id);
+    for (const l of locs) {
+        if (l.provider !== 'local' || !l.key) continue;
+        try { return fs.readFileSync(l.key); } catch { /* moved to a remote tier */ }
+    }
+    return null;
+}
+
+/**
+ * What a source URL names on this server, if anything: `{ obj }` for an object, `{ buffer }` when its bytes are
+ * local, or null to fetch it over the network. Options: `{ subject }` (the person the picture is for), `{ fetch }`.
+ * A source that is already this person's avatar object is returned as `{ obj, reuse: true }` so it is not copied
+ * again on every profile save.
+ */
+async function readLocalSource(rawUrl, { subject = null } = {}) {
+    const model = require('../objects/model');
+    let u; try { u = new URL(String(rawUrl || '')); } catch { return null; }
+    if (u.hostname !== new URL(require('../config').publicUrl).hostname) return null;
+    let obj = null;
+    const m = /^\/o\/(med_[0-9A-HJKMNP-TV-Z]{26})$/.exec(u.pathname);
+    if (m) obj = await model.getObject(m[1]);
+    else {
+        const p = /^\/p\/([A-Za-z0-9][A-Za-z0-9_-]{1,80})\/screenshot\/?$/.exec(u.pathname);
+        if (p) obj = await model.getObjectByLegacyRef(model.legacyRef('live', 'paste', p[1])) || await model.getObjectByLegacyRef(model.legacyRef('live', 'avatar', p[1]));
+        const f = /^\/f\/(.+)$/.exec(u.pathname);
+        if (f) {
+            const row = await require('../db/database').get('SELECT object_id FROM files WHERE key = ?', [decodeURIComponent(f[1])]);
+            if (row && row.object_id) obj = await model.getObject(row.object_id);
+        }
+    }
+    if (!obj || obj.lifecycle_status !== 'ready') return null;
+    // A private picture is copied only for the person it belongs to (their profile is already showing it); for
+    // anyone else the remote path is tried and the private object refuses, so a copy never publishes it.
+    if (obj.visibility === 'private' && obj.owner_subject !== subject) return null;
+    if (obj.kind === 'avatar' && subject && obj.owner_subject === subject) return { obj, reuse: true };
+    const buffer = await localBytes(obj);
+    return buffer ? { obj, buffer } : null;
 }
 
 /**
@@ -157,12 +211,29 @@ async function storeAvatar({ db, pic, subject = null, username = null, sourceHos
 function createIngestHandler({ db, config, log = console }) {
     return async function avatarIngest(req, res) {
         try {
-            const { url, user_id, username, subject } = req.body || {};
+            const { url, user_id, username, subject, product = null, ref = null, shape = 'avatar' } = req.body || {};
             if (!url || !user_id) return res.status(400).json({ ok: false, error: 'url and user_id required' });
-            const raw = await safeFetchImage(url);
-            const pic = await toAvatar(raw);
+            if (!SHAPES[shape]) return res.status(400).json({ ok: false, error: 'shape must be avatar or banner' });
+            if (product && (!PRODUCT_RE.test(String(product)) || ref == null || String(ref).length > 64)) {
+                return res.status(400).json({ ok: false, error: 'product and ref must name the profile slot' });
+            }
+            const model = require('../objects/model');
+            const adopt = async (objectId) => {
+                if (!product) return;
+                await model.adoptAvatar({ objectId, subject: SUBJECT_RE.test(String(subject || '')) ? subject : null, product: String(product), ref: String(ref) });
+            };
+            // Our own object: the bytes are here, and a picture that is already this person's avatar is reused as it is.
+            const local = await readLocalSource(url, { subject });
+            if (local && local.reuse) {
+                await adopt(local.obj.id);
+                return res.json({ ok: true, object_id: local.obj.id, url: `${config.publicUrl}/o/${local.obj.id}`,
+                    width: null, height: null, bytes: Number(local.obj.size_bytes) || 0, reused: true });
+            }
+            const raw = local && local.buffer ? local.buffer : await safeFetchImage(url);
+            const pic = await toAvatar(raw, { shape });
             const sourceHost = (() => { try { return new URL(url).hostname; } catch { return null; } })();
-            const id = await storeAvatar({ db, pic, subject, username, sourceHost, userId: user_id });
+            const id = await storeAvatar({ db, pic, subject, username, sourceHost });
+            await adopt(id);
             res.json({ ok: true, object_id: id, url: `${config.publicUrl}/o/${id}`, width: pic.width, height: pic.height, bytes: pic.buffer.length });
         } catch (err) {
             log.warn('[Avatar ingest]', err.message);
@@ -171,4 +242,42 @@ function createIngestHandler({ db, config, log = console }) {
     };
 }
 
-module.exports = { createIngestHandler, storeAvatar, safeFetchImage, isPublicAddress, toAvatar, resolvePublic };
+/** Record that a profile slot points at an avatar object (a route of last resort: ingest does this itself). */
+function createAdoptHandler({ log = console } = {}) {
+    return async function avatarAdopt(req, res) {
+        try {
+            const { object_id, subject = null, product, ref } = req.body || {};
+            if (!object_id || !product || ref == null) return res.status(400).json({ ok: false, error: 'object_id, product and ref are required' });
+            if (!PRODUCT_RE.test(String(product)) || String(ref).length > 64) return res.status(400).json({ ok: false, error: 'bad product or ref' });
+            const model = require('../objects/model');
+            const obj = await model.resolveObject(String(object_id));
+            if (!obj) return res.status(404).json({ ok: false, error: 'No such object' });
+            if (obj.kind !== 'avatar') return res.status(422).json({ ok: false, error: 'Only an avatar object can be a profile picture' });
+            if (obj.lifecycle_status !== 'ready') return res.status(409).json({ ok: false, error: `Object is ${obj.lifecycle_status}` });
+            if (subject && obj.owner_subject && subject !== obj.owner_subject) return res.status(422).json({ ok: false, error: 'That object belongs to someone else' });
+            const row = await model.adoptAvatar({ objectId: obj.id, subject: subject || obj.owner_subject || null, product: String(product), ref: String(ref) });
+            res.json({ ok: true, ref: row });
+        } catch (err) {
+            log.warn('[Avatar adopt]', err.message);
+            res.status(500).json({ ok: false, error: 'Could not record the reference' });
+        }
+    };
+}
+
+/** Drop a profile slot's reference (the picture was removed) or one object's references. */
+function createReleaseHandler({ log = console } = {}) {
+    return async function avatarRelease(req, res) {
+        try {
+            const { object_id = null, product = null, ref = null, subject = null } = req.body || {};
+            if (!object_id && !(product && ref != null) && !subject) return res.status(400).json({ ok: false, error: 'object_id, product+ref or subject required' });
+            const model = require('../objects/model');
+            const released = await model.releaseAvatar({ objectId: object_id, product, ref, subject });
+            res.json({ ok: true, released });
+        } catch (err) {
+            log.warn('[Avatar release]', err.message);
+            res.status(500).json({ ok: false, error: 'Could not release the reference' });
+        }
+    };
+}
+
+module.exports = { createIngestHandler, createAdoptHandler, createReleaseHandler, storeAvatar, safeFetchImage, readLocalSource, toAvatar, resolvePublic, isPublicAddress, SHAPES };

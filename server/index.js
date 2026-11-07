@@ -162,8 +162,12 @@ const ready = (async () => {
         // Loopback only. A Network service token holding media.avatar.ingest (audience openvibe.media);
         // a Bearer is judged on the token alone (401 bad, 403 no capability) and nothing else opens the
         // route (server/service-guard.js). The handler stores native avatar objects.
+        const avatars = require('./avatars/ingest');
         app.post('/internal/avatar-ingest', require('./service-guard').guard('media.avatar.ingest'),
-            require('./avatars/ingest').createIngestHandler({ db: require('./db/database'), config }));
+            avatars.createIngestHandler({ db: require('./db/database'), config }));
+        // A profile slot points at an avatar object: this is what makes softDelete refuse to break a working profile.
+        app.post('/internal/avatar-adopt', require('./service-guard').guard('media.avatar.adopt'), avatars.createAdoptHandler());
+        app.post('/internal/avatar-release', require('./service-guard').guard('media.avatar.release'), avatars.createReleaseHandler());
     }
     // ── Internal: retiring one legacy Live paste screenshot for OpenVibe.Community (see
     // server/objects/legacy-paste-retire.js). Same service-token guard and loopback rule as above;

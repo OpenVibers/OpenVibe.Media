@@ -60,6 +60,9 @@ async function exportPart(db, subjects) {
 /** Erase what the subjects own → { erased, retained }. Each object in its own step: a hold stops only that one. */
 async function erase(db, subjects) {
     const model = require('./objects/model');
+    // The account is gone, so no profile points at its pictures any more: release the avatar references first, or
+    // the in-use guard (model.softDelete) would keep the person's own avatar forever.
+    for (const s of subjects) await model.releaseAvatar({ subject: s });
     const erased = {};
     const retained = {};
     const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };

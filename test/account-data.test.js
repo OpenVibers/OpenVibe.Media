@@ -29,6 +29,7 @@ const path = require('path');
                 media_access_keys: 'project-scoped S3 keys; the project owns them and created_by is the issuer audit trail',
                 config_snapshots: 'the configuration audit trail, attributed to the staff member who changed it',
                 media_holds: 'a moderation, DMCA or legal hold is kept until it is released',
+                media_avatar_refs: 'which object a profile picture points at: erase() releases the person\'s references first, and the objects they name are erased separately',
                 media_jobs: 'operational job history, without the person\'s content',
                 media_namespaces: 'a namespace belongs to an app or project, not a person',
                 pastes: 'a frozen table Community owns and erases itself',
