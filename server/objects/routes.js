@@ -324,6 +324,9 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res)
         const kind = String(b.kind || 'file');
         if (!model.KINDS.includes(kind)) return problem(res, 400, 'media.object.invalid', `kind must be one of ${model.KINDS.join(', ')}`);
         const visibility = String(b.visibility || 'private');
+        if (req.appId === 'locker' && (kind !== 'file' || visibility !== 'private' || b.mime_type !== 'application/octet-stream')) {
+            return problem(res, 422, 'media.locker.opaque', 'Locker stores private opaque files only');
+        }
         if (!model.VISIBILITIES.includes(visibility)) return problem(res, 400, 'media.object.invalid', 'visibility must be public, unlisted or private');
         // The namespace: the tenant's root unless the body names one below it; the caller must hold write there.
         const named = namespaces.resolveName(req.appRow, b.namespace);
@@ -732,6 +735,21 @@ router.delete('/:id', remove, limits('media.object.delete', { minute: 60, hour: 
         if (!canWrite(req, obj)) return problem(res, 403, 'media.object.forbidden', 'Not your object');
         if (obj.legacy_ref) return problem(res, 409, 'media.object.legacy_managed', 'Delete vods, clips and files through their v1 routes; legacy screenshots and avatars are deleted through account deletion');
         if (await model.isHeld(obj.id)) return problem(res, 409, 'media.object.held', 'Object is under a retention hold');
+        if (req.query.purge === '1') {
+            if (req.appId !== 'locker' || req.principal?.sub !== 'svc:locker') return problem(res, 403, 'media.locker.forbidden', 'Immediate Locker erasure requires its own service principal');
+            // Sends have no restore window. Retry until every encrypted copy is gone; holds still win.
+            let gone = obj.lifecycle_status === 'deleted' ? obj : await model.softDelete(obj, { by: 'svc:locker' });
+            const md = model.parseJson(gone.metadata, {});
+            if (md.purged_at) return res.json(await model.objectPublic(gone));
+            md.no_restore = true;
+            await model.updateObject(obj.id, { metadata: JSON.stringify(md) });
+            const active = await db.all("SELECT id FROM media_uploads WHERE object_id = ? AND status = 'active'", [obj.id]);
+            for (const session of active) await multipart.abort(session.id);
+            gone = await model.getObject(obj.id);
+            if (!await model.purgeOne(gone)) return problem(res, 409, 'media.locker.purge_pending', 'Encrypted copies still need erasure; retry');
+            await namespaces.reconcileChain(req.appRow, obj.namespace);
+            return res.json(await model.objectPublic(await model.getObject(obj.id)));
+        }
         if (obj.lifecycle_status === 'deleted') return res.json(await model.objectPublic(obj));
         const gone = await model.softDelete(obj, { by: req.principal ? req.principal.sub : `app:${req.appId}` });
         await namespaces.reconcileChain(req.appRow, obj.namespace);
