@@ -205,6 +205,7 @@ async function ensureTokenOnlyApps() {
     for (const [appId, name, quotaGb, origins] of [
         ['live', 'OpenVibe.Live', 0, ['https://openvibe.live']],   // VODs, clips, thumbnails, avatars (C-70)
         ['community', 'OpenVibe.Community', 10, []],
+        ['locker', 'OpenVibe.Locker', 0, []], // Private ciphertext; Locker reserves each person's quota.
         ['tools', 'OpenVibe.Tools', 20, ['https://openvibe.tools']],       // Wave 11 job results (TOOLS_JOB_RESULTS=media)
         ['games', 'OpenVibe.Games', 10, ['https://openvibe.games', 'https://play.openvibe.games']],   // Wave 12 map-editor assets
         ['wiki', 'OpenVibe.Wiki', 10, []],         // Wave 16 page attachments
