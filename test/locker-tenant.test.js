@@ -35,6 +35,12 @@ const crypto = require('crypto');
         assert.strictEqual((await call('POST', `${obj}/${id}/complete`, {})).status, 200);
         const row = await model.getObject(id); const file = model.objectFilePath(row); assert.ok(fs.existsSync(file));
         assert.strictEqual((await fetch(`${base}/o/${id}`)).status, 404);
+        const storage = require('../server/vod/vod-storage');
+        const originalDelete = storage.deleteObject, originalHead = storage.headObject;
+        const remote = new Set(['b2', 'r2']); let failRemote = true;
+        for (const provider of remote) await model.upsertLocation(id, { provider, bucket: 'locker-test', key: `objects/locker/${id}`, state: 'present', size_bytes: 5, verified: true });
+        storage.deleteObject = async (provider) => { if (failRemote) return false; remote.delete(provider); return true; };
+        storage.headObject = async (provider) => remote.has(provider) ? { size: 5 } : null;
         const unlink = fs.unlinkSync;
         fs.unlinkSync = (name) => { if (name === file) throw Object.assign(new Error('denied'), { code: 'EACCES' }); return unlink(name); };
         try {
@@ -42,7 +48,13 @@ const crypto = require('crypto');
             assert.ok((await model.listLocations(id)).length, 'the durable location is retained for retry');
             assert.ok(fs.existsSync(file));
         } finally { fs.unlinkSync = unlink; }
-        assert.strictEqual((await call('DELETE', `${obj}/${id}?purge=1`)).status, 200);
+        try {
+            assert.strictEqual((await call('DELETE', `${obj}/${id}?purge=1`)).status, 409, 'failed remote erasure stays retryable');
+            assert.ok((await model.listLocations(id)).some((l) => l.provider !== 'local'));
+            failRemote = false;
+            assert.strictEqual((await call('DELETE', `${obj}/${id}?purge=1`)).status, 200);
+            assert.equal(remote.size, 0, 'cached and canonical remote ciphertext copies are erased');
+        } finally { storage.deleteObject = originalDelete; storage.headObject = originalHead; }
         assert.ok(!fs.existsSync(file), 'expired Send ciphertext is erased, not held through a restore window');
         assert.strictEqual((await call('DELETE', `${obj}/${id}?purge=1`)).status, 200, 'erasure retries are idempotent');
         assert.strictEqual((await call('POST', `${obj}/${id}/restore`, {})).status, 410);

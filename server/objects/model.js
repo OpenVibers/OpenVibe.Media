@@ -724,10 +724,21 @@ async function purgeExpired({ retentionDays = config.objects.retentionDays } = {
 async function purgeOne(obj) {
     const md = parseJson(obj.metadata, {});
     if (obj.lifecycle_status !== 'deleted' || obj.legacy_ref || md.purged_at || await isHeld(obj.id)) return false;
-    if ((await listLocations(obj.id)).some(l => l.provider === 'r2')) return false;
+    const locations = await listLocations(obj.id);
+    const lockerErasure = obj.app_id === 'locker' && md.no_restore === true;
+    if (!lockerErasure && locations.some(l => l.provider === 'r2')) return false;
     const root = path.resolve(config.objects.path) + path.sep;
-    for (const l of await listLocations(obj.id)) {
-        if (l.provider !== 'local') continue;
+    for (const l of locations) {
+        if (l.provider !== 'local') {
+            if (!lockerErasure) continue;
+            // Locker expiry is erasure, not cache demotion: delete canonical and cached remote copies too.
+            const storage = require('../vod/vod-storage');
+            try {
+                if (!await storage.deleteObject(l.provider, l.key) || await storage.headObject(l.provider, l.key)) return false;
+            } catch { return false; }
+            await db.run('DELETE FROM media_locations WHERE id = ?', [l.id]);
+            continue;
+        }
         // Retain the location until the bytes are gone: a denied or interrupted delete must be retried.
         if (!path.resolve(l.key).startsWith(root)) return false;
         try { fs.unlinkSync(l.key); } catch (e) { if (e.code !== 'ENOENT') return false; }
