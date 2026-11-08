@@ -29,6 +29,23 @@ const protectedSessions = require('./protected-sessions');
 
 const OUTBOX_BACKLOG_LIMIT = 1000;
 
+// `ready media objects with no good copy` is an anti-join over every ready object and its locations: 56 ms mean,
+// 5,486 calls in 22 h on 2026-11-08 (the /metrics gauge ran it every ~15 s). The metric answers a slow-moving
+// figure, so it is kept for 60 s in production; every call runs elsewhere (tests read their own writes).
+const NO_GOOD_COPY_MS = Math.max(0, Number(process.env.MEDIA_NO_GOOD_COPY_CACHE_MS || (process.env.NODE_ENV === 'production' ? 60_000 : 0)) || 0);
+function kept(read, keepMs = NO_GOOD_COPY_MS, now = () => Date.now()) {
+    if (!(keepMs > 0)) return read;
+    let hold = null;
+    return () => {
+        const t = now();
+        if (hold && (hold.pending || t - hold.at < keepMs)) return hold.pending || Promise.resolve(hold.value);
+        const pending = Promise.resolve().then(read);
+        hold = { at: t, pending };
+        return pending.then((value) => { if (hold && hold.pending === pending) hold = { at: t, value }; return value; },
+            (err) => { if (hold && hold.pending === pending) hold = null; throw err; });
+    };
+}
+
 /**
  * A count that cannot be answered is unknown (null), never zero: ovhost reads null as unknown and
  * holds the restart. The count is bounded, so a slow database cannot make the whole /api/ready
@@ -78,7 +95,12 @@ function storageDirs(config) {
     };
 }
 
+function noGoodCopyReader(db) {
+    return kept(() => copyReport.countNoGoodCopy(db));
+}
+
 function domainMetrics(registry, { db, recorder, events }) {
+    const noGoodCopy = noGoodCopyReader(db);
     registry.gauge({ name: 'media_recordings_in_progress', help: 'Recordings ffmpeg is writing right now', collect: () => recorder.activeCount() });
     const timelineCache = require('./objects/timeline-cache');
     registry.gauge({ name: 'media_timeline_local_bytes', help: 'Bytes used by local timeline files, including orphan files', collect: () => timelineCache.status().bytes });
@@ -107,7 +129,7 @@ function domainMetrics(registry, { db, recorder, events }) {
     });
     registry.gauge({
         name: 'media_objects_no_good_copy', help: 'Ready media objects with no present or unverified copy anywhere (see scripts/no-good-copy-report.js)',
-        collect: async () => await copyReport.countNoGoodCopy(db),
+        collect: async () => await noGoodCopy(),
     });
     registry.gauge({
         name: 'media_verify_last_run_timestamp_seconds', help: 'When the scheduled copy verification last finished a run',
@@ -226,4 +248,4 @@ function mountReady(app, registry, deps) {
     return readiness;
 }
 
-module.exports = { instrument, mountReady, createMediaReadiness, domainMetrics, storageDirs };
+module.exports = { instrument, mountReady, createMediaReadiness, domainMetrics, storageDirs, kept, noGoodCopyReader, NO_GOOD_COPY_MS };
