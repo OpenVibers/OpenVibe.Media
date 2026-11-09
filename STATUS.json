@@ -6,9 +6,9 @@
   "runtime": "node 22, express, PostgreSQL 18 (openvibe-sdk/db, async) + Valkey 9, ffmpeg",
   "port": 4100,
   "domain": "openvibe.media",
-  "contracts": "openvibe-contracts v0.338.0",
+  "contracts": "openvibe-contracts v0.373.0",
   "sdk": "openvibe-sdk v0.125.0",
-  "shared": "openvibe-shared v4.173.0",
+  "shared": "openvibe-shared v4.177.0",
   "capabilities": [
     "media.object.upload",
     "media.object.read",
