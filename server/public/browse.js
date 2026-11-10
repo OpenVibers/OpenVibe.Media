@@ -406,7 +406,7 @@ function renderPage(tab, page, data, counts, { home = false } = {}) {
     // On the home the list is a section like the ones around it (the same inset, so its heading, tabs and grid line up
     // with the hero and the developer sections); later pages and tabs keep the plain index layout.
     const list = `<nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
-${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : '<div class="empty">Nothing here yet.</div>'}
+${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : kit.empty({ icon: 'grid', title: 'Nothing here yet', text: 'No public media is in this list yet.', action: { href: '/me', label: 'Open your media', icon: 'plus' } })}
 <div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>`;
     const body = `${heading}
 ${first ? `<section class="sc-sec sc-media">${kit.rail({ id: 'media', wrap: true, title: 'Latest public media', more: { href: '/?tab=all', label: `See all ${data.total.toLocaleString('en-US')}` }, items: data.cards.slice(0, 12).map(asCard) })}<p class="sc-kinds" aria-label="Browse by kind">${TABS.filter(([k]) => k !== 'all' && (counts[k] ?? 0) > 0).map(([k, label]) => kit.button({ href: `/?tab=${k}`, label: `${label} ${(counts[k] ?? 0).toLocaleString('en-US')}`, kind: 'quiet', small: true })).join(' ')}</p></section>` : list}
@@ -421,6 +421,7 @@ ${first ? foldBlock({ id: 'shipped', head: '<h2 id="shipped-h">Recently shipped 
         },
         css: BROWSE_CSS + (rules.length ? `@supports selector(:has(*)){@media (max-width:640px){${rules.join('')}}}` : ''),
         kit: first,
+        kitCss: !data.cards.length && !first,
         body,
         // Later pages are noindex and carry no structured data, the summary's WebPage included.
         summary: page === 1 ? {
