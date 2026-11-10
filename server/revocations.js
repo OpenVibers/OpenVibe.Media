@@ -7,15 +7,14 @@
  * MEDIA_INBOUND_EVENTS_SECRET (signature v2 only) and refused when it came through the proxy. A
  * delivery moves the person's cutoff (openvibe-sdk createPgRevocationStore: only ever forward, source
  * network only); user-auth.js then refuses their older tokens, so openvibe.media's navbar shows them
- * signed out at once. The same endpoint takes network.subject.merged (ADR-029): a folded-in account's media objects
- * move to the survivor (server/subject-merge.js), and network.account.export_requested / network.account.deleted (ADR-033):
+ * signed out at once. network.account.export_requested / network.account.deleted (ADR-033):
  * Media's export part, or the erasure of what the account owns (server/account-data.js). The subscriptions (one per topic) are created at boot when
  * EVENTS_URL, the service secret and MEDIA_INBOUND_EVENTS_SECRET are set (grant media events.subscription.manage).
  */
 const express = require('express');
 
 const TOPIC = 'network.user.token_valid_after';
-const TOPICS = [TOPIC, 'network.subject.merged', 'network.account.export_requested', 'network.account.deleted'];
+const TOPICS = [TOPIC, 'network.account.export_requested', 'network.account.deleted'];
 let store = null;
 function cutoffs() {
     if (!store) store = require('openvibe-sdk/auth').createPgRevocationStore(require('./db/database').getDb(), { table: 'token_revocations' });
@@ -46,7 +45,7 @@ function handler() {
         }
         let outcome;
         try {
-            outcome = d.event.event_type === 'network.subject.merged' ? await require('./subject-merge').apply(d.event) : await cutoffs().apply(d.event);
+            outcome = await cutoffs().apply(d.event);
         } catch (e) {
             console.error(`[Revocations] ${d.event.event_type} failed:`, e.message);
             return res.status(500).json({ error: 'not applied' });
