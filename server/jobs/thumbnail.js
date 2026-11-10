@@ -16,7 +16,10 @@
  */
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const db = require('../db/database');
+const config = require('../config');
 const { JobError } = require('./queue');
 
 function targetOf(obj, params = {}) {
@@ -125,9 +128,102 @@ async function failedBefore(appId, kind, id) {
     return Number((r && r.n) || 0);
 }
 
+// ── Missing-picture backfill (due based, small batches) ──────
+// Most pictures are made at finalize (server/vod/finalize.js). One whose generation failed there, whose
+// files were lost, or whose row was made before thumbnails existed had no picture forever: the page then
+// showed Media's 1×1 fallback (the owner's empty grey boxes, 2026-11-10). This sweep asks the existing
+// thumbnail.regenerate job for a few of them at a time, never retrying one too soon, and logs its count.
+const TYPE = 'thumbnail.regenerate';
+const MIN_AGE_MS = 10 * 60 * 1000;             // a just-finalized recording may still be working on its picture
+const RETRY_FAILED_MS = 6 * 3600 * 1000;        // ffmpeg produced no frame; try again in six hours
+const RETRY_UNAVAILABLE_MS = 24 * 3600 * 1000;  // the file is gone/empty/too small; once a day is enough
+const RETRY_SUCCEEDED_MS = 60 * 60 * 1000;      // the row had a picture but its file is missing again
+const CANDIDATE_WINDOW = 400;                   // rows looked at per sweep per tenant
+
+function dbTimeMs(value) {
+    if (!value) return NaN;
+    const t = String(value);
+    const ms = Date.parse(/Z$|[+-]\d\d:?\d\d$/.test(t) ? t : t.replace(' ', 'T') + 'Z');
+    return Number.isFinite(ms) ? ms : NaN;
+}
+
+/** The stored thumbnail's file is on disk: a URL whose file is gone is not a picture (it answers 1×1). */
+function hasPicture(row) {
+    const url = String((row && row.thumbnail_url) || '');
+    if (!url) return false;
+    let name;
+    try { name = path.basename(new URL(url, 'http://media.invalid').pathname); } catch { name = path.basename(url); }
+    if (!name) return false;
+    try { return fs.existsSync(path.join(require('../thumbnails/thumbnail-service').THUMB_DIR, name)); } catch { return false; }
+}
+
+/** This VOD's latest thumbnail job (any status), for the due time. */
+async function lastAttempt(appId, id) {
+    return await db.get(`SELECT status, error_code, created_at FROM media_jobs
+        WHERE app_id = ? AND job_type = ? AND params::jsonb ->> 'kind' = 'vod' AND params::jsonb ->> 'id' = ?
+        ORDER BY created_at DESC, id DESC LIMIT 1`, [appId, TYPE, String(id)]);
+}
+
+/** The earliest moment the next attempt may run; Infinity while one is queued or running. */
+function dueAt(last) {
+    if (!last) return 0;
+    if (last.status === 'queued' || last.status === 'running') return Infinity;
+    const at = dbTimeMs(last.created_at);
+    if (!Number.isFinite(at)) return 0;
+    if (last.status === 'failed') {
+        return at + (last.error_code === 'media_unavailable' || last.error_code === 'no_video' ? RETRY_UNAVAILABLE_MS : RETRY_FAILED_MS);
+    }
+    return at + RETRY_SUCCEEDED_MS;
+}
+
+/**
+ * Queue one small batch of thumbnail.regenerate jobs for public, finished VODs whose stored picture is
+ * missing or gone. A VOD is due when no job is active and enough time has passed since its last attempt.
+ * → { missing, queued }
+ */
+async function sweepMissing({ now = Date.now(), limit = null, appId = null, minAgeMs = MIN_AGE_MS } = {}) {
+    const batch = Math.max(1, Math.min(20, Number(limit) || config.jobs.thumbnailBackfillBatch || 3));
+    const apps = appId ? [{ app_id: appId }]
+        : await db.all(`SELECT DISTINCT app_id FROM vods WHERE is_public = 1 AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0`);
+    let missing = 0, queued = 0;
+    for (const { app_id: app } of apps) {
+        const rows = await db.all(`SELECT id, created_at, thumbnail_url FROM vods
+            WHERE app_id = ? AND is_public = 1
+              AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
+              AND (file_path IS NOT NULL OR object_id IS NOT NULL)
+              AND COALESCE(health_status, '') NOT IN ('missing_file', 'zero_byte')
+            ORDER BY id DESC LIMIT ?`, [app, CANDIDATE_WINDOW]);
+        let appMissing = 0, appQueued = 0;
+        for (const row of rows) {
+            if (hasPicture(row)) continue;
+            const created = dbTimeMs(row.created_at);
+            if (Number.isFinite(created) && now - created < minAgeMs) continue;   // finalize may still make it
+            appMissing++;
+            if (now < dueAt(await lastAttempt(app, row.id))) continue;
+            try {
+                const out = await require('./queue').enqueue({
+                    appId: app, type: TYPE, params: { kind: 'vod', id: row.id },
+                    dedupeActive: true, createdBy: 'system:thumbnail-backfill',
+                });
+                if (out && out.created && appQueued < batch) appQueued++;
+                if (appQueued >= batch) break;
+            } catch (err) {
+                console.warn(`[Thumbnails] backfill could not queue vod ${row.id}: ${err.message}`);
+            }
+        }
+        if (appMissing) console.log(`[Thumbnails] backfill: queued ${appQueued} thumbnail job(s); ${appMissing} recording(s) on ${app} have no usable picture`);
+        missing += appMissing;
+        queued += appQueued;
+    }
+    return { missing, queued };
+}
+
 module.exports = {
     spec: { lane: 'light', maxAttempts: 2, timeoutMs: 2 * 60 * 1000, needsObject: false, backoffS: () => 20, validate, run },
     targetOf,
     failedBefore,
     GIVE_UP_AFTER,
+    sweepMissing,
+    hasPicture,
+    dueAt,
 };
