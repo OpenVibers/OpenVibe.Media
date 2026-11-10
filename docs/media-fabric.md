@@ -196,6 +196,21 @@ med_xyz/{captions/*.vtt, storyboard.webp+.vtt, waveform, metadata}
   With transcoding enabled, new jobs use a `:transcode` idempotency suffix. Lazy discovery retries an earlier
   copy-only `codec_unsupported` failure once under that key. A failed transcode job is not queued again; the hourly
   lazy backfill cap still applies.
+- **F3.d, shipped: the decode gate (2026-11-10).** A recording is a stream copy of a WebRTC ingest, so a lost RTP
+  fragment is a truncated H.264 access unit that the muxer writes without decoding. ffprobe sees a healthy file and
+  ffmpeg conceals the frame, but Chrome stops the whole playback on it (`MEDIA_ERR_DECODE`; VODs 6297/6298, the robot
+  phone's 2026-11-10 streams, each had a truncated IDR — the keyframe at 1.175 s / 3.120 s, the large burst a lossy uplink is most likely to lose a fragment of; ffmpeg concealed it and only complained at a later P-frame at 1.7 s / 3.6 s, while Chrome rejected the IDR). `server/vod/decode-check.js` decodes
+  the opening 10 s with `ffmpeg -xerror` and treats a decoder error line as a fault even when a single-threaded ffmpeg
+  exits 0 (the null muxer's DTS warnings from variable frame timing are not a fault). `finalize` runs it before the
+  ready transition: a failing recording is measured, marked `needs_repair`, quarantined and hidden, and its bytes are
+  kept. `server/vod/vod-repair.js` re-encodes that file in place to H.264 High/AAC on its original timing
+  (`-fps_mode passthrough`, keyframe every 4 s), verifies the output, settles duration/size/health in the row and its
+  object together, lifts the quarantine, restores the owner's visibility, announces `vod.ready` and queues an
+  `object.cmaf` re-cut under `object.cmaf:<id>:decode_repair:<file version>` so the source playlist serves the
+  repaired bytes too. The health job takes `needs_repair` rows first on its next idle pass, and a deep scan that
+  finds `decode_failed` repairs instead of quarantining. The operator path is
+  `node scripts/repair-vod-decode.js [--ids …] [--full] [--apply]` (dry run by default). Tests:
+  `test/decode-check.test.js`, `test/vod-decode-repair.test.js`.
 - **F3.5, shipped: virtual clips over the timeline (§4).**
 - **Local timeline cache, shipped:** `OBJECTS_PATH/.timeline` is bounded by
   `MEDIA_TIMELINE_LOCAL_MAX_BYTES` (10 GiB by default; 0 keeps no new local copies once durable) and

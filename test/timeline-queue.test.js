@@ -29,7 +29,7 @@ const express = require('express');
     const model = require('../server/objects/model');
     const timeline = require('../server/objects/timeline');
     const signing = require('../server/objects/signing');
-    const { queueCmaf, queuePack } = require('../server/objects/timeline-queue');
+    const { queueCmaf, queuePack, queueRecut } = require('../server/objects/timeline-queue');
     const tools = require('../server/vod/media-tools');
     const thumbService = require('../server/thumbnails/thumbnail-service');
     const vodStorage = require('../server/vod/vod-storage');
@@ -110,6 +110,27 @@ const express = require('express');
         assert.strictEqual(await queueCmaf('live', cut), null);
         assert.strictEqual((await jobs('object.cmaf', cut)).length, 0, 'a timeline already there: nothing queued');
         console.log('✅ nothing queued with the flag off, for a non-media or missing object, or once the timeline exists');
+
+        // ── queueRecut: a repaired file gets a new cut even though a timeline exists, keyed by the file version ──
+        const recutId = await queueRecut('live', cut, { reason: 'decode_repair', version: '111-222' });
+        assert.ok(recutId && /^mjob_/.test(recutId), 'a repaired file queues a re-cut over the existing timeline');
+        let recutJobs = await jobs('object.cmaf', cut);
+        assert.strictEqual(recutJobs.length, 1);
+        assert.deepStrictEqual([recutJobs[0].status, recutJobs[0].created_by, recutJobs[0].idempotency_key],
+            ['queued', 'system:decode_repair', `object.cmaf:${cut}:decode_repair:111-222`]);
+        assert.strictEqual(await queueRecut('live', cut, { reason: 'decode_repair', version: '111-222' }), recutId,
+            'the same repaired file joins its queued re-cut');
+        // dedupeActive is per object and type: while the cut is queued, a newer version joins it rather than
+        // running two cuts at once. The next repair after it settles gets its new key and cuts again.
+        assert.strictEqual(await queueRecut('live', cut, { reason: 'decode_repair', version: '333-444' }), recutId,
+            'a newer version while the cut is active joins it');
+        recutJobs = await jobs('object.cmaf', cut);
+        assert.strictEqual(recutJobs.length, 1);
+        config.hls.enabled = false;
+        assert.strictEqual(await queueRecut('live', cut, { reason: 'decode_repair', version: '555-666' }), null);
+        config.hls.enabled = true;
+        assert.strictEqual((await jobs('object.cmaf', cut)).length, 1, 'flag off: nothing queued');
+        console.log('✅ queueRecut: a repaired file re-cuts over the existing timeline, joining by file version');
 
         // ── queuePack: a cut queues one object.pack, a re-run joins it; flag off or non-media queue nothing ──
         const packOff = await media();
