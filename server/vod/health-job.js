@@ -58,7 +58,8 @@ async function _scanOne(vod, { deep }) {
         } catch (e) {
             console.warn(`[VOD-Health] Repair error for vod ${vod.id}:`, e.message);
         }
-        // Fall through: the probe scan leaves the row needs_repair for the next idle pass.
+        // Never probe a failed repair into 'ok': the row stays needs_repair and hidden, and the next idle pass retries.
+        return { id: vod.id, status: 'needs_repair' };
     }
 
     let scan = await scanner.scanVod(vod, { decode: false, repairDuration: true, quarantineBad: false });
