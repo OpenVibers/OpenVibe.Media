@@ -139,6 +139,7 @@ const RETRY_FAILED_MS = 6 * 3600 * 1000;        // ffmpeg produced no frame; try
 const RETRY_UNAVAILABLE_MS = 24 * 3600 * 1000;  // the file is gone/empty/too small; once a day is enough
 const RETRY_SUCCEEDED_MS = 60 * 60 * 1000;      // the row had a picture but its file is missing again
 const CANDIDATE_WINDOW = 400;                   // rows looked at per sweep per tenant
+const cursorKey = (appId) => `thumbnail_backfill.cursor.${appId}`;
 
 function dbTimeMs(value) {
     if (!value) return NaN;
@@ -187,14 +188,20 @@ async function sweepMissing({ now = Date.now(), limit = null, appId = null, minA
         : await db.all(`SELECT DISTINCT app_id FROM vods WHERE is_public = 1 AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0`);
     let missing = 0, queued = 0;
     for (const { app_id: app } of apps) {
+        // Walk the whole library a window at a time (newest first, then older), not just the newest rows:
+        // an old recording with a lost picture is a stored VOD too. The cursor wraps when the walk ends.
+        const cursor = Number(await db.getSetting(cursorKey(app))) || 0;
         const rows = await db.all(`SELECT id, created_at, thumbnail_url FROM vods
             WHERE app_id = ? AND is_public = 1
               AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
               AND (file_path IS NOT NULL OR object_id IS NOT NULL)
               AND COALESCE(health_status, '') NOT IN ('missing_file', 'zero_byte')
-            ORDER BY id DESC LIMIT ?`, [app, CANDIDATE_WINDOW]);
-        let appMissing = 0, appQueued = 0;
+              AND id < ?
+            ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW]);
+        let appMissing = 0, appQueued = 0, examined = 0, lastId = 0;
         for (const row of rows) {
+            examined++;
+            lastId = Number(row.id);
             if (hasPicture(row)) continue;
             const created = dbTimeMs(row.created_at);
             if (Number.isFinite(created) && now - created < minAgeMs) continue;   // finalize may still make it
@@ -211,6 +218,9 @@ async function sweepMissing({ now = Date.now(), limit = null, appId = null, minA
                 console.warn(`[Thumbnails] backfill could not queue vod ${row.id}: ${err.message}`);
             }
         }
+        // A stopped batch resumes at the row after the one it stopped on; a finished walk wraps to the top.
+        const done = examined === CANDIDATE_WINDOW || (examined === rows.length && rows.length < CANDIDATE_WINDOW);
+        await db.setSetting(cursorKey(app), done ? 0 : lastId, 'number');
         if (appQueued) console.log(`[Thumbnails] backfill: queued ${appQueued} thumbnail job(s); ${appMissing} recording(s) on ${app} have no usable picture`);
         missing += appMissing;
         queued += appQueued;
