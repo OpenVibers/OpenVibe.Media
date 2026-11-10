@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A first-party `ai` tenant for OpenVibe.AI's shared image task (`image.picture`): found Commons/Openverse pictures
+  and made illustrations are stored by Media reference in the blog or wiki tenant for the person the run acts for.
+  Network grants AI `media.object.upload` there (the AI, blog and wiki namespaces). `server/auth.js`.
+
 - **Watch ids (plan track U, 2026-11-07): every VOD and clip answers to an 11-character random id.** YouTube's
   `/watch?v=` shape, so a watch page cannot be found by counting: 8 random bytes as URL-safe base64
   (`crypto.randomBytes(8).toString('base64url')`), never derived from the numeric id. Media owns VODs and clips, so
