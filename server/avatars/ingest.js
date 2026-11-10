@@ -158,7 +158,7 @@ async function readLocalSource(rawUrl, { subject = null } = {}) {
  * Store one avatar's bytes as a native object; returns its id. Throws (with nothing left behind) when the tenant,
  * the namespace or the quota refuses it.
  */
-async function storeAvatar({ db, pic, subject = null, username = null, sourceHost = null, userId = null }) {
+async function storeAvatar({ db, pic, subject = null, username = null, sourceHost = null, userId = null, keepBoth = false }) {
     const model = require('../objects/model');
     const namespaces = require('../objects/namespaces');
     const invariant = require('../objects/invariant');
@@ -168,6 +168,15 @@ async function storeAvatar({ db, pic, subject = null, username = null, sourceHos
     const { namespace } = namespaces.resolveName(app, AVATAR_NAMESPACE);
     const bytes = pic.buffer.length;
     const sha256 = crypto.createHash('sha256').update(pic.buffer).digest('hex');
+    if (!keepBoth && (SUBJECT_RE.test(String(subject || '')) || userId != null)) {
+        const owner = [];
+        const params = [AVATAR_APP, sha256];
+        if (SUBJECT_RE.test(String(subject || ''))) { owner.push('owner_subject = ?'); params.push(subject); }
+        if (userId != null) { owner.push('owner_user_id = ?'); params.push(Number(userId)); }
+        const existing = await db.get(`SELECT id FROM media_objects WHERE app_id = ? AND kind = 'avatar' AND content_hash = ?
+            AND lifecycle_status = 'ready' AND (${owner.join(' OR ')}) ORDER BY created_at DESC LIMIT 1`, params);
+        if (existing) return { id: existing.id, duplicate: true };
+    }
     // The namespace row, the quota check and the object commit together, as an API upload's init does.
     const made = await db.getDb().tx(async () => {
         const row = await namespaces.ensure(app, namespace);
@@ -205,7 +214,7 @@ async function storeAvatar({ db, pic, subject = null, username = null, sourceHos
         throw err;
     }
     await namespaces.reconcileChain(app, namespace).catch(() => {});
-    return obj.id;
+    return { id: obj.id, duplicate: false };
 }
 
 function createIngestHandler({ db, config, log = console }) {
@@ -232,9 +241,10 @@ function createIngestHandler({ db, config, log = console }) {
             const raw = local && local.buffer ? local.buffer : await safeFetchImage(url);
             const pic = await toAvatar(raw, { shape });
             const sourceHost = (() => { try { return new URL(url).hostname; } catch { return null; } })();
-            const id = await storeAvatar({ db, pic, subject, username, sourceHost });
+            const stored = await storeAvatar({ db, pic, subject, username, sourceHost });
+            const id = stored.id;
             await adopt(id);
-            res.json({ ok: true, object_id: id, url: `${config.publicUrl}/o/${id}`, width: pic.width, height: pic.height, bytes: pic.buffer.length });
+            res.json({ ok: true, object_id: id, duplicate: stored.duplicate, url: `${config.publicUrl}/o/${id}`, width: pic.width, height: pic.height, bytes: pic.buffer.length });
         } catch (err) {
             log.warn('[Avatar ingest]', err.message);
             res.status(422).json({ ok: false, error: /unsupported image|Input buffer|corrupt|VipsJpeg|bad seek/i.test(err.message) ? 'That file is not a picture we can read' : err.message });
