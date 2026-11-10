@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `scripts/orientation-backfill.js` inspects stored JPEG, PNG and WebP originals in batches (dry run by default), bakes
+  any surviving EXIF orientation into pixels, removes the embedded details, updates object/location hashes and sizes,
+  and rebuilds 320/640 WebP variants. Images without source orientation data are marked `orientation unknown` for the
+  owner's later AI review. `--apply` writes one batch; `--all` walks the range.
+
 - Avatar ingestion, image variants, and the upload-time `POST /api/v2/:app/objects/normalize-image` operation share
   `server/images/orientation.js`. The operation applies EXIF orientation to pixels before Sharp drops the source
   metadata, for first-party uploaders such as Community. Test: `test/image-orientation.test.js` covers all eight values.
