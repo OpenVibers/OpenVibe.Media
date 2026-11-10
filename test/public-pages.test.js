@@ -46,7 +46,10 @@ const http = require('http');
     assert.ok(/<script src="[^"]*theme-loader\.js\?v=[0-9a-f]{12}"><\/script>/.test(html), 'theme-loader is eager, before the first paint');
     assert.ok(/\/shared\/web-runtime\.js\?v=[0-9a-f]{12}/.test(html), 'the shared web runtime from this site\'s own pinned copy');
     assert.ok(/\/shared\/navbar\.js\?v=[0-9a-f]{12}/.test(html) && /\/shared\/footer\.js\?v=[0-9a-f]{12}/.test(html), 'the Frame from this site\'s own pinned copy');
-    assert.ok(html.includes('"service":"media"') && html.includes('"history":{"type":"vod","title":"Late night <build>"}'.replace('<', '\\u003c')));
+    assert.ok(html.includes('"service":"media"'));
+    const historyMeta = JSON.parse(html.match(/"history":(\{[^}]*\})/)[1]);
+    assert.deepStrictEqual([historyMeta.type, historyMeta.title, historyMeta.private, historyMeta.mature], ['vod', 'Late night <build>', false, false]);
+    assert.ok(historyMeta.image_url, 'the history row carries the video thumbnail');
     assert.ok(html.includes('data-variant="compact"'), 'the server-rendered footer is compact');
     // openvibe-shared/shell v2.10.0 boots the navbar but not the footer; page-frame adds the init so
     // the "shipped X ago" line fills and the site's links survive a client render.
