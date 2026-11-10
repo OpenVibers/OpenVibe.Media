@@ -324,7 +324,8 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
 });
 
 // ── Latest VOD thumbnail per managed stream (batch) ──────────
-// GET /latest-thumbs?managed_stream_ids=1,2,3 → { "<msid>": { vod_id, thumbnail_url } }
+// GET /latest-thumbs?managed_stream_ids=1,2,3 → { "<msid>": { vod_id, thumbnail_url, audio_only } }
+// audio_only: the recording has no frame to show (a camera-less broadcast); its picture is the avatar card.
 router.get('/latest-thumbs', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) => {
     try {
         const ids = String(req.query.managed_stream_ids || '').split(',').filter(Boolean);

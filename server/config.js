@@ -134,6 +134,11 @@ const config = {
         leaseS: Math.max(30, intEnv('MEDIA_JOBS_LEASE_S', 120)),
         // The size-invariant validator runs this often (hours; 0 = only on demand). It proposes jobs, never runs them.
         invariantScanHours: intEnv('MEDIA_INVARIANT_SCAN_HOURS', 24),
+        // The missing-picture backfill (server/jobs/thumbnail.js sweepMissing): a small batch this often
+        // (minutes; 0 = never). It queues the existing thumbnail.regenerate jobs for stored VODs whose
+        // picture is missing or gone, so the home's replay rows stop showing a grey 1×1.
+        thumbnailBackfillMin: intEnv('MEDIA_THUMBNAIL_BACKFILL_MIN', 2),
+        thumbnailBackfillBatch: Math.max(1, Math.min(20, intEnv('MEDIA_THUMBNAIL_BACKFILL_BATCH', 10))),
         retentionDays: intEnv('MEDIA_JOBS_RETENTION_DAYS', 30),     // finished thumbnail jobs are pruned after this
     },
 
