@@ -21,7 +21,7 @@ const { measure, check, format } = require('openvibe-shared/perf-budget');
         // 2026-10-13 (T11): the index is composed by openvibe-shared/shell like the watch pages, which adds the
         // shared web-runtime.js; the showcase stylesheet (same-origin) replaces Font Awesome (cross-origin).
         jsRawKB: 361.4, // 361.4: measured 353.4 with openvibe-shared 4.163.0, plus room for 4.162.0–4.163.0, 2026-11-09
-        jsBrotliKB: 85.1, // 85.1: measured 83.1 with openvibe-shared 4.163.0, plus room for 4.162.0–4.163.0, 2026-11-09
+        jsBrotliKB: 85.3, // 85.3: measured 85.2 KB brotli with openvibe-shared 4.186.0 (2026-11-10: the mark's Working and Thinking states, the Dock and the menu as one sheet, bare controls styled by the loader); 85.1: measured 83.1 with openvibe-shared 4.163.0, plus room for 4.162.0–4.163.0, 2026-11-09
         cssFiles: 2,   // 1 (showcase.css)
         cssRawKB: 60.4, // 60.4: measured 55.4 with openvibe-shared 4.163.0, plus room for 4.162.0–4.163.0, 2026-11-09
         externalFiles: 3,   // 2
