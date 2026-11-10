@@ -303,23 +303,27 @@ async function listVods(appId, filters = {}) {
     return await all(`SELECT * FROM vods WHERE ${conds.join(' AND ')} ORDER BY ${_listOrder(order)} LIMIT ? OFFSET ?`, params);
 }
 
-/** Latest finished public VOD (id + thumbnail) per managed stream — one batch query. */
+/**
+ * Latest finished public VOD (id + thumbnail + whether it is audio-only) per managed stream — one batch
+ * query. The pick is deterministic (newest created_at, then newest id); two rows of one stream can share
+ * a created_at, and the old join on created_at alone let either answer. `audio_only` lets the card say
+ * "no picture to show" instead of naming a 1×1 fallback for a broadcast with no camera.
+ */
 async function latestVodThumbsByManagedStreams(appId, managedStreamIds) {
     const ids = (managedStreamIds || []).map(n => parseInt(n, 10)).filter(Number.isFinite);
     if (!ids.length) return {};
     const ph = ids.map(() => '?').join(',');
     const rows = await all(`
-        SELECT v.managed_stream_id, v.id, v.thumbnail_url
+        SELECT DISTINCT ON (v.managed_stream_id) v.managed_stream_id, v.id, v.thumbnail_url, v.audio_only
         FROM vods v
-        JOIN (SELECT managed_stream_id ms, MAX(created_at) mc FROM vods
-              WHERE app_id = ? AND managed_stream_id IN (${ph})
-                AND is_public = 1 AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
-              GROUP BY managed_stream_id) latest
-          ON v.managed_stream_id = latest.ms AND v.created_at = latest.mc
-        WHERE v.app_id = ? AND v.is_public = 1 AND COALESCE(v.is_recording, 0) = 0`,
-        [appId, ...ids, appId]);
+        WHERE v.app_id = ? AND v.managed_stream_id IN (${ph})
+          AND v.is_public = 1 AND COALESCE(v.is_recording, 0) = 0 AND COALESCE(v.clips_only, 0) = 0
+        ORDER BY v.managed_stream_id, v.created_at DESC NULLS LAST, v.id DESC`,
+        [appId, ...ids]);
     const out = {};
-    for (const r of rows) { if (out[r.managed_stream_id] == null) out[r.managed_stream_id] = { vod_id: r.id, thumbnail_url: r.thumbnail_url }; }
+    for (const r of rows) {
+        out[r.managed_stream_id] = { vod_id: r.id, thumbnail_url: r.thumbnail_url, audio_only: !!r.audio_only };
+    }
     return out;
 }
 
@@ -425,9 +429,11 @@ async function getVodsNeedingHealthScan({ staleDays = 30, limit = 3 } = {}) {
     return await all(`SELECT * FROM vods
         WHERE COALESCE(is_recording, 0) = 0
           AND (health_status IS NULL OR health_status NOT IN ('corrupt','zero_byte','missing_file'))
-          AND (last_health_scan_at IS NULL OR last_health_scan_at <= datetime('now', ?)
+          AND (health_status = 'needs_repair'
+               OR last_health_scan_at IS NULL OR last_health_scan_at <= datetime('now', ?)
                OR (COALESCE(file_size, 0) BETWEEN 1 AND 1023 AND COALESCE(health_status, 'ok') = 'ok'))
-        ORDER BY (last_health_scan_at IS NULL) DESC, (COALESCE(file_size, 0) BETWEEN 1 AND 1023) DESC, last_health_scan_at ASC
+        ORDER BY (health_status = 'needs_repair') DESC, (last_health_scan_at IS NULL) DESC,
+                 (COALESCE(file_size, 0) BETWEEN 1 AND 1023) DESC, last_health_scan_at ASC
         LIMIT ?`, [`-${Math.max(1, staleDays)} days`, limit]);
 }
 

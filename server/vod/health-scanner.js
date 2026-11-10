@@ -36,17 +36,12 @@ function probeMediaInfo(filePath) {
 }
 
 function decodeVodFile(filePath) {
-    return new Promise((resolve) => {
-        const proc = spawn('ffmpeg', ['-v', 'warning', '-xerror', '-i', filePath, '-map', '0:v:0', '-f', 'null', '-']);
-        let stderr = '';
-        proc.stderr.on('data', d => stderr += d.toString());
-        proc.on('close', (code) => {
-            const warnings = stderr.split('\n').filter(line => /error|warn|corrupt|invalid|timestamp|RTP|concealing|Non-monotonous DTS/i.test(line));
-            resolve({ code, stderr, warnings, ok: code === 0 });
-        });
-        proc.on('error', () => resolve({ code: -1, stderr: '', warnings: [], ok: false }));
-        setTimeout(() => { try { proc.kill(); } catch {} }, 60000);
-    });
+    // Same check as finalize's opening-seconds gate (server/vod/decode-check.js), over the whole file: a decoder error
+    // line is a fault even when ffmpeg exits 0 (a single-threaded decode of a small stream conceals the frame and
+    // carries on), while the null muxer's DTS complaints from a variable-timestamp recording are not.
+    return require('./decode-check').scan(filePath, { seconds: 0, timeoutMs: 60000 }).then((r) => ({
+        code: r.code, stderr: '', warnings: r.errors, ok: r.ok, timedOut: r.timedOut,
+    }));
 }
 
 // The shared remux (media-tools): a kill budget that scales with the file (this copy's flat 30 s cut

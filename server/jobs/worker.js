@@ -23,6 +23,8 @@
  * get a vod.finalize every MEDIA_FINALIZE_SWEEP_S (server/jobs/vod-finalize.js). The storage orphan
  * report (storage.orphans.scan, report only) runs every MEDIA_ORPHAN_SCAN_DAYS under queue.SYSTEM_APP;
  * storage.move.cleanup (alerts on placement moves that failed three times) every MEDIA_MOVE_CLEANUP_MINUTES.
+ * Stored VODs with no usable picture get a thumbnail.regenerate a few at a time every
+ * MEDIA_THUMBNAIL_BACKFILL_MIN (server/jobs/thumbnail.js sweepMissing; 0 = never).
  */
 'use strict';
 
@@ -46,6 +48,7 @@ async function sweepWorkDirs() {
     } catch (err) { console.warn('[Jobs] work directory sweep:', err.message); }
 }
 let lastPruneAt = 0;
+let lastThumbBackfillAt = 0;
 let kicked = false;
 
 function lanes() {
@@ -172,6 +175,14 @@ async function tick() {
                 try { await require('./recording-cleanup').schedule(now); } catch (err) { console.warn('[Jobs] recording clean-up schedule:', err.message); }
             }
             try { await require('./vod-finalize').sweepOrphans({ now }); } catch (err) { console.warn('[Jobs] orphan sweep:', err.message); }
+            // Stored VODs with no usable picture: a few thumbnail.regenerate jobs at a time (due based, so a
+            // broken file is not retried every sweep). Runs from the first tick after boot.
+            const backfillMs = cfg().thumbnailBackfillMin * 60 * 1000;
+            if (backfillMs > 0 && now - lastThumbBackfillAt > backfillMs) {
+                lastThumbBackfillAt = now;
+                try { await require('./thumbnail').sweepMissing({ now, limit: cfg().thumbnailBackfillBatch }); }
+                catch (err) { console.warn('[Jobs] thumbnail backfill:', err.message); }
+            }
             if (now - lastSweepAt > 3600 * 1000) {
                 lastSweepAt = now;
                 await sweepWorkDirs();
