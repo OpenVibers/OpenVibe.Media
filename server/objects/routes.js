@@ -318,6 +318,19 @@ async function putContent(req, res) {
 const router = express.Router({ mergeParams: true });
 router.use(tenantCors);
 
+// Image clients that remove EXIF must first bake its orientation into pixels. Keep this operation in Media so
+// uploads from other first-party services use the exact same decoder limits and orientation behavior.
+router.post('/normalize-image', upload, limits('media.object.upload', UPLOAD),
+    express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '8mb' }), async (req, res) => {
+        try {
+            if (!Buffer.isBuffer(req.body) || req.body.length === 0) return problem(res, 400, 'media.image.invalid', 'Image bytes are required');
+            const normalized = await require('../images/orientation').normalizeImage(req.body, req.get('content-type'));
+            return res.status(200).type(req.get('content-type')).set('Cache-Control', 'no-store').send(normalized);
+        } catch (err) {
+            return problem(res, 415, 'media.image.invalid', err.message || 'Image could not be normalized');
+        }
+    });
+
 router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res) => {
     try {
         const b = req.body || {};
