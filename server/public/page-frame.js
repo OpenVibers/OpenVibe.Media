@@ -90,7 +90,7 @@ function fmtDate(dt) {
  * `shell.page`'s `head`, so the shell still owns title, description, canonical, robots, og/twitter
  * mirroring and JSON-LD.
  */
-function extraHead(seo, css, kit = false) {
+function extraHead(seo, css, kit = false, kitCss = false) {
     const image = seo.image || DEFAULT_OG_IMAGE;
     const videoTags = seo.video && seo.video.url ? [
         `<meta property="og:video" content="${esc(seo.video.url)}">`,
@@ -101,10 +101,11 @@ function extraHead(seo, css, kit = false) {
         appIcon.headTags({ site: 'media', iconBase: '/assets' }),
         // openvibe-shared/showcase's stylesheet (the index's hero; the kit's sections on any page).
         `<link rel="stylesheet" href="${ovServe.url('showcase.css')}">`,
-        // A page with the kit's cards and rails (the front page's latest media, an empty list) carries room.css for the
-        // cards and kit.css for the empty state and the buttons; no kit-web.js is needed (these cards carry no menus,
-        // and wide screens wrap the rail instead of scrolling it).
-        kit ? `<link rel="stylesheet" href="${ovServe.url('room.css')}"><link rel="stylesheet" href="${ovServe.url('kit.css')}">` : '',
+        // A page with the kit's cards and rails (the front page's latest media) carries room.css, their look; it needs
+        // neither kit.css nor kit-web.js (no menus on these cards, and wide screens wrap the rail instead of scrolling it).
+        kit ? `<link rel="stylesheet" href="${ovServe.url('room.css')}">` : '',
+        // An empty list draws the kit's empty state, whose look and button live in kit.css: load it only on that page.
+        kitCss ? `<link rel="stylesheet" href="${ovServe.url('kit.css')}">` : '',
         // A page with a video plays it in the network's player (openvibe-shared player.js/css on video[data-ov-player]).
         seo.video ? `<link rel="stylesheet" href="${ovServe.url('player.css')}">\n<script src="${ovServe.url('player.js')}" defer></script>` : '',
         `<style>${baseCss()}${css}</style>`,
@@ -214,7 +215,7 @@ function oneGraph(nodes) {
     return { '@context': 'https://schema.org', '@graph': [].concat(nodes).map(({ '@context': _context, ...node }) => node) };
 }
 
-function page({ seo, css = '', body, history, footer, summary, agentLayer = false, kit = false }) {
+function page({ seo, css = '', body, history, footer, summary, agentLayer = false, kit = false, kitCss = false }) {
     const sum = summary == null ? null : typeof summary === 'object' ? summary : { summary };
     const summaryData = sum ? seoLib.pageSummary({ title: seo.title, summary: sum.summary, facts: sum.facts, url: sum.url || seo.canonical, updated: sum.updated, ...(sum.name ? { title: sum.name } : {}) }) : null;
     const html = shell.page({
@@ -230,7 +231,7 @@ function page({ seo, css = '', body, history, footer, summary, agentLayer = fals
         type: seo.ogType,
         robots: seo.robots || 'index, follow',
         jsonLd: oneGraph([...[].concat(seo.jsonLd || []), ...(summaryData ? [summaryData.jsonLd] : [])]),
-        head: extraHead(seo, css, kit) + (summaryData && summaryData.meta ? `<meta name="ai-summary" content="${summaryData.meta}">` : '') + footerBootScript(footer),
+        head: extraHead(seo, css, kit, kitCss) + (summaryData && summaryData.meta ? `<meta name="ai-summary" content="${summaryData.meta}">` : '') + footerBootScript(footer),
         body: `${summaryData ? summaryData.body : ''}<div id="navbar-mount"></div>\n<main id="main">\n${body}\n</main>`,
         navLinks: [{ label: 'Videos', href: '/?tab=videos' }, { label: 'Clips', href: '/?tab=clips' }],
         navbar: navOptions({ history }),

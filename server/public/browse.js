@@ -420,7 +420,8 @@ ${first ? foldBlock({ id: 'shipped', head: '<h2 id="shipped-h">Recently shipped 
             jsonLd: page === 1 ? [...browseJsonLd(tab, first ? data.cards.slice(0, 12) : data.cards), ...(first ? [homeFaqJsonLd()] : [])] : [],
         },
         css: BROWSE_CSS + (rules.length ? `@supports selector(:has(*)){@media (max-width:640px){${rules.join('')}}}` : ''),
-        kit: true,
+        kit: first,
+        kitCss: !data.cards.length && !first,
         body,
         // Later pages are noindex and carry no structured data, the summary's WebPage included.
         summary: page === 1 ? {
