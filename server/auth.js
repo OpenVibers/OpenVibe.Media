@@ -210,6 +210,7 @@ async function ensureTokenOnlyApps() {
         ['games', 'OpenVibe.Games', 10, ['https://openvibe.games', 'https://play.openvibe.games']],   // Wave 12 map-editor assets
         ['wiki', 'OpenVibe.Wiki', 10, []],         // Wave 16 page attachments
         ['blog', 'OpenVibe.Blog', 10, []],         // Wave 16 post attachments
+        ['ai', 'OpenVibe.AI', 10, []],              // the shared image task's find/make pictures (rich-content §4/§5)
         ['inventory', 'OpenVibe.Inventory', 1, []],     // Workshop badge images
         ['media-hub', 'OpenVibe.MediaHub', 100, []],    // the OpenVibe.Download drive
         ['codes', 'OpenVibe.Codes', 5, []],          // a task's screenshots, private to the person (Codes #188, 10-30)
