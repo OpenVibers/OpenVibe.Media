@@ -33,6 +33,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const sharp = require('sharp');
+const { applyExifOrientation } = require('../images/orientation');
 
 const MAX_BYTES = 8 * 1024 * 1024, DEADLINE_MS = 10_000, MAX_REDIRECTS = 3, SIZE = 512;
 // The house shapes: a square picture everywhere a person appears; a wide one for a channel banner.
@@ -107,7 +108,7 @@ async function toAvatar(buf, { shape = 'avatar' } = {}) {
     const img = sharp(buf, { limitInputPixels: 40_000_000, failOn: 'error', animated: false });
     const meta = await img.metadata();
     if (!meta.width || !meta.height || meta.width < 16 || meta.height < 16) throw new Error('That picture is too small');
-    const out = await img.rotate().resize(size.width, size.height, { fit: 'cover', position: 'attention' }).webp({ quality: 88 }).toBuffer();
+    const out = await applyExifOrientation(img).resize(size.width, size.height, { fit: 'cover', position: 'attention' }).webp({ quality: 88 }).toBuffer();
     return { buffer: out, width: size.width, height: size.height, shape };
 }
 

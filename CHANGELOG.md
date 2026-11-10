@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Image re-encoding in avatar ingestion and thumbnail variants now shares `server/images/orientation.js`, which applies
+  EXIF orientation to pixels before Sharp drops the source metadata. Test: `test/image-orientation.test.js` covers all
+  eight EXIF orientation values.
+
 - A first-party `ai` tenant for OpenVibe.AI's shared image task (`image.picture`): found Commons/Openverse pictures
   and made illustrations are stored by Media reference in the blog or wiki tenant for the person the run acts for.
   Network grants AI `media.object.upload` there (the AI, blog and wiki namespaces). `server/auth.js`.
