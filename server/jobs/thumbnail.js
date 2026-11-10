@@ -219,7 +219,7 @@ async function sweepMissing({ now = Date.now(), limit = null, appId = null, minA
             }
         }
         // A stopped batch resumes at the row after the one it stopped on; a finished walk wraps to the top.
-        const done = examined === CANDIDATE_WINDOW || (examined === rows.length && rows.length < CANDIDATE_WINDOW);
+        const done = examined === rows.length && rows.length < CANDIDATE_WINDOW;
         await db.setSetting(cursorKey(app), done ? 0 : lastId, 'number');
         if (appQueued) console.log(`[Thumbnails] backfill: queued ${appQueued} thumbnail job(s); ${appMissing} recording(s) on ${app} have no usable picture`);
         missing += appMissing;
