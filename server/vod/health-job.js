@@ -22,6 +22,7 @@ const path = require('path');
 const db = require('../db/database');
 const config = require('../config');
 const scanner = require('./health-scanner');
+const repair = require('./vod-repair');
 
 const TICK_MS = 5 * 60 * 1000;      // scan pass every 5 minutes
 const SCAN_STALE_DAYS = 45;         // re-scan a healthy VOD at most this often
@@ -43,10 +44,42 @@ function _anyRecording() {
 // (fast, non-destructive); the expensive full decode + re-encode only runs to
 // REPAIR a file that already looks broken, and only while idle (`deep`).
 async function _scanOne(vod, { deep }) {
+    // A recording the finalize decode check marked needs_repair (or an earlier repair failed): re-encode it, verify it,
+    // lift its quarantine and re-cut its timeline. Only while idle, like the other heavy recovery work.
+    if (vod.health_status === 'needs_repair') {
+        if (!deep) return { id: vod.id, status: 'deferred' };
+        try {
+            const r = await repair.repairVod(vod, { apply: true, recut: true, announceReady: true });
+            if (r.ok) {
+                console.log(`[VOD-Health] Repaired vod ${vod.id} (${r.skipped || `${r.duration}s`})${r.recut ? `, re-cut queued ${r.recut}` : ''}`);
+                return { id: vod.id, status: 'repaired' };
+            }
+            console.warn(`[VOD-Health] Repair failed for vod ${vod.id}: ${r.error || r.skipped}`);
+        } catch (e) {
+            console.warn(`[VOD-Health] Repair error for vod ${vod.id}:`, e.message);
+        }
+        // Fall through: the probe scan leaves the row needs_repair for the next idle pass.
+    }
+
     let scan = await scanner.scanVod(vod, { decode: false, repairDuration: true, quarantineBad: false });
 
     const broken = ['corrupt', 'zero_byte', 'missing_file', 'needs_review'].includes(scan.status)
         || (scan.issues || []).some(i => /decode_failed|probe_failed|invalid_duration/.test(i));
+
+    // A deep scan found a decode fault on a recording that predates the finalize check (or whose row was rated ok
+    // before): repair it here instead of quarantining it as corrupt. The same re-encode the needs_repair path uses.
+    if (deep && vod.file_path && (scan.issues || []).includes('decode_failed')) {
+        try {
+            const r = await repair.repairVod(vod, { apply: true, recut: true, announceReady: true });
+            if (r.ok) {
+                console.log(`[VOD-Health] Repaired vod ${vod.id} after a deep decode scan (${r.skipped || `${r.duration}s`})${r.recut ? `, re-cut queued ${r.recut}` : ''}`);
+                return { id: vod.id, status: 'repaired' };
+            }
+            console.warn(`[VOD-Health] Repair after a decode scan failed for vod ${vod.id}: ${r.error || r.skipped}`);
+        } catch (e) {
+            console.warn(`[VOD-Health] Repair after a decode scan errored for vod ${vod.id}:`, e.message);
+        }
+    }
 
     if (!broken) {
         // Healthy (or duration just repaired) — record the clean scan.

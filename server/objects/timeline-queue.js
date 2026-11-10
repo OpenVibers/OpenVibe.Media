@@ -148,4 +148,25 @@ async function queueRendition(appId, objectId, { rendition = null } = {}) {
     return first;
 }
 
-module.exports = { queueCmaf, queuePack, queueRendition, isVirtualClip };
+/**
+ * Cut a ready object's timeline again from its current bytes, even when a source timeline already exists. A repair
+ * after a bad recording replaces the file (server/vod/vod-repair.js), so the old rows name the broken copy: this queues
+ * object.cmaf under a key unique to that file version. The job replaces the source rows in one transaction and deletes
+ * the previous cut's bytes, so the same hls_url starts serving the repaired video. → the job id, or null.
+ */
+async function queueRecut(appId, objectId, { reason = 'repair', version = null, segmentSeconds = null } = {}) {
+    if (!config.hls.enabled || !appId || !objectId) return null;
+    const obj = await require('./model').getObject(objectId);
+    if (!obj || obj.lifecycle_status !== 'ready' || !require('../jobs/derive').isMediaObject(obj)) return null;
+    const queue = require('../jobs/queue');
+    const params = require('../jobs/cmaf').spec.validate({ appId, obj, params: segmentSeconds != null ? { segment_seconds: segmentSeconds } : {} });
+    const idempotencyKey = `object.cmaf:${obj.id}:${reason}${version ? `:${version}` : ''}`;
+    const r = await queue.enqueue({
+        appId, type: 'object.cmaf', objectId: obj.id, params,
+        dedupeActive: true, idempotencyKey, createdBy: `system:${reason}`,
+    });
+    if (r.created) require('../jobs/worker').kick();
+    return r.job ? r.job.id : null;
+}
+
+module.exports = { queueCmaf, queuePack, queueRendition, queueRecut, isVirtualClip };

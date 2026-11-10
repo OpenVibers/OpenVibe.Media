@@ -273,6 +273,16 @@ class StreamRecorder {
             const line = data.toString();
             const rec = this.activeRecordings.get(vodId);
             _trackFfmpegDiagnostics(line, rec);
+            // A lost RTP fragment is not an ffmpeg "Error": ffmpeg's H.264 depacketizer reassembles what arrived and
+            // the muxer copies it, so the file gets a truncated access unit that browsers refuse to play (VODs
+            // 6297/6298, 2026-11-10). Keep the loss visible in the log; the finalize decode check decides what the
+            // recording needs. Counted, so a lossy stream cannot flood the journal.
+            if (rec && /missed \d+ packets|dropping old packet|packet too late|invalid nal unit size|RTP: missed/i.test(line)) {
+                rec.rtpLossWarnings = (rec.rtpLossWarnings || 0) + 1;
+                if (rec.rtpLossWarnings === 1 || rec.rtpLossWarnings % 10 === 0) {
+                    console.warn(`[VOD] vod ${vodId}: ${rec.rtpLossWarnings} incomplete RTP frame warning(s) — last: ${line.trim().slice(0, 160)}`);
+                }
+            }
             if (line.includes('Error') || line.includes('error')) {
                 if (_isControlledFfmpegError(line, rec?._expectedShutdown)) return;
                 console.error(`[VOD] FFmpeg error (${label}, vod ${vodId}):`, line.trim());

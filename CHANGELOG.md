@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **A recording that does not decode is never published (2026-11-10).** A recording is a stream copy of a WebRTC
+  ingest, and WebRTC does not retransmit to a recording consumer: a lost RTP fragment arrives as a truncated H.264
+  access unit, the muxer writes it, ffprobe calls the file healthy, and Chrome stops the whole playback on it
+  (MEDIA_ERR_DECODE; VODs 6297/6298, the robot phone's streams, each had a truncated IDR — the keyframe at 1.175 s / 3.120 s — which ffmpeg concealed until a later P-frame at 1.7 s / 3.6 s, while Chrome rejected the IDR).
+  `finalize` now decodes the opening 10 s with `ffmpeg -xerror` (`server/vod/decode-check.js`): a decoder error line
+  matters even when a single-threaded ffmpeg exits 0, while the null muxer's DTS warnings from variable frame timing
+  do not. A failing recording is measured, marked `needs_repair`, quarantined and hidden; `server/vod/vod-repair.js`
+  re-encodes it in place (H.264/AAC, original timing and duration, verified output), settles the row, lifts the
+  quarantine, restores visibility, announces `vod.ready` and re-cuts its timeline so the streaming playlist serves the
+  repaired bytes too. The health job repairs `needs_repair` rows first on its next idle pass, and a deep scan that
+  finds a decode fault repairs it instead of quarantining it as corrupt. Operators can use
+  `node scripts/repair-vod-decode.js --ids … [--full] [--apply]`. Tests: `test/decode-check.test.js` (a corrupt
+  P-frame fixture generated with ffmpeg) and `test/vod-decode-repair.test.js` (finalize marks, repair publishes).
+  The Media recorder also logs incomplete-RTP-frame warnings, so packet loss is visible at record time.
+
 - Avatar ingestion, image variants, and the upload-time `POST /api/v2/:app/objects/normalize-image` operation share
   `server/images/orientation.js`. The operation applies EXIF orientation to pixels before Sharp drops the source
   metadata, for first-party uploaders such as Community. Test: `test/image-orientation.test.js` covers all eight values.

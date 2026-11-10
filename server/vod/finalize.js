@@ -192,7 +192,7 @@ async function _queueRetry(vodId, reason, opts = {}) {
 
 // Health issues finalize itself records when it cannot settle a recording. A later successful
 // finalize (the vod.finalize retry job) lifts the quarantine they caused.
-const FINALIZE_ISSUES = ['probe_failed', 'inflated_duration', 'stat_failed', 'finalize_failed'];
+const FINALIZE_ISSUES = ['probe_failed', 'inflated_duration', 'stat_failed', 'finalize_failed', 'decode_failed'];
 
 function _issuesOf(vod) {
     try { const v = JSON.parse(vod.health_issues_json || '[]'); return Array.isArray(v) ? v : []; } catch { return []; }
@@ -346,6 +346,22 @@ async function _doFinalize(vodId, opts) {
         console.log(`[VOD] Quarantining short vod ${vodId}: duration ${durationSeconds}s`);
         await _commitVodOutcome(vod, 'vod.failed', async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = ?, health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
             [stored, durationSource, 'needs_review', JSON.stringify(['short_duration', ...issues]), measured, probeFormatJson, vodId]));
+        return await db.getVodById(vodId);
+    }
+
+    // ── Does it decode? ──
+    // A stream copy can carry a truncated access unit (a lost RTP fragment): ffmpeg's muxer writes it without decoding,
+    // ffprobe sees a healthy file, and Chrome stops the whole playback on the first bad frame (VODs 6297/6298,
+    // 2026-11-10). Decode the opening seconds before the ready transition. A recording that fails is marked
+    // needs_repair and hidden; the health job re-encodes it (server/vod/vod-repair.js), lifts the quarantine and
+    // re-cuts its timeline. Failure here is never fatal to the bytes: the file stays for that repair.
+    let decode = { ok: true };
+    try { decode = await require('./decode-check').scan(filePath); }
+    catch (err) { console.warn(`[VOD] vod ${vodId}: decode check could not run (${err.message})`); }
+    if (decode.fault) {
+        console.warn(`[VOD] vod ${vodId}: first ${decode.seconds}s do not decode (${decode.errors[0] || `exit ${decode.code}${decode.timedOut ? ', timed out' : ''}`}) — needs_repair`);
+        await _commitVodOutcome(vod, 'vod.failed', async () => await db.run(`UPDATE vods SET is_recording = 0, duration_seconds = ?, duration_source = ?, health_status = 'needs_repair', health_issues_json = ?, probe_duration_seconds = ?, probe_format_json = ?, last_health_scan_at = datetime('now'), quarantined_at = datetime('now'), is_public = 0 WHERE id = ?`,
+            [stored, durationSource, JSON.stringify(['decode_failed', ...issues]), measured, probeFormatJson, vodId]));
         return await db.getVodById(vodId);
     }
 

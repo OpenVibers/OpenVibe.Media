@@ -425,9 +425,11 @@ async function getVodsNeedingHealthScan({ staleDays = 30, limit = 3 } = {}) {
     return await all(`SELECT * FROM vods
         WHERE COALESCE(is_recording, 0) = 0
           AND (health_status IS NULL OR health_status NOT IN ('corrupt','zero_byte','missing_file'))
-          AND (last_health_scan_at IS NULL OR last_health_scan_at <= datetime('now', ?)
+          AND (health_status = 'needs_repair'
+               OR last_health_scan_at IS NULL OR last_health_scan_at <= datetime('now', ?)
                OR (COALESCE(file_size, 0) BETWEEN 1 AND 1023 AND COALESCE(health_status, 'ok') = 'ok'))
-        ORDER BY (last_health_scan_at IS NULL) DESC, (COALESCE(file_size, 0) BETWEEN 1 AND 1023) DESC, last_health_scan_at ASC
+        ORDER BY (health_status = 'needs_repair') DESC, (last_health_scan_at IS NULL) DESC,
+                 (COALESCE(file_size, 0) BETWEEN 1 AND 1023) DESC, last_health_scan_at ASC
         LIMIT ?`, [`-${Math.max(1, staleDays)} days`, limit]);
 }
 
