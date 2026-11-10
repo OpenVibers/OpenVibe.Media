@@ -35,6 +35,7 @@ const https = require('https');
         'server/public/descriptions.js': 'the app\'s internal URL (APP_INTERNAL_URLS), a numeric media id in a fixed path',
         'server/jobs/pack.js': 'a presigned GET on B2/R2 (operator-configured buckets) for a segment\'s durable copy',
         'server/objects/routes.js': 'a ranged GET on a presigned B2/R2 URL (operator-configured buckets) for a packed segment\'s chunk',
+        'server/objects/orientation-backfill.js': 'a presigned GET on an operator-configured B2/R2 provider for a historical object location; provider and key come from Media storage metadata',
         'server/s3/routes.js': 'a ranged GET on a presigned B2/R2 URL (operator-configured buckets) for an S3 GetObject whose bytes are not on local disk',
         'server/jobs/previews.js': 'a (ranged) GET on a presigned B2/R2 URL (operator-configured buckets) for a timeline segment, to cut a sprite frame',
         'server/drill.js': 'restore drill: only this server itself',

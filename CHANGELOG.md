@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `scripts/orientation-backfill.js` inspects stored JPEG, PNG and WebP originals in batches (dry run by default), bakes
+  any surviving EXIF orientation into pixels, removes the embedded details, updates object/location hashes and sizes,
+  and rebuilds 320/640 WebP variants. Images without source orientation data are marked `orientation unknown` for the
+  owner's later AI review. `--apply` writes one batch; `--all` walks the range.
+
 - **A recording that does not decode is never published (2026-11-10).** A recording is a stream copy of a WebRTC
   ingest, and WebRTC does not retransmit to a recording consumer: a lost RTP fragment arrives as a truncated H.264
   access unit, the muxer writes it, ffprobe calls the file healthy, and Chrome stops the whole playback on it
