@@ -101,9 +101,10 @@ function extraHead(seo, css, kit = false) {
         appIcon.headTags({ site: 'media', iconBase: '/assets' }),
         // openvibe-shared/showcase's stylesheet (the index's hero; the kit's sections on any page).
         `<link rel="stylesheet" href="${ovServe.url('showcase.css')}">`,
-        // A page with the kit's cards and rails (the front page's latest media) carries room.css, their look; it needs
-        // neither kit.css nor kit-web.js (no menus on these cards, and wide screens wrap the rail instead of scrolling it).
-        kit ? `<link rel="stylesheet" href="${ovServe.url('room.css')}">` : '',
+        // A page with the kit's cards and rails (the front page's latest media, an empty list) carries room.css for the
+        // cards and kit.css for the empty state and the buttons; no kit-web.js is needed (these cards carry no menus,
+        // and wide screens wrap the rail instead of scrolling it).
+        kit ? `<link rel="stylesheet" href="${ovServe.url('room.css')}"><link rel="stylesheet" href="${ovServe.url('kit.css')}">` : '',
         // A page with a video plays it in the network's player (openvibe-shared player.js/css on video[data-ov-player]).
         seo.video ? `<link rel="stylesheet" href="${ovServe.url('player.css')}">\n<script src="${ovServe.url('player.js')}" defer></script>` : '',
         `<style>${baseCss()}${css}</style>`,

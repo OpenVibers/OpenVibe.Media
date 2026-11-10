@@ -34,6 +34,14 @@ const path = require('path');
         assert.strictEqual(r.status, 200);
         const text = r.body;
 
+        // The index with no public media draws the shared kit's empty state and one button forward.
+        const all = await get('/?tab=all');
+        assert.strictEqual(all.status, 200);
+        assert.match(all.body, /class="ovk-empty"/, 'an empty browse list draws the kit empty state');
+        assert.match(all.body, /No public media is in this list yet/);
+        assert.match(all.body, /class="ovk-btn[^"]*" href="\/me"/, 'the empty state offers one button forward');
+        assert.match(all.body, /\/shared\/kit\.css\?v=[0-9a-f]+/, 'the page loads kit.css for it');
+
         // The code samples: one pick block, a chip per sample, the first one picked.
         assert.ok(text.includes('<div class="pick" id="pick-api">'), 'the code samples are one pick block');
         assert.match(text, /<nav class="pick-row" aria-label="The ways to call Media">/);
