@@ -18,6 +18,7 @@
  */
 const fs = require('fs');
 const path = require('path');
+const { applyExifOrientation } = require('../images/orientation');
 
 // 64 and 96 are avatar sizes (a 32 or 48 px avatar on a 2x screen); 320–640 are card thumbnails.
 const LADDER = [64, 96, 160, 320, 480, 640];
@@ -80,7 +81,7 @@ function createVariants({ dir, maxBytes = 512 * 1024 * 1024, concurrency = 2, qu
     async function make(srcPath, key, spec) {
         const file = path.join(dir, key);
         const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-        let img = lib()(srcPath, { limitInputPixels: 40_000_000, failOn: 'error' }).rotate().resize({ width: spec.w, withoutEnlargement: true });
+        let img = applyExifOrientation(lib()(srcPath, { limitInputPixels: 40_000_000, failOn: 'error' })).resize({ width: spec.w, withoutEnlargement: true });
         img = spec.fmt === 'avif' ? img.avif({ quality: 50, effort: 2 }) : spec.fmt === 'jpeg' ? img.jpeg({ quality: 80, mozjpeg: true }) : img.webp({ quality: 75 });
         await img.toFile(tmp);
         fs.renameSync(tmp, file);
