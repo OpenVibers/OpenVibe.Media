@@ -135,7 +135,7 @@ function baseCss() {
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; }
   body { background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, -apple-system, 'Segoe UI', sans-serif; display: flex; flex-direction: column; min-height: 100vh; }
-  main { width: 100%; max-width: 1040px; margin: 0 auto; padding: 1.2rem 16px 2rem; flex: 1 0 auto; }
+  main { width: 100%; max-width: 1040px; margin: 0 auto; padding: 1.2rem 16px 0; flex: 1 0 auto; }
   a { color: var(--link); }
   h1 { font-size: 1.35rem; line-height: 1.3; margin: .2rem 0 .4rem; overflow-wrap: anywhere; }
   .meta { color: var(--muted); font-size: .86rem; margin: 0 0 1rem; display: flex; flex-wrap: wrap; gap: .25rem .6rem; align-items: center; }
