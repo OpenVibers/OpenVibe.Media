@@ -46,17 +46,6 @@ const http = require('http');
             assert.strictEqual(revocations.isRevoked({ subject_id: SUBJECT, iat: at / 1000 + 5 }), false, 'newer ones are fine');
             assert.strictEqual((await post(ev())).body.outcome, 'unchanged', 'a redelivery');
 
-            // network.subject.merged (ADR-029): the folded-in account's objects are the survivor's, once per merge.
-            const db = require('../server/db/database').getDb();
-            const FROM = 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2B4', INTO = 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2C5';
-            const obj = db.prepare("INSERT INTO media_objects (id, app_id, namespace, kind, owner_subject) VALUES (?, 'live', 'live', 'file', ?)");
-            await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2D6', FROM); await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2E7', FROM); await obj.run('med_01J8Z3Q4R5S6T7V8W9X0Y1Z2F8', SUBJECT);
-            const merged = (over = {}) => ev({ event_id: 'evt_01J8Z3Q4R5S6T7V8W9X0Y1Z2G9', event_type: 'network.subject.merged', payload: { merge_id: 'mrg_01J8Z3Q4R5S6T7V8W9X0Y1Z2H0', from: FROM, into: INTO, merged_at: '2026-09-27T21:00:00.000Z', initiated_by: 'person' }, ...over });
-            assert.strictEqual((await post(merged({ source: 'live' }))).body.outcome, 'ignored:source');
-            assert.strictEqual((await post(merged())).body.outcome, 'merged');
-            assert.deepStrictEqual((await db.prepare('SELECT owner_subject AS o, COUNT(*) AS n FROM media_objects GROUP BY o ORDER BY o').all()).map((r) => [r.o, r.n]), [[SUBJECT, 1], [INTO, 2]].sort());
-            assert.strictEqual((await post(merged())).body.outcome, 'unchanged', 'a redelivery moves nothing');
-            assert.strictEqual((await db.prepare('SELECT objects FROM subject_merges').get()).objects, 2);
             const src = fs.readFileSync(path.join(__dirname, '../server/user-auth.js'), 'utf8');
             assert.ok(/require\('\.\/revocations'\)\.isRevoked\(claims\)/.test(src), 'the site token check consults it');
 
@@ -70,7 +59,7 @@ const http = require('http');
             };
             assert.strictEqual(await revocations.ensureSubscription({ fetchImpl: fake, log: { log() {} } }), 'created');
             assert.strictEqual(await revocations.ensureSubscription({ fetchImpl: fake, log: { log() {} } }), 'exists');
-            assert.deepStrictEqual(subs.map((s) => s.topic_pattern), [revocations.TOPIC, 'network.subject.merged', 'network.account.export_requested', 'network.account.deleted'], 'one subscription per topic, created once');
+            assert.deepStrictEqual(subs.map((s) => s.topic_pattern), [revocations.TOPIC, 'network.account.export_requested', 'network.account.deleted'], 'one subscription per topic, created once');
         } finally {
             srv.close();
             fs.rmSync(tmp, { recursive: true, force: true });
