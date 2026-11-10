@@ -211,7 +211,7 @@ async function sweepMissing({ now = Date.now(), limit = null, appId = null, minA
                 console.warn(`[Thumbnails] backfill could not queue vod ${row.id}: ${err.message}`);
             }
         }
-        if (appMissing) console.log(`[Thumbnails] backfill: queued ${appQueued} thumbnail job(s); ${appMissing} recording(s) on ${app} have no usable picture`);
+        if (appQueued) console.log(`[Thumbnails] backfill: queued ${appQueued} thumbnail job(s); ${appMissing} recording(s) on ${app} have no usable picture`);
         missing += appMissing;
         queued += appQueued;
     }
