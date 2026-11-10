@@ -7,7 +7,7 @@
   "port": 4100,
   "domain": "openvibe.media",
   "contracts": "openvibe-contracts v0.384.0",
-  "sdk": "openvibe-sdk v0.125.0",
+  "sdk": "openvibe-sdk v0.146.0",
   "shared": "openvibe-shared v4.199.0",
   "capabilities": [
     "media.object.upload",
