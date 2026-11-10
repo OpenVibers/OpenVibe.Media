@@ -1,4 +1,6 @@
 'use strict';
+// This fixture verifies local/remote packing explicitly; startup placement has its own move and routing tests.
+process.env.MEDIA_HLS_STARTUP_SECONDS = '0';
 // Segment-native video, first slice (F3.1; docs/media-fabric.md §3): object.cmaf stream-copies a finished video into
 // CMAF segments on its own keyframes and writes one media_timeline row per segment; the HLS playlists come from the
 // rows (ENDLIST, the rows' durations); segmentAt answers the segment at an instant, at the boundaries too; a rerun is a

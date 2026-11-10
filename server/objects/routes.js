@@ -1014,6 +1014,8 @@ publicRouter.get('/:id/master.m3u8', hlsRoute(async (req, res, { obj, query }) =
     // A missing rendition (F4) is queued lazily; only the ones whose rows exist are listed, so a client never follows
     // a variant that is not there yet.
     await hls.queueRenditionsOnce(obj);
+    // Existing recordings are warmed in the bounded worker queue; playlist delivery never waits for a copy.
+    require('../jobs/startup-tier').queueOnce(obj).catch(err => console.warn('[HLS] startup queue:', err.message));
     res.type(HLS_TYPE).send(timeline.masterPlaylist(await hls.renditionsFor(obj, rows), { query }));
 }));
 
@@ -1086,8 +1088,10 @@ async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
     const router = require('../placement/router');
     const decision = await router.route({ locations: timeline.locationsOf(row), objectId: obj.id, segment: row.name,
         purpose: 'playback', session: router.sessionFor(req, `${obj.id}/${rendition}`),
-        contentType: mime, expiresIn: 300, presign: !packed });
+        contentType: mime, expiresIn: 300, presign: !packed,
+        preferredProvider: require('../jobs/startup-tier').playbackPreference(row) });
     for (const loc of decision.candidates || []) {
+        headers['X-OV-Media-Provider'] = loc.provider;
         if (loc.provider === 'local') {
             if (!fs.existsSync(loc.key)) continue;
             require('./timeline-cache').served(loc.key);
@@ -1102,6 +1106,7 @@ async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
             continue;
         }
         res.set('Cache-Control', 'private, max-age=0');
+        res.set('X-OV-Media-Provider', loc.provider);
         return res.redirect(302, url);
     }
     res.status(404).json({ error: 'Segment bytes unavailable' });
