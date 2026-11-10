@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use OpenVibe.Media in research or a product, cite it as below."
+title: openvibe-media
+type: software
+authors:
+  - name: OpenVibe
+    alias: OpenVibers
+    website: https://openvibe.network
+repository-code: https://github.com/OpenVibers/OpenVibe.Media
+url: https://openvibe.media
+license: MIT
+abstract: "The network's one media store: uploads, recordings, clips, thumbnails and files behind one API, at openvibe.media."
+keywords:
+  - openvibe
+  - cdn
+  - files
+  - media
+  - storage

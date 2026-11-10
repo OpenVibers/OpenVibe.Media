@@ -1,5 +1,8 @@
 # OpenVibe.Media
 
+**Live site:** https://openvibe.media · **API docs:** https://openvibe.services · **For AI:** https://openvibe.media/llms.txt
+**Run it:** `npm ci && npm start` · **Tests:** `npm test`
+
 ## Purpose
 
 Standalone multi-tenant media service (port **4100**) extracted from the
