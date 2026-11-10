@@ -368,6 +368,19 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res)
         }
         if (b.upload_ttl != null && !(Number(b.upload_ttl) >= 60 && Number(b.upload_ttl) <= 86400)) return problem(res, 400, 'media.object.invalid', 'upload_ttl must be 60-86400 seconds');
         const userId = req.authType === 'user' ? req.userId : (Number.isInteger(Number(b.user_id)) && Number(b.user_id) > 0 ? Number(b.user_id) : null);
+        if (b.content_hash && !['1', 'true'].includes(String(b.keep_both || '').toLowerCase()) && (subject || userId)) {
+            const ownerWhere = [], ownerParams = [];
+            if (subject) { ownerWhere.push('owner_subject = ?'); ownerParams.push(subject); }
+            if (userId) { ownerWhere.push('owner_user_id = ?'); ownerParams.push(userId); }
+            const existing = await db.get(`SELECT * FROM media_objects WHERE app_id = ? AND content_hash = ? AND lifecycle_status = 'ready'
+                AND (${ownerWhere.join(' OR ')}) ORDER BY created_at DESC LIMIT 1`, [req.appId, String(b.content_hash).toLowerCase(), ...ownerParams]);
+            if (existing) {
+                const meta = model.parseJson(existing.metadata, {});
+                const address = `${config.publicUrl}/me/objects/${encodeURIComponent(existing.id)}`;
+                return res.json({ duplicate: true, id: existing.id, object: await model.objectPublic(existing), name: meta.filename || meta.title || existing.id,
+                    date: existing.created_at, address, url: address });
+            }
+        }
         const metadata = { ...(b.metadata || {}) };
         const filename = sanitizeFilename(b.filename);
         if (filename) metadata.filename = filename;
@@ -670,6 +683,26 @@ router.post('/:id/operator-view', reviewView, async (req, res) => {
     } catch (err) {
         console.error('[Objects] operator view error:', err.message);
         return problem(res, 500, 'media.object.review_view_failed', 'The operator view could not be made');
+    }
+});
+
+// A person (or their own service acting for them) can only ask about their own objects in this tenant.
+router.get('/duplicates', read, limits('media.object.duplicates', { minute: 60, hour: 1200 }), async (req, res) => {
+    const hash = String(req.query.sha256 || '').toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(hash)) return problem(res, 400, 'media.object.invalid', 'sha256 must be a SHA-256 digest');
+    if (req.authType !== 'user' || !Number.isSafeInteger(Number(req.userId)) || Number(req.userId) < 1) {
+        return problem(res, 401, 'media.object.sign_in_required', 'Sign in to check your own uploads');
+    }
+    try {
+        const obj = await db.get(`SELECT * FROM media_objects WHERE app_id = ? AND owner_user_id = ? AND content_hash = ?
+            AND lifecycle_status = 'ready' ORDER BY created_at DESC LIMIT 1`, [req.appId, Number(req.userId), hash]);
+        if (!obj) return res.json({ duplicate: false });
+        const metadata = (() => { try { return JSON.parse(obj.metadata || '{}'); } catch { return {}; } })();
+        return res.json({ duplicate: true, object: { id: obj.id, name: metadata.filename || metadata.title || obj.id,
+            date: obj.created_at, address: `${config.publicUrl}/me/objects/${encodeURIComponent(obj.id)}`, url: `${config.publicUrl}/me/objects/${encodeURIComponent(obj.id)}` } });
+    } catch (err) {
+        console.error('[Objects] duplicate lookup error:', err.message);
+        return problem(res, 500, 'media.object.duplicates_failed', 'Could not check your uploads');
     }
 });
 

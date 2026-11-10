@@ -95,8 +95,10 @@ const sharp = require('sharp');
         const nextShot = await store({ kind: 'screenshot', owner_subject: ANA }, png);
         const replaced = await call('POST', '/internal/avatar-ingest', { url: `${config.publicUrl}/o/${nextShot}`, user_id: 513, subject: ANA, product: 'network', ref: '513' });
         assert.strictEqual(replaced.status, 200, JSON.stringify(replaced.body));
-        assert.ok(!await model.avatarRef(avatarId), "the old reference was released with the new one");
-        assert.strictEqual((await call('DELETE', `/api/v2/live/objects/${avatarId}`)).status, 200);
+        assert.strictEqual(replaced.body.duplicate, true, 'identical avatar bytes reuse the existing object');
+        assert.strictEqual(replaced.body.object_id, avatarId);
+        assert.ok(await model.avatarRef(avatarId), 'the reused avatar remains referenced by the profile');
+        assert.strictEqual((await call('DELETE', `/api/v2/live/objects/${avatarId}`)).status, 409);
 
         // 5) An explicit release lets the picture go too.
         const released = await call('POST', '/internal/avatar-release', { product: 'network', ref: '513' });

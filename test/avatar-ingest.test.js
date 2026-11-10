@@ -98,6 +98,8 @@ process.env.MEDIA_PUBLIC_URL = 'https://media.test';
             assert.strictEqual(second.status, 200, JSON.stringify(second.body));
             assert.notStrictEqual(second.body.object_id, first.body.object_id);
             await check(second.body, subject);
+            const sameAvatar = await post({ url: 'https://pics.example/me2-again.png', user_id: 8, subject });
+            assert.deepStrictEqual([sameAvatar.status, sameAvatar.body.duplicate, sameAvatar.body.object_id], [200, true, second.body.object_id]);
             const invalid = await post({ url: 'https://pics.example/me3.png', user_id: 9, subject: 'not-a-subject' });
             assert.strictEqual(invalid.status, 200, JSON.stringify(invalid.body));
             await check(invalid.body, null);

@@ -240,6 +240,18 @@ const crypto = require('crypto');
         assert.ok(!(await call('GET', O, { headers: { 'x-ov-user-id': '8' } })).body.objects.some(o => o.id === sevens || o.id === id), 'no enumeration of others\' private objects');
         assert.ok((await call('GET', O, { headers: { 'x-ov-user-id': '7' } })).body.objects.some(o => o.id === sevens));
         assert.strictEqual((await call('DELETE', `${O}/${pubId}`, { headers: { 'x-ov-user-id': '8' } })).status, 403);
+        const repeated = Buffer.from('my own duplicate fixture');
+        const ownedInit = await call('POST', O, { headers: { 'x-ov-user-id': '7' }, body: { kind: 'file', mime_type: 'text/plain', size_bytes: repeated.length, content_hash: sha(repeated) } });
+        const ownedUrl = local(ownedInit.body.upload.url);
+        await call('PUT', ownedUrl, { bearer: null, raw: repeated });
+        await call('POST', `${O}/${ownedInit.body.id}/complete`, { headers: { 'x-ov-user-id': '7' } });
+        const lookup = await call('GET', `${O}/duplicates?sha256=${sha(repeated)}`, { headers: { 'x-ov-user-id': '7' } });
+        assert.deepStrictEqual([lookup.status, lookup.body.duplicate, lookup.body.object.id], [200, true, ownedInit.body.id]);
+        const duplicateInit = await call('POST', O, { headers: { 'x-ov-user-id': '7' }, body: { kind: 'file', size_bytes: repeated.length, content_hash: sha(repeated) } });
+        assert.deepStrictEqual([duplicateInit.status, duplicateInit.body.duplicate, duplicateInit.body.id], [200, true, ownedInit.body.id]);
+        const otherOwner = await call('GET', `${O}/duplicates?sha256=${sha(repeated)}`, { headers: { 'x-ov-user-id': '8' } });
+        const signedOut = await call('GET', `${O}/duplicates?sha256=${sha(repeated)}`);
+        assert.deepStrictEqual([otherOwner.body.duplicate, signedOut.status], [false, 401], 'a lookup cannot confirm another owner\'s upload');
         console.log('✅ acting users: public + own objects only');
 
         // ── Holds, soft delete, restore ──
