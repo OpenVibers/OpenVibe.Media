@@ -29,6 +29,8 @@ queue.register('object.waveform', require('./previews').waveform);
 queue.register('object.sprite', require('./previews').sprite);
 queue.register('object.cmaf', require('./cmaf').spec);
 queue.register('object.pack', require('./pack').spec);
+queue.register('object.startup-tier', require('./startup-tier').spec);
+queue.register('storage.startup.cleanup', require('./startup-tier').cleanup);
 queue.register('rendition.create', require('./rendition').spec);
 queue.register('vod.finalize', require('./vod-finalize').spec);
 queue.register('clip.cut', require('../vod/clip-jobs').spec);

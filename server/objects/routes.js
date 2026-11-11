@@ -1014,6 +1014,8 @@ publicRouter.get('/:id/master.m3u8', hlsRoute(async (req, res, { obj, query }) =
     // A missing rendition (F4) is queued lazily; only the ones whose rows exist are listed, so a client never follows
     // a variant that is not there yet.
     await hls.queueRenditionsOnce(obj);
+    // Existing recordings are warmed in the bounded worker queue; playlist delivery never waits for a copy.
+    require('../jobs/startup-tier').queueOnce(obj).catch(err => console.warn('[HLS] startup queue:', err.message));
     res.type(HLS_TYPE).send(timeline.masterPlaylist(await hls.renditionsFor(obj, rows), { query }));
 }));
 
@@ -1086,8 +1088,10 @@ async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
     const router = require('../placement/router');
     const decision = await router.route({ locations: timeline.locationsOf(row), objectId: obj.id, segment: row.name,
         purpose: 'playback', session: router.sessionFor(req, `${obj.id}/${rendition}`),
-        contentType: mime, expiresIn: 300, presign: !packed });
+        contentType: mime, expiresIn: 300, presign: !packed,
+        preferredProvider: require('../jobs/startup-tier').playbackPreference(row) });
     for (const loc of decision.candidates || []) {
+        headers['X-OV-Media-Provider'] = loc.provider;
         if (loc.provider === 'local') {
             if (!fs.existsSync(loc.key)) continue;
             require('./timeline-cache').served(loc.key);
@@ -1101,7 +1105,18 @@ async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
             if (await sendSlice(req, res, { url, ...slice }) !== false) return;
             continue;
         }
+        // R2 answers without Access-Control-Allow-Origin, so a browser in CORS mode (native HLS and hls.js both)
+        // cannot read a cross-origin redirect to it; an init segment would fail and the page falls back to the file.
+        // Stream an unpacked opening row through Media like a packed slice, which carries Media's CORS headers.
+        if (loc.provider === 'r2') {
+            const size = Number(row.byte_length)
+                || Number((await require('../vod/vod-storage').headObject('r2', loc.key).catch(() => null) || {}).size);
+            if (!(size > 0)) continue;
+            if (await sendSlice(req, res, { url, offset: 0, length: size, headers }) !== false) return;
+            continue;
+        }
         res.set('Cache-Control', 'private, max-age=0');
+        res.set('X-OV-Media-Provider', loc.provider);
         return res.redirect(302, url);
     }
     res.status(404).json({ error: 'Segment bytes unavailable' });

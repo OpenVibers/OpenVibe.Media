@@ -67,6 +67,14 @@ const config = {
         maxSizeMb: intEnv('MAX_FILE_SIZE_MB', 256),
     },
 
+    // Composer attachments (server/attachments/routes.js): one person's file before it is sent. An unkept one
+    // expires after 24 hours; a keep moves it to the kept window. Bytes live under ATTACHMENTS_PATH/<att_…>/.
+    attachments: {
+        path: process.env.ATTACHMENTS_PATH || './data/attachments',
+        ttlHours: intEnv('MEDIA_ATTACHMENT_TTL_HOURS', 24),
+        keepDays: intEnv('MEDIA_ATTACHMENT_KEEP_DAYS', 30),
+    },
+
     // Canonical object model (Wave 4): native v2 uploads, signed delivery, retention,
     // and the public playback object-size invariant (policy, not a copied constant).
     objects: {
@@ -103,6 +111,8 @@ const config = {
     // Segment-native video (docs/media-fabric.md §3, F3.1/F3.3): the object.cmaf and object.pack jobs and the HLS playlists read from
     // media_timeline (/o/:id/master.m3u8, /o/:id/source/…). Off by default: off, the job is refused and the routes 404.
     hls: {
+        // Ask 288 explicitly enables the opening tier. Zero is the owner's off switch.
+        startupSeconds: Math.min(300, Math.max(0, intEnv('MEDIA_HLS_STARTUP_SECONDS', 180))),
         enabled: ['1', 'true', 'on'].includes(String(process.env.MEDIA_HLS_ENABLED || '').toLowerCase()),
         transcode: ['1', 'true', 'on'].includes(String(process.env.MEDIA_CMAF_TRANSCODE || '').toLowerCase()),
         transcodeMaxSeconds: Math.max(0, intEnv('MEDIA_CMAF_TRANSCODE_MAX_SECONDS', 14400)),

@@ -119,9 +119,39 @@ const { EventEmitter } = require('events');
             const res = { destroyed: false, writeHead(code, headers) { this.code = code; this.headers = headers; }, end(body) { this.body = body; } };
             await require('../server/objects/routes').sendSegmentRow(req, res, { obj: { id: 'cache-packed' }, closed: false }, packedRow, 'source');
             assert.strictEqual(res.code, 200);
+            assert.strictEqual(res.headers['X-OV-Media-Provider'], 'b2', 'packed responses identify their backing tier');
             assert.deepStrictEqual(res.body, Buffer.from('cde'), 'the segment route reads the packed range from durable storage');
         } finally {
             router.route = realRoute; router.sessionFor = realSession; storage.presignGet = realPresign; global.fetch = realFetch;
+        }
+        // An unpacked R2 row is proxied through Media: R2 sends no CORS header, so a browser following a redirect
+        // to it cannot read the init segment and the page falls back to the file (or stops).
+        const initBytes = Buffer.from('init-data');
+        await timeline.replace('cache-r2init', 'source', [{ seq: 0, name: 'init.mp4', start_ms: 0, end_ms: 0,
+            key: 'cache/r2init', local_path: null, durable_provider: 'r2', packed_object_id: null,
+            byte_offset: null, byte_length: initBytes.length, sha256: crypto.createHash('sha256').update(initBytes).digest('hex'), durability: 'durable' }]);
+        const initRow = await timeline.byName('cache-r2init', 'source', 'init.mp4');
+        const realHead = storage.headObject;
+        router.route = async () => ({ provider: 'r2', candidates: [{ provider: 'r2', key: initRow.key }] });
+        storage.headObject = async (provider, key) => provider === 'r2' && key === initRow.key ? { size: initBytes.length } : null;
+        storage.presignGet = async () => 'https://r2.invalid/init';
+        global.fetch = async (_url, opts) => {
+            const m = /^bytes=(\d+)-(\d+)$/.exec(opts.headers.range);
+            return new Response(initBytes.subarray(Number(m[1]), Number(m[2]) + 1), { status: 206 });
+        };
+        try {
+            const req = new EventEmitter();
+            req.headers = {};
+            const res = { destroyed: false, writeHead(code, headers) { this.code = code; this.headers = headers; }, end(body) { this.body = body; },
+                set() { this.reduced = true; }, redirect() { this.redirected = true; } };
+            await require('../server/objects/routes').sendSegmentRow(req, res, { obj: { id: 'cache-r2init' }, closed: false }, initRow, 'source');
+            assert.strictEqual(res.code, 200);
+            assert.strictEqual(res.headers['X-OV-Media-Provider'], 'r2');
+            assert.deepStrictEqual(res.body, initBytes, 'the R2 opening is streamed by Media');
+            assert.ok(!res.redirected, 'no cross-origin redirect to a store without CORS');
+        } finally {
+            storage.headObject = realHead;
+            router.route = realRoute;
         }
         assert.strictEqual(fs.existsSync(only), true);
         console.log('timeline cache: oldest verified copies and packed range evicted; sole copy retained');
