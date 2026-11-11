@@ -56,10 +56,11 @@ async function run(job) {
     // generate_failed on 2026-09-23: ffmpeg was run on 0-byte files and Live got a 500).
     // A virtual clip has no file: its frame comes from its VOD (five such clips failed every page view as
     // generate_failed on 2026-10-17: ffmpeg was pointed at the clip row's own path, which never existed).
-    // A clip whose cut failed has no picture to take: its window could not be read (clips 495-498 of VOD 6010,
-    // 2026-10-27: their window lies in the recording's damaged end, and every page view after a Live restart ran this
-    // job again and got a 500).
-    if (kind === 'clip' && row.status === 'failed' && !row.file_path) {
+    // A clip whose cut failed has no file of its own, but it may still name its recording: its window is then read
+    // from the VOD (the virtual path below), which is the only picture it can have (clips 533/317, where the cut never
+    // wrote a file). Refuse only a failed clip with no file AND no recording to read (clips 495-498 of VOD 6010,
+    // 2026-10-27: their window lies in the recording's damaged end).
+    if (kind === 'clip' && row.status === 'failed' && !row.file_path && row.vod_id == null) {
         throw new JobError('media_unavailable', 'The clip was never cut, so it has no picture', { permanent: true, status: 404 });
     }
     const virtual = kind === 'clip' && !row.file_path && row.vod_id != null;
@@ -215,7 +216,6 @@ async function sweepKind(app, kind, { now, batch, minAgeMs }) {
             ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW])
         : await db.all(`SELECT id, created_at, thumbnail_url FROM clips
             WHERE app_id = ? AND (is_public = 1 OR visibility IN ('public', 'unlisted'))
-              AND (status = 'ready' OR (status = 'failed' AND file_path IS NOT NULL))
               AND (file_path IS NOT NULL OR vod_id IS NOT NULL)
               AND id < ?
             ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW]);
