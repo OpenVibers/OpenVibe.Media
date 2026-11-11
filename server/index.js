@@ -296,6 +296,15 @@ const ready = (async () => {
         }
     }
 
+    // Composer attachments (composer.attachment@1): every site's composer uploads one person's file the same way.
+    // It sits before /api/v1/:app so `attachments` is never read as a tenant. Public bytes are /a/<id>/<name>.
+    {
+        const attachments = require('./attachments/routes');
+        attachments._ensureDirs();
+        app.use('/api/v1/attachments', attachments);
+        app.use('/a', attachments.publicRouter);
+        if (!drill.enabled) app.locals.attachmentsCleanup = attachments.startCleanup();
+    }
     app.use('/api/v1/:app/views', require('./views/routes'));
     // GET /api/v1/:app/watch/:watch_id: which item a watch id is (server/watch-routes.js, plan track U).
     app.use('/api/v1/:app/watch', require('./watch-routes'));
