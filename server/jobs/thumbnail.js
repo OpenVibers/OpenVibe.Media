@@ -185,8 +185,9 @@ function dueAt(last) {
 async function sweepMissing({ now = Date.now(), limit = null, appId = null, minAgeMs = MIN_AGE_MS } = {}) {
     const batch = Math.max(1, Math.min(20, Number(limit) || config.jobs.thumbnailBackfillBatch || 3));
     const apps = appId ? [{ app_id: appId }]
-        : await db.all(`SELECT DISTINCT app_id FROM vods WHERE is_public = 1 AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
-            UNION SELECT DISTINCT app_id FROM clips WHERE is_public = 1`);
+        : await db.all(`SELECT DISTINCT app_id FROM vods WHERE (is_public = 1 OR visibility IN ('public', 'unlisted'))
+              AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
+            UNION SELECT DISTINCT app_id FROM clips WHERE is_public = 1 OR visibility IN ('public', 'unlisted')`);
     let missing = 0, queued = 0;
     for (const { app_id: app } of apps) {
         const v = await sweepKind(app, 'vod', { now, batch, minAgeMs });
@@ -206,14 +207,14 @@ async function sweepKind(app, kind, { now, batch, minAgeMs }) {
     const cursor = Number(await db.getSetting(cursorKeyFor)) || 0;
     const rows = kind === 'vod'
         ? await db.all(`SELECT id, created_at, thumbnail_url FROM vods
-            WHERE app_id = ? AND is_public = 1
+            WHERE app_id = ? AND (is_public = 1 OR visibility IN ('public', 'unlisted'))
               AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
               AND (file_path IS NOT NULL OR object_id IS NOT NULL)
               AND COALESCE(health_status, '') NOT IN ('missing_file', 'zero_byte')
               AND id < ?
             ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW])
         : await db.all(`SELECT id, created_at, thumbnail_url FROM clips
-            WHERE app_id = ? AND is_public = 1 AND status = 'ready'
+            WHERE app_id = ? AND (is_public = 1 OR visibility IN ('public', 'unlisted')) AND status = 'ready'
               AND (file_path IS NOT NULL OR vod_id IS NOT NULL)
               AND id < ?
             ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW]);
