@@ -222,6 +222,8 @@ async function publishRendition({ job, ctx, src, rendition, out, list, label = '
         // its retry.
         try { await require('../objects/timeline-queue').queuePack(job.app_id, src.id, { rendition }); }
         catch (err) { console.warn(`[${label}] ${job.id}: pack queue failed: ${err.message}`); }
+        try { await require('./startup-tier').queueOnce(src); }
+        catch (err) { console.warn(`[${label}] ${job.id}: startup queue failed: ${err.message}`); }
         return {
             rows: written, uploaded,
             durable: rows.filter((x) => x.durability === 'durable').length,

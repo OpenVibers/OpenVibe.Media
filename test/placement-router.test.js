@@ -179,6 +179,20 @@ const assert = require('assert');
     assert.strictEqual(decision.provider, null, 'never an unconfigured provider, even as a last resort');
     signals.reset(); router.reset();
 
+    // A timeline's selected cloud tier beats its retained local cache and the old sticky choice.
+    providers.reset(); signals.reset(); router.reset();
+    providers.isConfigured = () => true;
+    const startupCopies = [{provider:'local',state:'present',key:'/tmp/cache'},{provider:'b2',state:'present',key:'tail'}];
+    decision = await router.route({locations:startupCopies,session:'startup-policy',presign:false});
+    assert.strictEqual(decision.provider,'local');
+    decision = await router.route({locations:startupCopies,session:'startup-policy',presign:false,preferredProvider:'b2'});
+    assert.strictEqual(decision.provider,'b2'); assert.strictEqual(decision.reason,'timeline-tier');
+    assert.strictEqual(decision.candidates[0].provider,'b2','metrics, sticky choice and served order agree');
+    for (let i=0;i<10;i++) signals.recordFailure('b2','presign',50);
+    decision = await router.route({locations:startupCopies,session:'startup-policy',presign:false,preferredProvider:'b2'});
+    assert.strictEqual(decision.provider,'local','an unhealthy preferred provider is still filtered out');
+    signals.reset(); router.reset();
+
     providers.isConfigured = realIsConfigured;
     console.log('placement-router: all checks passed');
     process.exit(0);

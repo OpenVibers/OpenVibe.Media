@@ -167,8 +167,10 @@ function tierOf(candidate, purpose) {
 }
 
 /** Rank the candidates: by tier, with a measured latency advantage (> TIE_BAND) allowed to promote. */
-function rankCandidates(candidates, { purpose = 'playback' } = {}) {
+function rankCandidates(candidates, { purpose = 'playback', preferredProvider = null } = {}) {
     return [...candidates].sort((a, b) => {
+        const ap = a.provider === preferredProvider, bp = b.provider === preferredProvider;
+        if (ap !== bp) return ap ? -1 : 1;
         const ta = tierOf(a, purpose), tb = tierOf(b, purpose);
         if (ta === tb) {
             const ma = measuredMs(a.provider), mb = measuredMs(b.provider);
@@ -217,6 +219,8 @@ const DEMAND_PURPOSES = new Set(['playback', 'download']);
 async function route(opts = {}) {
     const purpose = opts.purpose || 'playback';
     const session = opts.session || null;
+    // A verified timeline names its opening/tail tier. This never admits a missing or unhealthy copy.
+    const preferredProvider = purpose === 'playback' && (opts.preferredProvider === 'r2' || opts.preferredProvider === 'b2') ? opts.preferredProvider : null;
     const locs = (await locationsFor(opts)).filter((l) => l && l.state === 'present' && l.key);
 
     // One candidate per provider: the first present location it has. A copy on an unhealthy (or avoided) provider
@@ -234,7 +238,7 @@ async function route(opts = {}) {
     }
     const lastResort = candidates.length === 0 && degraded.length > 0;
     if (lastResort) candidates = degraded;
-    const ranked = rankCandidates(candidates, { purpose });
+    const ranked = rankCandidates(candidates, { purpose, preferredProvider });
 
     // Sticky: same session -> same provider for STICKY_TTL_MS unless its copy/breaker is gone, or a better tier
     // is available again. Stickiness stops latency flapping between copies of one tier; it never holds a viewer
@@ -244,7 +248,7 @@ async function route(opts = {}) {
     let stickyHit = false;
     if (sticky) {
         const at = ranked.findIndex((c) => c.provider === sticky.provider);
-        if (at >= 0 && tierOf(ranked[at], purpose) <= tierOf(ranked[0], purpose)) { ordered = [ranked[at], ...ranked.slice(0, at), ...ranked.slice(at + 1)]; stickyHit = true; }
+        if (at >= 0 && (!preferredProvider || ranked[0].provider !== preferredProvider || ranked[at].provider === preferredProvider) && tierOf(ranked[at], purpose) <= tierOf(ranked[0], purpose)) { ordered = [ranked[at], ...ranked.slice(0, at), ...ranked.slice(at + 1)]; stickyHit = true; }
         else stickyByKey.delete(session);
     }
 
@@ -261,7 +265,7 @@ async function route(opts = {}) {
 
     const fallbacks = ordered.filter((c) => c !== primary).map((c) => c.provider);
     const reason = primary
-        ? lastResort ? 'last-resort' : (stickyHit && primary === ordered[0] && primary.provider === sticky.provider ? 'sticky' : REASONS[tierOf(primary, purpose)] || 'fastest-healthy')
+        ? lastResort ? 'last-resort' : primary.provider === preferredProvider ? 'timeline-tier' : (stickyHit && primary === ordered[0] && primary.provider === sticky.provider ? 'sticky' : REASONS[tierOf(primary, purpose)] || 'fastest-healthy')
         : 'no-healthy-copy';
 
     if (primary) stickyPut(session, primary.provider);
