@@ -105,12 +105,17 @@ async function encode(input, remote, startAbs, seconds, out, codec, ctx, attempt
             '-pix_fmt', 'yuv420p', '-profile:v', 'main', '-movflags', '+faststart', '-f', 'mp4', out);
     } else {
         // VP9 where this ffmpeg has it, VP8 otherwise (both are WebM; a hover preview needs only the codec a browser plays).
-        args.push('-c:v', 'libvpx-vp9', '-crf', String(40 + attempt * 6), '-b:v', '0', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-f', 'webm', out);
+        // `-b:v 0` (pure CRF) let a high-motion 6 s clip reach 600 KB in production: a constrained bitrate keeps the
+        // 400 KB aim while the CRF still drops quiet scenes. attempt 1 and 2 lower it further.
+        args.push('-c:v', 'libvpx-vp9', '-crf', String(40 + attempt * 6),
+            '-b:v', `${Math.max(120, 300 - attempt * 60)}k`, '-maxrate', `${Math.max(180, 420 - attempt * 80)}k`,
+            '-bufsize', '840k', '-deadline', 'good', '-cpu-used', '4', '-row-mt', '1', '-f', 'webm', out);
     }
     let r = await d.ffmpeg(args, { signal: ctx.signal, timeoutMs: 5 * 60 * 1000, niceness: 5 });
     if (!r.ok && !mp4 && /Unknown encoder|libvpx-vp9/i.test(r.stderr)) {
         args.splice(args.indexOf('libvpx-vp9'), 1, 'libvpx');
         args.splice(args.indexOf('-row-mt'), 2);
+        const maxrate = args.indexOf('-maxrate'); if (maxrate >= 0) args.splice(maxrate, 4);
         r = await d.ffmpeg(args, { signal: ctx.signal, timeoutMs: 5 * 60 * 1000, niceness: 5 });
     }
     if (!r.ok || !d.existing(out) || !fs.statSync(out).size) return null;
@@ -177,8 +182,7 @@ async function queuePreview(appId, kind, id, { createdBy = 'system:preview' } = 
         const row = await rowOf(appId, kind, id);
         if (!row || Number(row.audio_only)) return null;
         if ((row.visibility || (Number(row.is_public) ? 'public' : 'private')) === 'private') return null;
-        // An older /p/ URL (the first release) does not route in production: make a fresh pair.
-        if (row.preview_url && !String(row.preview_url).startsWith('/p/')) return null;
+        if (row.preview_url) return null;
         const { enqueue } = require('./queue');
         return await enqueue({ appId, type: TYPE, params: { kind, id }, dedupeActive: true, createdBy });
     } catch (err) {
@@ -227,7 +231,7 @@ async function sweepKind(appId, kind, { now, batch, minAgeMs }) {
     const rows = await db.all(`SELECT id, created_at, duration_seconds, thumbnail_url, preview_url, file_path${kind === 'clip' ? ', vod_id' : ''} FROM ${table}
         WHERE ${where}
           AND audio_only IS NOT TRUE
-          AND (preview_url IS NULL OR preview_url LIKE '/p/%') AND thumbnail_url IS NOT NULL
+          AND preview_url IS NULL AND thumbnail_url IS NOT NULL
           AND COALESCE(duration_seconds, 0) >= 2
           AND id < ?
         ORDER BY id DESC LIMIT ?`, [appId, cursor || '9223372036854775807', CANDIDATE_WINDOW]);
