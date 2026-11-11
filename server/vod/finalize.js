@@ -70,8 +70,8 @@ async function vodPublic(vod, { readiness = false, hls } = {}) {
         playback_url: `${config.publicUrl}/v/${vod.id}`,
         thumbnail_url: _absUrl(vod.thumbnail_url),
         // The hover preview (preview.make): 6 s muted MP4, with the WebM of the same moment beside it. Null until made.
-        preview_url: _absUrl(vod.preview_url),
-        preview_webm_url: _absUrl(vod.preview_webm_url),
+        preview_url: _absUrl(require('../thumbnails/preview-service').normalizePreviewUrl(vod.preview_url)),
+        preview_webm_url: _absUrl(require('../thumbnails/preview-service').normalizePreviewUrl(vod.preview_webm_url)),
         // No picture in the source (an audio-only browser broadcast, Media#240): one probe at finalize says so once.
         audio_only: !!vod.audio_only,
         storage_provider: vod.storage_provider || 'local',

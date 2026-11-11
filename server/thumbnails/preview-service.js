@@ -44,6 +44,10 @@ async function itemServable(kind, id) {
 /** The public URL of a written preview file. */
 const previewUrl = (name) => `/t/${name}`;
 
+/** A stored preview URL, on the route that serves it today. The first release stored /p/, which production sends to
+ *  Community's paste pages: the same file name is served at /t/, so old rows need no re-encode, only this rewrite. */
+const normalizePreviewUrl = (url) => (typeof url === 'string' && url.startsWith('/p/') ? `/t/${url.slice(3)}` : url);
+
 /** The file name of a new preview for `kind`/`id` at `stamp` (the same stamp for both formats). */
 function previewNames(kind, id, stamp = Date.now()) {
     return { mp4: `${kind}-${id}-${stamp}.mp4`, webm: `${kind}-${id}-${stamp}.webm` };
@@ -114,5 +118,5 @@ async function servePreview(req, res) {
 
 module.exports = {
     PREVIEW_DIR, PREVIEW_WIDTH, PREVIEW_SECONDS, MAX_BYTES, NAME_RE,
-    previewUrl, previewNames, removePreviewFiles, parseRange, servePreview, itemServable,
+    previewUrl, normalizePreviewUrl, previewNames, removePreviewFiles, parseRange, servePreview, itemServable,
 };

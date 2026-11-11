@@ -98,8 +98,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
         // Absolute URLs — cross-origin consumers render these directly.
         playback_url: `${config.publicUrl}/c/${clip.id}`,
         thumbnail_url: require('./finalize')._absUrl(clip.thumbnail_url),
-        preview_url: require('./finalize')._absUrl(clip.preview_url),
-        preview_webm_url: require('./finalize')._absUrl(clip.preview_webm_url),
+        preview_url: require('./finalize')._absUrl(require('../thumbnails/preview-service').normalizePreviewUrl(clip.preview_url)),
+        preview_webm_url: require('./finalize')._absUrl(require('../thumbnails/preview-service').normalizePreviewUrl(clip.preview_webm_url)),
         // No picture in the source (an audio-only recording's clip): the player shows the avatar card, not a black box.
         audio_only: !!clip.audio_only,
         visibility: clip.visibility || 'public',

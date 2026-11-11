@@ -35,6 +35,9 @@ const { spawnSync } = require('child_process');
     assert.strictEqual(previewService.parseRange('bytes=1000-', 1000), null);
     assert.deepStrictEqual(previewJob.pickWindow(60), { len: 6, anchor: 6 });
     assert.deepStrictEqual(previewJob.pickWindow(3), { len: 3, anchor: 0 });
+    assert.strictEqual(previewService.normalizePreviewUrl('/p/vod-1-2.mp4'), '/t/vod-1-2.mp4', 'an old /p URL is served at /t');
+    assert.strictEqual(previewService.normalizePreviewUrl('/t/vod-1-2.mp4'), '/t/vod-1-2.mp4');
+    assert.strictEqual(previewService.normalizePreviewUrl(null), null);
 
     await db.upsertApp({ app_id: 'live', api_key: 'live-key' });
     const VIDEO = path.join(process.env.VOD_PATH, 'bright.mp4');

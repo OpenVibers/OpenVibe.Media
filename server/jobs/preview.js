@@ -177,8 +177,7 @@ async function queuePreview(appId, kind, id, { createdBy = 'system:preview' } = 
         const row = await rowOf(appId, kind, id);
         if (!row || Number(row.audio_only)) return null;
         if ((row.visibility || (Number(row.is_public) ? 'public' : 'private')) === 'private') return null;
-        // An older /p/ URL (the first release) does not route in production: make a fresh pair.
-        if (row.preview_url && !String(row.preview_url).startsWith('/p/')) return null;
+        if (row.preview_url) return null;
         const { enqueue } = require('./queue');
         return await enqueue({ appId, type: TYPE, params: { kind, id }, dedupeActive: true, createdBy });
     } catch (err) {
@@ -227,7 +226,7 @@ async function sweepKind(appId, kind, { now, batch, minAgeMs }) {
     const rows = await db.all(`SELECT id, created_at, duration_seconds, thumbnail_url, preview_url, file_path${kind === 'clip' ? ', vod_id' : ''} FROM ${table}
         WHERE ${where}
           AND audio_only IS NOT TRUE
-          AND (preview_url IS NULL OR preview_url LIKE '/p/%') AND thumbnail_url IS NOT NULL
+          AND preview_url IS NULL AND thumbnail_url IS NOT NULL
           AND COALESCE(duration_seconds, 0) >= 2
           AND id < ?
         ORDER BY id DESC LIMIT ?`, [appId, cursor || '9223372036854775807', CANDIDATE_WINDOW]);
