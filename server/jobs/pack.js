@@ -65,7 +65,8 @@ function plan(rows, targetMs) {
     let run = [];
     for (const r of segs) {
         const fits = !r.packed_object_id && r.durability === 'durable' && r.durable_provider;
-        const next = run.length && Number(r.seq) === Number(run[run.length - 1].seq) + 1;
+        const next = run.length && Number(r.seq) === Number(run[run.length - 1].seq) + 1
+            && r.durable_provider === run[run.length - 1].durable_provider;
         if (fits && (next || !run.length)) { run.push(r); continue; }
         if (run.length) runs.push(run);
         run = fits ? [r] : [];
@@ -136,6 +137,8 @@ async function run(job, ctx) {
     const dir = derive.workDir(job.id);
     try {
         for (const chunk of chunks) {
+            // Keep an R2 opening hot when packing; plan never joins two provider tiers.
+            const provider = chunk[0].durable_provider;
             aborted(ctx);
             if (Date.now() - started > budget) throw new JobError('budget_exceeded', `Packing ran past its ${Math.round(budget / 1000)} s budget; the rest is packed by a retry`, { retryAfterS: 60 });
             // Concatenate, recording where each segment starts in the chunk.
@@ -194,6 +197,8 @@ async function run(job, ctx) {
             if (kept.length) console.warn(`[Pack] ${job.id}: ${kept.length} packed segment location(s) kept — another object's rows name them`);
             out.left_behind += failed.length;
             out.removed_segments += chunk.length - failed.length;
+            out.providers = [...new Set([...(out.providers || []), provider])];
+            out.provider = out.providers.length === 1 ? provider : 'mixed';
             out.packs++;
             out.segments += chunk.length;
             out.rows_packed += chunk.length;

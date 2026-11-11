@@ -119,6 +119,7 @@ const { EventEmitter } = require('events');
             const res = { destroyed: false, writeHead(code, headers) { this.code = code; this.headers = headers; }, end(body) { this.body = body; } };
             await require('../server/objects/routes').sendSegmentRow(req, res, { obj: { id: 'cache-packed' }, closed: false }, packedRow, 'source');
             assert.strictEqual(res.code, 200);
+            assert.strictEqual(res.headers['X-OV-Media-Provider'], 'b2', 'packed responses identify their backing tier');
             assert.deepStrictEqual(res.body, Buffer.from('cde'), 'the segment route reads the packed range from durable storage');
         } finally {
             router.route = realRoute; router.sessionFor = realSession; storage.presignGet = realPresign; global.fetch = realFetch;
