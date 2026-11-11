@@ -1105,6 +1105,16 @@ async function sendSegmentRow(req, res, { obj, closed }, row, rendition) {
             if (await sendSlice(req, res, { url, ...slice }) !== false) return;
             continue;
         }
+        // R2 answers without Access-Control-Allow-Origin, so a browser in CORS mode (native HLS and hls.js both)
+        // cannot read a cross-origin redirect to it; an init segment would fail and the page falls back to the file.
+        // Stream an unpacked opening row through Media like a packed slice, which carries Media's CORS headers.
+        if (loc.provider === 'r2') {
+            const size = Number(row.byte_length)
+                || Number((await require('../vod/vod-storage').headObject('r2', loc.key).catch(() => null) || {}).size);
+            if (!(size > 0)) continue;
+            if (await sendSlice(req, res, { url, offset: 0, length: size, headers }) !== false) return;
+            continue;
+        }
         res.set('Cache-Control', 'private, max-age=0');
         res.set('X-OV-Media-Provider', loc.provider);
         return res.redirect(302, url);
