@@ -290,7 +290,7 @@ const http = require('http');
             assert.ok(r.text.includes('<progress max="100" value="50"'), 'upload progress without JavaScript');
             for (const b of benIds) assert.ok(!r.text.includes(b));
             assert.ok(/<label for="f-q">/.test(r.text) && /<caption class="sr">/.test(r.text), 'labelled filters, captioned tables');
-            assert.ok(!/\bfree\b/i.test(r.text), 'no cost claims in served HTML');
+            assert.ok(!/\bfree\b(?!\s+tools)/i.test(r.text), 'no cost claims in served HTML (the shared footer\'s "Free tools" group is a place, not a price)');
             assert.ok(r.text.includes('"menu":{"before":[{"id":"media-mine","label":"Your media","href":"/me"'), 'the account menu links /me');
             assert.ok(!r.text.includes('href="/me/ops"'), 'no operator link for a user');
             assert.ok((await call('GET', '/me', { cookie: 'admin' })).text.includes('href="/me/ops"'), 'staff get one');
