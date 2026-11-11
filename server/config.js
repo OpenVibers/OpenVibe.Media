@@ -149,6 +149,10 @@ const config = {
         // picture is missing or gone, so the home's replay rows stop showing a grey 1×1.
         thumbnailBackfillMin: intEnv('MEDIA_THUMBNAIL_BACKFILL_MIN', 2),
         thumbnailBackfillBatch: Math.max(1, Math.min(20, intEnv('MEDIA_THUMBNAIL_BACKFILL_BATCH', 10))),
+        // The hover-preview backfill (server/jobs/preview.js sweepMissing): a small batch this often (minutes; 0 =
+        // never), newest items first. Each is a 6 s 320 px encode in the light lane.
+        previewBackfillMin: intEnv('MEDIA_PREVIEW_BACKFILL_MIN', 5),
+        previewBackfillBatch: Math.max(1, Math.min(10, intEnv('MEDIA_PREVIEW_BACKFILL_BATCH', 2))),
         retentionDays: intEnv('MEDIA_JOBS_RETENTION_DAYS', 30),     // finished thumbnail jobs are pruned after this
     },
 

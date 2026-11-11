@@ -49,6 +49,7 @@ async function sweepWorkDirs() {
 }
 let lastPruneAt = 0;
 let lastThumbBackfillAt = 0;
+let lastPreviewBackfillAt = 0;
 let kicked = false;
 
 function lanes() {
@@ -182,6 +183,13 @@ async function tick() {
                 lastThumbBackfillAt = now;
                 try { await require('./thumbnail').sweepMissing({ now, limit: cfg().thumbnailBackfillBatch }); }
                 catch (err) { console.warn('[Jobs] thumbnail backfill:', err.message); }
+            }
+            // Hover previews for recent recordings and clips first: a small batch each time (server/jobs/preview.js).
+            const previewMs = cfg().previewBackfillMin * 60 * 1000;
+            if (previewMs > 0 && now - lastPreviewBackfillAt > previewMs) {
+                lastPreviewBackfillAt = now;
+                try { await require('./preview').sweepMissing({ now, limit: cfg().previewBackfillBatch }); }
+                catch (err) { console.warn('[Jobs] preview backfill:', err.message); }
             }
             if (now - lastSweepAt > 3600 * 1000) {
                 lastSweepAt = now;

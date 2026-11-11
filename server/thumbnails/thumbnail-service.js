@@ -141,6 +141,67 @@ async function nameWithColour(outPath, outFilename) {
 }
 
 /**
+ * The seek points to try for a picture, best first. A frame at second 0 (or 10% of a two-second recording) can be
+ * black, and the tail of a still-writing recording can be a partial frame: a failed or all-black grab moves on to the
+ * next point instead of leaving the item without a picture. (VOD 6292, 4.7 GB and healthy, failed three times at the
+ * 10% mark on 2026-11-10.) Exported for the tests.
+ */
+function frameSeekCandidates(duration, { liveEdge = false, lastPts = 0, seekSeconds = 0 } = {}) {
+    if (seekSeconds) return [Math.max(0, Number(seekSeconds) || 0.5)];
+    const dur = Number.isFinite(duration) && duration > 0 ? duration : (Number(lastPts) || 0);
+    let points;
+    if (liveEdge) {
+        if (dur > 0) points = [Math.max(0, dur - LIVE_EDGE_BACKOFF_SEC), Math.max(0, dur - 1), 0.5];
+        else points = [0.5, 0.2, 0];
+    } else if (dur > 20) {
+        // A few seconds in, not the very first frame: the start is often a fade-in or a black leader.
+        points = [Math.max(3, Math.min(dur * 0.1, dur - 1)), Math.max(3, Math.min(dur * 0.25, dur - 1)), 5, 1, 0.5];
+    } else if (dur >= 6) {
+        points = [Math.max(2, dur * 0.15), Math.max(1, dur * 0.5), 0.5];
+    } else if (dur >= 2) {
+        points = [Math.max(0.6, dur * 0.25), 0.5, Math.max(0.5, dur - 0.4)];
+    } else {
+        points = [0.4, 0.1, 0];
+    }
+    const seen = new Set();
+    return points
+        .map((p) => Math.round(Math.max(0, Math.min(dur > 0 ? dur - 0.05 : p, p)) * 1000) / 1000)
+        .filter((p) => { if (seen.has(p)) return false; seen.add(p); return true; });
+}
+
+/** The average colour's luminance, 0–255 (a black frame is under ~14; a fade-in or dark scene is not). */
+async function frameIsBlack(file) {
+    const hex = await colourOf(file);
+    if (!hex) return false;
+    const r = parseInt(hex.slice(0, 2), 16), g = parseInt(hex.slice(2, 4), 16), b = parseInt(hex.slice(4, 6), 16);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) < 14;
+}
+
+/** One ffmpeg grab of one frame; true when a usable file was written. */
+function grabFrame(videoPath, isUrl, seekTime, outPath) {
+    return new Promise((resolve) => {
+        const args = [
+            '-y',
+            '-ss', String(Math.max(0, seekTime)),
+            '-i', videoPath,
+            '-vframes', '1',
+            '-vf', `scale=${THUMB_WIDTH}:-1`,
+            '-q:v', String(THUMB_QUALITY),
+            outPath,
+        ];
+        const ff = spawn('ffmpeg', args, { stdio: 'ignore' });
+        const killTimer = setTimeout(() => { try { ff.kill('SIGKILL'); } catch { /* */ } }, isUrl ? 35000 : 20000);
+        ff.on('close', (code) => {
+            clearTimeout(killTimer);
+            let ok = false;
+            try { ok = code === 0 && fs.statSync(outPath).size > 256; } catch { ok = false; }
+            resolve(ok);
+        });
+        ff.on('error', () => { clearTimeout(killTimer); resolve(false); });
+    });
+}
+
+/**
  * Extract a thumbnail frame from a video file using ffmpeg.
  * @param {string} videoPath  – Absolute path (or presigned URL) of the video
  * @param {string} prefix     – Filename prefix ('vod' or 'clip')
@@ -164,8 +225,8 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
             return resolve(null);
         }
 
-        const outFilename = `${prefix}-${entityId}-${Date.now()}.jpg`;
-        const outPath = path.join(THUMB_DIR, outFilename);
+        const stamp = Date.now();
+        const outFilename = `${prefix}-${entityId}-${stamp}.jpg`;
 
         // First, probe the duration
         const probe = spawn('ffprobe', [
@@ -175,62 +236,49 @@ function generateFromVideo(videoPath, prefix, entityId, opts = {}) {
         probe.stdout.on('data', (d) => (probeData += d));
 
         const onProbeClose = async (probeCode) => {
-            let seekTime = opts.seekSeconds || 1;
-
-            if (!opts.seekSeconds) {
-                let duration = 0;
-                if (probeCode === 0) {
-                    try {
-                        const info = JSON.parse(probeData);
-                        // parseFloat('N/A') is NaN — normalize so the checks below
-                        // treat "no usable duration" as 0 rather than silently
-                        // falling through to the default 1-second seek.
-                        const d = parseFloat(info.format?.duration);
-                        if (Number.isFinite(d)) duration = d;
-                    } catch { /* */ }
-                }
-
-                // A still-recording file has no header duration; find the real
-                // tail position from the last video packet instead.
-                if (opts.liveEdge || duration <= 0) {
-                    const lastPts = await _probeLastPts(videoPath);
-                    if (lastPts > 0) duration = lastPts;
-                }
-
-                if (opts.liveEdge) {
-                    // Newest frame that is safely on disk. Falls back to the
-                    // start only when the tail could not be located at all.
-                    seekTime = duration > 0 ? Math.max(0, duration - LIVE_EDGE_BACKOFF_SEC) : 0;
-                } else if (duration > 2) {
-                    seekTime = Math.min(
-                        duration * ((opts.seekPercent || 10) / 100),
-                        duration - 0.5
-                    );
-                }
+            let duration = 0;
+            let lastPts = 0;
+            if (!opts.seekSeconds && probeCode === 0) {
+                try {
+                    const info = JSON.parse(probeData);
+                    // parseFloat('N/A') is NaN — normalize so the checks below
+                    // treat "no usable duration" as 0 rather than silently
+                    // falling through to the default 1-second seek.
+                    const d = parseFloat(info.format?.duration);
+                    if (Number.isFinite(d) && d > 0) duration = d;
+                } catch { /* */ }
             }
-
-            // Extract frame
-            const args = [
-                '-y',
-                '-ss', String(Math.max(0, seekTime)),
-                '-i', videoPath,
-                '-vframes', '1',
-                '-vf', `scale=${THUMB_WIDTH}:-1`,
-                '-q:v', String(THUMB_QUALITY),
-                outPath,
-            ];
-
-            const ff = spawn('ffmpeg', args, { stdio: 'ignore' });
-            const killTimer = setTimeout(() => { try { ff.kill('SIGKILL'); } catch {} }, isUrl ? 35000 : 20000);
-            ff.on('close', (code) => {
-                clearTimeout(killTimer);
-                if (code === 0 && fs.existsSync(outPath)) {
-                    nameWithColour(outPath, outFilename).then((name) => resolve(`/t/${name}`), () => resolve(`/t/${outFilename}`));
-                } else {
-                    resolve(null);
+            // A still-recording file has no header duration; find the real tail position from the last video packet.
+            if (!opts.seekSeconds && (opts.liveEdge || duration <= 0)) {
+                lastPts = await _probeLastPts(videoPath);
+            }
+            const candidates = frameSeekCandidates(duration, { liveEdge: !!opts.liveEdge, lastPts, seekSeconds: opts.seekSeconds });
+            let fallback = null;   // the first frame that decoded at all, kept when every candidate is black
+            for (let i = 0; i < candidates.length; i++) {
+                const tryPath = candidates.length > 1 ? path.join(THUMB_DIR, `${prefix}-${entityId}-${stamp}-try${i}.jpg`) : path.join(THUMB_DIR, outFilename);
+                const made = await grabFrame(videoPath, isUrl, candidates[i], tryPath);
+                if (!made) continue;
+                if (!fallback) fallback = tryPath;
+                const black = await frameIsBlack(tryPath);
+                if (!black) {
+                    if (fallback && fallback !== tryPath) { try { fs.unlinkSync(fallback); } catch { /* */ } }
+                    if (tryPath !== path.join(THUMB_DIR, outFilename)) {
+                        try { fs.renameSync(tryPath, path.join(THUMB_DIR, outFilename)); } catch { /* */ }
+                    }
+                    const name = await nameWithColour(path.join(THUMB_DIR, outFilename), outFilename);
+                    return resolve(`/t/${name}`);
                 }
-            });
-            ff.on('error', () => { clearTimeout(killTimer); resolve(null); });
+                // A black frame is kept only as the last resort; a later point may still show the scene.
+                if (tryPath !== fallback) { try { fs.unlinkSync(tryPath); } catch { /* */ } }
+            }
+            // Every point was black (a night stream, a black screen) or failed: a dark picture beats no picture, but
+            // a black one that decoded is the last resort, and an item that never decoded has none.
+            if (fallback) {
+                try { fs.renameSync(fallback, path.join(THUMB_DIR, outFilename)); } catch { /* */ }
+                const name = await nameWithColour(path.join(THUMB_DIR, outFilename), outFilename);
+                return resolve(`/t/${name}`);
+            }
+            return resolve(null);
         };
         // A throw inside the handler (e.g. spawn failing) must resolve the request, not hang it.
         probe.on('close', (probeCode) => { onProbeClose(probeCode).catch(() => resolve(null)); });
@@ -499,5 +547,7 @@ module.exports = {
     serveThumbnail,
     cleanupOldThumbnails,
     extractFrameToFile,
+    frameSeekCandidates,
+    frameIsBlack,
     THUMB_DIR,
 };
