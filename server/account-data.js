@@ -19,6 +19,8 @@
  *                                     Media then confirms with counts (POST /internal/account-deletions/:id/confirmations).
  */
 const fs = require('fs');
+const path = require('path');
+const config = require('./config');
 
 const SUBJECT_RE = /^usr_[0-9A-HJKMNP-TV-Z]{26}$/;
 const EXPORT_RE = /^exp_[0-9A-HJKMNP-TV-Z]{26}$/;
@@ -46,6 +48,11 @@ async function exportPart(db, subjects) {
     if (vods.length) files.push({ name: 'vods.json', content: vods });
     if (clips.length) files.push({ name: 'clips.json', content: clips });
     if (plain.length) files.push({ name: 'files.json', content: plain });
+    // Composer attachments are not media_objects: the person's own files before (or instead of) a message. Their
+    // metadata goes in attachments.json; the bytes are downloaded from openvibe.media/a/<id>/<name>.
+    const attachments = await db.prepare(`SELECT id, name, kind, mime, size_bytes, message_id, kept_at, created_at, expires_at
+        FROM media_attachments WHERE subject IN ${inList(subjects)} ORDER BY created_at DESC LIMIT ${ROW_LIMIT}`).all(...subjects);
+    if (attachments.length) files.push({ name: 'attachments.json', content: attachments });
     // The share.v1 rows the person owns or is on (step 5): the recording itself is above; this is who it was
     // shared with. `people` is a list of subject ids, never a name.
     const owned = await db.prepare(`SELECT service, kind, resource_id, audience, lock, revision FROM shares WHERE owner_subject->>'id' IN ${inList(subjects)} ORDER BY resource_id DESC LIMIT ${ROW_LIMIT}`).all(...subjects);
@@ -66,6 +73,13 @@ async function erase(db, subjects) {
     const erased = {};
     const retained = {};
     const bump = (o, k) => { o[k] = (o[k] || 0) + 1; };
+    // Composer attachments: the row and the stored bytes, like DELETE /api/v1/attachments/:id does.
+    const attachments = await db.prepare(`SELECT id FROM media_attachments WHERE subject IN ${inList(subjects)}`).all(...subjects);
+    for (const a of attachments) {
+        await db.prepare('DELETE FROM media_attachments WHERE id = ?').run(a.id);
+        try { fs.rmSync(path.join(path.resolve(config.attachments.path), a.id), { recursive: true, force: true }); } catch { /* gone */ }
+        bump(erased, 'attachments');
+    }
     const objs = await db.prepare(`SELECT * FROM media_objects WHERE owner_subject IN ${inList(subjects)} AND lifecycle_status != 'deleted' ORDER BY (kind = 'thumbnail'), created_at`).all(...subjects);
     for (const o of objs) {
         if (await model.isHeld(o.id)) { bump(retained, 'held_media'); continue; }

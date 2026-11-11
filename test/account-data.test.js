@@ -22,7 +22,7 @@ const path = require('path');
     const db = require('../server/db/database').getDb();
     {
         const missing = await uncovered(db, {
-            taskKeyed: ['vods', 'clips', 'files'],
+            taskKeyed: ['vods', 'clips', 'files', 'media_attachments'],
             exempt: {
                 account_data_events: 'the ledger of requests itself: which export and deletion Media applied',
                 assets: 'legacy rows keyed by Live\'s numeric user id, not a Network subject',
