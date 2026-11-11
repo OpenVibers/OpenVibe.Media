@@ -141,7 +141,7 @@ const http = require('http');
     assert.ok(!cards(pending).includes('https://openvibe.live/?ov_from=media'), 'no "go live" card without a player');
 
     // Paste pages are Community's: there is no viewer here (public/routes.js only redirects).
-    assert.ok(!/\bfree\b/i.test(html + pageFrame.baseCss()), 'no cost claims in served HTML');
+    assert.ok(!/\bfree\b(?!\s+tools)/i.test(html + pageFrame.baseCss()), 'no cost claims in served HTML (the shared footer\'s "Free tools" group is a place, not a price)');
 
     // ── End to end through the router: navigation → page, ?raw=1 → bytes path ──
     const express = require('express');
