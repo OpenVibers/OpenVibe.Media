@@ -214,7 +214,8 @@ async function sweepKind(app, kind, { now, batch, minAgeMs }) {
               AND id < ?
             ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW])
         : await db.all(`SELECT id, created_at, thumbnail_url FROM clips
-            WHERE app_id = ? AND (is_public = 1 OR visibility IN ('public', 'unlisted')) AND status = 'ready'
+            WHERE app_id = ? AND (is_public = 1 OR visibility IN ('public', 'unlisted'))
+              AND (status = 'ready' OR (status = 'failed' AND file_path IS NOT NULL))
               AND (file_path IS NOT NULL OR vod_id IS NOT NULL)
               AND id < ?
             ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW]);
