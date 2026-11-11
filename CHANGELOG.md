@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **The shared composer's attachments (2026-11-10, composer.attachment@1).** `POST /api/v1/attachments` takes one
+  multipart `file` from a person (a Network user JWT, or a first-party site's service token naming the person in
+  `X-OV-Subject`), sniffs the kind from the bytes — image, video, audio, file or code — and refuses an executable.
+  Limits are image 20 MB, video 300 MB, audio 50 MB, anything else 25 MB; images get a 640 px JPEG thumbnail and a
+  video its first frame (ffmpeg). `POST /api/v1/attachments/:id/keep` names the message it belongs to, `DELETE` removes
+  the person's own file, and an unkept attachment is swept 24 hours after upload (migrations/0027_attachments.sql).
+  Bytes are served at `/a/<id>/<name>`; CORS is the first-party origin list (server/attachments/origins.js).
+
 - `scripts/orientation-backfill.js` inspects stored JPEG, PNG and WebP originals in batches (dry run by default), bakes
   any surviving EXIF orientation into pixels, removes the embedded details, updates object/location hashes and sizes,
   and rebuilds 320/640 WebP variants. Images without source orientation data are marked `orientation unknown` for the

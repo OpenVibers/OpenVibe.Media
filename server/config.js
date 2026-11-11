@@ -67,6 +67,14 @@ const config = {
         maxSizeMb: intEnv('MAX_FILE_SIZE_MB', 256),
     },
 
+    // Composer attachments (server/attachments/routes.js): one person's file before it is sent. An unkept one
+    // expires after 24 hours; a keep moves it to the kept window. Bytes live under ATTACHMENTS_PATH/<att_…>/.
+    attachments: {
+        path: process.env.ATTACHMENTS_PATH || './data/attachments',
+        ttlHours: intEnv('MEDIA_ATTACHMENT_TTL_HOURS', 24),
+        keepDays: intEnv('MEDIA_ATTACHMENT_KEEP_DAYS', 30),
+    },
+
     // Canonical object model (Wave 4): native v2 uploads, signed delivery, retention,
     // and the public playback object-size invariant (policy, not a copied constant).
     objects: {
