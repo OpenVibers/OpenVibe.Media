@@ -84,8 +84,8 @@ const { spawnSync } = require('child_process');
 
     // ── The job makes both formats, 320 px wide, muted, under 400 KB, and points the row at them ──
     const out = await previewJob.spec.run({ app_id: 'live', params: { kind: 'vod', id: recent } }, {});
-    assert.match(out.preview_url, /^\/p\/vod-\d+-\d+\.mp4$/);
-    assert.match(out.preview_webm_url, /^\/p\/vod-\d+-\d+\.webm$/);
+    assert.match(out.preview_url, /^\/t\/vod-\d+-\d+\.mp4$/);
+    assert.match(out.preview_webm_url, /^\/t\/vod-\d+-\d+\.webm$/);
     assert.ok(out.bytes > 0 && out.bytes <= previewService.MAX_BYTES, `mp4 ${out.bytes} bytes`);
     assert.ok(out.webm_bytes > 0 && out.webm_bytes <= previewService.MAX_BYTES, `webm ${out.webm_bytes} bytes`);
     assert.ok(out.start_seconds >= 0 && out.start_seconds + out.seconds <= 8.1, 'the window is inside the source');

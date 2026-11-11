@@ -3,7 +3,8 @@
  *
  * A finished recording or clip gets a short preview beside its thumbnail, for the hover/centred player the design
  * puts on cards (plan 355): `vod-<id>-<time>.mp4` (H.264) and `.webm` (VP9, VP8 when this ffmpeg has no VP9), both
- * in THUMB_DIR, both served at GET /p/<name>. The row's preview_url is the MP4 (every browser plays it) and
+ * in THUMB_DIR, both served at GET /t/<name> (the thumbnail origin; /p/ belongs to Community's paste URLs). The row's
+ * preview_url is the MP4 (every browser plays it) and
  * preview_webm_url the WebM of the same moment. Files are made by the preview.make job (server/jobs/preview.js)
  * and only for public/unlisted, non-audio-only items.
  *
@@ -41,7 +42,7 @@ async function itemServable(kind, id) {
 }
 
 /** The public URL of a written preview file. */
-const previewUrl = (name) => `/p/${name}`;
+const previewUrl = (name) => `/t/${name}`;
 
 /** The file name of a new preview for `kind`/`id` at `stamp` (the same stamp for both formats). */
 function previewNames(kind, id, stamp = Date.now()) {
