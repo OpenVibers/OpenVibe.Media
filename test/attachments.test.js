@@ -28,7 +28,8 @@ const { serviceAuth, ids } = require('openvibe-contracts');
     const now = Math.floor(Date.now() / 1000);
     const SUBJECT = ids.newId('user');
     const OTHER = ids.newId('user');
-    const personToken = (sub = SUBJECT) => jwt.sign({ iss: 'https://openvibe.network', sub, aud: 'openvibe.media', iat: now, exp: now + 600 }, privateKey.export({ type: 'pkcs8', format: 'pem' }), { algorithm: 'RS256' });
+    // Network's session token: the numeric account id in `sub`, the person's subject in `subject_id`.
+    const personToken = (subject = SUBJECT) => jwt.sign({ iss: 'https://openvibe.network', sub: 42, subject_id: subject, aud: ['openvibe.media', 'openvibe.network'], iat: now, exp: now + 600 }, privateKey.export({ type: 'pkcs8', format: 'pem' }), { algorithm: 'RS256' });
     const serviceToken = (cap = ['media.object.upload']) => serviceAuth.signServiceToken({ iss: 'https://openvibe.network', sub: 'svc:community', actor_type: 'service', aud: ['openvibe.media'], cap, iat: now, exp: now + 300, jti: `tok_${crypto.randomBytes(6).toString('hex')}` }, privateKey.export({ type: 'pkcs8', format: 'pem' }));
 
     const app = express();

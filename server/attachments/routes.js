@@ -111,7 +111,9 @@ async function verifyUser(token) {
         const aud = Array.isArray(p.aud) ? p.aud : [p.aud];
         if (!aud.includes('openvibe.media')) return null;
     }
-    return SUBJECT_RE.test(String(p.sub || '')) ? p : null;
+    // Network's session token carries the numeric account id in `sub` and the person's subject in `subject_id`.
+    const subject = String(p.subject_id || p.sub || '');
+    return SUBJECT_RE.test(subject) ? { payload: p, subject } : null;
 }
 async function attachmentAuth(req, res, next) {
     const token = bearer(req);
@@ -134,8 +136,8 @@ async function attachmentAuth(req, res, next) {
     if (!subject) {
         const user = await verifyUser(token);
         if (!user) return problem(res, 401, 'token.invalid', 'the token is not a valid Network person or media service token');
-        subject = user.sub;
-        principal = user.sub;
+        subject = user.subject;
+        principal = user.subject;
     }
     req.person = { subject, principal };
     next();
