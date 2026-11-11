@@ -285,6 +285,7 @@ nav.tabs a .n{opacity:.75;font-size:.78rem;margin-left:.3rem}nav.tabs a.on .n{op
 /* The fold (the owner's short-pages rule): closed on a phone, and where there is room it looks like the section it
    replaces: a heading and its content, with no card around it. */
 .md-fold-block{margin:32px 0}
+.md-fold-block:last-of-type{margin-bottom:0}
 .md-fold-block>summary{display:flex;align-items:center;justify-content:space-between;gap:10px;min-height:48px;padding:0 16px;cursor:pointer;color:var(--text);font-weight:700;list-style:none;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
 .md-fold-block>summary::-webkit-details-marker{display:none}
 .md-fold-block>summary h2{margin:0;padding:0;border:0;font-size:1.05rem}
