@@ -7,6 +7,7 @@
  *   object.remux           heavy   a stream-copy remux of a vod/clip as a new private object
  *   object.waveform        heavy   the audio waveform (PNG) of a vod/clip as the source's `waveform` variant
  *   object.sprite          heavy   a seek-preview sprite sheet (JPEG, layout in its metadata) as the `sprite` variant
+ *   preview.make          light   the 6 s muted hover preview (MP4 H.264 + WebM, 320 px) of a vod/clip
  *   object.cmaf            heavy   the source as CMAF/HLS segments on its own keyframes, indexed in media_timeline (MEDIA_HLS_ENABLED)
  *   object.pack            heavy   a timeline's durable segments packed into ~60 s chunk objects (byte ranges; MEDIA_HLS_ENABLED)
  *   rendition.create       heavy   an on-demand 720p H.264/AAC rendition of a media object, indexed in media_timeline (MEDIA_HLS_ENABLED + MEDIA_RENDITIONS)
@@ -27,6 +28,7 @@ queue.register('object.split', require('./derive').split);
 queue.register('object.remux', require('./derive').remux);
 queue.register('object.waveform', require('./previews').waveform);
 queue.register('object.sprite', require('./previews').sprite);
+queue.register('preview.make', require('./preview').spec);
 queue.register('object.cmaf', require('./cmaf').spec);
 queue.register('object.pack', require('./pack').spec);
 queue.register('object.startup-tier', require('./startup-tier').spec);

@@ -496,6 +496,14 @@ router.get('/og-image.png', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'static', 'og-image.png'));
 });
 
+// ── Hover previews (6 s muted MP4/WebM; server/thumbnails/preview-service.js) ──
+router.get('/p/:id', async (req, res, next) => {
+    // Not a preview name: a paste slug, which the legacy /p/:slug route below redirects to Community.
+    if (!require('../thumbnails/preview-service').NAME_RE.test(path.basename(String(req.params.id || '')))) return next();
+    try { await require('../thumbnails/preview-service').servePreview(req, res); }
+    catch (err) { console.error('[Public] preview:', err.message); if (!res.headersSent) res.status(500).end(); }
+});
+
 // ── Thumbnails ───────────────────────────────────────────────
 router.get('/t/:id', sharingLib.attachViewer, async (req, res) => {
     if (drill.refuseBytes(res)) return;

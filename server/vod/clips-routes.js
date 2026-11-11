@@ -98,6 +98,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
         // Absolute URLs — cross-origin consumers render these directly.
         playback_url: `${config.publicUrl}/c/${clip.id}`,
         thumbnail_url: require('./finalize')._absUrl(clip.thumbnail_url),
+        preview_url: require('./finalize')._absUrl(clip.preview_url),
+        preview_webm_url: require('./finalize')._absUrl(clip.preview_webm_url),
         // No picture in the source (an audio-only recording's clip): the player shows the avatar card, not a black box.
         audio_only: !!clip.audio_only,
         visibility: clip.visibility || 'public',
@@ -422,6 +424,7 @@ async function _createUploadedClip(req, res) {
         await registerClip(req, clipId, visibility);
 
         require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, clipPath)
+            .then(() => require('../jobs/preview').queuePreview(req.appId, 'clip', clipId))
             .catch(err => console.warn(`[Clips] Thumbnail failed for clip ${clipId}:`, err.message));
 
         console.log(`[Clips] Direct upload: clip ${clipId} (${req.appId}, ${duration.toFixed ? duration.toFixed(1) : duration}s)`);

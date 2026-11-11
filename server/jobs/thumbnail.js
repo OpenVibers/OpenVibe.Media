@@ -158,11 +158,11 @@ function hasPicture(row) {
     try { return fs.existsSync(path.join(require('../thumbnails/thumbnail-service').THUMB_DIR, name)); } catch { return false; }
 }
 
-/** This VOD's latest thumbnail job (any status), for the due time. */
-async function lastAttempt(appId, id) {
+/** This item's latest thumbnail job (any status), for the due time. */
+async function lastAttempt(appId, kind, id) {
     return await db.get(`SELECT status, error_code, created_at FROM media_jobs
-        WHERE app_id = ? AND job_type = ? AND params::jsonb ->> 'kind' = 'vod' AND params::jsonb ->> 'id' = ?
-        ORDER BY created_at DESC, id DESC LIMIT 1`, [appId, TYPE, String(id)]);
+        WHERE app_id = ? AND job_type = ? AND params::jsonb ->> 'kind' = ? AND params::jsonb ->> 'id' = ?
+        ORDER BY created_at DESC, id DESC LIMIT 1`, [appId, TYPE, kind, String(id)]);
 }
 
 /** The earliest moment the next attempt may run; Infinity while one is queued or running. */
@@ -185,46 +185,63 @@ function dueAt(last) {
 async function sweepMissing({ now = Date.now(), limit = null, appId = null, minAgeMs = MIN_AGE_MS } = {}) {
     const batch = Math.max(1, Math.min(20, Number(limit) || config.jobs.thumbnailBackfillBatch || 3));
     const apps = appId ? [{ app_id: appId }]
-        : await db.all(`SELECT DISTINCT app_id FROM vods WHERE is_public = 1 AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0`);
+        : await db.all(`SELECT DISTINCT app_id FROM vods WHERE (is_public = 1 OR visibility IN ('public', 'unlisted'))
+              AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
+            UNION SELECT DISTINCT app_id FROM clips WHERE is_public = 1 OR visibility IN ('public', 'unlisted')`);
     let missing = 0, queued = 0;
     for (const { app_id: app } of apps) {
-        // Walk the whole library a window at a time (newest first, then older), not just the newest rows:
-        // an old recording with a lost picture is a stored VOD too. The cursor wraps when the walk ends.
-        const cursor = Number(await db.getSetting(cursorKey(app))) || 0;
-        const rows = await db.all(`SELECT id, created_at, thumbnail_url FROM vods
-            WHERE app_id = ? AND is_public = 1
+        const v = await sweepKind(app, 'vod', { now, batch, minAgeMs });
+        missing += v.missing; queued += v.queued;
+        const c = await sweepKind(app, 'clip', { now, batch, minAgeMs });
+        missing += c.missing; queued += c.queued;
+    }
+    return { missing, queued };
+}
+
+/**
+ * One kind's walk: the whole library a window at a time (newest first, then older), not just the newest rows: an old
+ * item with a lost or never-made picture is a stored VOD/clip too. The cursor wraps when the walk ends.
+ */
+async function sweepKind(app, kind, { now, batch, minAgeMs }) {
+    const cursorKeyFor = kind === 'vod' ? cursorKey(app) : `thumbnail_backfill.clips.${app}`;
+    const cursor = Number(await db.getSetting(cursorKeyFor)) || 0;
+    const rows = kind === 'vod'
+        ? await db.all(`SELECT id, created_at, thumbnail_url FROM vods
+            WHERE app_id = ? AND (is_public = 1 OR visibility IN ('public', 'unlisted'))
               AND COALESCE(is_recording, 0) = 0 AND COALESCE(clips_only, 0) = 0
               AND (file_path IS NOT NULL OR object_id IS NOT NULL)
               AND COALESCE(health_status, '') NOT IN ('missing_file', 'zero_byte')
               AND id < ?
+            ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW])
+        : await db.all(`SELECT id, created_at, thumbnail_url FROM clips
+            WHERE app_id = ? AND (is_public = 1 OR visibility IN ('public', 'unlisted')) AND status = 'ready'
+              AND (file_path IS NOT NULL OR vod_id IS NOT NULL)
+              AND id < ?
             ORDER BY id DESC LIMIT ?`, [app, cursor || '9223372036854775807', CANDIDATE_WINDOW]);
-        let appMissing = 0, appQueued = 0, examined = 0, lastId = 0;
-        for (const row of rows) {
-            examined++;
-            lastId = Number(row.id);
-            if (hasPicture(row)) continue;
-            const created = dbTimeMs(row.created_at);
-            if (Number.isFinite(created) && now - created < minAgeMs) continue;   // finalize may still make it
-            appMissing++;
-            if (now < dueAt(await lastAttempt(app, row.id))) continue;
-            try {
-                const out = await require('./queue').enqueue({
-                    appId: app, type: TYPE, params: { kind: 'vod', id: row.id },
-                    dedupeActive: true, createdBy: 'system:thumbnail-backfill',
-                });
-                if (out && out.created && appQueued < batch) appQueued++;
-                if (appQueued >= batch) break;
-            } catch (err) {
-                console.warn(`[Thumbnails] backfill could not queue vod ${row.id}: ${err.message}`);
-            }
+    let missing = 0, queued = 0, examined = 0, lastId = 0;
+    for (const row of rows) {
+        examined++;
+        lastId = Number(row.id);
+        if (hasPicture(row)) continue;
+        const created = dbTimeMs(row.created_at);
+        if (Number.isFinite(created) && now - created < minAgeMs) continue;   // finalize/cut may still make it
+        missing++;
+        if (now < dueAt(await lastAttempt(app, kind, row.id))) continue;
+        try {
+            const out = await require('./queue').enqueue({
+                appId: app, type: TYPE, params: { kind, id: row.id },
+                dedupeActive: true, createdBy: 'system:thumbnail-backfill',
+            });
+            if (out && out.created && queued < batch) queued++;
+            if (queued >= batch) break;
+        } catch (err) {
+            console.warn(`[Thumbnails] backfill could not queue ${kind} ${row.id}: ${err.message}`);
         }
-        // A stopped batch resumes at the row after the one it stopped on; a finished walk wraps to the top.
-        const done = examined === rows.length && rows.length < CANDIDATE_WINDOW;
-        await db.setSetting(cursorKey(app), done ? 0 : lastId, 'number');
-        if (appQueued) console.log(`[Thumbnails] backfill: queued ${appQueued} thumbnail job(s); ${appMissing} recording(s) on ${app} have no usable picture`);
-        missing += appMissing;
-        queued += appQueued;
     }
+    // A stopped batch resumes at the row after the one it stopped on; a finished walk wraps to the top.
+    const done = examined === rows.length && rows.length < CANDIDATE_WINDOW;
+    await db.setSetting(cursorKeyFor, done ? 0 : lastId, 'number');
+    if (queued) console.log(`[Thumbnails] backfill: queued ${queued} ${kind} thumbnail job(s); ${missing} on ${app} have no usable picture`);
     return { missing, queued };
 }
 

@@ -69,6 +69,9 @@ async function vodPublic(vod, { readiness = false, hls } = {}) {
         // directly; relative paths resolved against the app's origin and broke.
         playback_url: `${config.publicUrl}/v/${vod.id}`,
         thumbnail_url: _absUrl(vod.thumbnail_url),
+        // The hover preview (preview.make): 6 s muted MP4, with the WebM of the same moment beside it. Null until made.
+        preview_url: _absUrl(vod.preview_url),
+        preview_webm_url: _absUrl(vod.preview_webm_url),
         // No picture in the source (an audio-only browser broadcast, Media#240): one probe at finalize says so once.
         audio_only: !!vod.audio_only,
         storage_provider: vod.storage_provider || 'local',
@@ -422,6 +425,8 @@ async function _doFinalize(vodId, opts) {
         payload: async () => await vodPublic(await db.getVodById(vodId), { hls: false }),
     });
     const ready = await db.getVodById(vodId);
+    // The hover preview waits in the queue behind the row's own finalize; a preview is an extra, never a failure.
+    try { require('../jobs/preview').queuePreview(vod.app_id, 'vod', vodId).catch(() => {}); } catch { /* jobs off */ }
     // Segment-native video (MEDIA_HLS_ENABLED): the finished recording's timeline is cut by object.cmaf. A queue error
     // never fails the finalize; GET …/download?format=json queues it again on the first request.
     try {

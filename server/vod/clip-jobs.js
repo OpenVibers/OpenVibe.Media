@@ -115,6 +115,7 @@ async function _recutClip(clipId, { reason = 'recut', viaJob = false, job = null
     // Thumbnail first (the clip.ready payload carries it), then the ready transition, the clip's
     // object and its event in one transaction (announce).
     try { await require('../thumbnails/thumbnail-service').generateClipThumbnail(clipId, cut.filePath); } catch { /* */ }
+    try { await require('../jobs/preview').queuePreview(clip.app_id, 'clip', clipId); } catch { /* */ }
     await announce(clip.app_id, 'clip.ready', {
         change: async () => {
             await objects().withObject('clip', clipId, async () => await db.run(`UPDATE clips SET file_path = ?, duration_seconds = ?, end_time = ?, status = 'ready', cut_error = NULL, cut_next_at = NULL,
