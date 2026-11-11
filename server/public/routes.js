@@ -496,15 +496,9 @@ router.get('/og-image.png', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'static', 'og-image.png'));
 });
 
-// ── Hover previews (6 s muted MP4/WebM; server/thumbnails/preview-service.js) ──
-router.get('/p/:id', async (req, res, next) => {
-    // Not a preview name: a paste slug, which the legacy /p/:slug route below redirects to Community.
-    if (!require('../thumbnails/preview-service').NAME_RE.test(path.basename(String(req.params.id || '')))) return next();
-    try { await require('../thumbnails/preview-service').servePreview(req, res); }
-    catch (err) { console.error('[Public] preview:', err.message); if (!res.headersSent) res.status(500).end(); }
-});
-
-// ── Thumbnails ───────────────────────────────────────────────
+// ── Thumbnails and their hover previews ─────────────────────
+// A preview lives in the same directory and shares the thumbnail route (its file name is vod|clip-<id>-<time>.mp4|webm):
+// /p/ is Community's legacy paste namespace in production, so it cannot be this route's home.
 router.get('/t/:id', sharingLib.attachViewer, async (req, res) => {
     if (drill.refuseBytes(res)) return;
     // Open to every origin like the other public images: Live's player samples a stream thumbnail's colours on a
@@ -512,6 +506,10 @@ router.get('/t/:id', sharingLib.attachViewer, async (req, res) => {
     // Whoever has the URL can already load the image; this lets a page read its pixels.
     res.set('Access-Control-Allow-Origin', '*');
     res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+    const previewName = path.basename(String(req.params.id || ''));
+    if (require('../thumbnails/preview-service').NAME_RE.test(previewName)) {
+        return require('../thumbnails/preview-service').servePreview(req, res);
+    }
     // A Specific-people recording's picture is part of it: only the owner and the people on its list may fetch
     // it, by the same check the watch page and its bytes use. A private thumbnail keeps its old unguessable-URL
     // behaviour (changing that is not this step).
