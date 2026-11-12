@@ -78,7 +78,7 @@ function createDetector({ config, db, log = console, fetchImpl = globalThis.fetc
         if (!enabled) return { scanned: false, reason: 'disabled' };
         if (!obj || obj.lifecycle_status !== 'ready' || !IMAGE_TYPES.includes(String(obj.mime_type || '').toLowerCase())) return { scanned: false, reason: 'not_image' };
         const md = model.parseJson(obj.metadata, {});
-        if (md.orientation_status && !['orientation unknown', 'orientation applied'].includes(md.orientation_status)) return { scanned: false, reason: 'already_settled' };
+        if (md.orientation_status && md.orientation_status !== 'orientation unknown') return { scanned: false, reason: 'already_settled' };
         const file = await localFile(obj);
         if (!file) return { scanned: false, reason: 'no_local_copy' };
         // EXIF did settle it: the pixels are the source of truth and the detector is not asked.
