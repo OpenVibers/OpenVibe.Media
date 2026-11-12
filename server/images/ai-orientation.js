@@ -75,7 +75,6 @@ function createDetector({ config, db, log = console, fetchImpl = globalThis.fetc
      * → { scanned: true, status, rotation, confidence, turned } | { scanned: false, reason }
      */
     async function detect(obj, { apply = true } = {}) {
-        if (!enabled) return { scanned: false, reason: 'disabled' };
         if (!obj || obj.lifecycle_status !== 'ready' || !IMAGE_TYPES.includes(String(obj.mime_type || '').toLowerCase())) return { scanned: false, reason: 'not_image' };
         const md = model.parseJson(obj.metadata, {});
         if (md.orientation_status && md.orientation_status !== 'orientation unknown') return { scanned: false, reason: 'already_settled' };
@@ -94,6 +93,9 @@ function createDetector({ config, db, log = console, fetchImpl = globalThis.fetc
         if (apply && md.orientation_status !== 'orientation unknown') {
             await model.updateObject(obj.id, { metadata: { ...md, orientation_status: 'orientation unknown', orientation_source: 'none' } });
         }
+        // Marked before the detector is even configured: a picture seen while the feature is off or unconfigured is
+        // still found by the batch on the day the owner turns it on.
+        if (!enabled) return { scanned: false, reason: 'disabled' };
         if (!apply) return { scanned: true, rotation: null, confidence: null, turned: false };
         // A detector that just answered "off" is not asked again for a minute: one uploader's picture does not need
         // an AI request while the owner has the feature off.
