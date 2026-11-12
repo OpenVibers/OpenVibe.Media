@@ -274,7 +274,7 @@ async function _finalizeHandler(req, res) {
             segmentPath: chunkRec && chunkRec.currentSegmentPath !== chunkRec.filePath ? chunkRec.currentSegmentPath : null,
         });
         if (!result) return res.status(409).json({ error: 'Nothing to finalize (finalization already in progress or VOD discarded)' });
-        res.json({ vod: await vodPublic(result, { readiness: true }) });
+        res.json({ vod: await vodPublic(result, { readiness: true, counts: true }) });
     } catch (err) {
         console.error('[VOD] Finalize error:', err.message);
         res.status(500).json({ error: 'Failed to finalize VOD' });
@@ -315,8 +315,12 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
         const recs = await require('./recordings').summaries(vods.map((v) => v.id));
         const sharing = sharingOf(req);
         const audiences = sharing ? await sharing.audiencesOf('vod', vods.map((v) => v.id)) : new Map();
-        res.json({ vods: (await Promise.all(vods.map(async v => ({ ...await vodPublic({ ...v, audience: audiences.get(Number(v.id)) }, { readiness: true, hls: hls.get(String(v.object_id)) || null }),
-            ...(recs.has(Number(v.id)) && { recording: recs.get(Number(v.id)) }) })))), total, limit, offset, hasMore: offset + vods.length < total });
+        const outVods = (await Promise.all(vods.map(async v => ({ ...await vodPublic({ ...v, audience: audiences.get(Number(v.id)) }, { readiness: true, hls: hls.get(String(v.object_id)) || null }),
+            ...(recs.has(Number(v.id)) && { recording: recs.get(Number(v.id)) }) }))));
+        // One batched read of the view store for the page the app renders (never one query a card).
+        const viewCounts = await require('../views/unified').countsMany(outVods.map((v) => ({ service: 'media', kind: 'vod', id: String(v.id) })));
+        for (const v of outVods) v.counts = viewCounts[`media:vod:${v.id}`];
+        res.json({ vods: outVods, total, limit, offset, hasMore: offset + vods.length < total });
     } catch (err) {
         console.error('[VOD] List error:', err.message);
         res.status(500).json({ error: 'Failed to list VODs' });
@@ -380,7 +384,7 @@ router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, re
             vod.audience = await sharing.audienceOf('vod', vod.id);
             if (vod.audience === 'people') vod.share_members = await membersOf('vod', vod.id);
         }
-        res.json({ ...await vodPublic(vod, { readiness: true }), ai_transcript: vod.ai_transcript || null,
+        res.json({ ...await vodPublic(vod, { readiness: true, counts: true }), ai_transcript: vod.ai_transcript || null,
             ...(rec && { recording: { ...rec.recording, this_part: rec.part } }) });
     } catch (err) {
         console.error('[VOD] Get error:', err.message);
@@ -419,7 +423,7 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
         if (visibility !== undefined || title !== undefined) await require('./recordings').syncPart(vod.id, { visibility, title });
         // Made public (or already public): its watch page and the sitemap are indexable now.
         if (visibility !== undefined) await require('../indexnow-notify').pingWatch('vod', await db.getVodById(vod.id));
-        res.json({ vod: await vodPublic(await db.getVodById(vod.id, req.appId), { readiness: true }) });
+        res.json({ vod: await vodPublic(await db.getVodById(vod.id, req.appId), { readiness: true, counts: true }) });
     } catch (err) {
         console.error('[VOD] Update error:', err.message);
         res.status(500).json({ error: 'Failed to update VOD' });

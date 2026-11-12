@@ -100,12 +100,14 @@ async function recordView(type, id, o = {}) {
         if (!row) {
             await db.run('INSERT INTO content_visits (content_type, content_id, visitor) VALUES (?, ?, ?) ON CONFLICT DO NOTHING', [type, id, visitor]);
             await db.run(`UPDATE ${t.table} SET ${t.raw} = COALESCE(${t.raw},0) + 1, unique_views = COALESCE(unique_views,0) + 1 WHERE id = ?`, [id]);
+            await require('./unified').addLegacyView(type, id);
             return { counted: true, unique: true, ...await counts(type, id) };
         }
         const lastMs = new Date(String(row.last_at).replace(' ', 'T') + 'Z').getTime();
         if (cd > 0 && Date.now() - lastMs < cd * 1000) return { counted: false, unique: false, reason: 'cooldown', ...await counts(type, id) };
         await db.run('UPDATE content_visits SET last_at = ov_now(), visits = visits + 1 WHERE content_type = ? AND content_id = ? AND visitor = ?', [type, id, visitor]);
         await db.run(`UPDATE ${t.table} SET ${t.raw} = COALESCE(${t.raw},0) + 1 WHERE id = ?`, [id]);
+        await require('./unified').addLegacyView(type, id);
         return { counted: true, unique: false, ...await counts(type, id) };
     } catch (e) {
         console.warn('[Views] record failed:', e.message);

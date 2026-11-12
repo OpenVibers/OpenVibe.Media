@@ -67,7 +67,7 @@ const clipUpload = multer({
 // the clip.ready / clip.failed payloads leave them out, as vodPublic's do. `hls` selects the playlist
 // fields: undefined = discover them for this row (a single-item read), false = omit them (an event payload
 // must never carry a signed URL into the outbox), an object = the answer a list route already batched.
-async function clipPublic(clip, { readiness = false, hls } = {}) {
+async function clipPublic(clip, { readiness = false, hls, counts = false } = {}) {
     if (!clip) return null;
     const out = {
         unique_views: clip.unique_views || 0,
@@ -123,6 +123,8 @@ async function clipPublic(clip, { readiness = false, hls } = {}) {
     if (hls === undefined) Object.assign(out, await require('../objects/hls').discovery(clip.object_id) || {});
     else if (hls) Object.assign(out, hls);
     if (readiness) out.readiness = await require('../objects/readiness').forRow(clip);
+    // The one view store's numbers (server/views/unified.js); see vodPublic's note on why this is opt-in.
+    if (counts) out.counts = await require('../views/unified').countsFor({ service: 'media', kind: 'clip', id: String(clip.id) });
     return out;
 }
 
@@ -471,7 +473,11 @@ router.get('/', tenantAuth({ verb: 'list', allowUser: true }), async (req, res) 
         const clips = await db.listClips(req.appId, filters);
         const total = await db.countClips(req.appId, filters);
         const hls = await require('../objects/hls').discoveryMany(clips);
-        res.json({ clips: await Promise.all(clips.map(async c => await clipPublic(c, { readiness: true, hls: hls.get(String(c.object_id)) || null }))), total, limit, offset, hasMore: offset + clips.length < total });
+        const outClips = await Promise.all(clips.map(async c => await clipPublic(c, { readiness: true, hls: hls.get(String(c.object_id)) || null })));
+        // One batched read of the view store for the page the app renders (never one query a card).
+        const viewCounts = await require('../views/unified').countsMany(outClips.map((c) => ({ service: 'media', kind: 'clip', id: String(c.id) })));
+        for (const c of outClips) c.counts = viewCounts[`media:clip:${c.id}`];
+        res.json({ clips: outClips, total, limit, offset, hasMore: offset + clips.length < total });
     } catch (err) {
         console.error('[Clips] List error:', err.message);
         res.status(500).json({ error: 'Failed to list clips' });
@@ -507,7 +513,7 @@ router.get('/:id', tenantAuth({ verb: 'read', allowUser: true }), async (req, re
         }
         // Bare object, mirroring GET /vods/:id per CONTRACTS.md.
         // Detail responses carry the transcript too (lists stay light).
-        res.json({ ...await clipPublic(clip, { readiness: true }), ai_transcript: clip.ai_transcript || null });
+        res.json({ ...await clipPublic(clip, { readiness: true, counts: true }), ai_transcript: clip.ai_transcript || null });
     } catch (err) {
         res.status(500).json({ error: 'Failed to get clip' });
     }
@@ -661,7 +667,7 @@ router.put('/:id', tenantAuth({ verb: 'write' }), async (req, res) => {
             // Made public (or already public): its watch page and the sitemap are indexable now.
             await require('../indexnow-notify').pingWatch('clip', await db.getClipById(clip.id));
         }
-        res.json({ clip: await clipPublic(await db.getClipById(clip.id, req.appId), { readiness: true }) });
+        res.json({ clip: await clipPublic(await db.getClipById(clip.id, req.appId), { readiness: true, counts: true }) });
     } catch (err) {
         res.status(500).json({ error: 'Failed to update clip' });
     }

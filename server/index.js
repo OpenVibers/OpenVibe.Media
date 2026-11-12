@@ -254,7 +254,10 @@ const ready = (async () => {
         }
     });
 
-    if (!drill.enabled) setInterval(async () => { try { const n = await require('./views/service').prune(30); if (n) console.log(`[Views] pruned ${n} stale visit row(s)`); } catch { /* */ } }, 12 * 3600 * 1000);
+    if (!drill.enabled) setInterval(async () => {
+        try { const n = await require('./views/service').prune(30); if (n) console.log(`[Views] pruned ${n} stale visit row(s)`); } catch { /* */ }
+        try { const n = await require('./views/unified').prune(30); if (n) console.log(`[Views] pruned ${n} stale session row(s)`); } catch { /* */ }
+    }, 12 * 3600 * 1000);
     // The object explorer (WS-G task 12): a signed-in person's own objects and usage, and the operator views
     // (server/me/routes.js). /api/v2/me sits ahead of /api/v2/:app/…, so "me" is never a tenant there.
     const me = require('./me/routes').createMeRoutes({ auth: userAuthClient });
@@ -305,6 +308,10 @@ const ready = (async () => {
         app.use('/a', attachments.publicRouter);
         if (!drill.enabled) app.locals.attachmentsCleanup = attachments.startCleanup();
     }
+    // The one view API (server/views/unified.js): every content kind, from a browser beacon on any site. It sits
+    // before the tenant routes and takes no app key, cookie or user id — only a Network person token when the viewer
+    // has one. /api/v1/:app/views below is the older app-facing counter and keeps answering (N-1).
+    app.use('/api/v1/views', require('./views/api'));
     app.use('/api/v1/:app/views', require('./views/routes'));
     // GET /api/v1/:app/watch/:watch_id: which item a watch id is (server/watch-routes.js, plan track U).
     app.use('/api/v1/:app/watch', require('./watch-routes'));

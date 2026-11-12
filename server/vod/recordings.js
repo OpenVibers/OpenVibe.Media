@@ -248,14 +248,18 @@ const fail = (res, err) => {
 router.get('/object/:id', tenantAuth({ verb: 'read' }), async (req, res) => {
     try {
         const rec = await get(req.appId, req.params.id);
-        return rec ? res.json(rec) : res.status(404).json({ error: 'Recording not found', code: 'media.recording.not_found' });
+        if (!rec) return res.status(404).json({ error: 'Recording not found', code: 'media.recording.not_found' });
+        rec.counts = rec.vod_id ? await require('../views/unified').countsFor({ service: 'media', kind: 'vod', id: String(rec.vod_id) }) : null;
+        return res.json(rec);
     } catch (err) { return fail(res, err); }
 });
 
 router.get('/:key', tenantAuth({ verb: 'read' }), async (req, res) => {
     try {
         const rec = await byKey(req.appId, req.params.key);
-        return rec ? res.json(rec) : res.status(404).json({ error: 'Recording not found', code: 'media.recording.not_found' });
+        if (!rec) return res.status(404).json({ error: 'Recording not found', code: 'media.recording.not_found' });
+        rec.counts = rec.vod_id ? await require('../views/unified').countsFor({ service: 'media', kind: 'vod', id: String(rec.vod_id) }) : null;
+        return res.json(rec);
     } catch (err) { return fail(res, err); }
 });
 

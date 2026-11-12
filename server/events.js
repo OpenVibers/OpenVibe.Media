@@ -122,6 +122,23 @@ async function record(outcome, appId, data) {
     return await enqueue(eventType, appId, subject, data, eventType === 'media.storage.recovered' ? 'low' : 'important');
 }
 
+/**
+ * Queue one counted view or first engagement (media.viewed / media.engaged) inside the transaction that updates the
+ * counters. Its payload is the Contracts projection (ref, how, times, site, creator, concurrent) and carries no IP,
+ * user agent or raw session id. Low priority: a view is never an alert.
+ */
+async function recordView(eventType, subject, payload) {
+    if (!outbox) return null;
+    return await outbox.enqueue(inTx(), {
+        event_type: eventType,
+        actor: { type: 'service', id: 'media' },
+        subject,
+        visibility: 'internal',
+        priority: 'low',
+        payload,
+    });
+}
+
 /** Queue one placement decision inside its transaction; disabled and sandbox outboxes return null. */
 async function recordPlacement(eventType, appId, subject, payload, { priority = 'low' } = {}) {
     if (!PLACEMENT_TYPES.has(eventType)) throw new Error(`unknown placement event ${eventType}`);
@@ -349,4 +366,5 @@ function _reset() {
     stats.queued = 0; stats.lastError = null;
 }
 
-module.exports = { init, initWriter, record, publish, recordPlacement, recordIndexDocument, recordModeration, recordJob, recordUsage, checkUsage, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, PLACEMENT_TYPES, JOB_TRANSITIONS, _reset };
+module.exports = {
+    recordView, init, initWriter, record, publish, recordPlacement, recordIndexDocument, recordModeration, recordJob, recordUsage, checkUsage, recordObjectChanges, drainObjectChanges, discardObjectChanges, objectChangeEvent, kick, status, TYPES, PLACEMENT_TYPES, JOB_TRANSITIONS, _reset };

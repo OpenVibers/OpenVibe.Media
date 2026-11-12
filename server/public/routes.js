@@ -296,6 +296,9 @@ async function serveMediaRecord(kind, record, req, res) {
         if ((record.app_id || 'live') === 'live' && !record.watch_id) {
             record.watch_id = await require('../watch-ids').ensure(kind, record.id);
         }
+        // The one view store's numbers for the page (server/views/unified.js); a legacy row with no store row
+        // still shows its view_count, and the store is where the new API's views and engagement land.
+        record.counts = await require('../views/unified').countsFor({ service: 'media', kind, id: String(record.id) });
         res.set('Cache-Control', cache.htmlHeaders(visibility === 'public' ? { maxAge: 60, swr: 0 } : { private: true }));
         return res.type('html').send(pages.renderWatchPage(kind, record, await require('../objects/readiness').forRow(record)));
     }

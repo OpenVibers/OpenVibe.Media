@@ -41,7 +41,7 @@ function isFinalizing(vodId) {
 // `hls` selects the playlist fields: undefined = discover
 // them for this row (a single-item read), false = omit them (an event payload must never carry a signed
 // URL into the outbox), an object = the answer the list route already batched (objects/hls.discoveryMany).
-async function vodPublic(vod, { readiness = false, hls } = {}) {
+async function vodPublic(vod, { readiness = false, hls, counts = false } = {}) {
     if (!vod) return null;
     const out = {
         unique_views: vod.unique_views || 0,
@@ -102,6 +102,9 @@ async function vodPublic(vod, { readiness = false, hls } = {}) {
     if (hls === undefined) Object.assign(out, await require('../objects/hls').discovery(vod.object_id) || {});
     else if (hls) Object.assign(out, hls);
     if (readiness) out.readiness = await require('../objects/readiness').forRow(vod);
+    // The one view store's numbers (server/views/unified.js): views, engaged viewers, preview share and live peak.
+    // Off by default: an event payload (vod.ready) must not carry a number that is not its state change.
+    if (counts) out.counts = await require('../views/unified').countsFor({ service: 'media', kind: 'vod', id: String(vod.id) });
     return out;
 }
 
