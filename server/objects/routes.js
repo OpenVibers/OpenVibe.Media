@@ -15,6 +15,7 @@
  * GET    /                    cursor list (?namespace&kind&visibility&status&owner&user_id&include_deleted&limit&cursor)
  * DELETE /:id                 soft delete (bytes kept MEDIA_DELETE_RETENTION_DAYS); 409 when held
  * POST   /:id/restore         undo a soft delete inside the retention period
+ * POST   /:id/rotate          turn a ready JPEG/PNG/WebP picture 90/180/270 degrees (owner only; audited)
  * GET    /:id/download        302 to the public location, or a signed short-lived URL for private objects
  * GET    /:id/holds           retention holds (?all=1 includes released), and the holds a clip inherits from its VOD
  * POST   /:id/holds           place a hold  { kind, reason, note, placed_by | created_by }   (app key only)
@@ -481,6 +482,16 @@ async function completeUpload(req, res, obj, { expectedHash = null } = {}) {
     });
     await namespaces.reconcileChain(req.appRow, obj.namespace);
     const current = await model.getObject(obj.id);
+    // A new picture whose EXIF did not settle its orientation is offered to the owner's detector (pictures, part 3).
+    // It is a network call to OpenVibe.AI, so it never holds the upload's answer; the detector itself records
+    // "orientation unknown" even when the owner has it off, so a later batch finds the picture.
+    if (config.orientation.enabled && current && current.kind === 'file' && /^image\/(jpeg|png|webp)$/i.test(current.mime_type || '')) {
+        setImmediate(() => {
+            require('../images/ai-orientation').createDetector({ config, db }).detect(current).catch((err) => {
+                console.warn(`[Orientation] upload ${current.id}: ${String((err && err.message) || err).slice(0, 200)}`);
+            });
+        });
+    }
     if (current.review_status === 'pending') {
         const reviewed = await review.reviewObject(current);
         return res.json(await model.objectPublic(reviewed));
@@ -826,6 +837,32 @@ router.post('/:id/restore', remove, limits('media.object.restore', { minute: 60,
     if (!back) return problem(res, 410, 'media.object.purged', 'The retention period has passed and the bytes are gone');
     await namespaces.reconcileChain(req.appRow, obj.namespace);
     res.json(await model.objectPublic(back));
+});
+
+// A quarter turn by hand (pictures, 2026-11-11 part 4): the owner of the picture, or a first-party service acting for
+// them with X-OV-Subject. The stored file is turned and the original is kept beside it; every size follows because
+// the variants are made from the same file. The who and when stay in the object's metadata.
+router.post('/:id/rotate', upload, limits('media.object.rotate', { minute: 60, hour: 1200 }), async (req, res) => {
+    try {
+        const obj = await load(req, res, 'write');
+        if (!obj) return;
+        const subject = subjectFrom(req);
+        if (subject === undefined) return problem(res, 400, 'media.rotate.invalid', 'X-OV-Subject must be a user subject');
+        const owner = (req.authType === 'user' && obj.owner_user_id != null && obj.owner_user_id === req.userId)
+            || (Boolean(subject) && Boolean(obj.owner_subject) && subject === obj.owner_subject);
+        if (!owner) return problem(res, 403, 'media.rotate.forbidden', 'Only the picture\'s owner can turn it');
+        const { rotateObject, degreesOf } = require('../images/rotate');
+        const degrees = degreesOf(req.body);
+        const by = subject ? `user:${subject}` : `user_id:${req.userId}`;
+        const updated = await rotateObject(obj, degrees, { by });
+        await namespaces.reconcileChain(req.appRow, obj.namespace);
+        const out = await model.objectPublic(updated);
+        return res.json({ ...out, rotation: Number(model.parseJson(updated.metadata, {}).rotation) || 0 });
+    } catch (err) {
+        if (err && err.code && err.status) return problem(res, err.status, err.code, err.message);
+        console.error('[Objects] rotate error:', err.message);
+        return problem(res, 500, 'media.object.rotate_failed', 'Failed to turn the picture');
+    }
 });
 
 router.get('/:id/download', read, limits('media.object.download'), async (req, res) => {

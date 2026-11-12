@@ -653,6 +653,14 @@ model current. Full reference: **[docs/object-model.md](docs/object-model.md)**.
   `MEDIA_SIGNING_SECRET`). App key, or a Network service token with
   `media.object.upload` / `media.object.read` for namespace `:app`;
   `X-OV-Subject` sets the owner. `POST /:id/review` applies a review (see Unsafe-image review).
+  `POST /:id/rotate { degrees | quarter_turns }` turns a ready JPEG/PNG/WebP picture clockwise by 90, 180 or
+  270 degrees; only its owner (the `X-OV-Subject` or app user it belongs to) may. The stored pixels are turned,
+  the uploader's file is kept beside them as `<file>.original`, and every size follows because the variants are
+  made from the stored file. Each turn is recorded with who and when in the object's `metadata.rotation_audit`.
+  A picture whose EXIF did not settle its orientation is marked `orientation_status: orientation unknown`;
+  with the owner's detector on in OpenVibe.AI (`pics.orientation`; off by default) `server/images/ai-orientation.js`
+  asks it about a 256 px copy and turns the picture only above the owner's confidence. `node
+  scripts/orientation-detect.js [--apply] [--all]` walks the unknown pictures in batches (dry run counts, no spend).
 - **Retention holds** — `media_holds` (`moderation`, `dmca`, `creator_pin`,
   `admin`, `evidence`; reason, placed by/at, released by/at, note; `/:id/holds`
   and the staff routes `/api/v1/:app/admin/storage/holds`, app key only): a held

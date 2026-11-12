@@ -192,6 +192,23 @@ const config = {
         internalUrl: (process.env.OV_NETWORK_INTERNAL_URL || 'http://127.0.0.1:4000').replace(/\/$/, ''),
     },
 
+    // OpenVibe.AI, for the picture-orientation detector (server/images/ai-orientation.js): Media asks the
+    // `pics.orientation` workflow with its own Network service token. The internal URL defaults to the host's own
+    // AI service; with no OV_OAUTH_CLIENT_SECRET there is no token and the detector stays off.
+    ai: {
+        internalUrl: (process.env.OV_AI_INTERNAL_URL || 'http://127.0.0.1:4700').replace(/\/$/, ''),
+        audience: process.env.OV_AI_AUDIENCE || 'openvibe.ai',
+        clientId: process.env.OV_OAUTH_CLIENT_ID || 'media',
+        clientSecret: process.env.OV_OAUTH_CLIENT_SECRET || '',
+        timeoutMs: intEnv('MEDIA_AI_TIMEOUT_MS', 60000),
+    },
+    orientation: {
+        // On upload and in the batch script; MEDIA_ORIENTATION=off stops both. Whether a picture is actually turned
+        // is the owner's setting in AI (off by default), not this one.
+        enabled: !['0', 'false', 'off'].includes(String(process.env.MEDIA_ORIENTATION || '').toLowerCase()),
+        batch: Math.max(1, Math.min(500, intEnv('MEDIA_ORIENTATION_BATCH', 50))),
+    },
+
     // Usage readings → OpenVibe.Billing (plan T5 step 14; server/billing.js). Off by default:
     // MEDIA_BILLING_INTERVAL_MS=0 starts no timer and aggregates/sends nothing. With an interval but no
     // OV_BILLING_URL (or no OV_OAUTH_CLIENT_SECRET) readings are aggregated and stay queued in billing_readings.
