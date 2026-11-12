@@ -82,7 +82,7 @@ function createDetector({ config, db, log = console, fetchImpl = globalThis.fetc
         if (!file) return { scanned: false, reason: 'no_local_copy' };
         // EXIF did settle it: the pixels are the source of truth and the detector is not asked.
         const meta = await (sharp || require('sharp'))(file, { limitInputPixels: 40_000_000, failOn: 'error', animated: false }).metadata();
-        if (meta.orientation && Number(meta.orientation) >= 2 && Number(meta.orientation) <= 8) {
+        if (meta.orientation && Number(meta.orientation) >= 1 && Number(meta.orientation) <= 8) {
             if (apply && md.orientation_status !== 'orientation applied') {
                 await model.updateObject(obj.id, { metadata: { ...md, orientation_status: 'orientation applied', orientation_source: 'exif' } });
             }
