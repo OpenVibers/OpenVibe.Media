@@ -411,6 +411,16 @@ async function optionalIdentity(req, _res, next) {
     next();
 }
 
+/**
+ * The canonical subject of a signed-in viewer, or null. Used only by the public view API to dedupe a person's views
+ * across sessions: it is not an app-local user id and no route may use it as one (see tenantAuth's note above).
+ */
+async function viewerSubject(token) {
+    const payload = await verifyUserJwt(token);
+    if (!payload) return null;
+    return String(payload.subject_id || payload.sub || '') || null;
+}
+
 /** CORS for tenant API routes — reflects allow-listed origins per app. */
 function tenantCors(req, res, next) {
     const origin = req.headers.origin;
@@ -442,6 +452,7 @@ module.exports = {
     networkKeys,
     tenantCors,
     optionalIdentity,
+    viewerSubject,
     // verifyUserJwt stays internal: it proves a token is a genuine Network credential,
     // but its subject is a Network id and must never be used as an app-local user id.
     startJwksRefresh,

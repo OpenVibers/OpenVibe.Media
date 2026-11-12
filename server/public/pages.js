@@ -155,6 +155,9 @@ function renderWatchPage(kind, record, readiness = null) {
     const mime = VIDEO_MIME[path.extname(record.file_path || '').toLowerCase()] || 'video/mp4';
     const uploadDate = isoDate(record.created_at);
     const duration = isoDuration(record.duration_seconds);
+    // The one view store when the page route attached it; a crawl (or a legacy row) falls back to view_count.
+    const viewTotal = record.counts && record.counts.views != null ? Number(record.counts.views) : (record.view_count != null ? Number(record.view_count) : null);
+    const engaged = record.counts && record.counts.engaged != null ? Number(record.counts.engaged) : null;
 
     const videoObject = {
         '@type': 'VideoObject',
@@ -169,7 +172,7 @@ function renderWatchPage(kind, record, readiness = null) {
         author: ownerUrl ? { '@type': 'Person', name: by, url: ownerUrl } : { '@type': 'Organization', name: 'OpenVibe AI', url: NETWORK_URL },
         creator: ownerUrl ? { '@type': 'Person', name: by, url: ownerUrl } : { '@type': 'Organization', name: 'OpenVibe AI', url: NETWORK_URL },
         ...(sourceVod ? { isBasedOn: sourceVod } : {}),
-        ...(record.view_count ? { interactionStatistic: { '@type': 'InteractionCounter', interactionType: 'https://schema.org/WatchAction', userInteractionCount: record.view_count } } : {}),
+        ...(viewTotal ? { interactionStatistic: { '@type': 'InteractionCounter', interactionType: 'https://schema.org/WatchAction', userInteractionCount: viewTotal } } : {}),
         publisher: { '@type': 'Organization', name: 'OpenVibe', url: NETWORK_URL },
         isFamilyFriendly: true,
     };
@@ -177,7 +180,7 @@ function renderWatchPage(kind, record, readiness = null) {
     const metaBits = [
         isVod ? 'VOD' : ai ? 'AI clip' : 'Clip',
         record.duration_seconds ? fmtDuration(record.duration_seconds) : null,
-        record.view_count != null ? `${Number(record.view_count).toLocaleString('en-US')} views` : null,
+        viewTotal != null ? `${viewTotal.toLocaleString('en-US')} view${viewTotal === 1 ? '' : 's'}${engaged ? ` · ${engaged.toLocaleString('en-US')} engaged` : ''}` : null,
         fmtDate(record.created_at) || null,
         by ? (ownerUrl ? `by <a href="${esc(ownerUrl)}">${esc(by)}</a>` : `by ${esc(by)}`) : null,
     ].filter(Boolean);
@@ -249,7 +252,8 @@ function renderWatchPage(kind, record, readiness = null) {
             summary: description, url: canonical,
             facts: [
                 ['Duration', record.duration_seconds ? fmtDuration(record.duration_seconds) : null],
-                ['Views', record.view_count != null ? Number(record.view_count).toLocaleString('en-US') : null],
+                ['Views', viewTotal != null ? viewTotal.toLocaleString('en-US') : null],
+                ['Engaged viewers', engaged != null ? engaged.toLocaleString('en-US') : null],
             ].filter(([, v]) => v != null),
             updated: uploadDate || undefined,
         } : undefined,
