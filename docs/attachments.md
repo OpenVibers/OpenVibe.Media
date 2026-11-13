@@ -4,6 +4,7 @@ One person's file, stored before it is sent, so every site's composer attaches t
 bytes and the answer; a site keeps the attachment with the message it belongs to.
 
     POST   /api/v1/attachments               multipart field `file` -> composer.attachment@1
+    POST   /api/v1/attachments/import        { url } -> one remote picture, brought in (a service token)
     GET    /api/v1/attachments/:id           the person (or a service naming them) asks where it stands
     POST   /api/v1/attachments/:id/keep      { message_id } -> kept with that message
     DELETE /api/v1/attachments/:id           the person who uploaded it -> 204
@@ -54,6 +55,27 @@ is public.
 * `status` is `ready`, `processing` (the copy is being made) or `failed` (it could not be made; `reason`
   says why). The original is never touched: a failed copy keeps the file as it was uploaded.
 * `GET /api/v1/attachments/:id` answers the same shape, with the state as it is now.
+
+## One remote picture, brought in
+
+A picture that lives on somebody else's host is fetched once, by Media, and kept here: a site's server (a
+first-party service token with `media.object.upload`) posts the address to
+
+    POST /api/v1/attachments/import   { "url": "https://…/picture.png" }
+
+and Media answers with the same shape as an upload (`id`, `kind`, `mime`, `url`, `thumb`, `w`, `h`,
+`expires_at`). The bytes are served from `openvibe.media`, never from the other host.
+
+The fetch is the guarded one (server/avatars/ingest.js): https only, no credentials in the address, the port
+must be 443, at most three redirects with every hop checked again, the name resolved first and refused when
+any address is private, loopback, link-local, CGNAT or otherwise not public, and the connection pinned to the
+address that was checked (so a name that changes its answer between the check and the connect cannot reach
+an internal service). At most 2 MB, images only: a body that is not a picture is refused (415), and one that
+is larger is refused (422). A service that names no person in `X-OV-Subject` may still import: the row then
+belongs to the service (`svc:…`).
+
+The picture is kept like any attachment that was never sent to a message: it is unlisted (the id is
+unguessable and it is in no listing) and it expires 24 hours after it was brought in.
 
 ## The sniffer's table
 

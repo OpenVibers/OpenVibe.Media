@@ -2,6 +2,7 @@
  * OpenVibe.Media — composer attachments (composer.attachment@1)
  *
  * POST   /api/v1/attachments               multipart field `file` -> composer.attachment@1
+ * POST   /api/v1/attachments/import        { url } -> one remote picture, brought in through Media's own egress
  * GET    /api/v1/attachments/:id           the person (or a service naming them) asks where it stands
  * POST   /api/v1/attachments/:id/keep      { message_id } -> composer.attachment@1 (kept with a message)
  * DELETE /api/v1/attachments/:id           the person who uploaded it -> 204
@@ -38,6 +39,7 @@ const config = require('../config');
 const auth = require('../auth');
 const ctypes = require('../objects/content-type');
 const playback = require('./playback');
+const { safeFetchImage } = require('../avatars/ingest');
 const { limits } = require('../actor-limits');
 const { openVibeOrigins } = require('./origins');
 
@@ -126,9 +128,11 @@ async function verifyUser(token) {
 }
 /**
  * The credential of an attachment route: the person's own Network token, or a first-party service token that
- * names the person in X-OV-Subject. A service needs one of `caps`; a person needs nothing.
+ * names the person in X-OV-Subject. A service needs one of `caps`; a person needs nothing. A route that takes a
+ * picture for everybody (the import below) says `subjectRequired: false`: the service names no person, and the
+ * row belongs to the service.
  */
-function attachmentAuthWith(caps) {
+function attachmentAuthWith(caps, { subjectRequired = true } = {}) {
     return async function attachmentAuth(req, res, next) {
         const token = bearer(req);
         if (!token) return problem(res, 401, 'token.missing', 'a Network token is required');
@@ -148,8 +152,11 @@ function attachmentAuthWith(caps) {
                 }
                 if (denied) return problem(res, 403, denied.code || 'capability.denied', denied.reason || (caps.join(' or ') + ' is not granted'));
                 subject = namedSubject(req);
-                if (!subject) return problem(res, 403, 'attachments.subject_required', 'a service token must name the person in X-OV-Subject (usr_…)');
+                if (!subject && subjectRequired) return problem(res, 403, 'attachments.subject_required', 'a service token must name the person in X-OV-Subject (usr_…)');
                 principal = svc.claims.sub;
+                req.principal = { sub: principal };
+                req.person = { subject: subject || principal, principal };
+                return next();
             }
         }
         if (!subject) {
@@ -348,6 +355,59 @@ router.post('/', attachmentAuth, limits('media.attachment.upload', { minute: 30,
         if (err && err.code === 'LIMIT_FILE_SIZE') return problem(res, 413, 'media.attachment.too_large', 'the file is larger than 300 MB');
         console.error('[Attachments] Upload error:', err.message);
         if (!res.headersSent) problem(res, 500, 'media.attachment.store_failed', 'the file could not be stored');
+    }
+});
+
+// ── One remote picture, brought in ─────────────────────────────────────────────────────────────────────
+/**
+ * A picture that lives on somebody else's host, brought in once: a first-party service (media.object.upload)
+ * names an https address and Media fetches it through its own egress rules (server/avatars/ingest.js
+ * safeFetchImage: https only, public addresses only, the connection pinned to the address it checked, at most
+ * 2 MB, images only). The bytes are kept here as an unlisted attachment with a short life (it expires like any
+ * attachment that was never sent to a message), so a page that shows the picture never points at that host.
+ *
+ * POST /api/v1/attachments/import   { url }   → { id, kind, mime, url, thumb, w, h, expires_at }
+ */
+const IMPORT_MAX_BYTES = 2 * MB;
+const IMPORT_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp', 'image/avif': '.avif', 'image/bmp': '.bmp', 'image/heic': '.heic', 'image/heix': '.heic', 'image/mif1': '.heic', 'image/msf1': '.heic' };
+/** The name the picture keeps: the last piece of the address, with the type's extension. */
+function importName(url, mime) {
+    let base = '';
+    try { base = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || ''); } catch { base = ''; }
+    const clean = sanitizeName(base || 'picture');
+    return /\.[a-z0-9]{2,5}$/i.test(clean) ? clean : clean + (IMPORT_EXT[mime] || '.img');
+}
+router.post('/import', attachmentAuthWith(['media.object.upload'], { subjectRequired: false }), limits('media.attachment.import', { minute: 60, hour: 600 }), async (req, res) => {
+    try {
+        const url = String((req.body && req.body.url) || '').trim();
+        if (!url) return problem(res, 400, 'attachments.url_required', 'name the https address of the picture');
+        let bytes;
+        try {
+            bytes = await safeFetchImage(url, { maxBytes: IMPORT_MAX_BYTES });
+        } catch (err) {
+            return problem(res, 422, 'media.attachment.import_failed', err.message);
+        }
+        const { kind, mime } = classify(bytes.subarray(0, 512), '', 'import');
+        if (kind !== 'image') return problem(res, 415, 'media.attachment.not_an_image', 'that address is not a picture');
+        const id = `att_${ids.ulid()}`;
+        const dir = dirOf(id);
+        fs.mkdirSync(dir, { recursive: true });
+        const name = importName(url, mime);
+        const dest = path.join(dir, name);
+        fs.writeFileSync(dest, bytes);
+        const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+        const info = await imageInfo(dest, dir).catch(() => ({ width: null, height: null, thumb_name: null }));
+        const expiresAt = new Date(Date.now() + ttlMs()).toISOString();
+        await db.run(
+            `INSERT INTO media_attachments (id, subject, principal, name, stored_name, kind, mime, size_bytes, sha256, width, height, thumb_name, duration_s,
+                playback_status, playback_reason, playback_name, playback_mime, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, req.person.subject, req.person.principal, name, name, 'image', mime, bytes.length, sha256, info.width, info.height, info.thumb_name,
+                null, null, null, null, null, expiresAt]);
+        res.status(201).json(shape(await getRow(id)));
+    } catch (err) {
+        console.error('[Attachments] Import error:', err.message);
+        if (!res.headersSent) problem(res, 500, 'media.attachment.import_failed', 'the picture could not be stored');
     }
 });
 
