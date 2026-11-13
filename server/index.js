@@ -178,6 +178,22 @@ const ready = (async () => {
         const retire = require('./objects/legacy-paste-retire');
         app.post(retire.PATH, require('./service-guard').guard(retire.CAPABILITY), ...retire.handlers());
     }
+    // ── The owner's Setup reads every service's settings here (Network's /admin/setup and its guide), with a Network
+    // service token for media.config.manage (2026-11-13: Media had no such route, so the guide said "OpenVibe.Media did
+    // not answer"). Media's settings are its two storage policies (media.storage_tier, media.object_tier); it asks the
+    // owner for nothing, so Setup lists no input of Media's. Built on first use, like the admin copy of the same routes.
+    {
+        let routes = null;
+        app.use('/internal/config', require('./service-guard').guard('media.config.manage'), express.json({ limit: '64kb' }), (req, res, next) => {
+            if (!routes) {
+                const vodStorage = require('./vod/vod-storage');
+                routes = require('openvibe-shared/config').adminRoutes([vodStorage.tierConfig.get(vodStorage.DEFAULTS), require('./objects/tier-policy').get()], {
+                    basePath: '/', requireAdmin: (_rq, _rs, nx) => nx(), actor: (rq) => ({ type: 'service', id: (rq.principal && rq.principal.sub) || 'network' }),
+                });
+            }
+            routes.handle(req, res, next);
+        });
+    }
     const userAuth = require('./user-auth');
     const userAuthConfig = {
         baseUrl: config.publicUrl, networkUrl: config.network.url, networkInternalUrl: config.network.internalUrl,
