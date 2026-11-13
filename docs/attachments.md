@@ -6,7 +6,7 @@ bytes and the answer; a site keeps the attachment with the message it belongs to
     POST   /api/v1/attachments               multipart field `file` -> composer.attachment@1
     POST   /api/v1/attachments/import        { url } -> one remote picture, brought in (a service token)
     GET    /api/v1/attachments/:id           the person (or a service naming them) asks where it stands
-    POST   /api/v1/attachments/:id/keep      { message_id } -> kept with that message
+    POST   /api/v1/attachments/:id/keep      { message_id } -> kept with that message (its owner only)
     DELETE /api/v1/attachments/:id           the person who uploaded it -> 204
     GET    /a/:id/:name                      the bytes (public, unguessable id)
     GET    /a/:id/thumb.jpg                  the preview (an image's own copy, a video's first frame)
@@ -15,12 +15,28 @@ bytes and the answer; a site keeps the attachment with the message it belongs to
 Credentials: the person's own Network token (the browser), or a first-party service token holding
 `media.object.upload` (or `media.object.read` for the read) with the person named in `X-OV-Subject` (a
 site's server). A service may only read or keep the attachments of the person it names: another person's
-attachment is a 404, exactly like one that does not exist.
+attachment is a 404, exactly like one that does not exist. A service may also keep the attachments **it brought
+in itself** (see the import below) without naming a person: the picture belongs to the service that fetched it.
+Nobody else may keep an attachment.
 
 Limits: image 20 MB, video 300 MB, audio 50 MB, anything else 25 MB (code included). An unkept attachment
 expires 24 hours after upload; a keep names the message it belongs to and moves it to the kept window
 (30 days). The CORS allow-list is every first-party origin (server/attachments/origins.js); the bytes route
 is public.
+
+## The kept window
+
+A keep moves the attachment out of its 24-hour life into the kept window: **30 days**
+(`MEDIA_ATTACHMENT_KEEP_DAYS`) from that keep, and every later keep moves it out again. The picture is
+therefore kept for as long as a message shows it: a card whose picture was brought in for one message keeps it
+with that message, and a second message that shows the same picture keeps it again.
+
+A picture may be shown by more than one message, and all of them are written down: `media_attachment_keeps`
+holds one row per (attachment, message), and the answer names them (`kept_for`).
+
+After the window passes, the expiry sweep deletes the row and the bytes with it. The card that showed the
+picture does not break: it keeps its title, its description and its link, and the page drops the picture that
+does not load.
 
 ## The answer
 
@@ -55,6 +71,8 @@ is public.
 * `status` is `ready`, `processing` (the copy is being made) or `failed` (it could not be made; `reason`
   says why). The original is never touched: a failed copy keeps the file as it was uploaded.
 * `GET /api/v1/attachments/:id` answers the same shape, with the state as it is now.
+* `message_id` and `kept_at` are the message the attachment is kept with and when it was kept (null while
+  it is unkept); a keep answers `kept_for`, the messages it is kept with.
 
 ## One remote picture, brought in
 
@@ -76,6 +94,11 @@ belongs to the service (`svc:…`).
 
 The picture is kept like any attachment that was never sent to a message: it is unlisted (the id is
 unguessable and it is in no listing) and it expires 24 hours after it was brought in.
+
+The row belongs to the service that brought the picture in (`svc:…`), so that service may keep it with the
+message it shows under (`POST /api/v1/attachments/:id/keep`, `{ "message_id": "…" }`) and the picture then
+lives in the kept window (30 days) instead of the 24-hour one. Another service, and any person, may not keep
+it: for them it is a 404, exactly like an attachment that does not exist.
 
 ## The sniffer's table
 

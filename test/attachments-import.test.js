@@ -26,7 +26,7 @@ const { serviceAuth } = require('openvibe-contracts');
     const { privateKey, publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
     auth._setNetworkPublicKeyForTests(publicKey.export({ type: 'spki', format: 'pem' }));
     const now = Math.floor(Date.now() / 1000);
-    const serviceToken = (cap = ['media.object.upload']) => serviceAuth.signServiceToken({ iss: 'https://openvibe.network', sub: 'svc:chat', actor_type: 'service', aud: ['openvibe.media'], cap, iat: now, exp: now + 300, jti: `tok_${crypto.randomBytes(6).toString('hex')}` }, privateKey.export({ type: 'pkcs8', format: 'pem' }));
+    const serviceToken = (cap = ['media.object.upload'], sub = 'svc:chat') => serviceAuth.signServiceToken({ iss: 'https://openvibe.network', sub, actor_type: 'service', aud: ['openvibe.media'], cap, iat: now, exp: now + 300, jti: `tok_${crypto.randomBytes(6).toString('hex')}` }, privateKey.export({ type: 'pkcs8', format: 'pem' }));
 
     const app = express();
     app.use(express.json());
@@ -63,6 +63,46 @@ const { serviceAuth } = require('openvibe-contracts');
     assert.strictEqual(bytes.status, 200);
     assert.strictEqual(bytes.headers.get('content-type'), 'image/png');
     assert.strictEqual(bytes.headers.get('x-content-type-options'), 'nosniff');
+    const pictureId = out.body.id;
+
+    // ── The service that brought it in keeps it with the message it shows under ──
+    const keep = async (token, messageId, headers = {}) => {
+        const r = await fetch(`${base}/api/v1/attachments/${pictureId}/keep`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify({ message_id: messageId }) });
+        return { status: r.status, body: await r.json().catch(() => null) };
+    };
+    let answer = await keep(serviceToken(), 'room-7-42');
+    assert.strictEqual(answer.status, 200, JSON.stringify(answer.body));
+    assert.strictEqual(answer.body.message_id, 'room-7-42', 'the answer names the message it is kept with');
+    assert.deepStrictEqual(answer.body.kept_for, ['room-7-42']);
+    const keptRow = await db.get('SELECT message_id, kept_at, expires_at FROM media_attachments WHERE id = ?', [pictureId]);
+    assert.strictEqual(keptRow.message_id, 'room-7-42');
+    assert.ok(keptRow.kept_at, 'the keep is dated');
+    const keptWindow = Date.parse(keptRow.expires_at) - Date.now();
+    assert.ok(keptWindow > 29 * 24 * 3600_000 && keptWindow <= 30 * 24 * 3600_000, 'it lives in the kept window (30 days), not the 24 hours');
+    const keeps = await db.all('SELECT message_id FROM media_attachment_keeps WHERE attachment_id = ? ORDER BY message_id', [pictureId]);
+    assert.deepStrictEqual(keeps.map((k) => k.message_id), ['room-7-42'], 'the message it is kept with is written down');
+
+    // ── The same picture shown by a second message keeps it again ──
+    answer = await keep(serviceToken(), 'room-9-13');
+    assert.strictEqual(answer.status, 200, JSON.stringify(answer.body));
+    assert.deepStrictEqual(answer.body.kept_for, ['room-7-42', 'room-9-13'], 'both messages keep it');
+    const again = await db.all('SELECT message_id FROM media_attachment_keeps WHERE attachment_id = ? ORDER BY message_id', [pictureId]);
+    assert.deepStrictEqual(again.map((k) => k.message_id), ['room-7-42', 'room-9-13'], 'every message it is shown under is written down');
+    const later = await db.get('SELECT expires_at FROM media_attachments WHERE id = ?', [pictureId]);
+    assert.ok(Date.parse(later.expires_at) - Date.now() > 29 * 24 * 3600_000, 'the window moves out with the last keep');
+
+    // ── Another caller may not keep it: another service, and a service naming a person ──
+    let refused = await keep(serviceToken(['media.object.upload'], 'svc:community'), 'room-7-42');
+    assert.strictEqual(refused.status, 404, 'another service cannot keep it');
+    assert.strictEqual(refused.body.code, 'media.attachment.not_found');
+    refused = await keep(serviceToken(['media.object.upload'], 'svc:community'), 'room-7-42', { 'X-OV-Subject': 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2A3' });
+    assert.strictEqual(refused.status, 404, 'a service naming a person cannot keep a picture that belongs to another service');
+    answer = await keep(serviceToken(), 'room-7-42', { 'X-OV-Subject': 'usr_01J8Z3Q4R5S6T7V8W9X0Y1Z2A3' });
+    assert.strictEqual(answer.status, 200, 'the service that brought it in keeps its own picture, person named or not');
+    refused = await keep(serviceToken(['media.object.read']), 'room-7-42');
+    assert.strictEqual(refused.status, 403, 'and the capability is still needed');
+    const unchanged = await db.all('SELECT message_id FROM media_attachment_keeps WHERE attachment_id = ? ORDER BY message_id', [pictureId]);
+    assert.deepStrictEqual(unchanged.map((k) => k.message_id), ['room-7-42', 'room-9-13'], 'a refused keep writes nothing');
 
     // ── The credential: a service token with the capability, and nothing else ──
     out = await bring('https://pictures.example/og.png', { token: null });

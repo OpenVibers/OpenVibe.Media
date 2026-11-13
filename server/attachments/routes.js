@@ -14,6 +14,12 @@
  * Limits: image 20 MB, video 300 MB, audio 50 MB, anything else 25 MB (code included). An unkept attachment
  * expires 24 hours after upload; a keep names the message it belongs to and moves it to the kept window.
  *
+ * Who may keep one: its owner. A person owns the attachments in their name; a service owns the ones it brought
+ * in itself (the import below), so a service may keep its own picture with the message it shows under, and
+ * nobody else may keep it (another person's or another service's attachment is a 404, exactly like one that does
+ * not exist). A picture may be shown by more than one message: every one of them is written down
+ * (media_attachment_keeps) and every keep moves the window out again.
+ *
  * A video answers what plays it: `playback { url, mime, ready }`, its length, its size after the rotation is
  * applied and its poster (the first frame). A video a browser can play as it is (an MP4 with H.264 and AAC, a
  * WebM with VP8/VP9/AV1) plays its own bytes; one it cannot (an MKV, an AVI, a WMV, an HEVC MOV, an MP4 whose
@@ -295,6 +301,9 @@ function shape(row) {
         status: status === 'none' ? null : status,
         reason: row.playback_reason || null,
         expires_at: row.expires_at,
+        // What it is kept with, and since when (a kept attachment lives in the kept window, not the short one).
+        message_id: row.message_id || null,
+        kept_at: row.kept_at || null,
     };
     // A video names what plays it: its own bytes when a browser can play them, the copy once it is made.
     if (status !== 'none') {
@@ -303,7 +312,13 @@ function shape(row) {
     return out;
 }
 const getRow = (id) => db.get('SELECT * FROM media_attachments WHERE id = ?', [id]);
-const deleteRow = (id) => db.run('DELETE FROM media_attachments WHERE id = ?', [id]);
+/** The row goes with the messages it was kept for (the keeps table is its record of them). */
+const deleteRow = async (id) => {
+    await db.run('DELETE FROM media_attachment_keeps WHERE attachment_id = ?', [id]);
+    await db.run('DELETE FROM media_attachments WHERE id = ?', [id]);
+};
+/** The messages an attachment is kept with, oldest first. */
+const keepsOf = (id) => db.all('SELECT message_id, kept_at FROM media_attachment_keeps WHERE attachment_id = ? ORDER BY kept_at, message_id', [id]).catch(() => []);
 
 // ── Upload ───────────────────────────────────────────────────
 // multer creates its destination when built; a restore drill takes no upload and writes nothing.
@@ -424,15 +439,40 @@ router.get('/:id', attachmentReadAuth, limits('media.attachment.read', { minute:
 });
 
 // ── Keep with a message ──────────────────────────────────────
-router.post('/:id/keep', attachmentAuth, limits('media.attachment.keep', { minute: 120, hour: 1200 }), async (req, res) => {
+/**
+ * Who may keep an attachment: its owner, and nobody else. A person owns the attachments in their name (the
+ * subject); a service owns the ones it brought in itself (the principal: the service that called the import).
+ * A service that names a person may keep that person's attachments, as it may read them; a service that names
+ * nobody may keep its own, and no one else's. An attachment that is not the caller's is a 404, exactly like
+ * one that does not exist.
+ */
+function mayKeep(row, req) {
+    const person = (req && req.person) || {};
+    if (!row) return false;
+    if (row.subject && row.subject === person.subject) return true;
+    return !!(person.principal && row.principal === person.principal);
+}
+/**
+ * Keep the attachment with the message it belongs to. The picture leaves its short life (24 hours for one that
+ * was never sent) and lives in the kept window (MEDIA_ATTACHMENT_KEEP_DAYS, 30 days by default); every keep
+ * moves that window out again, so a picture shown by a message that arrives later lives on. A picture may be
+ * shown by more than one message: each one is written down (media_attachment_keeps), and the answer names them.
+ */
+router.post('/:id/keep', attachmentAuthWith(['media.object.upload'], { subjectRequired: false }), limits('media.attachment.keep', { minute: 120, hour: 1200 }), async (req, res) => {
     try {
         const row = await getRow(String(req.params.id || ''));
-        if (!row || row.subject !== req.person.subject) return problem(res, 404, 'media.attachment.not_found', 'no such attachment for this person');
+        if (!mayKeep(row, req)) return problem(res, 404, 'media.attachment.not_found', 'no such attachment for this caller');
         const messageId = String((req.body && req.body.message_id) || '').trim();
         if (!messageId || messageId.length > 200) return problem(res, 422, 'attachments.message_required', 'name the message this attachment belongs to in `message_id`');
+        const keptAt = new Date().toISOString();
         const expiresAt = new Date(Date.now() + keepMs()).toISOString();
-        await db.run('UPDATE media_attachments SET message_id = ?, kept_at = ?, expires_at = ? WHERE id = ?', [messageId, new Date().toISOString(), expiresAt, row.id]);
-        res.json(shape(await getRow(row.id)));
+        await db.run(`INSERT INTO media_attachment_keeps (attachment_id, message_id, kept_at) VALUES (?, ?, ?)
+                      ON CONFLICT (attachment_id, message_id) DO UPDATE SET kept_at = EXCLUDED.kept_at`,
+            [row.id, messageId, keptAt]);
+        await db.run('UPDATE media_attachments SET message_id = ?, kept_at = ?, expires_at = ? WHERE id = ?', [messageId, keptAt, expiresAt, row.id]);
+        const answer = shape(await getRow(row.id));
+        answer.kept_for = (await keepsOf(row.id)).map((k) => k.message_id);
+        res.json(answer);
     } catch (err) {
         console.error('[Attachments] Keep error:', err.message);
         problem(res, 500, 'media.attachment.keep_failed', 'the attachment could not be kept');
