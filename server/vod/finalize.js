@@ -317,7 +317,7 @@ async function _doFinalize(vodId, opts) {
                     durationSeconds = choice.seconds;
                     probeFormatJson = JSON.stringify(probe.format || {});
                 }
-                console.log(`[VOD] vod ${vodId}: recovered from master → ${durationSeconds}s`);
+                console.log(`[VOD] vod ${vodId}: recovered from master, ${durationSeconds}s`);
             } else {
                 console.warn(`[VOD] vod ${vodId}: master recovery failed — keeping master for manual recovery`);
             }

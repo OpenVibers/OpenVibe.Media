@@ -405,7 +405,7 @@ class StreamRecorder {
         this._wireProcess(this.activeRecordings.get(vod.id), 'rtmp');
         await persisted;
 
-        console.log(`[VOD] Recording started: vod ${vod.id} → ${filename} (rtmp pull)`);
+        console.log(`[VOD] Recording started: vod ${vod.id} to ${filename} (rtmp pull)`);
         return { ok: true, filePath };
     }
 
@@ -569,8 +569,8 @@ class StreamRecorder {
         this._wireProcess(this.activeRecordings.get(vod.id), 'rtp');   // before the row write (see startRtmp)
         await persisted;
 
-        const recMode = audioOnly ? 'audio only → Opus webm' : passthrough ? `passthrough ${isH264 ? 'H.264→mp4' : 'VP8/9→webm'} copy` : 'libvpx re-encode';
-        console.log(`[VOD] RTP recording started: vod ${vod.id} → ${filename} [${recMode}] (${videoPort ? `video:${videoPort}` : 'no video'}${audioPort ? ` audio:${audioPort}` : ''})`);
+        const recMode = audioOnly ? 'audio only, Opus webm' : passthrough ? `passthrough ${isH264 ? 'H.264 in mp4' : 'VP8/9 in webm'} copy` : 'libvpx re-encode';
+        console.log(`[VOD] RTP recording started: vod ${vod.id} to ${filename} [${recMode}] (${videoPort ? `video:${videoPort}` : 'no video'}${audioPort ? ` audio:${audioPort}` : ''})`);
         return { ok: true, videoPort, audioPort, filePath };
     }
 

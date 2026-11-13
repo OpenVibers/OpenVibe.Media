@@ -98,7 +98,7 @@ function formatReport(report) {
         for (const c of r.clips) out.push(`  clips#${c.id}: vod ${c.vod_id ?? '-'} user ${c.user_id ?? '-'} "${c.title || ''}" ${c.visibility || ''} file=${c.file_path || '-'}`);
         for (const f of r.files) out.push(`  files/${f.key}: user ${f.user_id ?? '-'} ${f.original_name || ''}`);
         for (const x of r.relationships) out.push(`  relationship: ${x.from_object_id} ${x.relation} ${x.to_object_id}`);
-        for (const x of r.variants) out.push(`  variant: ${x.object_id} ${x.variant_name} → ${x.derived_object_id}`);
+        for (const x of r.variants) out.push(`  variant: ${x.object_id} ${x.variant_name} gives ${x.derived_object_id}`);
         for (const h of r.holds) out.push(`  HOLD ${h.kind}: ${h.reason || ''} (by ${h.created_by || '-'})`);
         if (it.last_verification) out.push(`  last verified ${it.last_verification.verified_at}: ${it.last_verification.status}`);
     }

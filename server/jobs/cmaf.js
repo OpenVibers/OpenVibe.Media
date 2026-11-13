@@ -139,7 +139,7 @@ async function run(job, ctx) {
             if (audio !== 'none') audio = 'aac';
             timeoutMs = transcodeBudgetMs(info.duration);
             codecArgs = [...x264Args(segmentSeconds), ...(audio === 'aac' ? AAC_ARGS : [])];
-            console.log(`[Cmaf] ${job.id}: ${read.changes.length} frame sizes → ${periods.length} period(s): ${periods.map((p) => `${p.width}x${p.height}`).join(', ')}`);
+            console.log(`[Cmaf] ${job.id}: ${read.changes.length} frame sizes, ${periods.length} period(s): ${periods.map((p) => `${p.width}x${p.height}`).join(', ')}`);
         }
     }
     segments.checkDisk(Number(src.size_bytes) || 0);

@@ -526,7 +526,7 @@ router.post('/tiers/bulk-move', async (req, res) => {
             if (result.ok) { moved++; bytesTotal += result.bytes || 0; }
             else errors.push({ id, error: result.error });
         }
-        console.log(`[Admin] Bulk move → ${target} (${req.appId}): ${moved}/${ids.length}`);
+        console.log(`[Admin] Bulk move to ${target} (${req.appId}): ${moved}/${ids.length}`);
         res.json({ moved, bytes: bytesTotal, errors: errors.length ? errors : undefined });
     } catch (err) {
         console.error('[Admin] Bulk move error:', err.message);

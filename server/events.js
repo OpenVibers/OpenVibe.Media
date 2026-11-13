@@ -95,7 +95,7 @@ function init({
     drainTimer = setInterval(() => { drainObjectChanges().catch((err) => console.warn('[Events] object changes:', err.message)); }, intervalMs);
     if (drainTimer.unref) drainTimer.unref();
     drainObjectChanges().catch(() => { /* the timer retries */ });
-    outbox.pending().then((n) => console.log(`[Events] media outcomes → ${eventsUrl} (${n} pending)`), () => {});
+    outbox.pending().then((n) => console.log(`[Events] media outcomes to ${eventsUrl} (${n} pending)`), () => {});
     return outbox;
 }
 

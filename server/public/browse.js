@@ -220,7 +220,7 @@ function renderCard(c) {
     ${c.text ? `<div class="desc">${esc(c.text)}</div>` : ''}
     <div class="foot">
       <span>${esc(String(c.date || '').slice(0, 16))}${c.lang ? ` · ${esc(c.lang)}` : ''}${c.app ? ` · ${esc(c.app)}` : ''}</span>
-      <span class="links"><a href="${esc(c.view)}">view</a>${c.source ? ` · <a href="${esc(c.source)}" title="${esc(c.sourceLabel || 'source')}">source ↗</a>` : ''}</span>
+      <span class="links"><a href="${esc(c.view)}">view</a>${c.source ? ` · <a href="${esc(c.source)}" title="${esc(c.sourceLabel || 'source')}">source ${kit.icon('open')}</a>` : ''}</span>
     </div>
   </div>
 </div>`;
@@ -408,7 +408,7 @@ function renderPage(tab, page, data, counts, { home = false } = {}) {
     // with the hero and the developer sections); later pages and tabs keep the plain index layout.
     const list = `<nav class="tabs" aria-label="Media types">${TABS.map(([k, label]) => `<a class="${k === tab ? 'on' : ''}" href="/?tab=${k}">${label}<span class="n">${(counts[k] ?? 0).toLocaleString()}</span></a>`).join('')}</nav>
 ${data.cards.length ? `<div class="grid">${data.cards.map(renderCard).join('')}</div>` : kit.empty({ icon: 'grid', title: 'Nothing here yet', text: 'No public media is in this list yet.', action: { href: '/me', label: 'Open your media', icon: 'plus' } })}
-<div class="pager">${nav(page - 1, '‹ Prev', page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, 'Next ›', page >= pages)}</div>`;
+<div class="pager">${nav(page - 1, `${kit.icon('back')} Prev`, page <= 1)}<span>Page ${page} / ${pages} · ${data.total.toLocaleString()} items</span>${nav(page + 1, `Next ${kit.icon('chevron')}`, page >= pages)}</div>`;
     const body = `${heading}
 ${first ? `<section class="sc-sec sc-media">${kit.rail({ id: 'media', wrap: true, title: 'Latest public media', more: { href: '/?tab=all', label: `See all ${data.total.toLocaleString('en-US')}` }, items: data.cards.slice(0, 12).map(asCard) })}<p class="sc-kinds" aria-label="Browse by kind">${TABS.filter(([k]) => k !== 'all' && (counts[k] ?? 0) > 0).map(([k, label]) => kit.button({ href: `/?tab=${k}`, label: `${label} ${(counts[k] ?? 0).toLocaleString('en-US')}`, kind: 'quiet', small: true })).join(' ')}</p></section>` : list}
 ${first ? developerSections(rules) : ''}

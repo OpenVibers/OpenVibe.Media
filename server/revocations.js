@@ -78,7 +78,7 @@ async function ensureSubscription({ fetchImpl = globalThis.fetch, log = console 
         const r = await fetchImpl(`${eventsUrl}/api/v1/subscriptions`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ topic_pattern: topic, endpoint, secret }) });
         if (r.status === 409) continue;
         if (!r.ok) throw new Error(`Events answered ${r.status} creating the ${topic} subscription`);
-        log.log && log.log(`[Events] subscription created: ${topic} → ${endpoint}`);
+        log.log && log.log(`[Events] subscription created: ${topic} to ${endpoint}`);
         created++;
     }
     return created ? 'created' : 'exists';
