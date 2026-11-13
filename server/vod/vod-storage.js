@@ -375,7 +375,7 @@ async function uploadFile(provider, key, filePath, contentType = 'video/webm', {
 async function copyBetweenProviders(srcProvider, dstProvider, key) {
     const src = clientFor(srcProvider);
     const dst = clientFor(dstProvider);
-    if (!src || !dst) throw new Error(`Provider not configured for copy ${srcProvider}→${dstProvider}`);
+    if (!src || !dst) throw new Error(`Provider not configured for copy from ${srcProvider} to ${dstProvider}`);
     loadSdk();
     const obj = await src.send(new S3.GetObjectCommand({ Bucket: PROVIDER_ENV[srcProvider].bucket, Key: key }));
     const upload = new LibStorage.Upload({
@@ -394,7 +394,7 @@ async function copyBetweenProviders(srcProvider, dstProvider, key) {
     const expected = Number(obj.ContentLength || 0);
     const head = await headObject(dstProvider, key);
     if (!head || (expected && head.size !== expected)) {
-        throw new Error(`Copy verification failed for ${key} → ${dstProvider}`);
+        throw new Error(`Copy verification failed for ${key} at ${dstProvider}`);
     }
     return { size: head.size };
 }
@@ -1233,7 +1233,7 @@ async function runSweep() {
         sweepState.lastRunAt = Date.now();
         sweepState.lastResult = summary;
         if (migrated || promoted || demoted) {
-            console.log(`[VodStorage] Sweep: ${migrated} → B2, ${promoted} → R2, ${demoted} R2→B2, ${(bytesFreed / 1048576).toFixed(1)} MB freed locally`);
+            console.log(`[VodStorage] Sweep: ${migrated} migrated to B2, ${promoted} promoted to R2, ${demoted} demoted R2 to B2, ${(bytesFreed / 1048576).toFixed(1)} MB freed locally`);
         }
         return summary;
     } catch (err) {

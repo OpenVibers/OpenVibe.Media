@@ -13,6 +13,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const pageFrame = require('../public/page-frame');
+const glyphs = require('openvibe-shared/glyphs');
 const model = require('../objects/model');
 
 const { esc, SITE_NAME } = pageFrame;
@@ -296,7 +297,7 @@ function renderDetail({ person, obj }) {
     ];
     if (obj.source) facts.push(['Made from', `<a href="/me/objects/${esc(obj.source.id)}">${esc(obj.source.id)}</a> <span class="sub">${esc(obj.source.relation.replace(/_/g, ' '))}</span>`]);
     const body = `
-  <p><a href="/me">← Your media</a></p>
+  <p><a href="/me">${glyphs.svg('back', { size: 16 })} Your media</a></p>
   <h1>${esc(name)}</h1>
   <p class="meta"><span>Signed in as <strong>${esc(person.username ? `@${person.username}` : person.subject)}</strong></span></p>
   <dl class="facts">${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join('')}</dl>
@@ -416,7 +417,7 @@ function renderOps({ person, report, canRecompute, recomputed = null }) {
     ${table('Objects by canonical copy', ['Origin', 'Canonical copy', 'Objects', 'Bytes'], t.objects.map(o => [esc(o.origin), esc(o.canonical_provider), num(o.count), esc(fmtBytes(o.bytes))]), { numeric: [2, 3] })}
     <h3>Recent refused or failed moves</h3>
     ${table('Recent refused or failed tier moves', ['When', 'Tenant', 'VOD', 'Move', 'Outcome', 'Why'], t.recent_problems.map(d => [
-        esc(fmtWhen(d.decided_at)), esc(d.app_id || ''), esc(d.vod_id), `${esc(d.action)} ${esc(d.from_provider || '')} → ${esc(d.to_provider || '')}`, esc(d.outcome), esc(d.error || d.reason || ''),
+        esc(fmtWhen(d.decided_at)), esc(d.app_id || ''), esc(d.vod_id), `${esc(d.action)} ${esc(d.from_provider || '')} to ${esc(d.to_provider || '')}`, esc(d.outcome), esc(d.error || d.reason || ''),
     ])) || '<p class="empty">None.</p>'}
     ${no ? `<h3>Native objects</h3>
     <dl class="facts">
