@@ -174,4 +174,7 @@ async function run(job, ctx) {
 module.exports = {
     spec: { lane: 'heavy', maxAttempts: 3, timeoutMs: () => config.hls.transcode ? 13 * 3600 * 1000 : 3 * 3600 * 1000, needsObject: true, validate, run },
     parsePlaylist: segments.parsePlaylist,
+    // The time one transcode may take, by the length of the source: ten minutes, plus three seconds a second,
+    // capped at thirteen hours. The composer's web copy (jobs/attachment-playback.js) uses the same budget.
+    transcodeBudgetMs,
 };
