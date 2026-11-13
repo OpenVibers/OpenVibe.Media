@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Every video plays (2026-11-13, the owner's refused `7224.mp4` in a comment).** A video attachment is served
+  as it was uploaded, so an MKV, an AVI, a WMV, a 3GP, an HEVC MOV or an MP4 whose index is at the end showed a
+  black box. Media now sniffs every video container with its real type (`server/objects/content-type.js`: MP4,
+  QuickTime, M4V, 3GP, 3G2, Matroska, WebM, AVI, ASF/WMV, FLV, MPEG-PS, MPEG-TS, Ogg), says whether a browser can
+  play a file as it is (MP4 or WebM with H.264, VP8/VP9 or AV1 and AAC, Opus or Vorbis, and an MP4 with its index
+  first — `server/attachments/playback.js`), and makes a web copy of the rest in the background: H.264 (yuv420p) +
+  AAC in a faststart MP4, at most 1080 lines tall, the source frame rate up to 60, the rotation applied, inside
+  the CMAF job's transcode budget (`server/jobs/attachment-playback.js`, the `playback` lane). The attachment
+  answers `playback { url, mime, ready }`, `duration_s`, `width`, `height` (after the rotation) and `poster`;
+  `GET /api/v1/attachments/:id` answers the state as it is now, a copy that cannot be made says why
+  (`status`, `reason`) and the original is kept. A video longer than
+  `MEDIA_ATTACHMENT_PLAYBACK_MAX_SECONDS` is refused as too long. Docs: `docs/attachments.md`.
+
 - **The shared composer's attachments (2026-11-10, composer.attachment@1).** `POST /api/v1/attachments` takes one
   multipart `file` from a person (a Network user JWT, or a first-party site's service token naming the person in
   `X-OV-Subject`), sniffs the kind from the bytes — image, video, audio, file or code — and refuses an executable.

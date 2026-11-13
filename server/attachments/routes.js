@@ -2,15 +2,23 @@
  * OpenVibe.Media — composer attachments (composer.attachment@1)
  *
  * POST   /api/v1/attachments               multipart field `file` -> composer.attachment@1
+ * GET    /api/v1/attachments/:id           the person (or a service naming them) asks where it stands
  * POST   /api/v1/attachments/:id/keep      { message_id } -> composer.attachment@1 (kept with a message)
  * DELETE /api/v1/attachments/:id           the person who uploaded it -> 204
- * GET    /a/:id/:name                      the bytes (public, unguessable id), and /a/:id/thumb.jpg
+ * GET    /a/:id/:name                      the bytes (public, unguessable id), and /a/:id/thumb.jpg, /a/:id/playback.mp4
  *
  * One person's file, stored before it is sent, so every site's composer attaches the same way. Credentials:
  * a Network user JWT (the browser), or a first-party service token holding media.object.upload with the person
  * named in X-OV-Subject (a site's server). Media sniffs the bytes and decides the kind; an executable is refused.
  * Limits: image 20 MB, video 300 MB, audio 50 MB, anything else 25 MB (code included). An unkept attachment
  * expires 24 hours after upload; a keep names the message it belongs to and moves it to the kept window.
+ *
+ * A video answers what plays it: `playback { url, mime, ready }`, its length, its size after the rotation is
+ * applied and its poster (the first frame). A video a browser can play as it is (an MP4 with H.264 and AAC, a
+ * WebM with VP8/VP9/AV1) plays its own bytes; one it cannot (an MKV, an AVI, a WMV, an HEVC MOV, an MP4 whose
+ * index is at the end) gets a web copy made in the background (server/jobs/attachment-playback.js): H.264 + AAC
+ * in a faststart MP4, at most 1080 lines tall. Until the copy is there `playback.ready` is false; the original
+ * is never touched, and a copy that cannot be made says why (`status`, `reason`).
  *
  * The CORS allow-list is every first-party origin (the service manifests' domains, server/attachments/origins.js).
  * A foreign origin gets no Access-Control-Allow-Origin and is refused by the browser; the bytes route is public.
@@ -29,6 +37,7 @@ const db = require('../db/database');
 const config = require('../config');
 const auth = require('../auth');
 const ctypes = require('../objects/content-type');
+const playback = require('./playback');
 const { limits } = require('../actor-limits');
 const { openVibeOrigins } = require('./origins');
 
@@ -115,40 +124,62 @@ async function verifyUser(token) {
     const subject = String(p.subject_id || p.sub || '');
     return SUBJECT_RE.test(subject) ? { payload: p, subject } : null;
 }
-async function attachmentAuth(req, res, next) {
-    const token = bearer(req);
-    if (!token) return problem(res, 401, 'token.missing', 'a Network token is required');
-    let subject = null;
-    let principal = null;
-    if (token.split('.').length === 3) {
-        const svc = await auth.verifyServiceTokenResult(token);
-        if (svc.ok) {
-            if (!String(svc.claims.sub || '').startsWith('svc:')) {
-                return problem(res, 403, 'capability.denied', 'only a first-party service token or a person may attach a file');
+/**
+ * The credential of an attachment route: the person's own Network token, or a first-party service token that
+ * names the person in X-OV-Subject. A service needs one of `caps`; a person needs nothing.
+ */
+function attachmentAuthWith(caps) {
+    return async function attachmentAuth(req, res, next) {
+        const token = bearer(req);
+        if (!token) return problem(res, 401, 'token.missing', 'a Network token is required');
+        let subject = null;
+        let principal = null;
+        if (token.split('.').length === 3) {
+            const svc = await auth.verifyServiceTokenResult(token);
+            if (svc.ok) {
+                if (!String(svc.claims.sub || '').startsWith('svc:')) {
+                    return problem(res, 403, 'capability.denied', 'only a first-party service token or a person may attach a file');
+                }
+                let denied = null;
+                for (const cap of caps) {
+                    const c = capabilities.check(svc.claims, cap);
+                    if (c.allowed) { denied = null; break; }
+                    if (!denied) denied = c;
+                }
+                if (denied) return problem(res, 403, denied.code || 'capability.denied', denied.reason || (caps.join(' or ') + ' is not granted'));
+                subject = namedSubject(req);
+                if (!subject) return problem(res, 403, 'attachments.subject_required', 'a service token must name the person in X-OV-Subject (usr_…)');
+                principal = svc.claims.sub;
             }
-            const c = capabilities.check(svc.claims, 'media.object.upload');
-            if (!c.allowed) return problem(res, 403, c.code || 'capability.denied', c.reason || 'media.object.upload is not granted');
-            subject = namedSubject(req);
-            if (!subject) return problem(res, 403, 'attachments.subject_required', 'a service token must name the person in X-OV-Subject (usr_…)');
-            principal = svc.claims.sub;
         }
-    }
-    if (!subject) {
-        const user = await verifyUser(token);
-        if (!user) return problem(res, 401, 'token.invalid', 'the token is not a valid Network person or media service token');
-        subject = user.subject;
-        principal = user.subject;
-    }
-    req.person = { subject, principal };
-    next();
+        if (!subject) {
+            const user = await verifyUser(token);
+            if (!user) return problem(res, 401, 'token.invalid', 'the token is not a valid Network person or media service token');
+            subject = user.subject;
+            principal = user.subject;
+        }
+        req.person = { subject, principal };
+        next();
+    };
 }
+const attachmentAuth = attachmentAuthWith(['media.object.upload']);
+const attachmentReadAuth = attachmentAuthWith(['media.object.read', 'media.object.upload']);
 
 // ── Bytes sniffing ───────────────────────────────────────────
+// The real type of every container the sniffer knows (server/objects/content-type.js). A video keeps the
+// name a browser knows it by, so an MKV is video/x-matroska and a WebM is video/webm.
 const MIME = {
     jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
     avif: 'image/avif', heic: 'image/heic', heix: 'image/heic', mif1: 'image/heic', msf1: 'image/heic',
-    mp4: 'video/mp4', matroska: 'video/webm', ogg: 'video/ogg', avi: 'video/x-msvideo',
-    wav: 'audio/wav', flac: 'audio/flac', mp3: 'audio/mpeg', m4a: 'audio/mp4', mpegts: 'video/mp2t', pdf: 'application/pdf',
+    mp4: 'video/mp4', mov: 'video/quicktime', m4v: 'video/x-m4v', '3gp': 'video/3gpp', '3g2': 'video/3gpp2',
+    matroska: 'video/x-matroska', webm: 'video/webm', ogg: 'video/ogg', avi: 'video/x-msvideo',
+    asf: 'video/x-ms-asf', flv: 'video/x-flv', mpegts: 'video/mp2t', mpegps: 'video/mpeg',
+    wav: 'audio/wav', flac: 'audio/flac', mp3: 'audio/mpeg', m4a: 'audio/mp4', pdf: 'application/pdf',
+};
+// The same containers when they hold audio only.
+const AUDIO_MIME = {
+    mp4: 'audio/mp4', mov: 'audio/quicktime', m4v: 'audio/mp4', '3gp': 'audio/3gpp', '3g2': 'audio/3gpp2',
+    matroska: 'audio/x-matroska', webm: 'audio/webm', ogg: 'audio/ogg',
 };
 const CODE_EXT = /\.(js|mjs|cjs|jsx|ts|tsx|py|rb|go|rs|c|h|cc|cpp|hpp|cs|java|kt|swift|php|sh|bash|zsh|fish|ps1|sql|html|htm|css|scss|sass|less|json|jsonc|yaml|yml|toml|ini|xml|svg|vue|svelte|astro|md|mdx|lua|pl|r|dart|ex|exs|erl|hs|scala|clj|sol|zig|nim|graphql|gql|tf|dockerfile|make|cmake)$/i;
 const CODE_MIME = /^(application\/(javascript|ecmascript|typescript|json|xml|x-sh|x-httpd-php|x-ruby|x-python|x-perl|x-shellscript|x-csh|x-c\+\+|x-java-source|x-lua|x-rust|x-go)|text\/(javascript|typescript|css|html|x-python|x-sh|x-c|x-c\+\+|x-java-source|x-markdown|x-rust|x-go))/;
@@ -177,7 +208,11 @@ function classify(head, declaredMime, name) {
         if (sniffed.family === 'image') return { kind: 'image', mime };
         if (sniffed.family === 'video') return { kind: 'video', mime };
         if (sniffed.family === 'audio') return { kind: 'audio', mime };
-        if (sniffed.family === 'av') return /^audio\//.test(String(declaredMime || '')) ? { kind: 'audio', mime } : { kind: 'video', mime };
+        if (sniffed.family === 'av') {
+            const audioOnly = /^audio\//.test(String(declaredMime || ''));
+            if (audioOnly) return { kind: 'audio', mime: AUDIO_MIME[sniffed.format] || mime };
+            return { kind: 'video', mime };
+        }
         return { kind: 'file', mime };
     }
     const declared = ctypes.normalize(declaredMime);
@@ -197,35 +232,68 @@ async function imageInfo(file, dir) {
         return { width: w, height: h, thumb_name: 'thumb.jpg' };
     } catch { return { width: w, height: h, thumb_name: null }; }
 }
+/**
+ * A video's own facts (its size after the rotation is applied, its length) and its web copy. A video a browser
+ * can play as it is keeps its own bytes (playback 'ready'); one it cannot gets a copy made in the background
+ * (playback 'processing', the copy named once it is there). A file that cannot be read at all is 'failed', and
+ * the attachment answers with the reason.
+ */
 async function videoInfo(file, dir) {
-    let width = null, height = null;
-    try {
-        const info = await require('../vod/media-tools').probeDuration(file);
-        const v = (info.streams || []).find(s => s.codec_type === 'video' && Number(s.width) > 0);
-        if (v) { width = Number(v.width); height = Number(v.height); }
-    } catch { /* no ffprobe: no size */ }
+    const out = { width: null, height: null, thumb_name: null, duration_s: null,
+        playback: { status: 'none', reason: null, name: null, mime: null } };
+    let info = null;
+    try { info = await playback.probe(file); } catch (err) { info = { ok: false, reason: err.message }; }
+    if (info && info.ok) {
+        out.width = info.width;
+        out.height = info.height;
+        out.duration_s = info.duration_s;
+        if (!info.video_codec) out.playback = { status: 'none', reason: null, name: null, mime: null };
+        else {
+            const safe = playback.webSafe(info);
+            if (safe.safe) out.playback = { status: 'ready', reason: null, name: null, mime: null };
+            else if (!config.attachments.playback.enabled) out.playback = { status: 'failed', reason: 'the web copy is off on this server', name: null, mime: null };
+            else out.playback = { status: 'processing', reason: null, name: null, mime: null };
+        }
+    } else {
+        out.playback = { status: 'failed', reason: (info && info.reason) || 'the video could not be read', name: null, mime: null };
+    }
     let thumbName = null;
     try {
         const ok = await require('../thumbnails/thumbnail-service').extractFrameToFile(file, 1, path.join(dir, 'thumb.jpg'));
         if (ok) thumbName = 'thumb.jpg';
     } catch { /* best effort */ }
-    return { width, height, thumb_name: thumbName };
+    out.thumb_name = thumbName;
+    return out;
 }
 
 // ── The answer ───────────────────────────────────────────────
 function shape(row) {
-    return {
+    const status = row.playback_status || 'none';
+    const thumb = row.thumb_name ? publicUrl(row.id, row.thumb_name) : null;
+    const out = {
         id: row.id,
         kind: row.kind,
         name: row.name,
         size: Number(row.size_bytes),
         mime: row.mime,
         url: publicUrl(row.id, row.stored_name),
-        thumb: row.thumb_name ? publicUrl(row.id, row.thumb_name) : null,
+        thumb,
+        poster: thumb,
         w: row.width != null ? Number(row.width) : null,
         h: row.height != null ? Number(row.height) : null,
+        width: row.width != null ? Number(row.width) : null,
+        height: row.height != null ? Number(row.height) : null,
+        duration_s: row.duration_s != null ? Number(row.duration_s) : null,
+        playback: null,
+        status: status === 'none' ? null : status,
+        reason: row.playback_reason || null,
         expires_at: row.expires_at,
     };
+    // A video names what plays it: its own bytes when a browser can play them, the copy once it is made.
+    if (status !== 'none') {
+        out.playback = { url: publicUrl(row.id, row.playback_name || row.stored_name), mime: row.playback_mime || row.mime, ready: status === 'ready' };
+    }
+    return out;
 }
 const getRow = (id) => db.get('SELECT * FROM media_attachments WHERE id = ?', [id]);
 const deleteRow = (id) => db.run('DELETE FROM media_attachments WHERE id = ?', [id]);
@@ -256,14 +324,23 @@ router.post('/', attachmentAuth, limits('media.attachment.upload', { minute: 30,
         const dest = path.join(dir, stored);
         try { fs.renameSync(tmp, dest); } catch { fs.copyFileSync(tmp, dest); try { fs.unlinkSync(tmp); } catch { /* */ } }
         const sha256 = await sha256File(dest);
-        let info = { width: null, height: null, thumb_name: null };
+        let info = { width: null, height: null, thumb_name: null, duration_s: null, playback: { status: 'none', reason: null, name: null, mime: null } };
         if (kind === 'image') info = await imageInfo(dest, dir).catch(() => info);
         else if (kind === 'video') info = await videoInfo(dest, dir).catch(() => info);
         const expiresAt = new Date(Date.now() + ttlMs()).toISOString();
+        const state = info.playback || { status: 'none', reason: null, name: null, mime: null };
         await db.run(
-            `INSERT INTO media_attachments (id, subject, principal, name, stored_name, kind, mime, size_bytes, sha256, width, height, thumb_name, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, req.person.subject, req.person.principal, req.file.originalname || name, stored, kind, mime, req.file.size, sha256, info.width, info.height, info.thumb_name, expiresAt]);
+            `INSERT INTO media_attachments (id, subject, principal, name, stored_name, kind, mime, size_bytes, sha256, width, height, thumb_name, duration_s,
+                playback_status, playback_reason, playback_name, playback_mime, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, req.person.subject, req.person.principal, req.file.originalname || name, stored, kind, mime, req.file.size, sha256, info.width, info.height,
+                info.thumb_name, info.duration_s, state.status === 'none' ? null : state.status, state.reason, state.name, state.mime, expiresAt]);
+        // A video no browser can play gets its web copy made in the background; the answer says 'processing'
+        // until the copy is there (GET /api/v1/attachments/:id says where it is now).
+        if (state.status === 'processing') {
+            try { await require('../jobs/attachment-playback').enqueue(id); }
+            catch (err) { console.warn('[Attachments] could not queue the web copy for ' + id + ': ' + err.message); }
+        }
         const row = await getRow(id);
         res.status(201).json(shape(row));
     } catch (err) {
@@ -271,6 +348,18 @@ router.post('/', attachmentAuth, limits('media.attachment.upload', { minute: 30,
         if (err && err.code === 'LIMIT_FILE_SIZE') return problem(res, 413, 'media.attachment.too_large', 'the file is larger than 300 MB');
         console.error('[Attachments] Upload error:', err.message);
         if (!res.headersSent) problem(res, 500, 'media.attachment.store_failed', 'the file could not be stored');
+    }
+});
+
+// ── Read one attachment (the person, or a service naming them) ──
+router.get('/:id', attachmentReadAuth, limits('media.attachment.read', { minute: 60, hour: 600 }), async (req, res) => {
+    try {
+        const row = await getRow(String(req.params.id || ''));
+        if (!row || row.subject !== req.person.subject) return problem(res, 404, 'media.attachment.not_found', 'no such attachment for this person');
+        res.json(shape(row));
+    } catch (err) {
+        console.error('[Attachments] Read error:', err.message);
+        problem(res, 500, 'media.attachment.read_failed', 'the attachment could not be read');
     }
 });
 
@@ -339,6 +428,13 @@ publicRouter.get('/:id/thumb.jpg', async (req, res, next) => {
         const row = await getRow(String(req.params.id || ''));
         if (!row || !row.thumb_name) return next();
         sendBytes(req, res, row, row.thumb_name, 'image/jpeg');
+    } catch (err) { next(err); }
+});
+publicRouter.get('/:id/playback.mp4', async (req, res, next) => {
+    try {
+        const row = await getRow(String(req.params.id || ''));
+        if (!row || !row.playback_name) return next();
+        sendBytes(req, res, row, row.playback_name, row.playback_mime || 'video/mp4');
     } catch (err) { next(err); }
 });
 publicRouter.get('/:id/:name', async (req, res, next) => {

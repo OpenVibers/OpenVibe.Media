@@ -9,6 +9,8 @@
  *                                                     (it is the work the recorder does when a stream ends)
  *   clips  clip.cut                                   MEDIA_JOBS_CLIPS_CONCURRENCY (2); runs while recording (people
  *                                                     clip live streams and wait for the result)
+ *   playback attachment.playback                        MEDIA_JOBS_PLAYBACK_CONCURRENCY (1); the composer's web copy of a
+ *                                                     video (one ffmpeg run; it must not hold the heavy lane)
  *
  * A running job holds a lease (MEDIA_JOBS_LEASE_S) that a heartbeat renews; the heartbeat also notices
  * an owner's cancel request. Every write about the job carries the claim's lease_token (queue.js,
@@ -60,6 +62,7 @@ function lanes() {
         { name: 'heavy', types: by('heavy'), max: cfg().heavyConcurrency },
         { name: 'finalize', types: by('finalize'), max: cfg().finalizeConcurrency },
         { name: 'clips', types: by('clips'), max: cfg().clipsConcurrency || 2 },
+        { name: 'playback', types: by('playback'), max: cfg().playbackConcurrency || 1 },
     ];
 }
 

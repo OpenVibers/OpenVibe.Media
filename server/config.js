@@ -73,6 +73,17 @@ const config = {
         path: process.env.ATTACHMENTS_PATH || './data/attachments',
         ttlHours: intEnv('MEDIA_ATTACHMENT_TTL_HOURS', 24),
         keepDays: intEnv('MEDIA_ATTACHMENT_KEEP_DAYS', 30),
+        // The web copy of a video no browser can play as it is (server/attachments/playback.js,
+        // docs/attachments.md). Off, every video is served as it was uploaded.
+        playback: {
+            enabled: !['0', 'false', 'off'].includes(String(process.env.MEDIA_ATTACHMENT_PLAYBACK_ENABLED || '').toLowerCase()),
+            maxSeconds: Math.max(0, intEnv('MEDIA_ATTACHMENT_PLAYBACK_MAX_SECONDS', 14400)),
+            maxHeight: Math.max(240, intEnv('MEDIA_ATTACHMENT_PLAYBACK_MAX_HEIGHT', 1080)),
+            maxFps: Math.max(1, intEnv('MEDIA_ATTACHMENT_PLAYBACK_MAX_FPS', 60)),
+            crf: Math.min(51, Math.max(0, intEnv('MEDIA_ATTACHMENT_PLAYBACK_CRF', 23))),
+            preset: process.env.MEDIA_ATTACHMENT_PLAYBACK_PRESET || 'veryfast',
+            threads: Math.min(16, Math.max(1, intEnv('MEDIA_ATTACHMENT_PLAYBACK_THREADS', 2))),
+        },
     },
 
     // Canonical object model (Wave 4): native v2 uploads, signed delivery, retention,
@@ -139,6 +150,7 @@ const config = {
         heavyConcurrency: Math.max(1, intEnv('MEDIA_JOBS_HEAVY_CONCURRENCY', 1)),   // split, remux
         finalizeConcurrency: Math.max(1, intEnv('MEDIA_JOBS_FINALIZE_CONCURRENCY', 1)),   // vod.finalize retries
         clipsConcurrency: Math.max(1, intEnv('MEDIA_JOBS_CLIPS_CONCURRENCY', 2)),   // clip.cut (runs while recording)
+        playbackConcurrency: Math.max(1, intEnv('MEDIA_JOBS_PLAYBACK_CONCURRENCY', 1)),   // attachment.playback (the composer's web copy)
         // Heavy jobs wait while a recording is running (as the health job does), unless this is on.
         heavyWhileRecording: ['1', 'true', 'on'].includes(String(process.env.MEDIA_JOBS_HEAVY_WHILE_RECORDING || '').toLowerCase()),
         leaseS: Math.max(30, intEnv('MEDIA_JOBS_LEASE_S', 120)),

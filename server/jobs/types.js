@@ -17,6 +17,7 @@
  *   object.hash            light   sha256 of local copies with no content hash yet, one bounded batch (or one object)
  *   storage.orphans.scan   light   the storage orphan report, service-wide (report only; never deletes)
  *   storage.move.cleanup   light   the alert for placement moves whose delete keeps failing (3+ failed decisions), service-wide
+ *   attachment.playback    playback the web copy of a video attachment no browser can play (the composer's video)
  */
 'use strict';
 
@@ -41,5 +42,6 @@ queue.register('object.hash', require('./content-hash').spec);
 queue.register('storage.orphans.scan', require('./storage-orphans').spec);
 queue.register('storage.move.cleanup', require('./move-cleanup').spec);
 queue.register('storage.recordings.cleanup', require('./recording-cleanup').spec);
+queue.register('attachment.playback', require('./attachment-playback').spec);
 
 module.exports = { names: () => queue.typeNames() };
