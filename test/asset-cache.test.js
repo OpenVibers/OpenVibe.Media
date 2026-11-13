@@ -31,7 +31,7 @@ const cache = require('openvibe-shared/cache-policy');
         for (const v of ['deadbeefdeadbeef', undefined]) {
             const r = await fetchApp(v);
             assert.strictEqual(r.status, 200);
-            assert.strictEqual(r.cache, 'public, max-age=300, stale-while-revalidate=86400');
+            assert.strictEqual(r.cache, 'public, max-age=300, stale-while-revalidate=300');
             assert.strictEqual(r.cache, cache.assetHeaders('app.js', { hashed: false }));
         }
         console.log('asset-cache: ?v=<version> is immutable for a year; a wrong or missing ?v= is 5 min + a day of swr');
