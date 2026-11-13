@@ -53,6 +53,8 @@ async function failed(id, reason) {
 /** Queue the web copy of one attachment. */
 async function enqueue(attachmentId) {
     const out = await queue.enqueue({ appId: queue.SYSTEM_APP, type: TYPE, params: { attachment_id: attachmentId }, createdBy: 'system:attachments' });
+    // The worker looks for work now instead of at its next poll.
+    try { require('./worker').kick(); } catch { /* the poll picks it up */ }
     return out && out.job ? out.job.id : null;
 }
 
