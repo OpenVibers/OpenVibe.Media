@@ -2,6 +2,7 @@
  * OpenVibe.Media — composer attachments (composer.attachment@1)
  *
  * POST   /api/v1/attachments               multipart field `file` -> composer.attachment@1
+ * POST   /api/v1/attachments/import        { url } -> one remote picture, brought in through Media's own egress
  * GET    /api/v1/attachments/:id           the person (or a service naming them) asks where it stands
  * POST   /api/v1/attachments/:id/keep      { message_id } -> composer.attachment@1 (kept with a message)
  * DELETE /api/v1/attachments/:id           the person who uploaded it -> 204
@@ -12,6 +13,12 @@
  * named in X-OV-Subject (a site's server). Media sniffs the bytes and decides the kind; an executable is refused.
  * Limits: image 20 MB, video 300 MB, audio 50 MB, anything else 25 MB (code included). An unkept attachment
  * expires 24 hours after upload; a keep names the message it belongs to and moves it to the kept window.
+ *
+ * Who may keep one: its owner. A person owns the attachments in their name; a service owns the ones it brought
+ * in itself (the import below), so a service may keep its own picture with the message it shows under, and
+ * nobody else may keep it (another person's or another service's attachment is a 404, exactly like one that does
+ * not exist). A picture may be shown by more than one message: every one of them is written down
+ * (media_attachment_keeps) and every keep moves the window out again.
  *
  * A video answers what plays it: `playback { url, mime, ready }`, its length, its size after the rotation is
  * applied and its poster (the first frame). A video a browser can play as it is (an MP4 with H.264 and AAC, a
@@ -38,6 +45,7 @@ const config = require('../config');
 const auth = require('../auth');
 const ctypes = require('../objects/content-type');
 const playback = require('./playback');
+const { safeFetchImage } = require('../avatars/ingest');
 const { limits } = require('../actor-limits');
 const { openVibeOrigins } = require('./origins');
 
@@ -126,9 +134,11 @@ async function verifyUser(token) {
 }
 /**
  * The credential of an attachment route: the person's own Network token, or a first-party service token that
- * names the person in X-OV-Subject. A service needs one of `caps`; a person needs nothing.
+ * names the person in X-OV-Subject. A service needs one of `caps`; a person needs nothing. A route that takes a
+ * picture for everybody (the import below) says `subjectRequired: false`: the service names no person, and the
+ * row belongs to the service.
  */
-function attachmentAuthWith(caps) {
+function attachmentAuthWith(caps, { subjectRequired = true } = {}) {
     return async function attachmentAuth(req, res, next) {
         const token = bearer(req);
         if (!token) return problem(res, 401, 'token.missing', 'a Network token is required');
@@ -148,8 +158,11 @@ function attachmentAuthWith(caps) {
                 }
                 if (denied) return problem(res, 403, denied.code || 'capability.denied', denied.reason || (caps.join(' or ') + ' is not granted'));
                 subject = namedSubject(req);
-                if (!subject) return problem(res, 403, 'attachments.subject_required', 'a service token must name the person in X-OV-Subject (usr_…)');
+                if (!subject && subjectRequired) return problem(res, 403, 'attachments.subject_required', 'a service token must name the person in X-OV-Subject (usr_…)');
                 principal = svc.claims.sub;
+                req.principal = { sub: principal };
+                req.person = { subject: subject || principal, principal };
+                return next();
             }
         }
         if (!subject) {
@@ -288,6 +301,9 @@ function shape(row) {
         status: status === 'none' ? null : status,
         reason: row.playback_reason || null,
         expires_at: row.expires_at,
+        // What it is kept with, and since when (a kept attachment lives in the kept window, not the short one).
+        message_id: row.message_id || null,
+        kept_at: row.kept_at || null,
     };
     // A video names what plays it: its own bytes when a browser can play them, the copy once it is made.
     if (status !== 'none') {
@@ -296,7 +312,13 @@ function shape(row) {
     return out;
 }
 const getRow = (id) => db.get('SELECT * FROM media_attachments WHERE id = ?', [id]);
-const deleteRow = (id) => db.run('DELETE FROM media_attachments WHERE id = ?', [id]);
+/** The row goes with the messages it was kept for (the keeps table is its record of them). */
+const deleteRow = async (id) => {
+    await db.run('DELETE FROM media_attachment_keeps WHERE attachment_id = ?', [id]);
+    await db.run('DELETE FROM media_attachments WHERE id = ?', [id]);
+};
+/** The messages an attachment is kept with, oldest first. */
+const keepsOf = (id) => db.all('SELECT message_id, kept_at FROM media_attachment_keeps WHERE attachment_id = ? ORDER BY kept_at, message_id', [id]).catch(() => []);
 
 // ── Upload ───────────────────────────────────────────────────
 // multer creates its destination when built; a restore drill takes no upload and writes nothing.
@@ -351,6 +373,59 @@ router.post('/', attachmentAuth, limits('media.attachment.upload', { minute: 30,
     }
 });
 
+// ── One remote picture, brought in ─────────────────────────────────────────────────────────────────────
+/**
+ * A picture that lives on somebody else's host, brought in once: a first-party service (media.object.upload)
+ * names an https address and Media fetches it through its own egress rules (server/avatars/ingest.js
+ * safeFetchImage: https only, public addresses only, the connection pinned to the address it checked, at most
+ * 2 MB, images only). The bytes are kept here as an unlisted attachment with a short life (it expires like any
+ * attachment that was never sent to a message), so a page that shows the picture never points at that host.
+ *
+ * POST /api/v1/attachments/import   { url }   → { id, kind, mime, url, thumb, w, h, expires_at }
+ */
+const IMPORT_MAX_BYTES = 2 * MB;
+const IMPORT_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp', 'image/avif': '.avif', 'image/bmp': '.bmp', 'image/heic': '.heic', 'image/heix': '.heic', 'image/mif1': '.heic', 'image/msf1': '.heic' };
+/** The name the picture keeps: the last piece of the address, with the type's extension. */
+function importName(url, mime) {
+    let base = '';
+    try { base = decodeURIComponent(new URL(url).pathname.split('/').filter(Boolean).pop() || ''); } catch { base = ''; }
+    const clean = sanitizeName(base || 'picture');
+    return /\.[a-z0-9]{2,5}$/i.test(clean) ? clean : clean + (IMPORT_EXT[mime] || '.img');
+}
+router.post('/import', attachmentAuthWith(['media.object.upload'], { subjectRequired: false }), limits('media.attachment.import', { minute: 60, hour: 600 }), async (req, res) => {
+    try {
+        const url = String((req.body && req.body.url) || '').trim();
+        if (!url) return problem(res, 400, 'attachments.url_required', 'name the https address of the picture');
+        let bytes;
+        try {
+            bytes = await safeFetchImage(url, { maxBytes: IMPORT_MAX_BYTES });
+        } catch (err) {
+            return problem(res, 422, 'media.attachment.import_failed', err.message);
+        }
+        const { kind, mime } = classify(bytes.subarray(0, 512), '', 'import');
+        if (kind !== 'image') return problem(res, 415, 'media.attachment.not_an_image', 'that address is not a picture');
+        const id = `att_${ids.ulid()}`;
+        const dir = dirOf(id);
+        fs.mkdirSync(dir, { recursive: true });
+        const name = importName(url, mime);
+        const dest = path.join(dir, name);
+        fs.writeFileSync(dest, bytes);
+        const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+        const info = await imageInfo(dest, dir).catch(() => ({ width: null, height: null, thumb_name: null }));
+        const expiresAt = new Date(Date.now() + ttlMs()).toISOString();
+        await db.run(
+            `INSERT INTO media_attachments (id, subject, principal, name, stored_name, kind, mime, size_bytes, sha256, width, height, thumb_name, duration_s,
+                playback_status, playback_reason, playback_name, playback_mime, expires_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, req.person.subject, req.person.principal, name, name, 'image', mime, bytes.length, sha256, info.width, info.height, info.thumb_name,
+                null, null, null, null, null, expiresAt]);
+        res.status(201).json(shape(await getRow(id)));
+    } catch (err) {
+        console.error('[Attachments] Import error:', err.message);
+        if (!res.headersSent) problem(res, 500, 'media.attachment.import_failed', 'the picture could not be stored');
+    }
+});
+
 // ── Read one attachment (the person, or a service naming them) ──
 router.get('/:id', attachmentReadAuth, limits('media.attachment.read', { minute: 60, hour: 600 }), async (req, res) => {
     try {
@@ -364,15 +439,40 @@ router.get('/:id', attachmentReadAuth, limits('media.attachment.read', { minute:
 });
 
 // ── Keep with a message ──────────────────────────────────────
-router.post('/:id/keep', attachmentAuth, limits('media.attachment.keep', { minute: 120, hour: 1200 }), async (req, res) => {
+/**
+ * Who may keep an attachment: its owner, and nobody else. A person owns the attachments in their name (the
+ * subject); a service owns the ones it brought in itself (the principal: the service that called the import).
+ * A service that names a person may keep that person's attachments, as it may read them; a service that names
+ * nobody may keep its own, and no one else's. An attachment that is not the caller's is a 404, exactly like
+ * one that does not exist.
+ */
+function mayKeep(row, req) {
+    const person = (req && req.person) || {};
+    if (!row) return false;
+    if (row.subject && row.subject === person.subject) return true;
+    return !!(person.principal && row.principal === person.principal);
+}
+/**
+ * Keep the attachment with the message it belongs to. The picture leaves its short life (24 hours for one that
+ * was never sent) and lives in the kept window (MEDIA_ATTACHMENT_KEEP_DAYS, 30 days by default); every keep
+ * moves that window out again, so a picture shown by a message that arrives later lives on. A picture may be
+ * shown by more than one message: each one is written down (media_attachment_keeps), and the answer names them.
+ */
+router.post('/:id/keep', attachmentAuthWith(['media.object.upload'], { subjectRequired: false }), limits('media.attachment.keep', { minute: 120, hour: 1200 }), async (req, res) => {
     try {
         const row = await getRow(String(req.params.id || ''));
-        if (!row || row.subject !== req.person.subject) return problem(res, 404, 'media.attachment.not_found', 'no such attachment for this person');
+        if (!mayKeep(row, req)) return problem(res, 404, 'media.attachment.not_found', 'no such attachment for this caller');
         const messageId = String((req.body && req.body.message_id) || '').trim();
         if (!messageId || messageId.length > 200) return problem(res, 422, 'attachments.message_required', 'name the message this attachment belongs to in `message_id`');
+        const keptAt = new Date().toISOString();
         const expiresAt = new Date(Date.now() + keepMs()).toISOString();
-        await db.run('UPDATE media_attachments SET message_id = ?, kept_at = ?, expires_at = ? WHERE id = ?', [messageId, new Date().toISOString(), expiresAt, row.id]);
-        res.json(shape(await getRow(row.id)));
+        await db.run(`INSERT INTO media_attachment_keeps (attachment_id, message_id, kept_at) VALUES (?, ?, ?)
+                      ON CONFLICT (attachment_id, message_id) DO UPDATE SET kept_at = EXCLUDED.kept_at`,
+            [row.id, messageId, keptAt]);
+        await db.run('UPDATE media_attachments SET message_id = ?, kept_at = ?, expires_at = ? WHERE id = ?', [messageId, keptAt, expiresAt, row.id]);
+        const answer = shape(await getRow(row.id));
+        answer.kept_for = (await keepsOf(row.id)).map((k) => k.message_id);
+        res.json(answer);
     } catch (err) {
         console.error('[Attachments] Keep error:', err.message);
         problem(res, 500, 'media.attachment.keep_failed', 'the attachment could not be kept');

@@ -36,6 +36,8 @@ const sharp = require('sharp');
 const { applyExifOrientation } = require('../images/orientation');
 
 const MAX_BYTES = 8 * 1024 * 1024, DEADLINE_MS = 10_000, MAX_REDIRECTS = 3, SIZE = 512;
+let _testResolver = null;      // tests: the address check (null is the real one)
+let _testFetcher = null;       // tests: the fetch (null is the real one)
 // The house shapes: a square picture everywhere a person appears; a wide one for a channel banner.
 const SHAPES = { avatar: { width: SIZE, height: SIZE }, banner: { width: 1600, height: 500 } };
 const PRODUCT_RE = /^[a-z][a-z0-9-]{1,20}$/;
@@ -61,7 +63,7 @@ async function resolvePublic(hostname) {
     return all.find(a => a.family === 4) || all[0];
 }
 
-function fetchOnce(u, pinned, deadline) {
+function fetchOnce(u, pinned, deadline, cap = MAX_BYTES) {
     return new Promise((resolve, reject) => {
         const req = https.get({
             host: u.hostname, servername: u.hostname, port: u.port || 443, path: u.pathname + u.search, method: 'GET',
@@ -75,9 +77,9 @@ function fetchOnce(u, pinned, deadline) {
             if (status >= 300 && status < 400 && res.headers.location) { res.resume(); return resolve({ redirect: res.headers.location }); }
             if (status !== 200) { res.resume(); return reject(new Error(`The picture could not be loaded (HTTP ${status})`)); }
             if (!/^image\//i.test(String(res.headers['content-type'] || ''))) { res.resume(); return reject(new Error('That link is not a picture')); }
-            if (Number(res.headers['content-length']) > MAX_BYTES) { res.destroy(); return reject(new Error('That picture is too large (8 MB at most)')); }
+            if (Number(res.headers['content-length']) > cap) { res.destroy(); return reject(new Error(`That picture is too large (${Math.round(cap / (1024 * 1024))} MB at most)`)); }
             const chunks = []; let n = 0;
-            res.on('data', (c) => { n += c.length; if (n > MAX_BYTES) { res.destroy(); reject(new Error('That picture is too large (8 MB at most)')); } else chunks.push(c); });
+            res.on('data', (c) => { n += c.length; if (n > cap) { res.destroy(); reject(new Error(`That picture is too large (${Math.round(cap / (1024 * 1024))} MB at most)`)); } else chunks.push(c); });
             res.on('end', () => resolve({ body: Buffer.concat(chunks) }));
             res.on('error', reject);
         });
@@ -86,7 +88,10 @@ function fetchOnce(u, pinned, deadline) {
     });
 }
 
-async function safeFetchImage(rawUrl, { resolver = resolvePublic, fetcher = fetchOnce } = {}) {
+async function safeFetchImage(rawUrl, { resolver: givenResolver, fetcher: givenFetcher, maxBytes = MAX_BYTES } = {}) {
+    // The tests replace the address check and the fetch (below); the real ones are the defaults.
+    const resolver = _testResolver || givenResolver || resolvePublic;
+    const fetcher = _testFetcher || givenFetcher || fetchOnce;
     const deadline = Date.now() + DEADLINE_MS;
     let url = String(rawUrl || '');
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -95,8 +100,12 @@ async function safeFetchImage(rawUrl, { resolver = resolvePublic, fetcher = fetc
         if (u.username || u.password) throw new Error('Addresses with a username or password are not accepted');
         if (u.port && u.port !== '443') throw new Error('Only the standard https port is accepted');
         const pinned = await resolver(u.hostname);
-        const r = await fetcher(u, pinned, deadline);
-        if (r.body) return r.body;
+        const r = await fetcher(u, pinned, deadline, maxBytes);
+        if (r.body) {
+            // The cap is checked on the bytes as well: whatever the fetch did, an oversized picture is refused.
+            if (r.body.length > maxBytes) throw new Error(`That picture is too large (${Math.round(maxBytes / (1024 * 1024))} MB at most)`);
+            return r.body;
+        }
         url = new URL(r.redirect, u).toString();
     }
     throw new Error('Too many redirects');
@@ -291,4 +300,5 @@ function createReleaseHandler({ log = console } = {}) {
     };
 }
 
-module.exports = { createIngestHandler, createAdoptHandler, createReleaseHandler, storeAvatar, safeFetchImage, readLocalSource, toAvatar, resolvePublic, isPublicAddress, SHAPES };
+module.exports = { createIngestHandler, createAdoptHandler, createReleaseHandler, storeAvatar, safeFetchImage, readLocalSource, toAvatar, resolvePublic, isPublicAddress, SHAPES,
+    _setResolver(fn) { _testResolver = fn || null; }, _setFetcher(fn) { _testFetcher = fn || null; } };
