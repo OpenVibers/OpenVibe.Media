@@ -44,6 +44,7 @@
 
 const express = require('express');
 const fs = require('fs');
+const { pipeFile } = require('./pipe-file');
 const path = require('path');
 const crypto = require('crypto');
 const { ids, http } = require('openvibe-contracts');
@@ -1084,9 +1085,9 @@ async function sendSlice(req, res, { file, url, offset, length, headers }) {
     const head = { ...headers, 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1, ...(r && { 'Content-Range': `bytes ${start}-${end}/${length}` }) };
     if (file) {
         res.writeHead(r ? 206 : 200, head);
-        const stream = fs.createReadStream(file, { start: offset + start, end: offset + end });
-        stream.on('error', () => res.destroy());
-        return stream.pipe(res);
+        // Closed however the response ends: a seek aborts this slice, and an open descriptor would keep an offloaded
+        // VOD's deleted bytes on disk (pipe-file.js).
+        return pipeFile(res, file, { start: offset + start, end: offset + end });
     }
     // Bounded in time and dropped when the viewer goes away; any failure, mid-body too, moves on to the next copy.
     const ac = new AbortController();
@@ -1254,7 +1255,7 @@ publicRouter.get('/:id', async (req, res) => {
             if (local) { try { v = await objectVariants().get(local.key, spec); } catch { v = null; } }
             if (v) {
                 res.writeHead(200, { ...headers, 'Content-Type': v.type, 'Content-Length': v.size, 'Content-Disposition': contentDisposition(md.filename || obj.id, { inline: true }) });
-                return fs.createReadStream(v.file).on('error', () => res.destroy()).pipe(res);
+                return pipeFile(res, v.file);
             }
         }
         for (const loc of decision.candidates || []) {
