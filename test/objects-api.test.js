@@ -190,9 +190,31 @@ const crypto = require('crypto');
         assert.deepStrictEqual([sv.status, sv.headers.get('content-type'), /^inline/.test(sv.headers.get('content-disposition') || ''), sv.headers.get('x-content-type-options')],
             [200, 'image/svg+xml', true, 'nosniff'], 'the SVG is shown in place');
         assert.match(sv.headers.get('content-security-policy') || '', /^default-src 'none';.*sandbox$/, 'under the sandbox: no script, nothing fetched');
+        assert.strictEqual(sv.headers.get('access-control-allow-origin'), null, 'a private object answers no other site');
         r = await call('POST', O, { body: { kind: 'avatar', visibility: 'public', mime_type: 'image/svg+xml' } });
         assert.ok(r.status >= 400, 'an avatar still may not be an SVG: ' + r.status);
         await db.run('DELETE FROM media_objects WHERE id = ?', [svgId]);
+        // Fonts and icons (2026-11-16; the owner: "Media should support svg and all other file formats … And fonts and
+        // icons"): a file sent with only its name takes the type the name says, and a public one answers any site, so a
+        // font works in another site's @font-face and a picture in its canvas.
+        const fontBody = Buffer.from('wOF2' + 'x'.repeat(60));
+        r = await call('POST', O, { body: { kind: 'asset', visibility: 'public', filename: 'brand.woff2', size_bytes: fontBody.length } });
+        assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+        const fontId = r.body.id;
+        assert.strictEqual((await call('PUT', `${O}/${fontId}/content`, { raw: fontBody, headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+        assert.strictEqual((await call('POST', `${O}/${fontId}/complete`)).status, 200);
+        const ff = await fetch(`${base}/o/${fontId}`, { headers: { origin: 'https://openvibe.live' } });
+        assert.deepStrictEqual([ff.status, ff.headers.get('content-type'), ff.headers.get('access-control-allow-origin'), ff.headers.get('cross-origin-resource-policy')],
+            [200, 'font/woff2', '*', 'cross-origin'], 'a public font answers any site');
+        const icoBody = Buffer.from([0, 0, 1, 0, 1, 0, 16, 16, 0, 0]);
+        r = await call('POST', O, { body: { kind: 'asset', visibility: 'public', mime_type: 'application/octet-stream', filename: 'favicon.ico', size_bytes: icoBody.length } });
+        assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+        const icoId = r.body.id;
+        assert.strictEqual((await call('PUT', `${O}/${icoId}/content`, { raw: icoBody, headers: { 'content-type': 'application/octet-stream' } })).status, 200);
+        assert.strictEqual((await call('POST', `${O}/${icoId}/complete`)).status, 200);
+        const ic = await fetch(`${base}/o/${icoId}`);
+        assert.deepStrictEqual([ic.status, ic.headers.get('content-type')], [200, 'image/x-icon'], 'a generic blob named .ico is served as an icon');
+        await db.run('DELETE FROM media_objects WHERE id IN (?, ?)', [fontId, icoId]);
         console.log('✅ image variants: a public image in its asked size, the original otherwise; a private one only signed');
 
         // ── Service tokens ──

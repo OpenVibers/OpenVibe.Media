@@ -706,6 +706,8 @@ router.get('/f/:key', async (req, res) => {
             ...(served.isSvg(contentType) ? { 'Content-Security-Policy': served.SANDBOX_CSP } : {}),
             'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${row.key}"`,
             'Cache-Control': sandbox ? 'private, no-store' : 'public, max-age=86400',
+            // A public file is for any site (2026-11-16: a font in another site's @font-face); a sandbox one never.
+            ...(sandbox ? {} : { 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin' }),
         };
         if (range) {
             const parts = range.replace(/bytes=/, '').split('-');

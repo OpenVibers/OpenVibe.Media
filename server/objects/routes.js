@@ -376,7 +376,9 @@ router.post('/', upload, limits('media.object.upload', UPLOAD), async (req, res)
         const subject = subjectFrom(req);
         if (subject === undefined) return problem(res, 400, 'media.object.invalid', 'X-OV-Subject must be a user subject (usr_…)');
 
-        const mime = b.mime_type && /^[\w.+-]+\/[\w.+-]+$/.test(String(b.mime_type)) ? String(b.mime_type).toLowerCase() : null;
+        const declared = b.mime_type && /^[\w.+-]+\/[\w.+-]+$/.test(String(b.mime_type)) ? String(b.mime_type).toLowerCase() : null;
+        // A file sent without a type, or as a generic blob, takes the type its name says (a font, an icon …).
+        const mime = declared && declared !== 'application/octet-stream' ? declared : (ctypes.typeFromName(b.filename) || declared);
         if (mime) {
             const why = ctypes.kindProblem(kind, mime);
             if (why) return problem(res, 415, 'media.object.unsupported_type', why);
@@ -993,7 +995,7 @@ const SANDBOX_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data
 const publicRouter = express.Router();
 // Images a variant can be made of (sharp decodes them; a GIF's first frame); an SVG is never rasterized here.
 // An SVG has variants too (2026-11-16): a list, a card or a share preview gets pixels, never the drawing's own markup.
-const VARIANT_MIME = /^image\/(jpeg|png|webp|avif|gif|svg\+xml)$/i;
+const VARIANT_MIME = /^image\/(jpeg|png|webp|avif|gif|svg\+xml|tiff)$/i;   // 2026-11-16: a TIFF, which no browser but Safari shows, is drawn to WebP
 let _objectVariants = null;
 const objectVariants = () => _objectVariants || (_objectVariants = require('../thumbnails/variants').createVariants({
     dir: config.thumbnails.variants.objectsPath, maxBytes: config.thumbnails.variants.maxBytes, concurrency: config.thumbnails.variants.concurrency,
@@ -1230,6 +1232,9 @@ publicRouter.get('/:id', async (req, res) => {
             'Cache-Control': obj.visibility === 'private' || sandbox ? 'private, no-store' : 'public, max-age=3600',
             'Content-Disposition': contentDisposition(md.filename || obj.id, { inline: INLINE.test(mime) }),
             ...(isSvg(mime) ? { 'Content-Security-Policy': SANDBOX_CSP } : {}),
+            // A public object is for any site (2026-11-16): a font in another site's @font-face, a picture a page draws
+            // into a canvas. A private or sandbox object never says so.
+            ...(obj.visibility !== 'private' && !sandbox ? { 'Access-Control-Allow-Origin': '*', 'Cross-Origin-Resource-Policy': 'cross-origin' } : {}),
         };
         // ?w=&fmt= on an image asks for a variant (Media Fabric F4, thumbnails/variants.js): resized from its local copy
         // and cached (an avatar of 18 KB is under 1 KB at 96 px). Without a local copy, or when the cache is busy or the
