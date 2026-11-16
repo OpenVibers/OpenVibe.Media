@@ -10,12 +10,14 @@ const root = path.join(__dirname, '..');
 const pkg = require(path.join(root, 'package.json'));
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 
-const PIN = /OpenVibers\/OpenVibe\.[A-Za-z]+\/tar\.gz\/refs\/tags\/v(\d+\.\d+\.\d+)$/;
+// GitHub's tag tarball, or our own forge's archive (git.openvibe.codes, the pin bot's default since openvibe-shared 4.284.0).
+const PIN = /OpenVibers\/OpenVibe\.[A-Za-z]+\/tar\.gz\/refs\/tags\/v(\d+\.\d+\.\d+)$|openvibers\/openvibe\.[a-z]+\/archive\/v(\d+\.\d+\.\d+)\.tar\.gz$/i;
 let pinned = 0;
 for (const [name, spec] of Object.entries(pkg.dependencies || {})) {
     if (!name.startsWith('openvibe-')) continue;
-    const m = PIN.exec(String(spec));
-    if (!m) continue;
+    const t = PIN.exec(String(spec));
+    if (!t) continue;
+    const m = [t[0], t[1] || t[2]];
     pinned++;
     assert.ok(new RegExp(`${name.replace(/\./g, '\\.')}\`? v${m[1]}`).test(readme), `README names ${name} v${m[1]}, the pinned tag`);
 }
