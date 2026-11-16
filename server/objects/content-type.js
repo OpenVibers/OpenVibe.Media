@@ -22,6 +22,27 @@ const KIND_RULES = {
     avatar: { re: /^image\/(?!svg)/, what: 'image/* (not SVG)' },
 };
 
+/**
+ * The type a file's name says, for a file uploaded without one (or as application/octet-stream): fonts, icons and the
+ * common kinds (2026-11-16; the owner: "Media should support svg and all other file formats … And fonts and icons").
+ */
+const BY_EXTENSION = Object.freeze({
+    woff2: 'font/woff2', woff: 'font/woff', ttf: 'font/ttf', otf: 'font/otf', eot: 'application/vnd.ms-fontobject',
+    ico: 'image/x-icon', cur: 'image/x-icon', icns: 'image/icns', svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg',
+    jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', tif: 'image/tiff',
+    tiff: 'image/tiff', heic: 'image/heic', heif: 'image/heif', pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown',
+    csv: 'text/csv', json: 'application/json', zip: 'application/zip', gz: 'application/gzip', tar: 'application/x-tar',
+    '7z': 'application/x-7z-compressed', mp4: 'video/mp4', m4v: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+    mkv: 'video/x-matroska', mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg',
+    opus: 'audio/opus', flac: 'audio/flac', glb: 'model/gltf-binary', gltf: 'model/gltf+json', wasm: 'application/wasm',
+    epub: 'application/epub+zip',
+});
+/** The type a file name's extension says, or null. */
+function typeFromName(name) {
+    const m = /\.([a-z0-9]{1,8})$/i.exec(String(name || '').trim());
+    return m ? BY_EXTENSION[m[1].toLowerCase()] || null : null;
+}
+
 function normalize(type) {
     const t = String(type || '').split(';')[0].trim().toLowerCase();
     return TYPE_RE.test(t) ? t : null;
@@ -50,6 +71,11 @@ function sniff(head) {
     if (at(0, 'GIF87a') || at(0, 'GIF89a')) return { family: 'image', format: 'gif' };
     if (at(0, 'RIFF') && at(8, 'WEBP')) return { family: 'image', format: 'webp' };
     if (at(0, 'BM')) return { family: 'image', format: 'bmp' };
+    // Icons and the other still images people upload (2026-11-16, "fonts and icons and all that"): an ICO or a cursor
+    // (0 0, then 1 or 2, then 0), an Apple icon set, a TIFF either way round.
+    if (b.length >= 6 && b[0] === 0 && b[1] === 0 && (b[2] === 1 || b[2] === 2) && b[3] === 0 && (b[4] | (b[5] << 8)) > 0) return { family: 'image', format: b[2] === 1 ? 'ico' : 'cur' };
+    if (at(0, 'icns')) return { family: 'image', format: 'icns' };
+    if (at(0, 'II*\x00') || at(0, 'MM\x00*')) return { family: 'image', format: 'tiff' };
     if (at(4, 'ftyp')) {
         const brand = b.subarray(8, 12).toString('latin1');
         if (/^(avif|avis|heic|heix|mif1|msf1)$/.test(brand)) return { family: 'image', format: brand };
@@ -118,4 +144,4 @@ function readHead(file, n = 512) {
     } finally { fs.closeSync(fd); }
 }
 
-module.exports = { normalize, kindProblem, sniff, container, servedInline, contentProblem, readHead, KIND_RULES };
+module.exports = { normalize, kindProblem, sniff, container, servedInline, contentProblem, readHead, KIND_RULES, typeFromName, BY_EXTENSION };
