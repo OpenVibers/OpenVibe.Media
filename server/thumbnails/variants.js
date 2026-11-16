@@ -24,6 +24,9 @@ const { applyExifOrientation } = require('../images/orientation');
 const LADDER = [64, 96, 160, 320, 480, 640];
 const FORMATS = Object.freeze({ webp: 'image/webp', avif: 'image/avif', jpeg: 'image/jpeg' });
 
+/** The largest SVG drawn to pixels (a drawing is text; past this it is a bomb, not a picture). */
+const SVG_MAX_BYTES = 2 * 1024 * 1024;
+
 function parse(query = {}) {
     const hasW = query.w !== undefined && query.w !== '';
     const hasFmt = query.fmt !== undefined && query.fmt !== '';
@@ -81,7 +84,17 @@ function createVariants({ dir, maxBytes = 512 * 1024 * 1024, concurrency = 2, qu
     async function make(srcPath, key, spec) {
         const file = path.join(dir, key);
         const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-        let img = applyExifOrientation(lib()(srcPath, { limitInputPixels: 40_000_000, failOn: 'error' })).resize({ width: spec.w, withoutEnlargement: true });
+        // An SVG is drawn from its bytes, never its path: from a path, librsvg resolves the drawing's relative references
+        // against the store's directory (another object's file). Drawn at a density that covers the widest rung of the
+        // ladder, then sized down; a drawing over SVG_MAX_BYTES is not drawn (the original answers).
+        let img;
+        if (spec.svg) {
+            const st = fs.statSync(srcPath);
+            if (st.size > SVG_MAX_BYTES) throw new Error(`an SVG over ${SVG_MAX_BYTES} bytes is not drawn`);
+            img = lib()(fs.readFileSync(srcPath), { density: 384, limitInputPixels: 40_000_000, failOn: 'error' }).resize({ width: spec.w, withoutEnlargement: true });
+        } else {
+            img = applyExifOrientation(lib()(srcPath, { limitInputPixels: 40_000_000, failOn: 'error' })).resize({ width: spec.w, withoutEnlargement: true });
+        }
         img = spec.fmt === 'avif' ? img.avif({ quality: 50, effort: 2 }) : spec.fmt === 'jpeg' ? img.jpeg({ quality: 80, mozjpeg: true }) : img.webp({ quality: 75 });
         await img.toFile(tmp);
         fs.renameSync(tmp, file);
@@ -97,7 +110,7 @@ function createVariants({ dir, maxBytes = 512 * 1024 * 1024, concurrency = 2, qu
         async get(srcPath, spec) {
             count();
             const st = fs.statSync(srcPath);
-            const key = `${path.basename(srcPath)}.${Math.floor(st.mtimeMs)}.${spec.w}.${spec.fmt}`;
+            const key = `${path.basename(srcPath)}.${Math.floor(st.mtimeMs)}.${spec.w}.${spec.fmt}${spec.svg ? '.svg' : ''}`;
             const file = path.join(dir, key);
             try {
                 const hit = fs.statSync(file);
@@ -117,4 +130,4 @@ function createVariants({ dir, maxBytes = 512 * 1024 * 1024, concurrency = 2, qu
     };
 }
 
-module.exports = { parse, createVariants, LADDER, FORMATS };
+module.exports = { parse, createVariants, LADDER, FORMATS, SVG_MAX_BYTES };

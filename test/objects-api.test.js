@@ -185,8 +185,11 @@ const crypto = require('crypto');
         assert.deepStrictEqual([r.status, r.body.lifecycle_status], [200, 'ready'], JSON.stringify(r.body));
         r = await call('GET', `${O}/${svgId}/download`);
         const sv = await fetch(local(r.body.url));
-        assert.deepStrictEqual([sv.status, sv.headers.get('content-type'), /^attachment/.test(sv.headers.get('content-disposition') || ''), sv.headers.get('x-content-type-options')],
-            [200, 'image/svg+xml', true, 'nosniff'], 'the SVG downloads, never inline');
+        // 2026-11-16 (the owner: "Media should support svg and all other file formats"): shown in place, under a sandbox
+        // policy that runs no script and fetches nothing.
+        assert.deepStrictEqual([sv.status, sv.headers.get('content-type'), /^inline/.test(sv.headers.get('content-disposition') || ''), sv.headers.get('x-content-type-options')],
+            [200, 'image/svg+xml', true, 'nosniff'], 'the SVG is shown in place');
+        assert.match(sv.headers.get('content-security-policy') || '', /^default-src 'none';.*sandbox$/, 'under the sandbox: no script, nothing fetched');
         r = await call('POST', O, { body: { kind: 'avatar', visibility: 'public', mime_type: 'image/svg+xml' } });
         assert.ok(r.status >= 400, 'an avatar still may not be an SVG: ' + r.status);
         await db.run('DELETE FROM media_objects WHERE id = ?', [svgId]);

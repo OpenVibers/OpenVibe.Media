@@ -46,7 +46,10 @@ const express = require('express');
         assert.strictEqual(r.headers.get('x-content-type-options'), 'nosniff');
         assert.match(r.headers.get('content-security-policy') || '', /sandbox/);
         r = await fetch(`${base}/a/${svg}`);
-        assert.strictEqual(r.headers.get('content-disposition'), 'attachment', 'SVG is never inline');
+        // 2026-11-16: an SVG is shown in place, and its onload never runs (the sandbox, default-src 'none').
+        assert.strictEqual(r.headers.get('content-disposition'), 'inline', 'an SVG is shown in place');
+        assert.match(r.headers.get('content-security-policy') || '', /default-src 'none'.*sandbox/, 'under the sandbox');
+        assert.ok(!/script-src/.test(r.headers.get('content-security-policy') || ''), 'no script allowed');
         r = await fetch(`${base}/a/${png}`);
         assert.strictEqual(r.headers.get('content-disposition'), 'inline', 'an image is shown inline');
         assert.strictEqual(r.headers.get('x-content-type-options'), 'nosniff');

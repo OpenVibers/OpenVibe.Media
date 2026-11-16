@@ -613,11 +613,12 @@ router.get('/a/:id', async (req, res) => {
         // SVG), audio and video are shown inline, anything else downloads, and the bytes never run as a page on this
         // origin (nosniff, a sandboxing CSP).
         const mime = a.mime || 'application/octet-stream';
-        const inline = /^(image\/(?!svg)|audio\/|video\/)/i.test(mime);
+        // 2026-11-16: an SVG is shown in place too, under the same sandbox (its own styles allowed, no script).
+        const inline = /^(image\/|audio\/|video\/)/i.test(mime);
         streamFileWithRange(req, res, a.file_path, {
             'Content-Type': mime,
             'Content-Disposition': inline ? 'inline' : 'attachment',
-            'Content-Security-Policy': "default-src 'none'; sandbox",
+            'Content-Security-Policy': require('../objects/routes').isSvg(mime) ? require('../objects/routes').SANDBOX_CSP : "default-src 'none'; sandbox",
             'X-Content-Type-Options': 'nosniff',
             'Cache-Control': 'public, max-age=86400',
             'Access-Control-Allow-Origin': '*',
@@ -695,12 +696,14 @@ router.get('/f/:key', async (req, res) => {
         const stat = fs.statSync(filePath);
         const range = req.headers.range;
         const contentType = row.mime || 'application/octet-stream';
-        const inline = /^[\w.+-]+\/[\w.+-]+$/.test(contentType) && require('../objects/routes').INLINE.test(contentType.toLowerCase());
-        // Uploaders (developer apps included) choose the Content-Type: only inert types render here,
-        // everything else (HTML, SVG, XML…) downloads, so it never runs on this origin.
+        const served = require('../objects/routes');
+        const inline = /^[\w.+-]+\/[\w.+-]+$/.test(contentType) && served.INLINE.test(contentType.toLowerCase());
+        // Uploaders (developer apps included) choose the Content-Type: only inert types render here, and an SVG only
+        // under the sandbox policy (no script runs); everything else (HTML, XML…) downloads, so it never runs on this origin.
         const headers = {
             'X-Robots-Tag': 'noindex',
             'X-Content-Type-Options': 'nosniff',
+            ...(served.isSvg(contentType) ? { 'Content-Security-Policy': served.SANDBOX_CSP } : {}),
             'Content-Disposition': `${inline ? 'inline' : 'attachment'}; filename="${row.key}"`,
             'Cache-Control': sandbox ? 'private, no-store' : 'public, max-age=86400',
         };
