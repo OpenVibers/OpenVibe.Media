@@ -982,11 +982,18 @@ router.delete('/:id/holds/:holdId', appOnly, async (req, res) => {
 
 // ── Public bytes: GET /o/:id ─────────────────────────────────
 
-const INLINE = /^(image\/(?!svg)|video\/|audio\/|application\/pdf$|text\/plain$)/;
+// What a browser shows in place instead of downloading. SVG too, since 2026-11-16 (the owner: "Media should support svg
+// and all other file formats"): an SVG is shown under SANDBOX_CSP, so a script inside it never runs, even opened on its
+// own. Everything else still downloads with nosniff, whatever its type.
+const INLINE = /^(image\/|video\/|audio\/|application\/pdf$|text\/plain$)/;
+const isSvg = (type) => /^image\/svg/i.test(String(type || ''));
+/** An SVG's policy: no script, no fetch of anything, its own opaque origin; its own styles and data: pictures only. */
+const SANDBOX_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox";
 
 const publicRouter = express.Router();
 // Images a variant can be made of (sharp decodes them; a GIF's first frame); an SVG is never rasterized here.
-const VARIANT_MIME = /^image\/(jpeg|png|webp|avif|gif)$/i;
+// An SVG has variants too (2026-11-16): a list, a card or a share preview gets pixels, never the drawing's own markup.
+const VARIANT_MIME = /^image\/(jpeg|png|webp|avif|gif|svg\+xml)$/i;
 let _objectVariants = null;
 const objectVariants = () => _objectVariants || (_objectVariants = require('../thumbnails/variants').createVariants({
     dir: config.thumbnails.variants.objectsPath, maxBytes: config.thumbnails.variants.maxBytes, concurrency: config.thumbnails.variants.concurrency,
@@ -1222,6 +1229,7 @@ publicRouter.get('/:id', async (req, res) => {
             'X-Robots-Tag': 'noindex',
             'Cache-Control': obj.visibility === 'private' || sandbox ? 'private, no-store' : 'public, max-age=3600',
             'Content-Disposition': contentDisposition(md.filename || obj.id, { inline: INLINE.test(mime) }),
+            ...(isSvg(mime) ? { 'Content-Security-Policy': SANDBOX_CSP } : {}),
         };
         // ?w=&fmt= on an image asks for a variant (Media Fabric F4, thumbnails/variants.js): resized from its local copy
         // and cached (an avatar of 18 KB is under 1 KB at 96 px). Without a local copy, or when the cache is busy or the
@@ -1229,6 +1237,7 @@ publicRouter.get('/:id', async (req, res) => {
         // signature (the drive's previews, MediaHub), served with the same private, no-store headers as the original.
         const variants = require('../thumbnails/variants');
         const spec = VARIANT_MIME.test(mime) && (signed || (obj.visibility !== 'private' && !sandbox)) ? variants.parse(req.query) : null;
+        if (spec && !spec.error && isSvg(mime)) spec.svg = true;   // drawn to pixels from its bytes (thumbnails/variants.js)
         if (spec && spec.error) return res.status(400).json({ error: spec.error });
         // A viewer of a native object, counted once a day without being identified (objects/popularity.js); the
         // object tiering reads these counts. Sandbox objects are never tiered, so they are not counted.
@@ -1326,3 +1335,5 @@ module.exports.partHandlers = [mpWrite, tenantCors, limits('media.object.part', 
 module.exports.publicRouter = publicRouter;
 module.exports.sendSegmentRow = sendSegmentRow; // socket-free verification of durable ranged fallback
 module.exports.INLINE = INLINE;
+module.exports.isSvg = isSvg;
+module.exports.SANDBOX_CSP = SANDBOX_CSP;

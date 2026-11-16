@@ -93,7 +93,9 @@ const crypto = require('crypto');
         r = await upload(PA, appTok(), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', 'x.svg', 'image/svg+xml');
         assert.strictEqual(r.status, 201);
         r = await req('GET', `/f/${encodeURIComponent(r.body.key)}`);
-        assert.ok(/^attachment/.test(r.headers.get('content-disposition') || ''), 'SVG is served as a download');
+        // 2026-11-16: shown in place, but its script never runs: the sandbox policy, no script-src.
+        assert.ok(/^inline/.test(r.headers.get('content-disposition') || ''), 'an SVG is shown in place');
+        assert.match(r.headers.get('content-security-policy') || '', /default-src 'none'.*sandbox/, 'an SVG with a script is sandboxed');
 
         // MIME types are case-insensitive: image/SVG+xml is still SVG. (FormData lowercases, so raw multipart.)
         const boundary = 'ovboundary';
@@ -101,7 +103,7 @@ const crypto = require('crypto');
         r = await req('POST', `/api/v1/${PA}/files`, { bearer: appTok(), raw: multipart, headers: { 'content-type': `multipart/form-data; boundary=${boundary}` } });
         assert.strictEqual(r.status, 201, JSON.stringify(r.body));
         r = await req('GET', `/f/${encodeURIComponent(r.body.key)}`);
-        assert.ok(/^attachment/.test(r.headers.get('content-disposition') || ''), `mixed-case SVG is a download, got ${r.headers.get('content-type')} ${r.headers.get('content-disposition')}`);
+        assert.match(r.headers.get('content-security-policy') || '', /sandbox/, `mixed-case SVG is sandboxed too, got ${r.headers.get('content-type')} ${r.headers.get('content-security-policy')}`);
 
         // Sandbox signed URLs get the same treatment.
         r = await upload(PA, appTok({ env: 'sandbox' }), html, 'evil.html', 'text/html');

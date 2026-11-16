@@ -5,7 +5,8 @@
  *    screenshot / avatar -> image/* (not SVG). file and asset take any well-formed type.
  * 2. Bytes that /o/:id serves inline (image/* except SVG, video/*, audio/*, application/pdf) must look like
  *    what their type says: the first bytes are checked against the container signatures below at
- *    complete. A kind with a rule is always checked. An SVG is served as an attachment (routes.js INLINE).
+ *    complete. A kind with a rule is always checked. An SVG is shown in place under a sandbox policy that runs no
+ *    script (routes.js SANDBOX_CSP, 2026-11-16), and its variants are drawn to pixels from its bytes.
  * Anything else is served as an attachment with nosniff, so its declared type is taken as given.
  */
 'use strict';
@@ -89,8 +90,8 @@ function container(head) {
 }
 
 /**
- * Is `type` served inline (so its bytes must match it)? An SVG is served as an attachment on this origin (it is
- * never inline, INLINE in routes.js), so its text bytes are taken as given, like any other downloaded file.
+ * Must `type`'s bytes match it? An SVG is text shown under a sandbox policy (routes.js SANDBOX_CSP), so its bytes are
+ * taken as given: a script in it never runs, whatever it says.
  */
 function servedInline(type) {
     const t = String(type || '').toLowerCase();
