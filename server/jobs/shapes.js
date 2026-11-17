@@ -150,6 +150,17 @@ function plan(changes, { end } = {}) {
     return periods.map((p) => ({ start: p.start, end: p.end, ...canvasOf(p.runs) }));
 }
 
+/**
+ * A recording whose stream lost packets (a WebRTC part whose frames the decoder conceals) can leave libx264's B-frames
+ * with timestamps the fMP4 muxer refuses: "Not yet implemented in FFmpeg, patches welcome" (VOD 6568, 2026-11-17: all
+ * three attempts of its first period; the same period with `-bf 0` cut). Whether a failed run is that case and is
+ * worth one more run without B-frames: a slightly larger file instead of no timeline, and a healthy file keeps them.
+ */
+function noBframesRetry(r, codec) {
+    return !!r && !r.ok && /Not yet implemented in FFmpeg/i.test(String(r.stderr || ''))
+        && Array.isArray(codec) && codec.includes('libx264') && !codec.includes('-bf');
+}
+
 /** Whether the probe found more than one size: the cut must re-encode on the planned canvases. */
 function varies(changes) {
     return changes.length > 1;
@@ -179,12 +190,13 @@ async function cut({ source, periods, start = 0, out, segmentSeconds, encode, au
         const playlist = path.join(out, `index-${i + 1}.m3u8`);
         // -ss only finds the keyframe at or before the period's start (an absolute timestamp, nothing dropped by
         // ffmpeg itself): the trim on the input's own timestamps is what cuts.
-        const r = await derive.ffmpeg(['-y', '-nostdin', '-v', 'error', ...derive.inputArgs(source), '-copyts',
+        const codec = encode(p, i);
+        const args = (extra) => ['-y', '-nostdin', '-v', 'error', ...derive.inputArgs(source), '-copyts',
             ...(i > 0 ? ['-seek_timestamp', '1', '-noaccurate_seek', '-ss', secs(p.start)] : []), '-i', source.input,
             '-map', '0:v:0', ...(audio ? ['-map', '0:a:0?'] : []),
             '-vf', `${trim('trim')}setpts=PTS-${secs(from)}/TB,${fit(p.width, p.height)}`,
             ...(audio ? ['-af', `${trim('atrim')}asetpts=PTS-${secs(from)}/TB`] : []),
-            ...encode(p, i),
+            ...codec, ...extra,
             '-map_metadata', '-1', '-fflags', '+bitexact', '-flags', '+bitexact',
             ...(from > start ? ['-output_ts_offset', secs(from - start)] : []),
             '-f', 'hls', '-hls_time', String(segmentSeconds), '-hls_list_size', '0', '-hls_playlist_type', 'vod',
@@ -192,8 +204,10 @@ async function cut({ source, periods, start = 0, out, segmentSeconds, encode, au
             // Without them the encoder's B-frame delay leaves a gap at each join, which hls.js jumps and Chrome's
             // native HLS stalls on.
             '-hls_segment_type', 'fmp4', '-hls_segment_options', 'movflags=+negative_cts_offsets', '-hls_fmp4_init_filename', init,
-            '-start_number', String(next), '-hls_segment_filename', path.join(out, '%06d.m4s'), playlist],
-        { signal, timeoutMs, niceness });
+            '-start_number', String(next), '-hls_segment_filename', path.join(out, '%06d.m4s'), playlist];
+        let r = await derive.ffmpeg(args([]), { signal, timeoutMs, niceness });
+        // The same period again without B-frames when the fMP4 muxer refuses libx264's (noBframesRetry).
+        if (noBframesRetry(r, codec) && !(signal && signal.aborted)) r = await derive.ffmpeg(args(['-bf', '0']), { signal, timeoutMs, niceness });
         if (signal && signal.aborted) throw signal.reason || new Error('aborted');
         const tail = String(r.stderr).trim().split('\n').slice(-2).join(' ').slice(0, 300);
         if (!r.ok) {
@@ -210,4 +224,4 @@ async function cut({ source, periods, start = 0, out, segmentSeconds, encode, au
     return list;
 }
 
-module.exports = { SAME_SHAPE, MIN_PERIOD_S, MAX_PERIODS, MAX_SIDE, probe, plan, varies, fit, cut, canvasOf };
+module.exports = { SAME_SHAPE, MIN_PERIOD_S, MAX_PERIODS, MAX_SIDE, probe, plan, varies, fit, cut, canvasOf, noBframesRetry };

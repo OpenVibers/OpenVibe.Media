@@ -69,13 +69,15 @@ function validate({ obj, params }) {
 
 /** The whole input as one HLS fMP4 rendition (one shape): → the produced segments, [{ name, seconds }]. */
 async function cutWhole({ source, out, codecArgs, segmentSeconds, ctx, timeoutMs, niceness }) {
-    const r = await derive.ffmpeg(['-y', '-nostdin', '-v', 'error', ...derive.inputArgs(source), '-i', source.input,
-        '-map', '0:v:0?', '-map', '0:a:0?', ...codecArgs, '-map_metadata', '-1', '-fflags', '+bitexact', '-flags', '+bitexact',
+    const args = (extra) => ['-y', '-nostdin', '-v', 'error', ...derive.inputArgs(source), '-i', source.input,
+        '-map', '0:v:0?', '-map', '0:a:0?', ...codecArgs, ...extra, '-map_metadata', '-1', '-fflags', '+bitexact', '-flags', '+bitexact',
         '-f', 'hls', '-hls_time', String(segmentSeconds), '-hls_list_size', '0',
         '-hls_playlist_type', 'vod', '-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', timeline.INIT_NAME,
-        '-start_number', '1', '-hls_segment_filename', path.join(out, '%06d.m4s'), path.join(out, 'index.m3u8')],
-    { signal: ctx.signal, timeoutMs, niceness });
+        '-start_number', '1', '-hls_segment_filename', path.join(out, '%06d.m4s'), path.join(out, 'index.m3u8')];
+    let r = await derive.ffmpeg(args([]), { signal: ctx.signal, timeoutMs, niceness });
     segments.aborted(ctx);
+    // A re-encode the fMP4 muxer refuses for libx264's B-frames goes once more without them (shapes.noBframesRetry).
+    if (shapes.noBframesRetry(r, codecArgs)) { r = await derive.ffmpeg(args(['-bf', '0']), { signal: ctx.signal, timeoutMs, niceness }); segments.aborted(ctx); }
     const tail = String(r.stderr).trim().split('\n').slice(-2).join(' ').slice(0, 300);
     if (!r.ok) {
         const unsupported = /not currently supported in container|could not find tag for codec|codec not supported/i.test(r.stderr);
