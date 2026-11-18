@@ -9,6 +9,9 @@
  *                            it (joining one already queued or running for the same
  *                            item), runs it at once and answers { url } as before.
  *                            ?async=1 answers 202 { job } without waiting.
+ *                            A finished item whose picture is on disk answers
+ *                            it ({ url, current: true }) with no job; ?force=1
+ *                            makes a new one anyway.
  *   kind = 'live'|'stream' → upload only; stored under a stable per-app/id
  *                            filename so the URL survives refreshes.
  *
@@ -93,6 +96,13 @@ router.post('/:kind/:id', tenantAuth({ verb: 'write', allowUser: true }), upload
             return res.status(404).json({ error: 'Media file unavailable', code: 'media.clip_not_cut' });
         }
 
+        // A finished item whose picture is on disk keeps it. Asking again (a page's image failing to load for a moment,
+        // many visitors at once) made a new picture under a new name and deleted the old one, which emptied every page
+        // and cached feed still naming it (11-18). A recording still being written is remade (Live's live-edge cadence),
+        // and ?force=1 remakes one on purpose.
+        const force = ['1', 'true'].includes(String(req.query.force || ''));
+        const recording = kind === 'vod' && (row.is_recording === true || Number(row.is_recording) === 1);
+        if (!force && !recording && thumbService.hasPicture(row.thumbnail_url)) return res.json({ url: row.thumbnail_url, current: true });
         // Generate from the media file (local or presigned remote) as a thumbnail.regenerate job.
         const queue = require('../jobs/queue');
         const worker = require('../jobs/worker');
