@@ -219,6 +219,10 @@ async function ensureTokenOnlyApps() {
         // Files people attach in an agent conversation (the menu's Vibe, Actor, Codes: Network's /api/frame/runs/files goes
         // through Chat's /api/chat/vibe/files). Missing until 11-18, so every such attachment failed "404: Unknown app".
         ['chat', 'OpenVibe.Chat', 20, ['https://openvibe.chat']],
+        // Actor's private objects: a sandbox skill's code, a person's photo for their agent, and script_run's npm packages
+        // bundles (plan §AD.26). Network has granted Actor this tenant since the skills work, but it was never created
+        // here, so every one of them failed "404: Unknown app" (found 11-18 by the first real script_run with packages).
+        ['actor', 'OpenVibe.Actor', 10, []],
     ]) {
         if (!await db.getApp(appId)) {
             await db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes, allowed_origins) VALUES (?, ?, '', ?, ?)", [appId, name, quotaGb * 1024 ** 3, JSON.stringify(origins)]);
