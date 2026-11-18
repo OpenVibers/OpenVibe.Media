@@ -25,6 +25,16 @@ const path = require('path');
     const again = await variants.get(badge, { w: 320, fmt: 'webp', svg: true });
     assert.ok(again.hit, 'made once, then cached');
 
+    // 11-18: Inventory's item pictures name xmlns twice on <svg> ("Attribute xmlns redefined"): still drawn.
+    const twice = path.join(store, 'med_twice');
+    fs.writeFileSync(twice, '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg"><rect width="128" height="128" fill="#64748b"/></svg>');
+    const t2 = await variants.get(twice, { w: 160, fmt: 'webp', svg: true });
+    assert.strictEqual((await sharp(t2.file).metadata()).width, 160, 'a drawing that names xmlns twice is drawn');
+    const { svgForDrawing } = require('../server/thumbnails/variants');
+    assert.strictEqual(svgForDrawing(Buffer.from('<svg a="1" b="2" A="3"><g a="x" a="y"/></svg>')).toString(), '<svg a="1" b="2"><g a="x" a="y"/></svg>', 'only the root tag, first value kept');
+    const clean = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>');
+    assert.strictEqual(svgForDrawing(clean), clean, 'a clean drawing is the same buffer');
+
     // Another object's file beside it in the store: a drawing that names it draws nothing of it.
     await sharp({ create: { width: 64, height: 64, channels: 3, background: '#ff0000' } }).png().toFile(path.join(store, 'secret.png'));
     const sneaky = path.join(store, 'med_sneaky');

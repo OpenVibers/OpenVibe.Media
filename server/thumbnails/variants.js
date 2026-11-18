@@ -91,7 +91,7 @@ function createVariants({ dir, maxBytes = 512 * 1024 * 1024, concurrency = 2, qu
         if (spec.svg) {
             const st = fs.statSync(srcPath);
             if (st.size > SVG_MAX_BYTES) throw new Error(`an SVG over ${SVG_MAX_BYTES} bytes is not drawn`);
-            img = lib()(fs.readFileSync(srcPath), { density: 384, limitInputPixels: 40_000_000, failOn: 'error' }).resize({ width: spec.w, withoutEnlargement: true });
+            img = lib()(svgForDrawing(fs.readFileSync(srcPath)), { density: 384, limitInputPixels: 40_000_000, failOn: 'error' }).resize({ width: spec.w, withoutEnlargement: true });
         } else {
             img = applyExifOrientation(lib()(srcPath, { limitInputPixels: 40_000_000, failOn: 'error' })).resize({ width: spec.w, withoutEnlargement: true });
         }
@@ -130,4 +130,23 @@ function createVariants({ dir, maxBytes = 512 * 1024 * 1024, concurrency = 2, qu
     };
 }
 
-module.exports = { parse, createVariants, LADDER, FORMATS, SVG_MAX_BYTES };
+/**
+ * The drawing's bytes as librsvg will take them. It refuses an element that names an attribute twice ("Attribute xmlns
+ * redefined"): 11-18, Inventory's 120 item pictures say xmlns twice on <svg>, and none of their variants could be made.
+ * On the root start tag each attribute keeps its first value; nothing else in the drawing changes.
+ */
+function svgForDrawing(buf) {
+    const text = buf.toString('utf8');
+    const m = /<svg\b[^>]*>/i.exec(text);
+    if (!m) return buf;
+    const seen = new Set();
+    const tag = m[0].replace(/\s([A-Za-z_][\w:.-]*)\s*=\s*("[^"]*"|'[^']*')/g, (all, name) => {
+        const k = name.toLowerCase();
+        if (seen.has(k)) return '';
+        seen.add(k);
+        return all;
+    });
+    return tag === m[0] ? buf : Buffer.from(text.slice(0, m.index) + tag + text.slice(m.index + m[0].length), 'utf8');
+}
+
+module.exports = { parse, createVariants, LADDER, FORMATS, SVG_MAX_BYTES, svgForDrawing };
