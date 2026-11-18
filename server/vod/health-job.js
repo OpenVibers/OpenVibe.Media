@@ -49,7 +49,22 @@ async function _scanOne(vod, { deep }) {
     if (vod.health_status === 'needs_repair') {
         if (!deep) return { id: vod.id, status: 'deferred' };
         try {
-            const r = await repair.repairVod(vod, { apply: true, recut: true, announceReady: true });
+            const opts = { apply: true, recut: true, announceReady: true };
+            let r = await repair.repairVod(vod, opts);
+            // 11-18: a recording that needs repair but whose file lives only on B2/R2 was asked again every idle pass
+            // ("not_local", 21 times in 45 minutes) and stayed hidden for good. Bring it back to this host first, then
+            // repair it; one with no copy in remote storage either is marked missing_file instead of retried forever.
+            if (!r.ok && r.skipped === 'not_local') {
+                const storage = require('./vod-storage');
+                const back = await storage.moveToHot(vod.id, { trigger: 'health', reason: 'needs repair' });
+                if (back && back.ok) {
+                    r = await repair.repairVod((await db.get('SELECT * FROM vods WHERE id = ?', [vod.id])) || vod, opts);
+                } else if (back && /missing from remote storage/i.test(String(back.error || ''))) {
+                    await storage.quarantineMissing(vod.id, 'needs_repair, and no copy on this host or in remote storage');
+                    console.warn(`[VOD-Health] vod ${vod.id} needs repair but has no copy anywhere: marked missing_file`);
+                    return { id: vod.id, status: 'missing_file' };
+                }
+            }
             if (r.ok) {
                 console.log(`[VOD-Health] Repaired vod ${vod.id} (${r.skipped || `${r.duration}s`})${r.recut ? `, re-cut queued ${r.recut}` : ''}`);
                 return { id: vod.id, status: 'repaired' };
@@ -317,4 +332,4 @@ function stop() {
     if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { start, stop, _tick };
+module.exports = { start, stop, _tick, _scanOne };
