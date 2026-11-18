@@ -126,7 +126,8 @@ const { serviceAuth, ids } = require('openvibe-contracts');
     assert.ok(has('-movflags', '+faststart'), 'the index comes first');
     assert.ok(has('-vf', 'scale=-2:1080'), 'at most 1080 lines tall');
     assert.ok(has('-r', '60'), 'the frame rate is capped at 60');
-    assert.ok(args.includes('-autorotate'), 'the rotation is applied');
+    // The rotation is ffmpeg's default; the flag is left out (ffmpeg 8 takes no value after it, ffmpeg 6 needs one).
+    assert.ok(!args.includes('-autorotate') && !args.includes('1'), 'no -autorotate 1: a second output file on ffmpeg 8');
     const small = playback.copyArgs({ input: '/in.mp4', output: '/out.mp4', info: { height: 720, fps: 30 }, maxHeight: 1080, maxFps: 60 });
     assert.ok(!small.includes('-vf'), 'a small video is not scaled');
     assert.ok(small[small.indexOf('-r') + 1] === '30', 'a small frame rate is kept');

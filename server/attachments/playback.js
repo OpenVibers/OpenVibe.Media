@@ -141,12 +141,15 @@ function webSafe(info) {
 /**
  * The ffmpeg arguments that make the web copy: H.264 (yuv420p) + AAC in an MP4 whose index comes first
  * (-movflags +faststart), at most `maxHeight` lines tall, the source frame rate up to `maxFps`, the rotation
- * applied (-autorotate, the ffmpeg default, said out loud so the output is never rotated twice).
+ * applied (ffmpeg's default autorotate; the output carries no display matrix, so it is never rotated twice).
+ * 11-18: no `-autorotate 1` any more. ffmpeg 8 (production's, Ubuntu 26.04) takes the flag without a value, so the
+ * "1" became a second output file and every web copy failed ("Error parsing options for output file 1"); ffmpeg 6
+ * takes a value. Left out, it is on in both.
  */
 function copyArgs({ input, output, info = {}, maxHeight = 1080, maxFps = 60, crf = 23, preset = 'veryfast', threads = 2, audio = true }) {
     const height = Number(info.height) || 0;
     const fps = Number(info.fps) || 0;
-    const args = ['-y', '-nostdin', '-v', 'error', '-autorotate', '1', '-i', String(input),
+    const args = ['-y', '-nostdin', '-v', 'error', '-i', String(input),
         '-map', '0:v:0', '-map', '0:a:0?',
         '-c:v', 'libx264', '-preset', preset, '-crf', String(crf), '-pix_fmt', 'yuv420p', '-profile:v', 'high',
         '-threads', String(threads)];
