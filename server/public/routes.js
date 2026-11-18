@@ -605,6 +605,9 @@ router.get('/live/:sel/frame.jpg', async (req, res) => {
 // ── App assets (emotes / sounds) by id ───────────────────────
 router.get('/a/:id', async (req, res) => {
     if (drill.refuseBytes(res)) return;
+    // An app asset's id is a number; anything else (a bare attachment id without its file name, att_…) is not one of
+    // them. 11-18: those reached the query as NaN and answered 500 (browser tests' stand-ins asking production).
+    if (!/^[1-9][0-9]{0,15}$/.test(String(req.params.id))) return res.status(404).json({ error: 'Not found' });
     try {
         const a = await db.getAssetById(parseInt(req.params.id, 10));
         if (!a || !a.file_path || !fs.existsSync(a.file_path)) return res.status(404).json({ error: 'Not found' });
