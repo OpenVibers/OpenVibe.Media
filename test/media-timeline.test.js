@@ -30,6 +30,9 @@ const { spawn, spawnSync } = require('child_process');
     process.env.MEDIA_JOBS_POLL_MS = '50';
     process.env.MEDIA_INVARIANT_SCAN_HOURS = '0';
     process.env.MEDIA_UPLOAD_MIN_FREE_MB = '0';
+    // This node keeps a packed chunk only above this much free disk (8 GB by default): the test must not depend on the
+    // machine's own (11-18: the shared node's /tmp had 6.7 GB free, so no chunk was kept and the test failed there).
+    process.env.MEDIA_TIMELINE_LOCAL_MIN_FREE_BYTES = '0';
     process.env.MEDIA_HLS_ENABLED = '1';
     for (const p of ['B2', 'R2']) for (const k of ['ENDPOINT', 'BUCKET', 'KEY_ID', 'APP_KEY', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY']) process.env[`MEDIA_${p}_${k}`] = '';
     // The durable providers' bytes ("<provider>:<key>"), served back with Range at /blob/… by the stub (presigned URLs).
