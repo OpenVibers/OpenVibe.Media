@@ -204,13 +204,15 @@ async function tick() {
             }
             for (const lane of lanes()) {
                 if (lane.name === 'heavy' && !cfg().heavyWhileRecording && recordingActive()) continue;
-                while (inLane(lane.name) < lane.max) {
+                // A stopped worker claims nothing more (11-18: a tick already under way when stop() ran claimed a job
+                // queued after it, so runNow found it taken; at a deploy's stop it left a job leased until expiry).
+                while (started && inLane(lane.name) < lane.max) {
                     const row = await queue.claim(lane.types, { leaseS: cfg().leaseS });
                     if (!row) break;
                     execute(row, lane.name).catch((err) => console.warn(`[Jobs] ${row.id}: ${err.message}`));   // runs in its lane; the loop claims the next
                 }
             }
-        } while (kicked);
+        } while (kicked && started);
     } catch (err) {
         console.warn('[Jobs] tick:', err.message);
     } finally {
