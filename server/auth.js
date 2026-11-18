@@ -216,6 +216,9 @@ async function ensureTokenOnlyApps() {
         ['codes', 'OpenVibe.Codes', 5, []],          // a task's screenshots, private to the person (Codes #188, 10-30)
         ['host', 'OpenVibe.Host', 10, []],          // the screenshot baselines ovhost shots captures (plan L9, 11-06)
         ['tours', 'OpenVibe.Tours', 5, ['https://openvibe.tours']],   // licensed place photos copied from Commons/Openverse (11-08)
+        // Files people attach in an agent conversation (the menu's Vibe, Actor, Codes: Network's /api/frame/runs/files goes
+        // through Chat's /api/chat/vibe/files). Missing until 11-18, so every such attachment failed "404: Unknown app".
+        ['chat', 'OpenVibe.Chat', 20, ['https://openvibe.chat']],
     ]) {
         if (!await db.getApp(appId)) {
             await db.run("INSERT INTO apps (app_id, name, api_key_hash, quota_bytes, allowed_origins) VALUES (?, ?, '', ?, ?)", [appId, name, quotaGb * 1024 ** 3, JSON.stringify(origins)]);

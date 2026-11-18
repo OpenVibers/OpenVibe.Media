@@ -36,13 +36,15 @@ const crypto = require('crypto');
     await auth.ensureTokenOnlyApps();
     // C-71: every first-party tenant exists without seeding, and one boot created carries no app key. An existing row
     // (live, written with a test key just above) is left exactly as it was.
-    for (const id of ['community', 'tools', 'games', 'wiki', 'blog', 'inventory', 'media-hub', 'codes', 'host', 'locker', 'tours']) {
+    for (const id of ['community', 'tools', 'games', 'wiki', 'blog', 'inventory', 'media-hub', 'codes', 'host', 'locker', 'tours', 'chat']) {
         const row = await db.getApp(id);
         assert.ok(row, `${id} exists without seeding`);
         assert.strictEqual(row.api_key_hash, '', `${id} has no app key`);
     }
     assert.deepStrictEqual(JSON.parse((await db.getApp('games')).allowed_origins), ['https://openvibe.games', 'https://play.openvibe.games']);
     assert.notStrictEqual((await db.getApp('live')).api_key_hash, '', 'an existing row is not rewritten');
+    // 11-18: Chat's tenant, where the files people attach in an agent conversation go (it was missing: "404: Unknown app").
+    assert.deepStrictEqual(JSON.parse((await db.getApp('chat')).allowed_origins), ['https://openvibe.chat']);
 
     const PA = `prj_${ids.ulid()}`;
     const PB = `prj_${ids.ulid()}`;
