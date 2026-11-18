@@ -5,6 +5,7 @@
  * POST   /:id/ingest/rtmp        { rtmp_url }             → 202 (ffmpeg pulls it)
  * POST   /:id/ingest/rtp/start   { video, audio }         → { videoPort, audioPort }
  * POST   /:id/ingest/rtp/stop    finalize RTP recording   → 200
+ * GET    /:id/ingest             is this process recording it now → { recording, row_recording, kind, … }
  * POST   /:id/chunks             multipart chunk append (user JWT ok)
  * POST   /:id/complete           finalize chunked upload
  * POST   /:id/finalize           close recording, kick off thumbnail+probe
@@ -144,6 +145,33 @@ router.post('/:id/ingest/rtmp', tenantAuth({ verb: 'write' }), async (req, res) 
     } catch (err) {
         console.error('[VOD] RTMP ingest error:', err.message);
         res.status(500).json({ error: 'Failed to start RTMP ingest' });
+    }
+});
+
+// ── Ingest status ────────────────────────────────────────────
+// Whether this process is recording the VOD right now. A restart ends every ingest (its ffmpeg goes with the old
+// process) while the row keeps is_recording = 1 until the orphan sweep finalizes it minutes later; an app that asks
+// here (OpenVibe.Live's recorder, every 15 s while a stream records) resumes in a new part at once instead of losing
+// those minutes. `bytes` and `file_age_ms` say whether the file is still growing.
+router.get('/:id/ingest', tenantAuth({ verb: 'read' }), async (req, res) => {
+    try {
+        const vod = await _getVodScoped(req, res);
+        if (!vod) return;
+        const rec = recorder.activeRecordings.get(Number(vod.id)) || null;
+        let bytes = null, fileAgeMs = null;
+        const file = (rec && rec.filePath) || vod.file_path || null;
+        if (file) { try { const st = fs.statSync(file); bytes = st.size; fileAgeMs = Math.max(0, Date.now() - st.mtimeMs); } catch { /* not on disk */ } }
+        res.set('Cache-Control', 'no-store').json({
+            id: vod.id,
+            recording: !!rec,
+            row_recording: !!vod.is_recording,
+            kind: rec ? (rec.protocol || rec.kind || null) : null,
+            since: rec ? new Date(rec.startTime).toISOString() : null,
+            bytes, file_age_ms: fileAgeMs,
+        });
+    } catch (err) {
+        console.error('[VOD] Ingest status error:', err.message);
+        res.status(500).json({ error: 'Failed to read the ingest status' });
     }
 });
 

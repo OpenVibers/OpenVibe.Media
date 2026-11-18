@@ -245,6 +245,7 @@ and in `scripts/smoke-test.sh`.
 | POST | `/vods/:id/ingest/rtmp` | `{ rtmp_url }` → **202**; ffmpeg pulls the URL, lossless stream-copy → fragmented `.mp4`. Only allow-listed RTMP servers (`MEDIA_RTMP_PULL_ALLOW`, a list of `host:port` or `host:low-high`, default `127.0.0.1:1935,localhost:1935,[::1]:1935,127.0.0.1:19360-19399`: Live's RTMP server and OpenRestream's loopback play ports on this host) and a plain `rtmp[s]://host[:port]/path` shape (no user info, whitespace or backslash); anything else is **400** and starts nothing |
 | POST | `/vods/:id/ingest/rtp/start` | `{ video: {payloadType, codec, clockRate, ssrc?, parameters?}, audio?: {…} }` → `{ videoPort, audioPort }` from UDP 12000-12199; point PlainRtpTransports at `127.0.0.1` (RTCP = port+1) |
 | POST | `/vods/:id/ingest/rtp/stop` | finalizes the recording |
+| GET | `/vods/:id/ingest` | whether this process records it now (`recording`, `row_recording`, `kind`, `since`, `bytes`, `file_age_ms`): after a restart the row still says recording while nothing does, so an app resumes at once |
 | POST | `/vods/:id/chunks` | multipart `chunk` (+`segmentId`), user JWT ok — browser MediaRecorder append flow |
 | POST | `/vods/:id/complete` | finalize chunked upload (user JWT ok) |
 | POST | `/vods/:id/finalize` | close recording; remux, probe, thumbnail, event |
