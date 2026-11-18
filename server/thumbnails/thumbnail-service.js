@@ -433,6 +433,35 @@ async function thumbnailItemGone(filename) {
     return !exists;
 }
 
+/** The stored thumbnail URL's file is on disk (a URL whose file is gone answers the empty pixel). */
+function hasPicture(url) {
+    if (!url) return false;
+    let name;
+    try { name = path.basename(new URL(String(url), 'http://media.invalid').pathname); } catch { return false; }
+    return !!name && fs.existsSync(path.join(THUMB_DIR, name));
+}
+
+// A stale name: the item's picture was made again (a new name; the old file is deleted), but a page, a feed or a cache
+// built before still names the old one. It answers the item's CURRENT picture by a redirect, for a public or unlisted
+// item, instead of the empty pixel, which never fires the page's onerror and left the card empty (11-18: the owner's
+// openvibe.video feed, built from a list cached for minutes, showed empty cards after the pictures were remade).
+async function currentThumbFor(filename) {
+    const m = ITEM_THUMB_RE.exec(filename);
+    if (!m) return null;
+    let row;
+    try {
+        row = await require('../db/database').get(`SELECT thumbnail_url, visibility, is_public FROM ${m[1] === 'vod' ? 'vods' : 'clips'} WHERE id = ?`, [Number(m[2])]);
+    } catch { return null; }   // no database to ask (a test, a drill): the pixel, as before
+    if (!row || !row.thumbnail_url) return null;
+    const visibility = row.visibility || (Number(row.is_public) ? 'public' : 'private');
+    if (visibility !== 'public' && visibility !== 'unlisted') return null;
+    let name;
+    try { name = path.basename(new URL(String(row.thumbnail_url), 'http://media.invalid').pathname); } catch { return null; }
+    const same = ITEM_THUMB_RE.exec(name || '');
+    if (!same || same[1] !== m[1] || same[2] !== m[2] || name === filename) return null;   // only the same item's picture
+    return fs.existsSync(path.join(THUMB_DIR, name)) ? name : null;
+}
+
 async function serveThumbnail(req, res, { noStore = false } = {}) {
     if (require('../drill').refuseBytes(res)) return;   // a restore drill serves no stored file
     try {
@@ -443,7 +472,21 @@ async function serveThumbnail(req, res, { noStore = false } = {}) {
         const spec = require('./variants').parse(req.query);
         if (spec && spec.error) return res.status(400).json({ error: spec.error });
 
-        if (!filename || !fs.existsSync(filePath) || await thumbnailItemGone(filename)) {
+        const onDisk = !!filename && fs.existsSync(filePath);
+        if (filename && !onDisk && !noStore) {
+            const current = await currentThumbFor(filename);
+            if (current) {
+                const qs = String(req.originalUrl || req.url || '').split('?')[1];
+                res.writeHead(302, {
+                    Location: `/t/${encodeURIComponent(current)}${qs ? `?${qs}` : ''}`,
+                    // Short: the picture may be made again, and the old name must then lead to the newer one.
+                    'Cache-Control': 'public, max-age=300',
+                    'X-Robots-Tag': 'noindex',
+                });
+                return res.end();
+            }
+        }
+        if (!onDisk || await thumbnailItemGone(filename)) {
             // Return a 1x1 transparent pixel JPEG as fallback
             const pixel = Buffer.from(
                 '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AKwA=',
@@ -545,6 +588,7 @@ module.exports = {
     generateAudioThumbnail,
     saveLiveThumbnail,
     serveThumbnail,
+    hasPicture,
     cleanupOldThumbnails,
     extractFrameToFile,
     frameSeekCandidates,
