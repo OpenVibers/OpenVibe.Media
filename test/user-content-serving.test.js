@@ -53,6 +53,10 @@ const express = require('express');
         r = await fetch(`${base}/a/${png}`);
         assert.strictEqual(r.headers.get('content-disposition'), 'inline', 'an image is shown inline');
         assert.strictEqual(r.headers.get('x-content-type-options'), 'nosniff');
+        // Not an asset's number: 404, never a 500 from the query (11-18: att_… without its name, NaN in SQL).
+        for (const bad of ['att_01JD0000000000000000000001', '12abc', '0', '-3', '99999999999999999999']) {
+            assert.strictEqual((await fetch(`${base}/a/${bad}`)).status, 404, bad);
+        }
 
         const post = (id) => new Promise((resolve, reject) => {
             const body = JSON.stringify({ image: 'data:image/jpeg;base64,/9j/4AAQ' });
