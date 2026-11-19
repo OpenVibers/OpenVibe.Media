@@ -48,7 +48,7 @@ without `DATABASE_URL`, development uses an embedded PGlite database in `data/pg
   export and deletion), OpenVibe.Live (`live.lineage.resolve`), OpenVibe.Events (the outbox relay and
   the account and revocation subscriptions)
 - Backblaze B2 and Cloudflare R2 (S3 API) when configured; `ffmpeg`/`ffprobe` on the host
-- `openvibe-contracts` v0.443.0, `openvibe-sdk` v0.188.0 (tokens, events outbox, usage readings, per-actor limits),
+- `openvibe-contracts` v0.449.0, `openvibe-sdk` v0.188.0 (tokens, events outbox, usage readings, per-actor limits),
   `openvibe-shared` v4.320.0, pinned by release tarball
 
 ## Capabilities
@@ -802,7 +802,7 @@ Rollback: ovhost puts the previous sha back by itself when `/api/ready` does not
 restart; afterwards `sudo ovhost rollback media --to <sha>`.
 
 <!-- versions:start -->
-- openvibe-contracts: v0.443.0
+- openvibe-contracts: v0.449.0
 - openvibe-sdk: v0.188.0
 - openvibe-shared: v4.320.0
 <!-- versions:end -->
