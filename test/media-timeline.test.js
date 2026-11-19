@@ -121,8 +121,11 @@ const { spawn, spawnSync } = require('child_process');
         const mk = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=7:size=160x90:rate=10', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=7',
             '-c:v', 'mpeg4', '-g', '15', '-c:a', 'aac', '-shortest', src]);
         assert.strictEqual(mk.status, 0, String(mk.stderr));
+        // A native object's bytes live under OBJECTS_PATH, where a purge may delete them (it never deletes a file
+        // outside it). They were under VOD_PATH, so the purge below left the object alone; GitHub's runner has no
+        // ffmpeg and skips this test, so only our own CI (the shared node, 2026-11-19) ran it and saw that.
         const native = async (visibility) => {
-            const file = path.join(process.env.VOD_PATH, `${visibility}.mp4`);
+            const file = path.join(process.env.OBJECTS_PATH, `${visibility}.mp4`);
             fs.copyFileSync(src, file);
             const id = await model.createObject({ app_id: 'live', owner_user_id: 5, visibility, lifecycle_status: 'ready', kind: 'file', mime_type: 'video/mp4', size_bytes: fs.statSync(file).size });
             await model.upsertLocation(id, { provider: 'local', key: file, state: 'present', size_bytes: fs.statSync(file).size, verified: true });
@@ -351,7 +354,7 @@ const { spawn, spawnSync } = require('child_process');
         assert.ok(brightness((await model.listLocations(so.id))[0].key) > 30, 'real frames from the rows, not black tiles');
 
         // The source file gone: the seek path could not run at all, yet the rows' bytes cut the same sheet.
-        const pubFile = path.join(process.env.VOD_PATH, 'public.mp4');
+        const pubFile = path.join(process.env.OBJECTS_PATH, 'public.mp4');
         fs.renameSync(pubFile, `${pubFile}.away`);
         const sr2 = await runJob(pub, { frames: 4, columns: 2, tile_width: 96 }, 'object.sprite');
         assert.strictEqual(sr2.status, 'succeeded', JSON.stringify(sr2.error));
