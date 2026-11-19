@@ -23,6 +23,9 @@ const { spawn, spawnSync } = require('child_process');
         VOD_PATH: dir('vods'), CLIPS_PATH: dir('clips'), FILES_PATH: dir('files'), THUMBNAILS_PATH: dir('thumbnails'),
         PASTES_PATH: dir('pastes'), OBJECTS_PATH: dir('objects'), MEDIA_PUBLIC_URL: 'https://media.test',
         MEDIA_JOBS_POLL_MS: '50', MEDIA_INVARIANT_SCAN_HOURS: '0', MEDIA_UPLOAD_MIN_FREE_MB: '0',
+        // Segments stay on this node's disk only above 8 GB free by default: the test must not depend on the machine's own
+        // (the shared node's /tmp is a 7.6 GB tmpfs, so no segment was kept and pack found no copy: our own CI, 11-19).
+        MEDIA_TIMELINE_LOCAL_MIN_FREE_BYTES: '0',
         MEDIA_HLS_ENABLED: '1', MEDIA_MATERIALIZED_CLIPS: '1',
     });
     for (const p of ['B2', 'R2']) for (const k of ['ENDPOINT', 'BUCKET', 'KEY_ID', 'APP_KEY', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY']) process.env[`MEDIA_${p}_${k}`] = '';
