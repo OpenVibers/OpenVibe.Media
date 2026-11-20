@@ -38,6 +38,7 @@ const https = require('https');
         'server/objects/orientation-backfill.js': 'a presigned GET on an operator-configured B2/R2 provider for a historical object location; provider and key come from Media storage metadata',
         'server/s3/routes.js': 'a ranged GET on a presigned B2/R2 URL (operator-configured buckets) for an S3 GetObject whose bytes are not on local disk',
         'server/jobs/previews.js': 'a (ranged) GET on a presigned B2/R2 URL (operator-configured buckets) for a timeline segment, to cut a sprite frame',
+        'server/vod/mp4-layout.js': 'ranged GETs of a VOD\'s first box headers on a presigned B2/R2 URL (operator-configured buckets; health-job\'s layout sweep passes only storage.presignGet\'s answer), https only',
         'server/drill.js': 'restore drill: only this server itself',
         'server/me/client.js': 'browser script, same-origin',
     };
