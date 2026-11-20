@@ -273,7 +273,7 @@ async function _masterSweep() {
 // fragmented one is brought to this host, remuxed (stream copy, +faststart) into a new file that must check out (the
 // moov first, no moof, the same length to 2%) before it replaces the local copy. B2's canonical copy is untouched until
 // the storage tier moves the VOD out again, with the remuxed file. At most one remux a pass.
-const LAYOUT_BATCH = 4;
+const LAYOUT_BATCH = 25;   // checks a pass: each is three 16-byte range reads (4 took 11 h for production's 521 recordings); still one remux a pass
 const _layoutSkip = new Set();   // ids this process could not read, fetch or fix (tried again after a restart)
 const _objects = () => require('../objects/model');
 
