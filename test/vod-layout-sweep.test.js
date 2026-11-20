@@ -53,11 +53,12 @@ const urls = {};          // B2 object key -> a presigned URL
 stub('server/vod/vod-storage', {
     providerConfigured: (p) => (p === 'b2' && b2on) || (p === 'r2' && r2on),
     keyForVod: (v) => `vods/${v.id}.mp4`,
-    headObject: async (p, key) => heads[key] || null,
+    headObject: async (p, key) => heads[`${p}:${key}`] || heads[key] || null,   // 'r2:key' for one provider's copy
+    copyBetweenProviders: async (from, to, key) => { storageCalls.push(['copy', from, to, key]); return { size: 1 }; },
     moveToCold: async (id) => { storageCalls.push(['moveToCold', id]); return { ok: true }; },
     uploadFile: async (p, key, file, type) => { storageCalls.push(['uploadFile', key, type]); uploads.push([p, key]); return { size: 1 }; },
     localPathForVod: (v) => v.local || null,
-    presignGet: async (provider, key) => (key && urls[key]) || presigned,
+    presignGet: async (provider, key) => (key && (urls[`${provider}:${key}`] || urls[key])) || presigned,
     moveToHot: async (id) => { storageCalls.push(['moveToHot', id]); if (!hotFile) return { ok: false, error: 'download stalled' }; fresh = { id, local: hotFile }; return { ok: true }; },
 });
 const layout = require('../server/vod/mp4-layout');
@@ -201,6 +202,28 @@ function serve(file) {
         out = await job._checkLayout({ id: 52, local: r2frag, file_path: r2frag, storage_provider: 'r2', storage_key: 'r2/vods/52.mp4', duration_seconds: 6 });
         assert.deepStrictEqual([out.status, out.published], ['remuxed', 'published']);
         assert.deepStrictEqual(uploads, [['r2', 'r2/vods/52.mp4']], 'a new repair of an R2 recording writes R2');
+
+        // 11-20, VOD 6554 again: repaired, then moved to R2 by the tiering (no local file), its fragmented original
+        // still on B2, the copy the edge shields and players get. R2's repaired copy is copied over B2's; nothing is
+        // copied when R2's is fragmented too (62) or the two sizes are far apart (63, not the same recording).
+        b2on = true; storageCalls.length = 0; uploads.length = 0;
+        const fastAgain = await serve(FAST);
+        const fragAt = `https://127.0.0.1:${server.address().port}/v/frag`, fastAt = `https://127.0.0.1:${fastAgain.address().port}/v/fast`;
+        for (const [id, r2Size, r2Url] of [[61, 1004, fastAt], [62, 1004, fragAt], [63, 600, fastAt]]) {
+            heads[`r2:vods/${id}.mp4`] = { size: r2Size };
+            heads[`b2:vods/${id}.mp4`] = { size: 1000 };
+            urls[`r2:vods/${id}.mp4`] = r2Url;
+            urls[`b2:vods/${id}.mp4`] = fragAt;
+        }
+        rows = [63, 62, 61].map((id) => ({ id, storage_provider: 'r2', storage_key: `vods/${id}.mp4`, layout_checked_at: 'x' }));
+        const fromR2 = await job._republishPass();
+        assert.deepStrictEqual([fromR2.id, fromR2.status, fromR2.published], [61, 'republished', 'published'], JSON.stringify(fromR2));
+        assert.deepStrictEqual(storageCalls, [['copy', 'r2', 'b2', 'vods/61.mp4']], 'R2\'s repaired copy over B2\'s, nothing else');
+        assert.deepStrictEqual(uploads, [], 'no local file is uploaded');
+        storageCalls.length = 0;
+        assert.strictEqual(await job._republishPass(), null, 'each asked once a process');
+        assert.deepStrictEqual(storageCalls, []);
+        fastAgain.close();
 
         server.close();
         console.log = said;

@@ -377,6 +377,10 @@ async function copyBetweenProviders(srcProvider, dstProvider, key) {
     const dst = clientFor(dstProvider);
     if (!src || !dst) throw new Error(`Provider not configured for copy from ${srcProvider} to ${dstProvider}`);
     loadSdk();
+    // 11-20: a copy over a shielded key that already exists (R2's repaired recording over B2's fragmented one) refreshes
+    // the shield's slices, as uploadFile does, or the edge serves the old bytes for up to a day.
+    const shield = require('../placement/shield');
+    const before = shield.enabled(dstProvider) ? await headObject(dstProvider, key).catch(() => null) : null;
     const obj = await src.send(new S3.GetObjectCommand({ Bucket: PROVIDER_ENV[srcProvider].bucket, Key: key }));
     const upload = new LibStorage.Upload({
         client: dst,
@@ -395,6 +399,10 @@ async function copyBetweenProviders(srcProvider, dstProvider, key) {
     const head = await headObject(dstProvider, key);
     if (!head || (expected && head.size !== expected)) {
         throw new Error(`Copy verification failed for ${key} at ${dstProvider}`);
+    }
+    if (before) {
+        const r = await shield.purge({ provider: dstProvider, key, size: Math.max(head.size, before.size || 0), presign: presignGet });
+        if (r.failed) console.warn(`[VodStorage] shield refresh ${dstProvider}:${key}: ${r.failed} of ${r.slices} slices not refreshed`);
     }
     return { size: head.size };
 }
