@@ -35,18 +35,27 @@ const stub = (rel, exports) => {
 const runs = [];
 let rows = [];
 let fresh = null;
+const byId = {};          // rows db.get answers by id (the publish step re-reads its row)
 stub('server/db/database', {
     run: async (sql, params) => { runs.push([sql.replace(/\s+/g, ' ').trim(), params]); return { changes: 1 }; },
-    get: async () => fresh,
+    get: async (sql, params) => (params && byId[params[0]]) || fresh,
     all: async () => rows,
 });
 stub('server/objects/model', { withObject: async (kind, id, fn) => await fn() });
 const storageCalls = [];
 let presigned = null;
 let hotFile = null;
+let b2on = false;          // B2 configured (the publish step)
+const heads = {};         // B2 object key -> { size }
+const urls = {};          // B2 object key -> a presigned URL
 stub('server/vod/vod-storage', {
+    providerConfigured: (p) => p === 'b2' && b2on,
+    keyForVod: (v) => `vods/${v.id}.mp4`,
+    headObject: async (p, key) => heads[key] || null,
+    moveToCold: async (id) => { storageCalls.push(['moveToCold', id]); return { ok: true }; },
+    uploadFile: async (p, key, file, type) => { storageCalls.push(['uploadFile', key, type]); return { size: 1 }; },
     localPathForVod: (v) => v.local || null,
-    presignGet: async () => presigned,
+    presignGet: async (provider, key) => (key && urls[key]) || presigned,
     moveToHot: async (id) => { storageCalls.push(['moveToHot', id]); if (!hotFile) return { ok: false, error: 'download stalled' }; fresh = { id, local: hotFile }; return { ok: true }; },
 });
 const layout = require('../server/vod/mp4-layout');
@@ -128,6 +137,49 @@ function serve(file) {
         const pass = await job._layoutSweep();
         assert.deepStrictEqual(pass.map((x) => x.status), ['ok', 'remuxed'], JSON.stringify(pass));
         assert.strictEqual((await layout.layoutOf({ filePath: c })).fragmented, true, 'the next pass takes the next one');
+
+        // Publishing (11-20): a repaired file replaces a stale B2 copy, or viewers keep getting the fragmented one from the
+        // edge. A recording brought here goes back out (moveToCold); one that was here only has its B2 copy replaced, as
+        // video/mp4; with no B2 copy the local file is the copy.
+        b2on = true;
+        storageCalls.length = 0;
+        hotFile = copy(FRAG, 'hot2.mp4');
+        fresh = { id: 31, local: hotFile };
+        byId[31] = fresh;
+        heads['vods/31.mp4'] = { size: fs.statSync(FRAG).size };
+        out = await job._checkLayout({ id: 31, storage_provider: 'b2', storage_key: 'vods/31.mp4', duration_seconds: 6 });
+        assert.deepStrictEqual([out.status, out.published], ['remuxed', 'published']);
+        assert.deepStrictEqual(storageCalls, [['moveToHot', 31], ['moveToCold', 31]], 'brought here, repaired, put back');
+        storageCalls.length = 0;
+        const here = copy(FRAG, 'here.mp4');
+        byId[32] = { id: 32, local: here };
+        heads['vods/32.mp4'] = { size: 123 };
+        out = await job._checkLayout({ id: 32, local: here, file_path: here, duration_seconds: 6 });
+        assert.deepStrictEqual(storageCalls, [['uploadFile', 'vods/32.mp4', 'video/mp4']], 'a local recording: only its B2 copy replaced');
+        const alone = copy(FRAG, 'alone.mp4');
+        byId[33] = { id: 33, local: alone };
+        out = await job._checkLayout({ id: 33, local: alone, file_path: alone, duration_seconds: 6 });
+        assert.strictEqual(out.published, 'local', 'no B2 copy: the local file is the copy');
+
+        // Repaired before the publish step: a checked local row whose B2 copy is still fragmented is put back (one a
+        // pass, before any new check); one whose B2 copy is fine is left and not asked again.
+        storageCalls.length = 0;
+        const fixed = copy(FAST, 'fixed.mp4'), fine = copy(FAST, 'fine.mp4');
+        const fastServer = await serve(FAST);
+        urls['vods/41.mp4'] = `https://127.0.0.1:${server.address().port}/v/41`;            // serves FRAG
+        urls['vods/42.mp4'] = `https://127.0.0.1:${fastServer.address().port}/v/42`;        // serves FAST
+        heads['vods/41.mp4'] = { size: fs.statSync(FRAG).size };
+        heads['vods/42.mp4'] = { size: fs.statSync(FAST).size + 1 };
+        byId[41] = { id: 41, local: fixed };
+        byId[42] = { id: 42, local: fine };
+        rows = [{ id: 42, local: fine, storage_provider: 'local', layout_checked_at: 'x' }, { id: 41, local: fixed, storage_provider: 'local', layout_checked_at: 'x' }];
+        const again = await job._layoutSweep();
+        assert.deepStrictEqual(again.map((x) => [x.id, x.status, x.published]), [[41, 'republished', 'published']], JSON.stringify(again));
+        assert.deepStrictEqual(storageCalls, [['moveToCold', 41]]);
+        storageCalls.length = 0;
+        assert.strictEqual(await job._republishPass(), null, 'each asked once a process');
+        assert.deepStrictEqual(storageCalls, []);
+        fastServer.close();
 
         server.close();
         console.log = said;
