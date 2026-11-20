@@ -46,14 +46,16 @@ const storageCalls = [];
 let presigned = null;
 let hotFile = null;
 let b2on = false;          // B2 configured (the publish step)
+let r2on = false;          // R2 configured (11-20: the copy that serves an 'r2' recording)
+const uploads = [];        // [provider, key] of every upload
 const heads = {};         // B2 object key -> { size }
 const urls = {};          // B2 object key -> a presigned URL
 stub('server/vod/vod-storage', {
-    providerConfigured: (p) => p === 'b2' && b2on,
+    providerConfigured: (p) => (p === 'b2' && b2on) || (p === 'r2' && r2on),
     keyForVod: (v) => `vods/${v.id}.mp4`,
     headObject: async (p, key) => heads[key] || null,
     moveToCold: async (id) => { storageCalls.push(['moveToCold', id]); return { ok: true }; },
-    uploadFile: async (p, key, file, type) => { storageCalls.push(['uploadFile', key, type]); return { size: 1 }; },
+    uploadFile: async (p, key, file, type) => { storageCalls.push(['uploadFile', key, type]); uploads.push([p, key]); return { size: 1 }; },
     localPathForVod: (v) => v.local || null,
     presignGet: async (provider, key) => (key && urls[key]) || presigned,
     moveToHot: async (id) => { storageCalls.push(['moveToHot', id]); if (!hotFile) return { ok: false, error: 'download stalled' }; fresh = { id, local: hotFile }; return { ok: true }; },
@@ -180,6 +182,25 @@ function serve(file) {
         assert.strictEqual(await job._republishPass(), null, 'each asked once a process');
         assert.deepStrictEqual(storageCalls, []);
         fastServer.close();
+
+        // 11-20, VOD 6554: a recording served from R2 kept its fragmented R2 copy (only B2 was put back). The pass
+        // reads the R2 copy of an 'r2' recording and puts the repaired file back there; a new repair writes R2 too.
+        r2on = true; uploads.length = 0; storageCalls.length = 0;
+        const r2fixed = copy(FAST, 'r2fixed.mp4');
+        urls['r2/vods/51.mp4'] = `https://127.0.0.1:${server.address().port}/v/51`;   // serves FRAG
+        heads['r2/vods/51.mp4'] = { size: fs.statSync(FRAG).size };
+        byId[51] = { id: 51, local: r2fixed, storage_provider: 'r2', storage_key: 'r2/vods/51.mp4' };
+        rows = [{ id: 51, local: r2fixed, storage_provider: 'r2', storage_key: 'r2/vods/51.mp4', layout_checked_at: 'x' }];
+        const r2pass = await job._republishPass();
+        assert.deepStrictEqual([r2pass.id, r2pass.status, r2pass.published], [51, 'republished', 'published'], JSON.stringify(r2pass));
+        assert.deepStrictEqual(uploads, [['r2', 'r2/vods/51.mp4']], 'the R2 copy that serves it is put back');
+        uploads.length = 0;
+        const r2frag = copy(FRAG, 'r2frag.mp4');
+        heads['r2/vods/52.mp4'] = { size: 123 };
+        byId[52] = { id: 52, local: r2frag, storage_provider: 'r2', storage_key: 'r2/vods/52.mp4' };
+        out = await job._checkLayout({ id: 52, local: r2frag, file_path: r2frag, storage_provider: 'r2', storage_key: 'r2/vods/52.mp4', duration_seconds: 6 });
+        assert.deepStrictEqual([out.status, out.published], ['remuxed', 'published']);
+        assert.deepStrictEqual(uploads, [['r2', 'r2/vods/52.mp4']], 'a new repair of an R2 recording writes R2');
 
         server.close();
         console.log = said;
