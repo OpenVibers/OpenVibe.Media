@@ -265,13 +265,115 @@ async function _masterSweep() {
     if (n) console.log(`[VOD-Health] Master sweep: removed ${n} orphaned master(s), freed ${(freed / 1024 / 1024).toFixed(0)}MB`);
 }
 
+// ── The layout sweep (2026-11-20) ──
+// A finished MP4 left fragmented (a small moov, then thousands of moof+mdat with no index) plays from a URL only after
+// the browser walked the whole file: openvibe.video's player waited 40 s on a 370 MB recording, minutes on several GB.
+// 54 public recordings of 11-14 to 11-17 were served that way from B2/R2 (the edge copy was the recording as written).
+// Each idle pass checks a few finished MP4s' first box headers (newest first, once each: vods.layout_checked_at); a
+// fragmented one is brought to this host, remuxed (stream copy, +faststart) into a new file that must check out (the
+// moov first, no moof, the same length to 2%) before it replaces the local copy. B2's canonical copy is untouched until
+// the storage tier moves the VOD out again, with the remuxed file. At most one remux a pass.
+const LAYOUT_BATCH = 4;
+const _layoutSkip = new Set();   // ids this process could not read, fetch or fix (tried again after a restart)
+const _objects = () => require('../objects/model');
+
+/** Remux an MP4 into a faststart one beside it; it replaces the file only when it checks out. */
+async function _remuxVerified(filePath, expectSeconds) {
+    const { spawn } = require('child_process');
+    const tools = require('./media-tools');
+    const layout = require('./mp4-layout');
+    const bytes = (await fs.promises.stat(filePath)).size;
+    if (!(await tools.hasRoomFor(path.dirname(filePath), bytes))) return { ok: false, error: 'no room for the remux copy' };
+    const tmp = filePath + '.layout.mp4';
+    const code = await new Promise((resolve) => {
+        let p;
+        try { p = spawn('ffmpeg', ['-v', 'error', '-y', '-i', filePath, '-c', 'copy', '-movflags', '+faststart', '-fflags', '+genpts', tmp], { stdio: 'ignore' }); } catch { return resolve(-1); }
+        const timer = setTimeout(() => { try { p.kill('SIGKILL'); } catch { /* gone */ } }, tools.remuxBudgetMs(bytes));
+        p.on('error', () => { clearTimeout(timer); resolve(-1); });
+        p.on('close', (c) => { clearTimeout(timer); resolve(c); });
+    });
+    if (code !== 0) { await tools.removeFile(tmp); return { ok: false, error: `ffmpeg exited ${code}` }; }
+    const after = await layout.layoutOf({ filePath: tmp });
+    const probe = await tools.probeDuration(tmp, { timeoutMs: 30000 });
+    const seconds = Number(probe && probe.seconds) || 0;
+    const close = expectSeconds > 0 ? Math.abs(seconds - expectSeconds) <= Math.max(3, expectSeconds * 0.02) : seconds > 0;
+    if (!after.ok || after.fragmented || !after.moovFirst || !close) {
+        await tools.removeFile(tmp);
+        return { ok: false, error: `the remuxed copy did not check out (${after.kinds.join(',') || after.error}, ${Math.round(seconds)} s for ${Math.round(expectSeconds)} s)` };
+    }
+    await fs.promises.rename(tmp, filePath);
+    return { ok: true, bytes: (await fs.promises.stat(filePath)).size, seconds };
+}
+
+/** Check one finished MP4's layout; remux it when fragmented. → { id, status } */
+async function _checkLayout(vod) {
+    const storage = require('./vod-storage');
+    const layout = require('./mp4-layout');
+    const now = () => new Date().toISOString();
+    const mark = async () => { try { await db.run('UPDATE vods SET layout_checked_at = ? WHERE id = ?', [now(), vod.id]); } catch { /* the next pass */ } };
+    const localOf = (v) => [storage.localPathForVod(v), v.file_path].find((p) => p && String(p).endsWith('.mp4') && fs.existsSync(p)) || null;
+    let local = localOf(vod);
+    let src = local ? { filePath: local } : null;
+    if (!src && vod.storage_provider && vod.storage_provider !== 'local' && vod.storage_key) {
+        const url = await Promise.resolve(storage.presignGet(vod.storage_provider, vod.storage_key, 300)).catch(() => null);
+        if (url) src = { url };
+    }
+    if (!src) { _layoutSkip.add(vod.id); return { id: vod.id, status: 'unreadable' }; }
+    const l = await layout.layoutOf(src);
+    if (!l.ok) {
+        if (l.error === 'not an MP4') { await mark(); return { id: vod.id, status: 'not_mp4' }; }
+        _layoutSkip.add(vod.id);
+        return { id: vod.id, status: 'unreadable' };
+    }
+    if (!l.fragmented && l.moovFirst) { await mark(); return { id: vod.id, status: 'ok' }; }
+    if (!local) {
+        const back = await storage.moveToHot(vod.id, { trigger: 'health', reason: 'fragmented MP4: remux for playback' });
+        if (!back || !back.ok) {
+            _layoutSkip.add(vod.id);
+            console.warn(`[VOD-Health] layout: vod ${vod.id} is fragmented but could not be brought here: ${(back && back.error) || 'no answer'}`);
+            return { id: vod.id, status: 'fetch_failed' };
+        }
+        const fresh = (await db.get('SELECT * FROM vods WHERE id = ?', [vod.id])) || vod;
+        local = localOf(fresh);
+        if (!local) { _layoutSkip.add(vod.id); return { id: vod.id, status: 'fetch_failed' }; }
+    }
+    const r = await _remuxVerified(local, Number(vod.duration_seconds) || 0);
+    if (!r.ok) {
+        _layoutSkip.add(vod.id);
+        console.warn(`[VOD-Health] layout: vod ${vod.id} stays as it is: ${r.error}`);
+        return { id: vod.id, status: 'remux_failed' };
+    }
+    try {
+        await _objects().withObject('vod', vod.id, async () => await db.run('UPDATE vods SET file_size = ?, layout_checked_at = ? WHERE id = ?', [r.bytes, now(), vod.id]));
+    } catch { await mark(); }
+    console.log(`[VOD-Health] layout: vod ${vod.id} was ${l.fragmented ? 'fragmented' : 'indexed at its end'}; remuxed to a faststart MP4 (${(r.bytes / 1e9).toFixed(2)} GB)`);
+    return { id: vod.id, status: 'remuxed' };
+}
+
+async function _layoutSweep() {
+    let vods = [];
+    try {
+        vods = await db.all(`SELECT * FROM vods WHERE COALESCE(is_recording, 0) = 0 AND layout_checked_at IS NULL AND COALESCE(file_size, 0) > 0
+            AND (file_path LIKE '%.mp4' OR storage_key LIKE '%.mp4') ORDER BY id DESC LIMIT ?`, [LAYOUT_BATCH + _layoutSkip.size]);
+    } catch { return []; }
+    const out = [];
+    for (const vod of vods) {
+        if (_layoutSkip.has(vod.id) || out.length >= LAYOUT_BATCH) continue;
+        let r;
+        try { r = await _checkLayout(vod); } catch (e) { _layoutSkip.add(vod.id); r = { id: vod.id, status: 'error' }; console.warn(`[VOD-Health] layout check error for vod ${vod.id}:`, e.message); }
+        out.push(r);
+        if (r.status === 'remuxed') break;   // one heavy job a pass
+    }
+    return out;
+}
+
 async function _tick() {
     if (_busy) return;
     _busy = true;
     try {
         const deep = !_anyRecording();     // full decode + recovery only while idle
         await _scanPass(deep);
-        if (deep) { await _cleanupPass(deep); await _masterSweep(); }
+        if (deep) { await _cleanupPass(deep); await _masterSweep(); await _layoutSweep(); }
     } catch (e) {
         console.warn('[VOD-Health] tick error:', e.message);
     } finally {
@@ -332,4 +434,4 @@ function stop() {
     if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { start, stop, _tick, _scanOne };
+module.exports = { start, stop, _tick, _scanOne, _layoutSweep, _checkLayout, _remuxVerified };
