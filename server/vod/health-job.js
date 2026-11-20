@@ -320,13 +320,15 @@ async function _remuxVerified(filePath, expectSeconds) {
  */
 async function _putBackServing(vod, local) {
     const storage = require('./vod-storage');
-    if (vod.storage_provider !== 'r2' || !storage.providerConfigured('r2')) return null;
+    // The provider the row says serves it (R2 today), other than B2, which _publishRepaired handles below.
+    const serving = vod.storage_provider && vod.storage_provider !== 'local' && vod.storage_provider !== 'b2' ? vod.storage_provider : null;
+    if (!serving || !storage.providerConfigured(serving)) return null;
     const key = vod.storage_key || storage.keyForVod(vod);
-    const head = await storage.headObject('r2', key).catch(() => null);
+    const head = await storage.headObject(serving, key).catch(() => null);
     if (!head) return null;
     if (head.size === fs.statSync(local).size) return 'same';
-    try { await storage.uploadFile('r2', key, local, 'video/mp4'); return 'published'; }
-    catch (e) { console.warn(`[VOD-Health] layout: vod ${vod.id} repaired but not put back on R2: ${e.message}`); return 'failed'; }
+    try { await storage.uploadFile(serving, key, local, 'video/mp4'); return 'published'; }
+    catch (e) { console.warn(`[VOD-Health] layout: vod ${vod.id} repaired but not put back on ${serving}: ${e.message}`); return 'failed'; }
 }
 
 async function _publishRepaired(vodId, { offload = true } = {}) {
@@ -418,9 +420,10 @@ async function _republishPass() {
         if (_publishSkip.has(vod.id)) continue;
         const local = storage.localPathForVod(vod);
         if (!local || !fs.existsSync(local)) { _publishSkip.add(vod.id); continue; }
-        const where = vod.storage_provider === 'r2' ? 'r2' : 'b2';
+        // The copy people get: the row's provider when it is not local, else B2 (the canonical copy).
+        const where = vod.storage_provider && vod.storage_provider !== 'local' ? vod.storage_provider : 'b2';
         if (!storage.providerConfigured(where)) { _publishSkip.add(vod.id); continue; }
-        const key = where === 'r2' ? (vod.storage_key || storage.keyForVod(vod)) : storage.keyForVod(vod);
+        const key = where !== 'b2' ? (vod.storage_key || storage.keyForVod(vod)) : storage.keyForVod(vod);
         const head = await storage.headObject(where, key).catch(() => null);
         if (!head || head.size === fs.statSync(local).size) { _publishSkip.add(vod.id); continue; }
         const url = await Promise.resolve(storage.presignGet(where, key, 300)).catch(() => null);
@@ -430,7 +433,7 @@ async function _republishPass() {
         if (!mine.ok || mine.fragmented || !mine.moovFirst) { _publishSkip.add(vod.id); continue; }
         const published = await _publishRepaired(vod.id, { offload: where === 'b2' });
         _publishSkip.add(vod.id);
-        console.log(`[VOD-Health] layout: vod ${vod.id}'s ${where === 'r2' ? 'R2' : 'B2'} copy was still fragmented; the repaired file put back (${published})`);
+        console.log(`[VOD-Health] layout: vod ${vod.id}'s ${where.toUpperCase()} copy was still fragmented; the repaired file put back (${published})`);
         return { id: vod.id, status: 'republished', published };
     }
     return null;
