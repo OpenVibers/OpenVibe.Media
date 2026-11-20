@@ -609,7 +609,7 @@ async function moveToCold(vodId) {
         const existing = await headObject('b2', key);
         const localSize = fs.statSync(local).size;
         if (!existing || existing.size !== localSize) {
-            await uploadFile('b2', key, local);
+            await uploadFile('b2', key, local, /\.mp4$/i.test(local) ? 'video/mp4' : 'video/webm');
         }
 
         await _moved(vodId, ['b2'], async () => await db.run("UPDATE vods SET storage_provider = 'b2', storage_key = ? WHERE id = ?", [key, vodId]));

@@ -306,6 +306,37 @@ async function _remuxVerified(filePath, expectSeconds) {
 }
 
 /** Check one finished MP4's layout; remux it when fragmented. → { id, status } */
+/**
+ * A repaired file must be what viewers get (2026-11-20: VOD 6554 was remuxed here, but its master copy on B2 kept the
+ * fragmented bytes and the edge served those). When B2 holds a copy of another size, the repaired file replaces it
+ * (uploadFile refreshes the edge's cached slices): `offload` (the recording was brought here for the repair) puts it
+ * back where it was and frees this host (moveToCold); otherwise only the B2 copy is replaced.
+ * → 'published' | 'local' (no B2 copy: this file is the copy) | 'same' | 'failed'
+ */
+async function _publishRepaired(vodId, { offload = true } = {}) {
+    const storage = require('./vod-storage');
+    if (!storage.providerConfigured('b2')) return 'local';
+    const vod = await db.get('SELECT * FROM vods WHERE id = ?', [vodId]);
+    if (!vod) return 'failed';
+    const key = storage.keyForVod(vod);
+    const local = storage.localPathForVod(vod);
+    if (!local || !fs.existsSync(local)) return 'failed';
+    const head = await storage.headObject('b2', key).catch(() => null);
+    if (!head) return 'local';
+    if (head.size === fs.statSync(local).size) return 'same';
+    try {
+        if (offload) {
+            const r = await storage.moveToCold(vodId);
+            return r && r.ok ? 'published' : 'failed';
+        }
+        await storage.uploadFile('b2', key, local, 'video/mp4');
+        return 'published';
+    } catch (e) {
+        console.warn(`[VOD-Health] layout: vod ${vodId} repaired but not published to B2: ${e.message}`);
+        return 'failed';
+    }
+}
+
 async function _checkLayout(vod) {
     const storage = require('./vod-storage');
     const layout = require('./mp4-layout');
@@ -326,6 +357,7 @@ async function _checkLayout(vod) {
         return { id: vod.id, status: 'unreadable' };
     }
     if (!l.fragmented && l.moovFirst) { await mark(); return { id: vod.id, status: 'ok' }; }
+    const fetched = !local;
     if (!local) {
         const back = await storage.moveToHot(vod.id, { trigger: 'health', reason: 'fragmented MP4: remux for playback' });
         if (!back || !back.ok) {
@@ -346,11 +378,46 @@ async function _checkLayout(vod) {
     try {
         await _objects().withObject('vod', vod.id, async () => await db.run('UPDATE vods SET file_size = ?, layout_checked_at = ? WHERE id = ?', [r.bytes, now(), vod.id]));
     } catch { await mark(); }
-    console.log(`[VOD-Health] layout: vod ${vod.id} was ${l.fragmented ? 'fragmented' : 'indexed at its end'}; remuxed to a faststart MP4 (${(r.bytes / 1e9).toFixed(2)} GB)`);
-    return { id: vod.id, status: 'remuxed' };
+    const published = await _publishRepaired(vod.id, { offload: fetched });
+    console.log(`[VOD-Health] layout: vod ${vod.id} was ${l.fragmented ? 'fragmented' : 'indexed at its end'}; remuxed to a faststart MP4 (${(r.bytes / 1e9).toFixed(2)} GB; ${published})`);
+    return { id: vod.id, status: 'remuxed', published };
+}
+
+// Repaired before 11-20's publish step: local, checked, and their B2 copy still fragmented (read from its first box
+// headers). One put back a pass; one that is fine or cannot be read is not asked again this process.
+const _publishSkip = new Set();
+async function _republishPass() {
+    const storage = require('./vod-storage');
+    const layout = require('./mp4-layout');
+    if (!storage.providerConfigured('b2')) return null;
+    let rows = [];
+    try {
+        rows = await db.all(`SELECT * FROM vods WHERE layout_checked_at IS NOT NULL AND storage_provider = 'local' AND COALESCE(is_recording, 0) = 0
+            AND (file_path LIKE '%.mp4' OR storage_key LIKE '%.mp4') ORDER BY id DESC LIMIT 40`);
+    } catch { return null; }
+    for (const vod of rows) {
+        if (_publishSkip.has(vod.id)) continue;
+        const local = storage.localPathForVod(vod);
+        if (!local || !fs.existsSync(local)) { _publishSkip.add(vod.id); continue; }
+        const key = storage.keyForVod(vod);
+        const head = await storage.headObject('b2', key).catch(() => null);
+        if (!head || head.size === fs.statSync(local).size) { _publishSkip.add(vod.id); continue; }
+        const url = await Promise.resolve(storage.presignGet('b2', key, 300)).catch(() => null);
+        const remote = url ? await layout.layoutOf({ url }) : { ok: false };
+        if (!remote.ok || !remote.fragmented) { _publishSkip.add(vod.id); continue; }
+        const mine = await layout.layoutOf({ filePath: local });
+        if (!mine.ok || mine.fragmented || !mine.moovFirst) { _publishSkip.add(vod.id); continue; }
+        const published = await _publishRepaired(vod.id, { offload: true });
+        _publishSkip.add(vod.id);
+        console.log(`[VOD-Health] layout: vod ${vod.id}'s B2 copy was still fragmented; the repaired file put back (${published})`);
+        return { id: vod.id, status: 'republished', published };
+    }
+    return null;
 }
 
 async function _layoutSweep() {
+    // A repaired recording whose B2 copy is stale is put back first: that is the one viewers still wait on.
+    try { const r = await _republishPass(); if (r) return [r]; } catch (e) { console.warn('[VOD-Health] layout republish error:', e.message); }
     let vods = [];
     try {
         vods = await db.all(`SELECT * FROM vods WHERE COALESCE(is_recording, 0) = 0 AND layout_checked_at IS NULL AND COALESCE(file_size, 0) > 0
@@ -434,4 +501,4 @@ function stop() {
     if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { start, stop, _tick, _scanOne, _layoutSweep, _checkLayout, _remuxVerified };
+module.exports = { start, stop, _tick, _scanOne, _layoutSweep, _checkLayout, _remuxVerified, _publishRepaired, _republishPass };
