@@ -407,6 +407,33 @@ async function _checkLayout(vod) {
 // get still fragmented: B2's for a local one, R2's for one R2 serves (read from its first box headers). One put back a
 // pass; one that is fine or cannot be read is not asked again this process.
 const _publishSkip = new Set();
+
+/**
+ * 11-20, VOD 6554: a recording repaired here and then moved to R2 by the tiering (no local file left) still had its
+ * fragmented original on B2, the canonical copy the edge shields and the player is sent to. When R2's copy is the
+ * repaired one (moov first, not fragmented) and B2's is fragmented, about the same size, R2's is copied over B2's
+ * (copyBetweenProviders refreshes the shield). → { id, status: 'republished', published } or null.
+ */
+async function _republishFromR2(vod) {
+    const storage = require('./vod-storage');
+    const layout = require('./mp4-layout');
+    if (!storage.providerConfigured('r2') || !storage.providerConfigured('b2')) return null;
+    const key = storage.keyForVod(vod);
+    const head = (p) => storage.headObject(p, key).catch(() => null);
+    const urlOf = (p) => Promise.resolve(storage.presignGet(p, key, 300)).catch(() => null);
+    const [r2, b2] = await Promise.all([head('r2'), head('b2')]);
+    if (!r2 || !b2 || r2.size === b2.size || Math.abs(r2.size - b2.size) > b2.size * 0.05) return null;
+    const [r2Url, b2Url] = await Promise.all([urlOf('r2'), urlOf('b2')]);
+    if (!r2Url || !b2Url) return null;
+    const [mine, canonical] = await Promise.all([layout.layoutOf({ url: r2Url }), layout.layoutOf({ url: b2Url })]);
+    if (!mine.ok || mine.fragmented || !mine.moovFirst || !canonical.ok || !canonical.fragmented) return null;
+    let published = 'published';
+    try { await storage.copyBetweenProviders('r2', 'b2', key); }
+    catch (e) { published = 'failed'; console.warn(`[VOD-Health] layout: vod ${vod.id}'s R2 copy not copied to B2: ${e.message}`); }
+    console.log(`[VOD-Health] layout: vod ${vod.id}'s B2 copy was still fragmented; R2's repaired copy put over it (${published})`);
+    return { id: vod.id, status: 'republished', published };
+}
+
 async function _republishPass() {
     const storage = require('./vod-storage');
     const layout = require('./mp4-layout');
@@ -414,12 +441,19 @@ async function _republishPass() {
     let rows = [];
     try {
         rows = await db.all(`SELECT * FROM vods WHERE layout_checked_at IS NOT NULL AND storage_provider IN ('local', 'r2') AND COALESCE(is_recording, 0) = 0
-            AND (file_path LIKE '%.mp4' OR storage_key LIKE '%.mp4') ORDER BY id DESC LIMIT 40`);
+            AND (file_path LIKE '%.mp4' OR storage_key LIKE '%.mp4') ORDER BY id DESC LIMIT ?`, [40 + _publishSkip.size]);
     } catch { return null; }
+    let asked = 0;
     for (const vod of rows) {
-        if (_publishSkip.has(vod.id)) continue;
+        if (_publishSkip.has(vod.id) || asked >= 40) continue;
+        asked++;
         const local = storage.localPathForVod(vod);
-        if (!local || !fs.existsSync(local)) { _publishSkip.add(vod.id); continue; }
+        if (!local || !fs.existsSync(local)) {
+            const r = vod.storage_provider === 'r2' ? await _republishFromR2(vod) : null;
+            _publishSkip.add(vod.id);
+            if (r) return r;
+            continue;
+        }
         // The copy people get: the row's provider when it is not local, else B2 (the canonical copy).
         const where = vod.storage_provider && vod.storage_provider !== 'local' ? vod.storage_provider : 'b2';
         if (!storage.providerConfigured(where)) { _publishSkip.add(vod.id); continue; }
@@ -525,4 +559,4 @@ function stop() {
     if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { start, stop, _tick, _scanOne, _layoutSweep, _checkLayout, _remuxVerified, _publishRepaired, _republishPass };
+module.exports = { start, stop, _tick, _scanOne, _layoutSweep, _checkLayout, _remuxVerified, _publishRepaired, _republishPass, _republishFromR2 };
