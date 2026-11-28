@@ -35,6 +35,24 @@ let _running = false;
 let _timer = null;
 let _busy = false;
 
+// A repair that failed is not tried again on every idle pass (11-28: vod 6666 failed "Error muxing a packet" 72 times in
+// six hours, one full re-encode every five minutes). Each failure doubles the wait, from ten minutes to a day; a
+// success, or a restart, clears it. The row stays needs_repair and hidden meanwhile, as before.
+const REPAIR_BACKOFF_FIRST_MS = 10 * 60 * 1000;
+const REPAIR_BACKOFF_MAX_MS = 24 * 60 * 60 * 1000;
+const _repairBackoff = new Map();   // vod id → { fails, nextAt }
+function _repairWaiting(id, now = Date.now()) {
+    const b = _repairBackoff.get(String(id));
+    return Boolean(b && now < b.nextAt);
+}
+function _repairFailed(id, now = Date.now()) {
+    const prev = _repairBackoff.get(String(id));
+    const fails = (prev ? prev.fails : 0) + 1;
+    const wait = Math.min(REPAIR_BACKOFF_MAX_MS, REPAIR_BACKOFF_FIRST_MS * 2 ** (fails - 1));
+    _repairBackoff.set(String(id), { fails, nextAt: now + wait });
+    return { fails, wait };
+}
+
 function _anyRecording() {
     try { return require('./recorder').activeCount() > 0; }
     catch { return false; }
@@ -48,6 +66,7 @@ async function _scanOne(vod, { deep }) {
     // lift its quarantine and re-cut its timeline. Only while idle, like the other heavy recovery work.
     if (vod.health_status === 'needs_repair') {
         if (!deep) return { id: vod.id, status: 'deferred' };
+        if (_repairWaiting(vod.id)) return { id: vod.id, status: 'needs_repair', waiting: true };
         try {
             const opts = { apply: true, recut: true, announceReady: true };
             let r = await repair.repairVod(vod, opts);
@@ -66,12 +85,15 @@ async function _scanOne(vod, { deep }) {
                 }
             }
             if (r.ok) {
+                _repairBackoff.delete(String(vod.id));
                 console.log(`[VOD-Health] Repaired vod ${vod.id} (${r.skipped || `${r.duration}s`})${r.recut ? `, re-cut queued ${r.recut}` : ''}`);
                 return { id: vod.id, status: 'repaired' };
             }
-            console.warn(`[VOD-Health] Repair failed for vod ${vod.id}: ${r.error || r.skipped}`);
+            const b = _repairFailed(vod.id);
+            console.warn(`[VOD-Health] Repair failed for vod ${vod.id}: ${r.error || r.skipped} (try ${b.fails}; next in ${Math.round(b.wait / 60000)} min)`);
         } catch (e) {
-            console.warn(`[VOD-Health] Repair error for vod ${vod.id}:`, e.message);
+            const b = _repairFailed(vod.id);
+            console.warn(`[VOD-Health] Repair error for vod ${vod.id} (try ${b.fails}; next in ${Math.round(b.wait / 60000)} min):`, e.message);
         }
         // Never probe a failed repair into 'ok': the row stays needs_repair and hidden, and the next idle pass retries.
         return { id: vod.id, status: 'needs_repair' };
@@ -559,4 +581,4 @@ function stop() {
     if (_timer) { clearInterval(_timer); _timer = null; }
 }
 
-module.exports = { start, stop, _tick, _scanOne, _layoutSweep, _checkLayout, _remuxVerified, _publishRepaired, _republishPass, _republishFromR2 };
+module.exports = { start, stop, _tick, _scanOne, _repairBackoff, _repairWaiting, _repairFailed, _layoutSweep, _checkLayout, _remuxVerified, _publishRepaired, _republishPass, _republishFromR2 };
